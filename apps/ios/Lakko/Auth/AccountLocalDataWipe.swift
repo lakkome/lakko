@@ -246,6 +246,8 @@ enum AccountLocalDataWipe {
         }
         step("reach") { ReachCenter.shared.forget(accountIdB64: accountIdB64) }
         step("copublisher-keys") { CoPublisherKeyBook.clear(accountIdB64: accountIdB64) }
+        // ADR-0090 — owed own-account hand-overs and queued device requests.
+        step("channel-device-admission") { ChannelDeviceAdmissionStore.clear(accountIdB64: accountIdB64) }
         step("publisher-links") { PublisherLinkApproval.clear(accountIdB64: accountIdB64) }
 
         // 3. The DeviceGroup and the cross-device synced state. The founding

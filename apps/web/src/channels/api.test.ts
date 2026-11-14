@@ -158,8 +158,8 @@ describe("stageRotation", () => {
     );
 
     const envelopes = [
-      { subscriber_pubkey_hex: "aa", envelope_b64: "ZW52MQ==" },
-      { subscriber_pubkey_hex: "bb", envelope_b64: "ZW52Mg==" },
+      { subscriber_id: "aa", envelope_b64: "ZW52MQ==" },
+      { subscriber_id: "bb", envelope_b64: "ZW52Mg==" },
     ];
     const res = await stageRotation(CH, 7, envelopes, ALICE);
 
@@ -330,7 +330,7 @@ describe("deliverEnvelope", () => {
 describe("publisher proof on writes", () => {
   it("signs the service path and the exact JSON bytes it sends on rotate/stage", async () => {
     const calls = installFetch(() => json({ target_epoch: 7, staged: 1 }));
-    const envelopes = [{ subscriber_pubkey_hex: "aa", envelope_b64: "ZW52MQ==" }];
+    const envelopes = [{ subscriber_id: "aa", envelope_b64: "ZW52MQ==" }];
     await stageRotation(CH, 7, envelopes, ALICE);
 
     expect(fake.signed).toHaveLength(1);
@@ -395,7 +395,7 @@ describe("publisher role", () => {
     expect(await cachedPublisherRole(CH, ALICE)).toBe("copublisher");
 
     calls.length = 0;
-    await stageRotation(CH, 4, [{ subscriber_pubkey_hex: "aa", envelope_b64: "eA" }], ALICE);
+    await stageRotation(CH, 4, [{ subscriber_id: "aa", envelope_b64: "eA" }], ALICE);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.headers[COPUB_HEADER]).toBeDefined();
     expect(calls[0]!.headers[OWNER_HEADER]).toBeUndefined();
@@ -406,7 +406,7 @@ describe("publisher role", () => {
     await listSubscribers(CH, ALICE);
     expect(calls).toHaveLength(2);
     calls.length = 0;
-    await stageRotation(CH, 4, [{ subscriber_pubkey_hex: "aa", envelope_b64: "eA" }], ALICE);
+    await stageRotation(CH, 4, [{ subscriber_id: "aa", envelope_b64: "eA" }], ALICE);
     expect(calls).toHaveLength(1);
   });
 

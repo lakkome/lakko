@@ -21,6 +21,8 @@ import { isStaleSubscriberKey } from "./member-card-rules";
 import { DsClient } from "../ds/client";
 import { claimOrReset } from "../ds/ownership";
 import { boundContactsAccount } from "../contacts/local-store";
+import { publisherDevice } from "./publisher-device";
+import { writeCurrentHead } from "./channel-vault-head";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -163,28 +165,65 @@ export async function freshPublisherKeys(
 ): Promise<ChannelPublisherKeys> {
   const wasm = await loadWasm();
   const channelId = channelIdFromHex(channelIdHex);
+  const device = publisherDevice();
 
-  // Persistent PublisherGroup → MLS exporter → channel
-  // seed. The wasm-bindgen surface delegates to the
-  // load-or-create dance in `crates/lakko-mls`; the seed
-  // is stable across page reloads for the same identity +
-  // channel id.
+  // ADR-0090: founding is New channel only (`joinedGroupId` absent); a
+  // co-publisher's group is opened under the id its link conveyed and never
+  // founded. Both live in the DEVICE identity's provider.
   const publisher =
     joinedGroupId === undefined
-      ? await openOrFoundPublisherGroup(wasm, identity, channelId)
-      : wasm.PublisherGroup.loadJoined(identity, joinedGroupId, channelId);
+      ? await foundPublisherGroup(wasm, identity, channelId)
+      : wasm.PublisherGroup.loadJoined(device, joinedGroupId, channelId);
   if (publisher === undefined) {
     throw new Error("co-publisher: the joined PublisherGroup is not on this device");
   }
-  let seed: Uint8Array;
-  let seedEpoch: number;
   try {
-    seed = publisher.channelSeed(identity);
-    seedEpoch = Number(publisher.epoch());
+    // ADR-0064 section 7 (amendment of 2026-11-14): a channel founded now
+    // gets its saved copy at once, so an owner device that holds no group
+    // can enter it later. Never fails the founding.
+    if (joinedGroupId === undefined) await writeCurrentHead(publisher, device, identity);
+    return keysOfPublisherGroup(wasm, publisher, device, existingSigningSeed);
   } finally {
     publisher.free();
   }
+}
 
+/**
+ * ADR-0090 — the publisher keys of a PublisherGroup this device holds (an
+ * owner device admitted by a sibling, or one that founded again): the seed
+ * of the group's epoch and this device's own signing seed (kept when
+ * well-formed, else a fresh one). Never founds.
+ */
+export async function heldPublisherKeys(
+  identity: WasmIdentity,
+  channelIdHex: string,
+  existingSigningSeed?: Uint8Array,
+): Promise<ChannelPublisherKeys | null> {
+  const wasm = await loadWasm();
+  const device = publisherDevice();
+  let publisher: InstanceType<Wasm["PublisherGroup"]> | undefined;
+  try {
+    publisher = wasm.PublisherGroup.load(device, identity.ed25519Seed, channelIdFromHex(channelIdHex));
+  } catch {
+    return null;
+  }
+  if (publisher === undefined) return null;
+  try {
+    if (!publisher.isActive()) return null;
+    return keysOfPublisherGroup(wasm, publisher, device, existingSigningSeed);
+  } finally {
+    publisher.free();
+  }
+}
+
+function keysOfPublisherGroup(
+  wasm: Wasm,
+  publisher: InstanceType<Wasm["PublisherGroup"]>,
+  device: WasmIdentity,
+  existingSigningSeed: Uint8Array | undefined,
+): ChannelPublisherKeys {
+  const seed = publisher.channelSeed(device);
+  const seedEpoch = Number(publisher.epoch());
   if (existingSigningSeed !== undefined && existingSigningSeed.length === 32) {
     // Reconstruct rather than trust: a seed the constructor refuses is
     // treated like an absent one.
@@ -470,71 +509,62 @@ export function utf8Decode(bytes: Uint8Array): string {
 }
 
 /**
- * ADR-0057 obligations 1 + 7 — open the channel's PublisherGroup, and when
- * this call FOUNDS it (no persisted group for the channel: a first open, or a
- * re-found after a lost-state recovery), claim its journal with the channel
- * owner's ROOT; a 409 (the deterministic id already carries an older group's
- * chain) becomes a root RESET. A loaded group claims nothing here: a reset of
- * a live chain would drop every epoch this device has not seen, and an
- * unclaimed journal is claimed by the owner's first refused request.
+ * ADR-0057 obligations 1 + 7, ADR-0090 section 1 — FOUND the channel's
+ * PublisherGroup on this device (New channel, and the re-founding of
+ * decision A only) and claim its journal with the channel owner's ROOT; a
+ * 409 (the deterministic id already carries an older group's chain: decision
+ * A) becomes a root RESET.
+ *
+ * The group is created in the DEVICE identity's provider with the owner's
+ * account seed (`lineage`'s), so its leaf is this bound device. Refused when
+ * this device already holds a group under the id (the caller deletes it
+ * first, decision A).
  *
  * FAIL-CLOSED (the second security pass, finding 3): the claim is awaited and
- * must land before the handle is returned, so no channel is announced (the
- * handle registered, the channel created on the service, a post published)
- * for a journal somebody else could claim first. A failed claim frees the
- * handle and throws. The founded group stays in the provider (it cannot be
- * deleted), so an "unconfirmed founding" marker for its id is kept until a
- * claim lands: the next open of that channel claims again instead of taking
- * the loaded group as claimed. Throws what `openOrCreate` throws too (a
- * retired v1 group, surfaced as the legacy-channel copy). The caller owns
- * the handle.
+ * must land before the handle is returned, so no channel is announced for a
+ * journal somebody else could claim first. A failed claim frees the handle
+ * and throws. The founded group stays in the provider, so an "unconfirmed
+ * founding" marker for its id is kept until a claim lands: the next open of
+ * that channel claims again instead of taking the loaded group as claimed.
+ * The caller owns the handle.
  */
-export async function openOrFoundPublisherGroup(
+export async function foundPublisherGroup(
   wasm: Wasm,
-  identity: WasmIdentity,
+  lineage: WasmIdentity,
   channelId: Uint8Array,
   storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
   owner: string | null = boundContactsAccount(),
 ): Promise<InstanceType<Wasm["PublisherGroup"]>> {
-  let existed = false;
-  try {
-    const loaded = wasm.PublisherGroup.load(identity, channelId);
-    existed = loaded !== undefined;
-    loaded?.free();
-  } catch {
-    existed = false;
-  }
+  const device = publisherDevice();
   let publisher: InstanceType<Wasm["PublisherGroup"]>;
   try {
-    publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
+    publisher = new wasm.PublisherGroup(device, lineage.ed25519Seed, channelId);
   } catch (err) {
     // Retired v1 state refuses here and cannot be repaired.
     rethrowAsLegacyChannel(err);
   }
   const groupId = publisher.groupId();
   const key = foundingKey(owner, groupId);
-  if (!existed || isUnconfirmedFounding(storage, key)) {
-    markUnconfirmedFounding(storage, key);
+  markUnconfirmedFounding(storage, key);
+  try {
+    const epochSigner = publisher.dsAccessSigner(device);
+    const root = wasm.dsJournalRootSigner(lineage, groupId);
     try {
-      const epochSigner = publisher.dsAccessSigner(identity);
-      const root = wasm.dsJournalRootSigner(identity, groupId);
-      try {
-        await claimOrReset(new DsClient(), groupId, root, epochSigner.epoch, epochSigner.verifyingKey());
-      } finally {
-        epochSigner.free();
-        root.free();
-      }
-      clearUnconfirmedFounding(storage, key);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: PublisherGroup claim failed; the channel is not opened", err);
-      try {
-        publisher.free();
-      } catch {
-        /* already freed */
-      }
-      throw err;
+      await claimOrReset(new DsClient(), groupId, root, epochSigner.epoch, epochSigner.verifyingKey());
+    } finally {
+      epochSigner.free();
+      root.free();
     }
+    clearUnconfirmedFounding(storage, key);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("ds: PublisherGroup claim failed; the channel is not opened", err);
+    try {
+      publisher.free();
+    } catch {
+      /* already freed */
+    }
+    throw err;
   }
   return publisher;
 }
@@ -551,12 +581,13 @@ export class PublisherGroupNotHeldError extends Error {
 
 /**
  * Open the channel's PublisherGroup this device holds, for every path but New
- * channel (2026-11-13, the trap rule): `PublisherGroup.load` only. A miss is
+ * channel (2026-11-13, the trap rule; ADR-0090 section 1): `PublisherGroup.load`
+ * with this DEVICE identity and the owner's account seed (`identity`'s) only. A miss is
  * {@link PublisherGroupNotHeldError} and nothing is founded: founding here
  * on a device of the owner that holds no group state would claim-reset the
  * live journal onto a group only this device holds. A held group whose
  * founding claim was never confirmed (the marker of
- * {@link openOrFoundPublisherGroup}) claims again, as before. The caller owns
+ * {@link foundPublisherGroup}) claims again, as before. The caller owns
  * the handle.
  */
 export async function openHeldPublisherGroup(
@@ -566,9 +597,10 @@ export async function openHeldPublisherGroup(
   storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
   owner: string | null = boundContactsAccount(),
 ): Promise<InstanceType<Wasm["PublisherGroup"]>> {
+  const device = publisherDevice();
   let loaded: InstanceType<Wasm["PublisherGroup"]> | undefined;
   try {
-    loaded = wasm.PublisherGroup.load(identity, channelId);
+    loaded = wasm.PublisherGroup.load(device, identity.ed25519Seed, channelId);
   } catch (err) {
     // Retired v1 state refuses here and cannot be repaired.
     rethrowAsLegacyChannel(err);
@@ -578,7 +610,7 @@ export async function openHeldPublisherGroup(
   const key = foundingKey(owner, groupId);
   if (isUnconfirmedFounding(storage, key)) {
     try {
-      const epochSigner = loaded.dsAccessSigner(identity);
+      const epochSigner = loaded.dsAccessSigner(device);
       const root = wasm.dsJournalRootSigner(identity, groupId);
       try {
         await claimOrReset(new DsClient(), groupId, root, epochSigner.epoch, epochSigner.verifyingKey());
@@ -611,7 +643,7 @@ export async function openHeldPublisherGroup(
  * the group alone, let a second account signed in on the same browser clear
  * the first account's marker by claiming the same channel, after which the
  * first took its never-claimed group as claimed (2026-09-30). The account is
- * the `owner` argument of {@link openOrFoundPublisherGroup} (default: the
+ * the `owner` argument of {@link foundPublisherGroup} (default: the
  * signed-in account bound through `bindContactsAccount`). With no account
  * there is nowhere to record a confirmation, so every open claims again
  * (fail-closed; a same-root claim is idempotent) and nothing is written.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CryptoKit
 import Foundation
 import LakkoCore
 
@@ -42,8 +43,11 @@ enum ChannelAdmissionSeedShare {
         var requests: [String: Request] = [:]
         /// Approved publishers, by joiner key.
         var publishers: [String: Request] = [:]
-        /// Versions already sealed, by joiner key.
+        /// Versions already sealed, by joiner key (before ADR-0090).
         var sent: [String: [UInt16]] = [:]
+        /// ADR-0090 — seeds already sealed, by joiner key: a short digest of
+        /// each seed, since two seeds of one version may both be held.
+        var sentSeeds: [String: [String]]?
         /// Publishers the read key was sealed to, by joiner key.
         var readKeySent: Set<String> = []
         /// Epochs whose seed was sealed to each publisher, by joiner key.
@@ -145,9 +149,57 @@ enum ChannelAdmissionSeedShare {
         guard let request = record.requests[joinerHex] else { return }
         record.publishers[joinerHex] = request
         record.sent[joinerHex] = nil
+        record.sentSeeds?[joinerHex] = nil
         record.readKeySent.remove(joinerHex)
         record.epochSeedsSent?[joinerHex] = nil
         save(record, account, channelId)
+    }
+
+    /// A short, non-secret name of an admission seed for the sent record.
+    nonisolated static func seedId(_ seed: Data) -> String {
+        SHA256.hash(data: seed).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The seeds owed to a publisher: every held seed whose id it was not
+    /// sent, whatever its version (two seeds of one version both go).
+    nonisolated static func seedsOwed(
+        held: [(seed: Data, version: UInt16)], sentIds: Set<String>
+    ) -> [(seed: Data, version: UInt16)] {
+        held.filter { !sentIds.contains(seedId($0.seed)) }
+    }
+
+    /// ADR-0090 section 6 — the whole hand-over to one account (the owner's
+    /// own, after its devices were admitted): every admission seed, the read
+    /// key, the newest epoch seeds. Not recorded: receivers drop what they
+    /// hold. Whether everything went out.
+    static func sendAll(
+        channelId: String, identity: Identity, group: PublisherGroup, ds: DsClient,
+        accountKey: Data, x25519: Data, readKey: Data?, epochSeeds: [UInt32: Data]
+    ) async -> Bool {
+        guard let channelBytes = try? group.channelId() else { return false }
+        var envelopes: [Data] = []
+        for seed in ChannelInvites.admissionSeeds(channelIdHex: channelId) {
+            if let e = try? composeAdmissionSeedEnvelope(
+                channelId: channelBytes, memberAccountKey: accountKey, memberX25519PublicKey: x25519,
+                admissionVersion: seed.version, admissionSeed: seed.seed) { envelopes.append(e) }
+        }
+        if let readKey, let e = try? composeChannelReadKeyEnvelope(
+            channelId: channelBytes, memberAccountKey: accountKey, memberX25519PublicKey: x25519, readKey: readKey) {
+            envelopes.append(e)
+        }
+        let seeds = epochSeedsToSend(held: epochSeeds, sent: [], max: maxEpochSeeds)
+        if !seeds.isEmpty, let e = try? composeChannelEpochSeedsEnvelope(
+            channelId: channelBytes, memberAccountKey: accountKey, memberX25519PublicKey: x25519,
+            seeds: seeds.map { FfiChannelEpochSeed(epoch: $0.epoch, seed: $0.seed) }) {
+            envelopes.append(e)
+        }
+        var all = true
+        for envelope in envelopes {
+            if !(await ChannelDeviceAdmission.publish(envelope, identity: identity, group: group, ds: ds)) {
+                all = false
+            }
+        }
+        return all
     }
 
     /// After a removal: nothing more is sealed to that publisher.
@@ -208,8 +260,7 @@ enum ChannelAdmissionSeedShare {
         guard !record.publishers.isEmpty, let channelBytes = try? group.channelId(),
               let groupId = try? group.groupId() else { return }
         for (joinerHex, publisher) in record.publishers {
-            let already = Set(record.sent[joinerHex] ?? [])
-            let owed = seeds.filter { !already.contains($0.version) }
+            let owed = Self.seedsOwed(held: seeds, sentIds: Set(record.sentSeeds?[joinerHex] ?? []))
             let readKeyOwed = readKey != nil && !record.readKeySent.contains(joinerHex)
             let epochSeedsOwed = Self.epochSeedsToSend(
                 held: epochSeeds, sent: Set(record.epochSeedsSent?[joinerHex] ?? []), max: maxEpochSeeds)
@@ -235,7 +286,9 @@ enum ChannelAdmissionSeedShare {
                     _ = try await ds.publishGroup(
                         groupId: groupId, payload: message,
                         auth: CoPublisher.auth(ds: ds, identity: identity, publisherGroup: group))
-                    record.sent[joinerHex, default: []].append(seed.version)
+                    var sentSeeds = record.sentSeeds ?? [:]
+                    sentSeeds[joinerHex, default: []].append(Self.seedId(seed.seed))
+                    record.sentSeeds = sentSeeds
                     save(record, account, channelId)
                 } catch {
                     NSLog("[channels] an admission seed was not sealed to a publisher yet")
@@ -318,7 +371,9 @@ enum ChannelAdmissionSeedShare {
         guard !fromOwner.isEmpty else { return }
         var identities: [Identity] = []
         if let current = try? Identity.fromSeed(seed: currentSeed) { identities.append(current) }
-        if let lineage = try? ChannelPublisherIdentity.shared.identity(currentSeed: currentSeed) {
+        // ADR-0090 — the lineage ACCOUNT identity (an owner device receives
+        // its own account's hand-over too).
+        if let lineage = try? ChannelPublisherIdentity.shared.account(currentSeed: currentSeed) {
             identities.append(lineage)
         }
         for plaintext in fromOwner {

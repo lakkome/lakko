@@ -391,6 +391,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                     // rotate request ride PublisherGroup journals too.
                     || isChannelEpochSeedsEnvelope(plaintext: bytes)
                     || isChannelRotateRequestEnvelope(plaintext: bytes)
+                    // ADR-0090 — a co-publisher's device request and the
+                    // admission mark ride PublisherGroup journals too.
+                    || isPublisherDeviceRequestEnvelope(plaintext: bytes)
+                    || isChannelAdmissionMarkEnvelope(plaintext: bytes)
             },
             // `docs/ux/who-can-find-me.md` 6.4 — a contact request inside the
             // group: a yes / no from the slim FFI, never opened here.

@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * G-50 — the durable record of a PublisherGroup commit: the steps run in
- * order and each is recorded as it lands; a failure leaves the entry with
- * what landed, and the next run resumes there; a restart drops an entry whose
- * group never reached its target epoch; a reseal already landed on the
- * channels service is not sent twice.
+ * G-50, ADR-0090 section 3 — the durable record of a STAGED PublisherGroup
+ * commit: the journal decides (merged on its acceptance, abandoned on a
+ * 409, owed when unanswered), nothing is resealed from a commit that did
+ * not merge, the steps after the merge run in order and each is recorded as
+ * it lands; a restart re-sends a recorded stage, resumes a merged one and
+ * drops one that never reached disk.
  */
 import { describe, expect, it } from "vitest";
 
@@ -62,6 +63,16 @@ function ports(opts: { failAt?: string; serverEpoch?: number; lost?: boolean } =
       step(`commit:${new TextDecoder().decode(commit)}`);
     },
     classifyCommitFailure: () => (opts.lost === true ? "lost" : "unknown"),
+    async merge() {
+      step("merge");
+      return true;
+    },
+    async abandon() {
+      step("abandon");
+    },
+    async handover(key) {
+      step(`handover:${new TextDecoder().decode(key).slice(0, 1)}`);
+    },
     async deliverWelcome(welcome, _key, grant) {
       step(`welcome:${new TextDecoder().decode(welcome)}:${grant ?? "none"}`);
     },
@@ -85,42 +96,59 @@ function ports(opts: { failAt?: string; serverEpoch?: number; lost?: boolean } =
   return { p, calls, saved, proofs, finished: () => finished };
 }
 
-describe("running a recorded PublisherGroup commit", () => {
-  it("an approve runs the journal, the Welcome, the reseal and the appointment in order", async () => {
+const ADMIT: PublisherCommitEntry = {
+  ...APPROVE,
+  id: "0c".repeat(16),
+  kind: "admit",
+  commitB64: btoa("admit"),
+  welcomeB64: btoa("welcome"),
+  joinerKeyB64: btoa("o".repeat(32)),
+  replyGrantB64: null,
+};
+
+describe("running a recorded STAGED PublisherGroup commit", () => {
+  it("an approve: journal, merge, reseal, then the Welcome and the appointment", async () => {
     const t = ports();
-    await runPublisherCommit(APPROVE, t.p);
+    expect(await runPublisherCommit(APPROVE, t.p)).toBe("landed");
     expect(t.calls).toEqual([
       "commit:commit",
-      "welcome:welcome:Z3JhbnQ=",
+      "merge",
       "server-epoch",
       "reseal:8",
+      "welcome:welcome:Z3JhbnQ=",
       "appoint",
     ]);
     expect(t.saved.map((e) => e.done)).toEqual([
       ["journal"],
-      ["journal", "welcome"],
-      ["journal", "welcome", "reseal"],
-      ["journal", "welcome", "reseal", "appoint"],
+      ["journal", "reseal"],
+      ["journal", "reseal", "welcome"],
+      ["journal", "reseal", "welcome", "appoint"],
     ]);
     expect(t.finished()?.id).toBe(APPROVE.id);
   });
 
-  it("a rotation sends its commit with the epoch and reseals; it sends no Welcome", async () => {
+  it("an admission of devices: journal, merge, reseal, the Welcome, the hand-over reset", async () => {
     const t = ports();
-    await runPublisherCommit(ROTATION, t.p);
-    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
+    expect(await runPublisherCommit(ADMIT, t.p)).toBe("landed");
+    expect(t.calls).toEqual(["commit:admit", "merge", "server-epoch", "reseal:8", "welcome:welcome:none", "handover:o"]);
   });
 
-  it("a failed step leaves what landed recorded, and the next run resumes there", async () => {
+  it("a rotation sends its commit, merges on the answer and reseals; it sends no Welcome", async () => {
+    const t = ports();
+    await runPublisherCommit(ROTATION, t.p);
+    expect(t.calls).toEqual(["commit:rotation", "merge", "server-epoch", "reseal:8"]);
+  });
+
+  it("a failed step after the merge leaves what landed recorded, and the next run resumes there", async () => {
     const first = ports({ failAt: "reseal:8" });
     await expect(runPublisherCommit(APPROVE, first.p)).rejects.toThrow(/reseal/);
     expect(first.finished()).toBeNull();
     const recorded = first.saved.at(-1)!;
-    expect(remainingSteps(recorded)).toEqual(["reseal", "appoint"]);
+    expect(remainingSteps(recorded)).toEqual(["reseal", "welcome", "appoint"]);
     const second = ports();
     await runPublisherCommit(recorded, second.p);
-    expect(second.calls).toEqual(["server-epoch", "reseal:8", "appoint"]);
-    expect(second.finished()?.done).toEqual(["journal", "welcome", "reseal", "appoint"]);
+    expect(second.calls).toEqual(["server-epoch", "reseal:8", "welcome:welcome:Z3JhbnQ=", "appoint"]);
+    expect(second.finished()?.done).toEqual(["journal", "reseal", "welcome", "appoint"]);
   });
 
   it("a reseal the channels service already holds is not sent again", async () => {
@@ -131,74 +159,58 @@ describe("running a recorded PublisherGroup commit", () => {
   });
 
   it("the journal step is proven under the recorded seed of the epoch the commit left", async () => {
-    // ADR-0081: the commit merged eagerly, so a replay after a reload holds
-    // only the N+1 key; the recorded epoch-N seed lets it prove the epoch
-    // the DS requires for a first send.
     const t = ports();
     await runPublisherCommit(APPROVE, t.p);
     expect(t.proofs).toEqual([`4:${"s".repeat(32)}`]);
   });
 
-  it("a rotation commit the DS did not answer defers only its journal step", async () => {
-    const t = ports({ failAt: "commit:rotation" });
-    await runPublisherCommit(ROTATION, t.p);
-    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
-    // The reseal landed; the entry is kept for the journal step.
-    expect(t.finished()).toBeNull();
-    const kept = t.saved.at(-1)!;
-    expect(remainingSteps(kept)).toEqual(["journal"]);
-    const again = ports({ serverEpoch: 8 });
-    await runPublisherCommit(kept, again.p);
-    expect(again.calls).toEqual(["commit:rotation"]);
-    expect(again.finished()?.done).toEqual(["reseal", "journal"]);
+  it("C-90: a commit the DS did not answer stays owed; nothing is merged or resealed", async () => {
+    for (const entry of [ROTATION, APPROVE, ADMIT]) {
+      const t = ports({ failAt: `commit:${atob(entry.commitB64 ?? "")}` });
+      expect(await runPublisherCommit(entry, t.p)).toBe("owed");
+      expect(t.calls).toEqual([`commit:${atob(entry.commitB64 ?? "")}`]);
+      expect(t.saved).toEqual([]);
+      expect(t.finished()).toBeNull();
+    }
   });
 
-  it("a publisher removal runs like a rotation: journal then reseal, its journal step deferred alone", async () => {
-    const REMOVAL: PublisherCommitEntry = { ...ROTATION, kind: "removal" };
-    const t = ports({ failAt: "commit:rotation" });
-    await runPublisherCommit(REMOVAL, t.p);
-    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
-    expect(t.finished()).toBeNull();
-    expect(remainingSteps(t.saved.at(-1)!)).toEqual(["journal"]);
-    expect(parsePublisherCommitEntry(JSON.parse(JSON.stringify(REMOVAL)))?.kind).toBe("removal");
-  });
-
-  it("a rotation commit the DS refused (409) is lost and does not hold the rotation", async () => {
+  it("a commit another owner device beat (409) is abandoned; nothing else of it runs", async () => {
     const t = ports({ failAt: "commit:rotation", lost: true });
-    await runPublisherCommit(ROTATION, t.p);
-    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
-    expect(t.finished()?.done).toEqual(["journal", "reseal"]);
+    expect(await runPublisherCommit(ROTATION, t.p)).toBe("lost");
+    expect(t.calls).toEqual(["commit:rotation", "abandon"]);
     expect(t.finished()?.journalLost).toBe(true);
   });
 
-  it("an approve whose commit lost (409) delivers no Welcome and appoints nobody, but reseals", async () => {
+  it("an approve that lost delivers no Welcome, appoints nobody and reseals nothing", async () => {
     const t = ports({ failAt: "commit:commit", lost: true });
-    await runPublisherCommit(APPROVE, t.p);
-    expect(t.calls).toEqual(["commit:commit", "server-epoch", "reseal:8"]);
-    expect(t.finished()?.journalLost).toBe(true);
+    expect(await runPublisherCommit(APPROVE, t.p)).toBe("lost");
+    expect(t.calls).toEqual(["commit:commit", "abandon"]);
   });
 
-  it("an approve commit the DS did not answer stops the approve before its Welcome", async () => {
-    const t = ports({ failAt: "commit:commit" });
-    await expect(runPublisherCommit(APPROVE, t.p)).rejects.toThrow(/commit/);
-    expect(t.calls).toEqual(["commit:commit"]);
-    expect(t.saved).toEqual([]);
-    expect(t.finished()).toBeNull();
+  it("a publisher removal runs like a rotation", async () => {
+    const REMOVAL: PublisherCommitEntry = { ...ROTATION, kind: "removal" };
+    const t = ports();
+    await runPublisherCommit(REMOVAL, t.p);
+    expect(t.calls).toEqual(["commit:rotation", "merge", "server-epoch", "reseal:8"]);
+    expect(parsePublisherCommitEntry(JSON.parse(JSON.stringify(REMOVAL)))?.kind).toBe("removal");
   });
 
   it("a failed appointment never holds the entry", async () => {
     const t = ports({ failAt: "appoint" });
-    await runPublisherCommit({ ...APPROVE, done: ["journal", "welcome", "reseal"] }, t.p);
+    await runPublisherCommit({ ...APPROVE, done: ["journal", "reseal", "welcome"] }, t.p);
     expect(t.finished()).not.toBeNull();
   });
 });
 
 describe("a restart", () => {
-  it("drops an entry whose group is below its target (a torn write) or gone, replays the rest", () => {
-    expect(replayVerdict(APPROVE, 4n)).toBe("discard");
+  it("resumes a merged stage, re-sends a recorded one, drops one that never reached disk", () => {
+    // APPROVE: N = 4, target 5.
+    expect(replayVerdict(APPROVE, 5n)).toBe("merged");
+    expect(replayVerdict(APPROVE, 6n)).toBe("merged");
+    expect(replayVerdict(APPROVE, 4n, true)).toBe("resend");
+    expect(replayVerdict(APPROVE, 4n, false)).toBe("discard");
+    expect(replayVerdict(APPROVE, 3n, true)).toBe("discard");
     expect(replayVerdict(APPROVE, null)).toBe("discard");
-    expect(replayVerdict(APPROVE, 5n)).toBe("replay");
-    expect(replayVerdict(APPROVE, 6n)).toBe("replay");
   });
 });
 
@@ -213,5 +225,6 @@ describe("the persisted entry", () => {
     // An approve needs its commit, its Welcome and the joiner.
     expect(parsePublisherCommitEntry({ ...APPROVE, commitB64: null })).toBeNull();
     expect(parsePublisherCommitEntry(ROTATION)).toEqual(ROTATION);
+    expect(parsePublisherCommitEntry({ ...ADMIT, done: ["journal", "handover"] })?.kind).toBe("admit");
   });
 });

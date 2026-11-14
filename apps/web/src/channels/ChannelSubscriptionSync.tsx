@@ -53,6 +53,8 @@ function localChannels(port: ChannelSubscriptionPort): LocalChannelState[] {
       listed: handle !== undefined,
       publishing: channelsState.keysByChannel().has(idHex),
       coPublisherGroupIdHex: channelsActions.coPublisherGroupIdOf(idHex) ?? null,
+      coPublisherOwnerKey:
+        access?.ownerAccountKeyB64 === undefined ? null : b64ToBytes(access.ownerAccountKeyB64),
       subscriberSecret: channelsState.subscriberKeysByChannel().get(idHex)?.secret ?? null,
       readKey: access?.readKeyB64 === null || access?.readKeyB64 === undefined ? null : b64ToBytes(access.readKeyB64),
       holdsSeeds: seeds !== undefined && seeds.size > 0,

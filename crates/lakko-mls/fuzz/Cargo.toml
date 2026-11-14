@@ -108,3 +108,17 @@ path = "fuzz_targets/join_request_retain.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "rejoin_knock_open"
+path = "fuzz_targets/rejoin_knock_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wrapped_entry_open"
+path = "fuzz_targets/wrapped_entry_open.rs"
+test = false
+doc = false
+bench = false

@@ -360,6 +360,14 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "channel-subscriptions-unsent",
       run: () => removeLocal(`lakko.channel-subscriptions.unsent.v1.${accountIdB64}`),
     },
+    // ADR-0090 decision A: the "founded the DeviceGroup alone" marker.
+    { name: "channels-founded-alone", run: () => removeLocal(`lakko.channels.founded-alone.v1.${accountIdB64}`) },
+    // ADR-0090 open question 4: admission seeds not yet sent to the
+    // account's other devices.
+    {
+      name: "channel-admission-seeds-unsent",
+      run: () => removeLocal(`lakko.channel-admission-seeds.unsent.v1.${accountIdB64}`),
+    },
     { name: "unseen-reactions", run: () => removeLocal(`lakko.unseen-reactions.v1:${accountIdB64}`) },
     // ADR-0080: the cards of the account's devices, this device's own card,
     // its city answer and its "Show my city" switch.

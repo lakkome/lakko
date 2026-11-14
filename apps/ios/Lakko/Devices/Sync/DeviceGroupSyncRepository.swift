@@ -1302,6 +1302,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentLinkRecords()
         guard bound.isCurrent else { return }
         await flushUnsentChannelSubscriptions()
+        await flushUnsentChannelAdmissionSeeds()
         guard bound.isCurrent else { return }
         await flushUnsentDeviceAcks()
         while !Task.isCancelled, bound.isCurrent {
@@ -1818,7 +1819,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 guard let loginHandle = self?.currentLoginHandle(accountIdB64: accountIdB64) else {
                     throw DeviceGroupSyncError.notReady
                 }
-                guard let groupId = DeviceGroupLifecycle.groupId(accountIdB64: accountIdB64) else {
+                guard let groupId = DeviceGroupLifecycle.groupId(accountIdB64: accountIdB64),
+                      let lineageSeed = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64) else {
                     throw DeviceGroupLifecycle.NoAccountSeed()
                 }
                 let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
@@ -1833,17 +1835,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 // attested-removal policy without a passkey. An unclaimed
                 // journal names no epoch: no proof.
                 let probe = try await DsClient().knock(groupId: groupId, payloads: [])
-                let payload: Data
+                var proof = Data()
                 if let epoch = probe.epoch {
-                    let proof = try signDeviceGroupSelfRemoval(
+                    proof = try signDeviceGroupSelfRemoval(
                         oldIdentity: joiner, groupId: groupId, epoch: epoch, replacementKeyPackage: keyPackage)
-                    payload = try PairingCodec.buildRejoinKnockPayload(
-                        loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous,
-                        selfRemovalProof: proof)
-                } else {
-                    payload = try PairingCodec.buildPairingQrPayload(
-                        loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous)
                 }
+                // G-55: sealed under the lineage seed either way.
+                let payload = try PairingCodec.buildRejoinKnockPayload(
+                    lineageSeed: lineageSeed, loginHandle: loginHandle, keyPackage: keyPackage,
+                    rendezvousPseudonym: rendezvous, selfRemovalProof: proof)
                 let state = DeviceGroupRejoinState(
                     rendezvousB64: base64Encode(rendezvous),
                     joinerSnapshotB64: base64Encode(try joiner.snapshotStorage()),
@@ -2001,8 +2001,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     ) async {
         guard let accountId = activeAccountId,
               let loginHandle = currentLoginHandle(accountIdB64: accountIdB64),
-              let decoded = try? PairingCodec.parsePairingQrPayload(
-                  wireBytes: knock.payload, expectedLoginHandle: loginHandle),
+              let lineageSeed = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64),
+              let decoded = try? PairingCodec.openRejoinKnockPayload(
+                  lineageSeed: lineageSeed, row: knock.payload, expectedLoginHandle: loginHandle),
               let key = try? keyPackageSignatureKey(keyPackage: decoded.keyPackage),
               let ownKey = identity?.signaturePublicKey(),
               let watching = admissions else { return }
@@ -2215,6 +2216,21 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // ADR-0050 section 2.9 (amended 2026-11-13) — a channel
             // subscription register, the same way; ``ChannelSubscriptionSync``
             // reconciles the channel list from ``channelSubscriptions``.
+            // ADR-0090 open question 4 — an owner account's channel admission
+            // seed, the same way (write-once per seed; two seeds of one
+            // version both kept).
+            if isChannelAdmissionSeedEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyChannelAdmissionSeedEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                        persistSyncState()
+                    }
+                } catch {
+                    NSLog("channel-admission-seed: envelope refused")
+                }
+                return
+            }
             if isChannelSubscriptionEnvelope(bytes: envelope) {
                 do {
                     if try syncedState.applyChannelSubscriptionEnvelope(envelope: envelope) {
@@ -2447,6 +2463,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.channelSubscriptionEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0090 — and every channel admission seed of the account.
+        for envelope in (try? syncedState.channelAdmissionSeedEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
     }
 
     // MARK: - ADR-0079: the link-record register
@@ -2597,14 +2617,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     @discardableResult
     public func setChannelSubscription(
         channelId: Data, role: ChannelSubscriptionRole, subscriberSecret: Data, readKey: Data,
-        publisherGroupId: Data, name: String, handle: String
+        publisherGroupId: Data, ownerAccountKey: Data, name: String, handle: String
     ) -> Bool? {
         guard ready, !deviceRemoved else { return nil }
         let written: Bool
         do {
             written = try syncedState.setChannelSubscription(
                 hlc: Hlc.mint(), channelId: channelId, role: role, subscriberSecret: subscriberSecret,
-                readKey: readKey, publisherGroupId: publisherGroupId, name: name, handle: handle)
+                readKey: readKey, publisherGroupId: publisherGroupId, ownerAccountKey: ownerAccountKey,
+                name: name, handle: handle)
         } catch {
             NSLog("channel-subscription: register refused")
             return false
@@ -2657,6 +2678,72 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     /// A channel subscription register failed to send this session.
     private var channelSubscriptionSendFailed = false
+
+    // MARK: - ADR-0090: the channel admission-seed register
+
+    static func channelAdmissionSeedsUnsentKey(accountIdB64: String) -> String {
+        "lakko.channel-admission-seeds.unsent.v1.\(accountIdB64)"
+    }
+
+    /// Every admission seed of `channelId` the register holds (a version may
+    /// appear more than once); empty before the synced state is loaded.
+    public func channelAdmissionSeeds(channelId: Data) -> [ChannelAdmissionSeedView] {
+        guard ready else { return [] }
+        return (try? syncedState.channelAdmissionSeeds(channelId: channelId)) ?? []
+    }
+
+    /// Write one admission seed of `channelId` (write-once per seed) and send
+    /// it. `nil` when the synced state is not loaded yet (the caller writes
+    /// it again later); `true` once held.
+    @discardableResult
+    public func setChannelAdmissionSeed(channelId: Data, version: UInt16, seed: Data) -> Bool? {
+        guard ready, !deviceRemoved else { return nil }
+        let written: Bool
+        do {
+            written = try syncedState.setChannelAdmissionSeed(
+                hlc: Hlc.mint(), channelId: channelId, admissionVersion: version, seed: seed)
+        } catch {
+            NSLog("channel-admission-seed: register refused")
+            return false
+        }
+        guard written else { return true }
+        stateChanged()
+        persistSyncState()
+        guard let account = activeAccountIdB64 else { return true }
+        let key = Self.channelAdmissionSeedsUnsentKey(accountIdB64: account)
+        UserDefaults.standard.set(true, forKey: key)
+        let envelope = (try? syncedState.channelAdmissionSeedEnvelopeFor(
+            channelId: channelId, admissionVersion: version, seed: seed)).flatMap { $0 }
+        Task { @MainActor [weak self] in
+            guard let self, let envelope else { return }
+            do {
+                try await self.sendLineageEnvelopes([envelope])
+                if self.activeAccountIdB64 == account, !self.channelAdmissionSeedSendFailed {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+            } catch {
+                self.channelAdmissionSeedSendFailed = true
+                NSLog("channel-admission-seed: register send failed; retried at the next start")
+            }
+        }
+        return true
+    }
+
+    private var channelAdmissionSeedSendFailed = false
+
+    /// Send every admission seed again when an earlier send was not
+    /// confirmed (write-once registers: a re-send changes nothing).
+    func flushUnsentChannelAdmissionSeeds() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.channelAdmissionSeedsUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.channelAdmissionSeedEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("channel-admission-seed: register send failed; retried at the next start")
+        }
+    }
 
     // MARK: - UX 17.5 / 17.6: the device-acknowledgement register
 

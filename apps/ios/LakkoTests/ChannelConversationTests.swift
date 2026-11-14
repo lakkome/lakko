@@ -529,16 +529,19 @@ final class ChannelConversationTests: XCTestCase {
     /// "Earlier posts aren't available.".
     @MainActor
     func testTheOwnerStillHoldsTheSeedOfTheEpochARotationLeft() throws {
-        let identity = try Identity.fromSeed(seed: Data(repeating: 0x5B, count: 32))
+        let accountSeed = Data(repeating: 0x5B, count: 32)
+        let identity = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x5C, count: 32), accountSeed: accountSeed, issuedAtUnixSecs: 1_700_000_000)
         let channelId = Data((0..<16).map { UInt8($0) &+ 0x30 })
         let channelIdHex = channelId.map { String(format: "%02x", $0) }.joined()
-        let group = try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+        let group = try PublisherGroup.create(identity: identity, ownerAccountSeed: accountSeed, channelId: channelId)
         let before = try group.channelSeed(identity: identity)
         let channels = ChannelsUiState()
 
         ChannelPublisherCommits.keepOutgoingSeed(
             state: channels, channelIdHex: channelIdHex, serverEpoch: 0, group: group, identity: identity)
-        _ = try group.rotate(identity: identity)
+        _ = try group.stageRotate(identity: identity)
+        XCTAssertTrue(try group.mergeStagedCommit(identity: identity))
         let after = try group.channelSeed(identity: identity)
 
         XCTAssertNotEqual(before, after)

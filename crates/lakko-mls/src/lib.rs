@@ -19,6 +19,7 @@ pub mod ciphersuite;
 pub mod device_binding;
 pub mod device_group;
 pub mod device_group_sync;
+pub mod entry_wrap;
 pub mod error;
 pub mod group;
 pub mod group_kind;
@@ -36,6 +37,10 @@ pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
 pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
+pub use entry_wrap::{
+    is_wrapped_entry, wrapped_entry_epoch, DS_ACCESS_EXPORTER_LABEL, ENTRY_WRAP_KEY_CONTEXT,
+    WRAPPED_ENTRY_MAGIC,
+};
 pub use error::{group_id_hex, Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
@@ -47,8 +52,10 @@ pub use group_proposals::{ProposalKind, ProposalRecord};
 pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
-    compose_publisher_step_down, is_publisher_step_down, is_publisher_step_down_envelope,
-    publisher_group_id_for, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
+    check_publisher_commit, compose_publisher_step_down, is_publisher_step_down,
+    is_publisher_step_down_envelope, publisher_group_id_for, publisher_owner_account_key,
+    ChannelId, MemberAdditionBytes, PublisherCommit, PublisherCommitEffects, PublisherEntry,
+    PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN, PUBLISHER_GROUP_OWNER_ROW_DOMAIN,
     PUBLISHER_STEP_DOWN_DOMAIN_V1, PUBLISHER_STEP_DOWN_LEN,
 };
 pub use refusal::{RefusalDisposition, RefusalReason};
@@ -294,6 +301,78 @@ pub mod fuzz_api {
                 && p.login_handle.as_slice() == PAIRING_QR_EXPECTED_HANDLE.as_slice()
                 && p.device_card.len() <= crate::pairing::PAIRING_DEVICE_CARD_MAX_LEN
         })
+    }
+
+    /// The fixed lineage seed the `rejoin_knock_open` harness seals and opens
+    /// under (G-55).
+    pub const REJOIN_KNOCK_SEED: crate::AccountSeed = [0x4B; 32];
+
+    /// Drive a DeviceGroup knock row (G-55) through every parser a sibling
+    /// runs on it: [`crate::pairing::open_rejoin_knock`] under the fixed
+    /// [`REJOIN_KNOCK_SEED`] (the fuzzer cannot forge the tag, so this is the
+    /// header checks and the AEAD refusal), the padding parser fed directly,
+    /// and a seal-open round trip of the bytes taken as a KeyPackage. The DS
+    /// knock queue accepts rows from anyone holding a token, so every byte is
+    /// attacker-chosen. Returns `true` when the row opened.
+    ///
+    /// # Panics
+    ///
+    /// When a knock this crate sealed does not open back to its input.
+    #[must_use]
+    pub fn open_rejoin_knock(bytes: &[u8]) -> bool {
+        let _ = crate::pairing::unpad_knock(bytes);
+        let opened = crate::pairing::open_rejoin_knock(
+            &REJOIN_KNOCK_SEED,
+            bytes,
+            &PAIRING_QR_EXPECTED_HANDLE,
+        )
+        .is_ok();
+        let rendezvous = [0x11; crate::pairing::RENDEZVOUS_PSEUDONYM_LEN];
+        if let Ok(row) = crate::pairing::encode_rejoin_knock(
+            &REJOIN_KNOCK_SEED,
+            &PAIRING_QR_EXPECTED_HANDLE,
+            bytes,
+            &rendezvous,
+            &[],
+        ) {
+            let back = crate::pairing::open_rejoin_knock(
+                &REJOIN_KNOCK_SEED,
+                &row,
+                &PAIRING_QR_EXPECTED_HANDLE,
+            );
+            assert!(
+                back.is_ok_and(|d| d.key_package == bytes),
+                "a sealed knock opens to its input"
+            );
+        }
+        opened
+    }
+
+    /// Drive a wrapped external-entry row (G-55) through the parsers a member
+    /// runs on it: the clear epoch reader and the open under a fixed key at
+    /// that epoch, then a wrap-open round trip of the bytes as a commit. A
+    /// PublisherGroup journal row is chosen by whoever the DS let write it.
+    /// Returns `true` when the row opened.
+    ///
+    /// # Panics
+    ///
+    /// When a row this crate wrapped does not open back to its input.
+    #[must_use]
+    pub fn open_wrapped_entry(bytes: &[u8]) -> bool {
+        let seed = [0x57; 32];
+        let group = [0x47; 32];
+        let epoch = crate::wrapped_entry_epoch(bytes).unwrap_or(0);
+        let _ = crate::epoch_of_message(bytes);
+        let _ = crate::epoch_after_message(bytes);
+        let opened = crate::entry_wrap::unwrap_entry_commit(&seed, &group, epoch, bytes).is_ok();
+        if let Ok(row) = crate::entry_wrap::wrap_entry_commit(&seed, &group, 7, bytes) {
+            let back = crate::entry_wrap::unwrap_entry_commit(&seed, &group, 7, &row);
+            assert!(
+                back.is_ok_and(|c| c.as_slice() == bytes),
+                "a wrapped entry opens to its input"
+            );
+        }
+        opened
     }
 
     /// Try to open a history-bundle (`history_bundle::open_bundle`), the

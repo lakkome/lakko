@@ -113,6 +113,10 @@ pub mod fuzz_api {
     ///   (ADR-0079), reached the same way. Whatever decodes must re-encode to
     ///   the identical bytes, hold records within their bounds, and fold so
     ///   that every revoked record it carries is held revoked.
+    /// * `decode_channel_admission_seed_envelope` — a private channel's
+    ///   admission seeds (ADR-0090), reached the same way: canonical, folding
+    ///   to exactly its registers (two seeds of one version coexist),
+    ///   write-once per seed at the writer.
     /// * `decode_device_ack_envelope` — the device-acknowledgement registers
     ///   (identity-recovery 17.5), reached the same way: canonical, folding
     ///   to exactly its keys, not applying twice.
@@ -135,13 +139,15 @@ pub mod fuzz_api {
             && channel_reaction_envelope_holds(bytes)
             && channel_comment_envelope_holds(bytes)
             && channel_subscription_envelope_holds(bytes)
+            && channel_admission_seed_envelope_holds(bytes)
             && persisted_state_holds(bytes)
     }
 
     /// The channel-subscription envelope (2026-11-13): canonical, within its
     /// bounds, folds to exactly its registers, is carried back by
-    /// `channel_subscription_envelopes`, does not apply twice, and a live
-    /// register it carries reads as subscribed and a leave as not.
+    /// `channel_subscription_envelopes`, does not apply twice, a live
+    /// register it carries reads as subscribed and a leave as not, and an
+    /// owner key is carried exactly by a co-publisher (ADR-0090 2.3).
     fn channel_subscription_envelope_holds(bytes: &[u8]) -> bool {
         let Ok(entries) = crate::synced::decode_channel_subscription_envelope(bytes) else {
             return true;
@@ -156,6 +162,46 @@ pub mod fuzz_api {
             && state.apply_channel_subscription_envelope(bytes) == Ok(false)
             && entries.iter().all(|e| {
                 state.is_channel_subscribed(&e.value.channel_id) == e.value.is_subscribed()
+                    && e.value.subscribed.as_ref().map_or(true, |s| {
+                        (s.role == crate::synced::ChannelSubscriptionRole::CoPublisher)
+                            == s.owner_account_key.is_some()
+                    })
+            })
+    }
+
+    /// The channel admission-seed envelope (ADR-0090 open question 4):
+    /// canonical, within its bounds, folds to exactly its registers, is
+    /// carried back by `channel_admission_seed_envelopes`, does not apply
+    /// twice, every seed reads back among the seeds of its version, and a
+    /// local write of a held seed writes nothing.
+    fn channel_admission_seed_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_admission_seed_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_channel_admission_seed_envelope(&entries).as_deref() == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_LEN
+            && state.apply_channel_admission_seed_envelope(bytes) == Ok(true)
+            && state.all_channel_admission_seeds() == entries
+            && state.channel_admission_seed_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_admission_seed_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state
+                    .channel_admission_seeds_for(&e.value.channel_id, e.value.admission_version)
+                    .contains(&e.value.seed)
+                    && !state.set_channel_admission_seed(
+                        u64::MAX,
+                        &e.value.channel_id,
+                        e.value.admission_version,
+                        &e.value.seed,
+                    )
+                    && state
+                        .channel_admission_seed_envelope_for(
+                            &e.value.channel_id,
+                            e.value.admission_version,
+                            &e.value.seed,
+                        )
+                        .is_some()
             })
     }
 
@@ -378,6 +424,14 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        for envelope in state.channel_admission_seed_envelopes() {
+            if rebuilt
+                .apply_channel_admission_seed_envelope(&envelope)
+                .is_err()
+            {
+                return false;
+            }
+        }
         let reactions = |s: &SyncedState| {
             s.entries()
                 .into_iter()
@@ -395,6 +449,7 @@ pub mod fuzz_api {
         rebuilt.all_lineage() == state.all_lineage()
             && rebuilt.all_link_records() == state.all_link_records()
             && rebuilt.all_channel_subscriptions() == state.all_channel_subscriptions()
+            && rebuilt.all_channel_admission_seeds() == state.all_channel_admission_seeds()
             && rebuilt.recovery_email_register() == state.recovery_email_register()
             && rebuilt.own_username_register() == state.own_username_register()
             && rebuilt.quick_reaction_register() == state.quick_reaction_register()
@@ -644,6 +699,7 @@ mod fuzz_api_tests {
                     subscriber_secret: [6; 32],
                     read_key: Some([7; 32]),
                     publisher_group_id: Some([8; 32]),
+                    owner_account_key: Some([9; 32]),
                     name: "News".into(),
                     handle: "news".into(),
                 },

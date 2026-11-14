@@ -24,27 +24,32 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
     private let minted = Data(repeating: 0x55, count: 32)
 
     private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
+    /// ADR-0090 contract 3a — the owner key a co-publisher recorded at join.
+    private let ownerAccountKey = Data(repeating: 0x0A, count: 32)
 
     private func register(
         _ id: Data, subscribed: Bool = true, role: ChannelSubscriptionRole = .subscriber,
-        secret: Data? = nil, readKey: Data = Data(), groupId: Data = Data(), name: String = "",
-        handle: String = "", hlc: UInt64 = 10
+        secret: Data? = nil, readKey: Data = Data(), groupId: Data = Data(), ownerKey: Data? = nil,
+        name: String = "", handle: String = "", hlc: UInt64 = 10
     ) -> ChannelSubscriptionRegister {
         ChannelSubscriptionRegister(
             hlc: hlc, channelId: id, subscribed: subscribed, role: subscribed ? role : .subscriber,
             subscriberSecret: subscribed ? (secret ?? secret1) : Data(), readKey: subscribed ? readKey : Data(),
-            publisherGroupId: subscribed ? groupId : Data(), name: subscribed ? name : "",
+            publisherGroupId: subscribed ? groupId : Data(),
+            ownerAccountKey: subscribed && role == .coPublisher ? (ownerKey ?? ownerAccountKey) : Data(),
+            name: subscribed ? name : "",
             handle: subscribed ? handle : "")
     }
 
     private func local(
         _ id: Data, listed: Bool = true, secret: Data? = nil, publishes: Bool = false,
-        coPublished: Data? = nil, readKey: Data? = nil, role: String? = nil, name: String = "News",
-        handle: String = "news", seeds: Bool = false
+        coPublished: Data? = nil, readKey: Data? = nil, role: String? = nil, ownerKey: Data? = nil,
+        name: String = "News", handle: String = "news", seeds: Bool = false
     ) -> ChannelSubscriptionPlan.Local {
         ChannelSubscriptionPlan.Local(
             id: hex(id), listed: listed, subscriberSecret: secret, publishesHere: publishes,
             coPublishedGroupIdHex: coPublished.map(hex), readKey: readKey, accountRole: role,
+            ownerAccountKey: ownerKey ?? (coPublished != nil ? ownerAccountKey : nil),
             name: name, handle: handle, holdsSeeds: seeds)
     }
 
@@ -72,7 +77,25 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
     func testACoPublishersRegisterCarriesItsGroupIdToTheReaderDevice() {
         let out = plan([register(idA, role: .coPublisher, groupId: groupId)], [])
         XCTAssertTrue(out.applies.contains(
-            .extras(id: hex(idA), role: ChannelAccountRole.coPublisher, readKey: nil, coPublishedGroupId: groupId)))
+            .extras(id: hex(idA), role: ChannelAccountRole.coPublisher, readKey: nil, coPublishedGroupId: groupId,
+                    ownerAccountKey: ownerAccountKey)))
+    }
+
+    /// ADR-0090 contract 3a — a co-publisher's register carries the owner key
+    /// its device recorded at join; a co-publisher with no recorded key
+    /// writes nothing (the core would refuse it).
+    func testACoPublishersRegisterCarriesTheRecordedOwnerKey() {
+        let coPub = plan([], [local(idB, publishes: true, coPublished: groupId)])
+        XCTAssertEqual(coPub.writes.first?.ownerAccountKey, ownerAccountKey)
+        let noKey = ChannelSubscriptionPlan.desired(
+            local: ChannelSubscriptionPlan.Local(
+                id: hex(idB), listed: true, subscriberSecret: secret1, publishesHere: true,
+                coPublishedGroupIdHex: hex(groupId), readKey: nil, accountRole: nil, ownerAccountKey: nil,
+                name: "", handle: "", holdsSeeds: false),
+            register: nil, forceSubscriber: false, mintSecret: { self.minted })
+        XCTAssertNil(noKey)
+        XCTAssertEqual(plan([], [local(idA, publishes: true)]).writes.first?.ownerAccountKey, Data(),
+                       "an owner records none")
     }
 
     func testALeftRegisterDropsAReadersChannelButNeverOneThisDevicePublishes() {
@@ -158,7 +181,8 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         let write = try XCTUnwrap(plan([], [local(idA, publishes: true, readKey: readKey)]).writes.first)
         XCTAssertTrue(try device1.setChannelSubscription(
             hlc: 100, channelId: write.channelId, role: write.role, subscriberSecret: write.subscriberSecret,
-            readKey: write.readKey, publisherGroupId: write.publisherGroupId, name: write.name, handle: write.handle))
+            readKey: write.readKey, publisherGroupId: write.publisherGroupId,
+            ownerAccountKey: write.ownerAccountKey, name: write.name, handle: write.handle))
         let envelope = try XCTUnwrap(try device1.channelSubscriptionEnvelopeFor(channelId: idA))
         XCTAssertTrue(isChannelSubscriptionEnvelope(bytes: envelope))
         let device2 = SyncedState()
@@ -182,7 +206,8 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
             hlc += 1
             return (try? state.setChannelSubscription(
                 hlc: hlc, channelId: write.channelId, role: write.role, subscriberSecret: write.subscriberSecret,
-                readKey: write.readKey, publisherGroupId: write.publisherGroupId, name: write.name,
+                readKey: write.readKey, publisherGroupId: write.publisherGroupId,
+                ownerAccountKey: write.ownerAccountKey, name: write.name,
                 handle: write.handle)) != nil
         }
         func writeLeave(channelId: Data) -> Bool? {
@@ -209,7 +234,7 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         let port = FakePort()
         XCTAssertTrue(try port.state.setChannelSubscription(
             hlc: 5, channelId: idA, role: .owner, subscriberSecret: secret1, readKey: readKey,
-            publisherGroupId: Data(), name: "News", handle: "news"))
+            publisherGroupId: Data(), ownerAccountKey: Data(), name: "News", handle: "news"))
         let (sync, channels, _) = bound(port)
         sync.reconcileNow()
         let id = hex(idA)
@@ -242,7 +267,7 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         let port = FakePort()
         XCTAssertTrue(try port.state.setChannelSubscription(
             hlc: 5, channelId: idA, role: .subscriber, subscriberSecret: secret1, readKey: Data(),
-            publisherGroupId: Data(), name: "", handle: ""))
+            publisherGroupId: Data(), ownerAccountKey: Data(), name: "", handle: ""))
         port.registersReady = false
         let (sync, channels, _) = bound(port)
         channels.onRelationshipEnded?(hex(idA))
@@ -256,13 +281,13 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         let port = FakePort()
         XCTAssertTrue(try port.state.setChannelSubscription(
             hlc: 5, channelId: idA, role: .subscriber, subscriberSecret: secret1, readKey: Data(),
-            publisherGroupId: Data(), name: "", handle: ""))
+            publisherGroupId: Data(), ownerAccountKey: Data(), name: "", handle: ""))
         let (sync, channels, _) = bound(port)
         XCTAssertEqual(channels.subscriberKeysForSubscribe(hex(idA)).secret, secret1)
 
         XCTAssertTrue(try port.state.setChannelSubscription(
             hlc: 6, channelId: idB, role: .subscriber, subscriberSecret: secret2, readKey: Data(),
-            publisherGroupId: Data(), name: "", handle: ""))
+            publisherGroupId: Data(), ownerAccountKey: Data(), name: "", handle: ""))
         XCTAssertTrue(try port.state.leaveChannelSubscription(hlc: 7, channelId: idB))
         let id = hex(idB)
         channels.addChannel(ChannelHandle(id: id, localName: "Other", localDescription: "", addedAtMs: 1))
@@ -301,7 +326,12 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
     // MARK: - The trap: nothing founds a PublisherGroup outside New channel
 
     func testOpeningAChannelWithNoGroupHereNeverFoundsOne() throws {
-        let identity = try Identity.fromSeed(seed: Data(repeating: 0x6C, count: 32))
+        // ADR-0090 — a bound DEVICE identity and the owner account seed.
+        let accountSeed = Data(repeating: 0x6C, count: 32)
+        let identity = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x6D, count: 32), accountSeed: accountSeed, issuedAtUnixSecs: 1_700_000_000)
+        ChannelPublisherIdentity.noteOwnerSeed(accountSeed)
+        defer { ChannelPublisherIdentity.noteOwnerSeed(nil) }
         let channelHex = hex(idA)
         XCTAssertThrowsError(try CoPublisher.openPublisherGroup(
             identity: identity, accountIdB64: nil, channelIdHex: channelHex)) { error in
@@ -315,11 +345,11 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
                 return XCTFail("expected notOnThisDevice, got \(error)")
             }
         }
-        XCTAssertNil(try publisherGroupLoad(identity: identity, channelId: idA), "nothing was founded")
+        XCTAssertNil(try publisherGroupLoad(identity: identity, ownerAccountSeed: accountSeed, channelId: idA), "nothing was founded")
         // New channel founds.
         _ = try ChannelsComposer.freshPublisherKeys(
             identity: identity, accountIdB64: nil, channelIdHex: channelHex, mayFound: true)
-        XCTAssertNotNil(try publisherGroupLoad(identity: identity, channelId: idA))
+        XCTAssertNotNil(try publisherGroupLoad(identity: identity, ownerAccountSeed: accountSeed, channelId: idA))
         XCTAssertNoThrow(try CoPublisher.openPublisherGroup(
             identity: identity, accountIdB64: nil, channelIdHex: channelHex))
     }
@@ -415,7 +445,7 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         channels.addChannel(ChannelHandle(id: hex(idA), localName: "News", localDescription: "", addedAtMs: 1))
         _ = port.writeLive(ChannelSubscriptionPlan.Write(
             channelId: idA, role: .subscriber, subscriberSecret: secret1, readKey: Data(),
-            publisherGroupId: Data(), name: "", handle: ""))
+            publisherGroupId: Data(), ownerAccountKey: Data(), name: "", handle: ""))
         XCTAssertEqual(sync.carriedSeedsForBundle().first?.seeds.map(\.epoch), [1, 2])
     }
 

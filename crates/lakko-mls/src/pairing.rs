@@ -61,6 +61,7 @@ use prost::Message as _;
 
 use lakko_crypto::secret::SecretBytes;
 
+use crate::device_group::AccountSeed;
 use crate::error::{Error, Result};
 
 /// Current payload schema version. The decoder accepts exactly this
@@ -152,35 +153,176 @@ pub fn encode(
     )
 }
 
+/// BLAKE3 derive-key context of the rejoin-knock seal key (G-55). Frozen.
+pub const REJOIN_KNOCK_KEY_CONTEXT: &str = "lakko/device-group/knock-wrap/v1";
+
+/// First bytes of a sealed rejoin knock. Frozen.
+pub const REJOIN_KNOCK_MAGIC: &[u8] = b"lakko/rejoin-knock/v1\0";
+
+/// The one sealed-knock version.
+pub const REJOIN_KNOCK_VERSION: u8 = 0x01;
+
+/// The sealed plaintext (`len(4 BE) ‖ pairing payload ‖ zeros`) is padded to
+/// a multiple of this size, so the knock's length does not vary with the
+/// KeyPackage. Chosen: measured on 2026-11-14 in the
+/// `a_knock_is_one_padded_size` test, a bound device's KeyPackage was 417
+/// bytes and the whole payload with a self-removal proof 631, so it fits one
+/// step; a larger payload takes more steps (the DS takes 16 KiB per knock).
+pub const REJOIN_KNOCK_PAD_STEP: usize = 1024;
+
+const KNOCK_HEADER_LEN: usize = REJOIN_KNOCK_MAGIC.len() + 1;
+
+/// Length of a sealed knock whose payload fits one padding step.
+pub const REJOIN_KNOCK_SEALED_LEN: usize = KNOCK_HEADER_LEN
+    + lakko_crypto::aead::NONCE_LEN
+    + REJOIN_KNOCK_PAD_STEP
+    + lakko_crypto::aead::TAG_LEN;
+
+fn knock_key(lineage_account_seed: &AccountSeed) -> lakko_crypto::aead::AeadKey {
+    lakko_crypto::aead::AeadKey::new(lakko_crypto::hash::blake3_derive_key_from_material(
+        REJOIN_KNOCK_KEY_CONTEXT,
+        lineage_account_seed,
+    ))
+}
+
+fn knock_aad(lineage_account_seed: &AccountSeed) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(KNOCK_HEADER_LEN + 32);
+    aad.extend_from_slice(REJOIN_KNOCK_MAGIC);
+    aad.push(REJOIN_KNOCK_VERSION);
+    aad.extend_from_slice(&crate::DeviceGroup::group_id_for(lineage_account_seed));
+    aad
+}
+
+fn seal_knock(lineage_account_seed: &AccountSeed, payload: &[u8]) -> Result<Vec<u8>> {
+    let len = u32::try_from(payload.len())
+        .map_err(|_| Error::Codec("rejoin knock: payload too long".into()))?;
+    let framed = 4 + payload.len();
+    let padded_len = framed.div_ceil(REJOIN_KNOCK_PAD_STEP) * REJOIN_KNOCK_PAD_STEP;
+    let mut plaintext = zeroize::Zeroizing::new(Vec::with_capacity(padded_len));
+    plaintext.extend_from_slice(&len.to_be_bytes());
+    plaintext.extend_from_slice(payload);
+    plaintext.resize(padded_len, 0);
+    let mut nonce = [0u8; lakko_crypto::aead::NONCE_LEN];
+    lakko_crypto::random::fill(&mut nonce);
+    let sealed = lakko_crypto::aead::seal(
+        lakko_crypto::aead::Algorithm::ChaCha20Poly1305,
+        &knock_key(lineage_account_seed),
+        &nonce,
+        &knock_aad(lineage_account_seed),
+        &plaintext,
+    )
+    .map_err(|e| Error::Codec(format!("rejoin knock: seal: {e}")))?;
+    let mut out = Vec::with_capacity(KNOCK_HEADER_LEN + nonce.len() + sealed.len());
+    out.extend_from_slice(REJOIN_KNOCK_MAGIC);
+    out.push(REJOIN_KNOCK_VERSION);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&sealed);
+    Ok(out)
+}
+
 /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
-/// plus the device's self-removal proof for `key_package_bytes`. A knock
-/// carries no device card: the rejoining device is already known to its
-/// siblings.
+/// plus, when the journal names an epoch, the device's self-removal proof for
+/// `key_package_bytes` (empty for none). A knock carries no device card: the
+/// rejoining device is already known to its siblings.
+///
+/// **Sealed (G-55, ADR-0078 section 4).** The knock row is read by the
+/// Delivery Service, and the payload names the account's login handle and
+/// carries a KeyPackage whose binding names the account key. It is sealed
+/// under `BLAKE3-derive-key(REJOIN_KNOCK_KEY_CONTEXT, lineage_account_seed)`,
+/// the seed the DeviceGroup id derives from (every device of the account
+/// holds it; [`crate::DeviceGroup::group_id_for`]), with the DeviceGroup id
+/// in the AAD, and padded to [`REJOIN_KNOCK_PAD_STEP`]:
+/// `REJOIN_KNOCK_MAGIC ‖ version(1) ‖ nonce(12) ‖ ChaCha20-Poly1305(len(4 BE)
+/// ‖ payload ‖ zeros)`. A sibling opens it with [`open_rejoin_knock`].
 ///
 /// # Errors
 ///
-/// [`Error::Codec`] when `self_removal_proof` is not exactly
-/// [`crate::SELF_REMOVAL_PROOF_LEN`] bytes, or on a prost-encode failure.
+/// [`Error::Codec`] when `self_removal_proof` is neither empty nor exactly
+/// [`crate::SELF_REMOVAL_PROOF_LEN`] bytes, or on an encode or seal failure.
 pub fn encode_rejoin_knock(
+    lineage_account_seed: &AccountSeed,
     login_handle: &LoginHandle,
     key_package_bytes: &[u8],
     rendezvous_pseudonym: &RendezvousPseudonym,
     self_removal_proof: &[u8],
 ) -> Result<Vec<u8>> {
-    if self_removal_proof.len() != crate::SELF_REMOVAL_PROOF_LEN {
+    if !self_removal_proof.is_empty() && self_removal_proof.len() != crate::SELF_REMOVAL_PROOF_LEN {
         return Err(Error::Codec(format!(
             "rejoin knock: a self-removal proof is {} bytes, got {}",
             crate::SELF_REMOVAL_PROOF_LEN,
             self_removal_proof.len()
         )));
     }
-    encode_payload(
+    let payload = zeroize::Zeroizing::new(encode_payload(
         login_handle,
         key_package_bytes,
         rendezvous_pseudonym,
         self_removal_proof.to_vec(),
         Vec::new(),
-    )
+    )?);
+    seal_knock(lineage_account_seed, &payload)
+}
+
+/// A sibling's side of [`encode_rejoin_knock`]: open a knock row read from
+/// the account's DeviceGroup knock queue under the lineage seed, then
+/// [`decode`] the pairing payload against `expected_login_handle`.
+///
+/// # Errors
+///
+/// [`Error::Codec`] when the row is not a sealed knock of the known version,
+/// does not open under this account's key (another account's knock, tampered
+/// bytes), or its padding is malformed; then whatever [`decode`] returns.
+pub fn open_rejoin_knock(
+    lineage_account_seed: &AccountSeed,
+    row: &[u8],
+    expected_login_handle: &LoginHandle,
+) -> Result<DecodedPairingQr> {
+    let malformed = || Error::Codec("rejoin knock: not a sealed knock".into());
+    if !row.starts_with(REJOIN_KNOCK_MAGIC) {
+        return Err(malformed());
+    }
+    if row.get(REJOIN_KNOCK_MAGIC.len()) != Some(&REJOIN_KNOCK_VERSION) {
+        return Err(Error::Unsupported(
+            "rejoin knock version is not supported by this client",
+        ));
+    }
+    let nonce_end = KNOCK_HEADER_LEN + lakko_crypto::aead::NONCE_LEN;
+    let nonce: [u8; lakko_crypto::aead::NONCE_LEN] = row
+        .get(KNOCK_HEADER_LEN..nonce_end)
+        .and_then(|n| n.try_into().ok())
+        .ok_or_else(malformed)?;
+    let sealed = row.get(nonce_end..).ok_or_else(malformed)?;
+    let plaintext = zeroize::Zeroizing::new(
+        lakko_crypto::aead::open(
+            lakko_crypto::aead::Algorithm::ChaCha20Poly1305,
+            &knock_key(lineage_account_seed),
+            &nonce,
+            &knock_aad(lineage_account_seed),
+            sealed,
+        )
+        .map_err(|_| Error::Codec("rejoin knock: does not open under this account's key".into()))?,
+    );
+    let payload = unpad_knock(&plaintext)?;
+    decode(payload, expected_login_handle)
+}
+
+pub(crate) fn unpad_knock(plaintext: &[u8]) -> Result<&[u8]> {
+    let malformed = || Error::Codec("rejoin knock: malformed padding".into());
+    if plaintext.is_empty() || plaintext.len() % REJOIN_KNOCK_PAD_STEP != 0 {
+        return Err(malformed());
+    }
+    let len_bytes: [u8; 4] = plaintext
+        .get(..4)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(malformed)?;
+    let len = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| malformed())?;
+    let end = 4usize.checked_add(len).ok_or_else(malformed)?;
+    let payload = plaintext.get(4..end).ok_or_else(malformed)?;
+    let rest = plaintext.get(end..).ok_or_else(malformed)?;
+    if rest.iter().any(|b| *b != 0) {
+        return Err(malformed());
+    }
+    Ok(payload)
 }
 
 fn encode_payload(
@@ -584,17 +726,17 @@ mod tests {
         }
     }
 
+    const LINEAGE: AccountSeed = [0x3c; 32];
+
     #[test]
     fn a_rejoin_knock_carries_no_device_card() {
         let handle = fixture_handle();
         let proof = vec![0x5a; crate::SELF_REMOVAL_PROOF_LEN];
         let knock =
-            encode_rejoin_knock(&handle, &[1, 2, 3], &fixture_rendezvous(), &proof).unwrap();
-        assert!(PairingQr::decode(knock.as_slice())
-            .unwrap()
-            .device_card
-            .is_empty());
-        assert!(decode(&knock, &handle).unwrap().device_card.is_empty());
+            encode_rejoin_knock(&LINEAGE, &handle, &[1, 2, 3], &fixture_rendezvous(), &proof)
+                .unwrap();
+        let opened = open_rejoin_knock(&LINEAGE, &knock, &handle).unwrap();
+        assert!(opened.device_card.is_empty());
     }
 
     // ---- ADR-0081 amendment: the rejoin knock carries a self-removal proof ----
@@ -604,18 +746,155 @@ mod tests {
         let handle = fixture_handle();
         let proof = vec![0x5a; crate::SELF_REMOVAL_PROOF_LEN];
         let knock =
-            encode_rejoin_knock(&handle, &[1, 2, 3], &fixture_rendezvous(), &proof).unwrap();
-        let decoded = decode(&knock, &handle).unwrap();
+            encode_rejoin_knock(&LINEAGE, &handle, &[1, 2, 3], &fixture_rendezvous(), &proof)
+                .unwrap();
+        let decoded = open_rejoin_knock(&LINEAGE, &knock, &handle).unwrap();
         assert_eq!(decoded.self_removal_proof, Some(proof));
         assert_eq!(decoded.key_package, vec![1, 2, 3]);
         let plain = encode(&handle, &[1, 2, 3], &fixture_rendezvous(), &[]).unwrap();
         assert_eq!(decode(&plain, &handle).unwrap().self_removal_proof, None);
+        let unproven =
+            encode_rejoin_knock(&LINEAGE, &handle, &[1, 2, 3], &fixture_rendezvous(), &[]).unwrap();
+        assert_eq!(
+            open_rejoin_knock(&LINEAGE, &unproven, &handle)
+                .unwrap()
+                .self_removal_proof,
+            None
+        );
+    }
+
+    // ---- G-55: the knock is sealed under the lineage seed ----
+
+    #[test]
+    fn the_knock_constants_are_pinned() {
+        assert_eq!(REJOIN_KNOCK_KEY_CONTEXT, "lakko/device-group/knock-wrap/v1");
+        assert_eq!(REJOIN_KNOCK_MAGIC, b"lakko/rejoin-knock/v1\0");
+        assert_eq!(REJOIN_KNOCK_SEALED_LEN, 22 + 1 + 12 + 1024 + 16);
+    }
+
+    /// A realistic knock (a bound device's KeyPackage and a proof) is one
+    /// padded size, and so is a small one: the length says nothing about the
+    /// KeyPackage.
+    #[test]
+    fn a_knock_is_one_padded_size() {
+        let device = crate::Identity::from_seed_bound(&[0x71; 64], &[0x72; 32], 1).unwrap();
+        let kp = crate::key_package::serialize(&device.create_key_package().unwrap()).unwrap();
+        let proof = vec![0x5a; crate::SELF_REMOVAL_PROOF_LEN];
+        let big = encode_rejoin_knock(
+            &LINEAGE,
+            &fixture_handle(),
+            &kp,
+            &fixture_rendezvous(),
+            &proof,
+        )
+        .unwrap();
+        let small = encode_rejoin_knock(
+            &LINEAGE,
+            &fixture_handle(),
+            &[1],
+            &fixture_rendezvous(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(big.len(), REJOIN_KNOCK_SEALED_LEN);
+        assert_eq!(small.len(), REJOIN_KNOCK_SEALED_LEN);
+        let opened = open_rejoin_knock(&LINEAGE, &big, &fixture_handle()).unwrap();
+        assert_eq!(opened.key_package, kp);
+    }
+
+    #[test]
+    fn a_knock_names_neither_the_handle_nor_the_account_key() {
+        let account = [0x72u8; 32];
+        let device = crate::Identity::from_seed_bound(&[0x71; 64], &account, 1).unwrap();
+        let kp = crate::key_package::serialize(&device.create_key_package().unwrap()).unwrap();
+        let handle = fixture_handle();
+        let knock =
+            encode_rejoin_knock(&LINEAGE, &handle, &kp, &fixture_rendezvous(), &[]).unwrap();
+        let account_key = device.account_public_key().unwrap();
+        let has = |needle: &[u8]| knock.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(&handle), "no login handle");
+        assert!(!has(&account_key), "no account key");
+        assert!(!has(device.device_binding().unwrap()), "no device binding");
+        assert!(!has(&fixture_rendezvous()), "no rendezvous");
+    }
+
+    #[test]
+    fn a_knock_does_not_open_under_another_seed_or_as_another_row() {
+        let handle = fixture_handle();
+        let knock =
+            encode_rejoin_knock(&LINEAGE, &handle, &[1, 2], &fixture_rendezvous(), &[]).unwrap();
+        assert!(matches!(
+            open_rejoin_knock(&[0x3d; 32], &knock, &handle),
+            Err(Error::Codec(_))
+        ));
+        let plain = encode(&handle, &[1, 2], &fixture_rendezvous(), &[]).unwrap();
+        assert!(
+            open_rejoin_knock(&LINEAGE, &plain, &handle).is_err(),
+            "no plain fallback"
+        );
+        let mut tampered = knock.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(open_rejoin_knock(&LINEAGE, &tampered, &handle).is_err());
+        let mut version = knock;
+        version[REJOIN_KNOCK_MAGIC.len()] = 0x02;
+        assert!(matches!(
+            open_rejoin_knock(&LINEAGE, &version, &handle),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    proptest! {
+        #[test]
+        fn a_sealed_knock_round_trips_under_its_seed_only(
+            seed in any::<[u8; 32]>(),
+            other in any::<[u8; 32]>(),
+            kp in proptest::collection::vec(any::<u8>(), 0..6000),
+            with_proof in any::<bool>(),
+        ) {
+            let handle = fixture_handle();
+            let proof = if with_proof { vec![0x11; crate::SELF_REMOVAL_PROOF_LEN] } else { Vec::new() };
+            let knock = encode_rejoin_knock(&seed, &handle, &kp, &fixture_rendezvous(), &proof).unwrap();
+            prop_assert_eq!((knock.len() - (REJOIN_KNOCK_SEALED_LEN - REJOIN_KNOCK_PAD_STEP)) % REJOIN_KNOCK_PAD_STEP, 0);
+            let opened = open_rejoin_knock(&seed, &knock, &handle).unwrap();
+            prop_assert_eq!(opened.key_package, kp);
+            prop_assert_eq!(opened.self_removal_proof.is_some(), with_proof);
+            if other != seed {
+                prop_assert!(open_rejoin_knock(&other, &knock, &handle).is_err());
+            }
+        }
+
+        #[test]
+        fn arbitrary_rows_never_open(row in proptest::collection::vec(any::<u8>(), 0..300)) {
+            let mut sealed = REJOIN_KNOCK_MAGIC.to_vec();
+            sealed.push(REJOIN_KNOCK_VERSION);
+            sealed.extend_from_slice(&row);
+            prop_assert!(open_rejoin_knock(&LINEAGE, &sealed, &fixture_handle()).is_err());
+            prop_assert!(open_rejoin_knock(&LINEAGE, &row, &fixture_handle()).is_err());
+        }
+
+        #[test]
+        fn malformed_padding_is_refused(pad in proptest::collection::vec(any::<u8>(), 0..64), len in any::<u32>()) {
+            let mut plaintext = len.to_be_bytes().to_vec();
+            plaintext.extend_from_slice(&pad);
+            plaintext.resize(REJOIN_KNOCK_PAD_STEP, 0);
+            let ok = usize::try_from(len).is_ok_and(|l| l + 4 <= REJOIN_KNOCK_PAD_STEP);
+            let res = unpad_knock(&plaintext);
+            if !ok {
+                prop_assert!(res.is_err());
+            } else if let Ok(p) = res {
+                prop_assert_eq!(p.len(), usize::try_from(len).unwrap());
+            }
+        }
     }
 
     #[test]
     fn a_self_removal_proof_of_the_wrong_length_is_refused_both_ways() {
         let handle = fixture_handle();
-        assert!(encode_rejoin_knock(&handle, &[1], &fixture_rendezvous(), &[0u8; 10]).is_err());
+        assert!(
+            encode_rejoin_knock(&LINEAGE, &handle, &[1], &fixture_rendezvous(), &[0u8; 10])
+                .is_err()
+        );
         for len in [
             1usize,
             64,

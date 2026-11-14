@@ -212,18 +212,70 @@ function cardOfDecoded(card: (DeviceCardLike & { free(): void }) | undefined): S
 }
 
 /**
- * ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
- * this device's self-removal proof (signed with its old leaf key, which is
- * its device identity's key) for `keyPackage`.
+ * ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus,
+ * when the journal names an epoch, this device's self-removal proof (signed
+ * with its old leaf key, which is its device identity's key) for
+ * `keyPackage`; an empty proof for none.
+ *
+ * G-55: the row is sealed under a key derived from `lineageSeed`, the 64-byte
+ * seed the DeviceGroup id derives from (`deviceGroupLineageSeed`), and padded,
+ * so the Delivery Service reads neither the login handle nor the KeyPackage.
+ * Every device of the account holds that seed; a sibling opens the row with
+ * {@link openRejoinKnockPayload}.
  */
 export async function buildRejoinKnockPayload(
+  lineageSeed: Uint8Array,
   loginHandle: Uint8Array,
   keyPackage: Uint8Array,
   rendezvousPseudonym: Uint8Array,
   selfRemovalProof: Uint8Array,
 ): Promise<Uint8Array> {
   const wasm = await loadWasm();
-  return wasm.encodeRejoinKnock(loginHandle, keyPackage, rendezvousPseudonym, selfRemovalProof);
+  const lineage = wasm.Identity.fromSeed(lineageSeed);
+  try {
+    return wasm.encodeRejoinKnock(lineage, loginHandle, keyPackage, rendezvousPseudonym, selfRemovalProof);
+  } finally {
+    lineage.free();
+  }
+}
+
+/**
+ * A sibling's side of {@link buildRejoinKnockPayload} (G-55): open a row read
+ * from the account's DeviceGroup knock queue under `lineageSeed`, then check
+ * the pairing payload against this account's own handle, as
+ * {@link parsePairingQrPayload} does. Throws for a row that is not a sealed
+ * knock or does not open under this account's key.
+ */
+export async function openRejoinKnockPayload(
+  lineageSeed: Uint8Array,
+  row: Uint8Array,
+  expectedLoginHandle: Uint8Array,
+): Promise<DecodedPairingQr> {
+  if (expectedLoginHandle.length !== LOGIN_HANDLE_LEN) {
+    throw new Error(
+      `expectedLoginHandle must be ${LOGIN_HANDLE_LEN} bytes (got ${expectedLoginHandle.length})`,
+    );
+  }
+  const wasm = await loadWasm();
+  const lineage = wasm.Identity.fromSeed(lineageSeed);
+  let decoded;
+  try {
+    decoded = wasm.openRejoinKnock(lineage, row, expectedLoginHandle);
+  } catch (err) {
+    throw pairingDecodeError(err);
+  } finally {
+    lineage.free();
+  }
+  try {
+    return {
+      keyPackage: decoded.keyPackage,
+      rendezvousPseudonym: decoded.rendezvousPseudonym,
+      selfRemovalProof: decoded.selfRemovalProof ?? null,
+      deviceCard: cardOfDecoded(decoded.deviceCard),
+    };
+  } finally {
+    decoded.free();
+  }
 }
 
 /**

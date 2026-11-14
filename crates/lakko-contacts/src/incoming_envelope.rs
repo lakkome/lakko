@@ -123,6 +123,9 @@ use thiserror::Error;
 use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::channel_admission_mark::{
+    try_unwrap_channel_admission_mark, ChannelAdmissionMark, ChannelAdmissionMarkError,
+};
 use crate::channel_epoch_seeds::{
     try_unwrap_channel_epoch_seeds, ChannelEpochSeedsEnvelope, ChannelEpochSeedsError,
 };
@@ -157,6 +160,9 @@ use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
+use crate::publisher_device_request::{
+    try_unwrap_publisher_device_request, PublisherDeviceRequest, PublisherDeviceRequestError,
+};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 use crate::registrar_seed::{try_unwrap_registrar_seed, RegistrarSeedEnvelope, RegistrarSeedError};
 use crate::shared_channels::{try_unwrap_shared_channels, SharedChannels, SharedChannelsError};
@@ -454,6 +460,16 @@ pub enum IncomingEnvelope<'a> {
     /// journal, sent by a current publisher resolved at receipt; requests
     /// before the next rotation collapse into it.
     ChannelRotateRequest([u8; 16]),
+    /// A co-publisher's device asks an owner device to admit or retire one of
+    /// its account's devices in the PublisherGroup (ADR-0090 section 2.2).
+    /// Never a chat bubble. Only an owner device acts on it, under the rule
+    /// in [`crate::publisher_device_request`].
+    PublisherDeviceRequest(PublisherDeviceRequest),
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). Never a chat bubble. Every publishing device keeps the
+    /// largest mark from a current publisher, under the rule in
+    /// [`crate::channel_admission_mark`].
+    ChannelAdmissionMark(ChannelAdmissionMark),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -569,6 +585,13 @@ pub enum DispatchError {
     /// malformed payload.
     #[error(transparent)]
     ChannelRotateRequest(#[from] ChannelRotateRequestError),
+    /// The publisher device-request domain (ADR-0090) with a malformed
+    /// payload.
+    #[error(transparent)]
+    PublisherDeviceRequest(#[from] PublisherDeviceRequestError),
+    /// The channel admission-mark domain (ADR-0090) with a malformed payload.
+    #[error(transparent)]
+    ChannelAdmissionMark(#[from] ChannelAdmissionMarkError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -589,6 +612,9 @@ pub enum DispatchError {
 /// `Ok(IntroMessage(&[]))`, which is a valid (degenerate)
 /// ContactRequest payload the UI can render as an empty
 /// message body.
+// One arm per envelope kind, in dispatch order; splitting it would hide the
+// order that decides which domain wins.
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'_>, DispatchError> {
     // 1. Call-Welcome — first joiner.
     if let Some(welcome) = try_unwrap_call_welcome(plaintext)? {
@@ -698,6 +724,15 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n4. A publisher asks the owner to rotate — ADR-0087, 2026-11-08.
     if let Some(channel) = try_unwrap_channel_rotate_request(plaintext)? {
         return Ok(IncomingEnvelope::ChannelRotateRequest(channel));
+    }
+    // 7n5. A co-publisher's device asks for a device admission or
+    // retirement — ADR-0090 section 2.2.
+    if let Some(request) = try_unwrap_publisher_device_request(plaintext)? {
+        return Ok(IncomingEnvelope::PublisherDeviceRequest(request));
+    }
+    // 7n6. A publishing device's admission mark — ADR-0090 section 6.
+    if let Some(mark) = try_unwrap_channel_admission_mark(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelAdmissionMark(mark));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
     if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {

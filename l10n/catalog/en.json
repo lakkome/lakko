@@ -1664,12 +1664,12 @@
       "comment": "A channel post is being published."
     },
     "channels.reader_device.owner": {
-      "text": "You post in this channel from the device you created it on.",
-      "comment": "Channel screen, in place of the post composer, on another device of the channel's owner: this device reads the channel but cannot post. Posting works only on the device where the channel was created."
+      "text": "You can post here once Lakko opens on your other device.",
+      "comment": "Channel screen, in place of the post composer, on a device of the channel's owner that is not yet admitted to post (ADR-0090): another device of the owner adds it the next time Lakko runs there. No button, no spinner."
     },
     "channels.reader_device.publisher": {
-      "text": "You post in this channel from the device where you became a publisher.",
-      "comment": "Channel screen, in place of the post composer, on another device of a channel publisher (co-publisher): this device reads the channel but cannot post. Posting works only on the device where the person accepted the publisher invitation."
+      "text": "You can post here once Lakko opens on your other device and on the owner's.",
+      "comment": "Channel screen, in place of the post composer, on a device of a channel publisher (co-publisher) that is not yet admitted to post (ADR-0090): the publisher's other device asks, and a device of the channel's owner adds it the next time Lakko runs there. No button, no spinner."
     },
     "channels.copublishers.desc": {
       "text": "People who can post to this channel. Share a link; approve them when they ask.",

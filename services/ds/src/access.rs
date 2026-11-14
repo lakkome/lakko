@@ -798,7 +798,7 @@ pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
 /// registered epoch has no second-newest row and loses nothing. "Not at or
 /// after `H`" is "below the group's newest root or admin epoch", again by
 /// comparison; a group with no such row keeps only the two-newest rule.
-async fn prune_group_access_rows(
+pub(crate) async fn prune_group_access_rows(
     pool: &MySqlPool,
     retention_secs: i64,
 ) -> Result<u64, sqlx::Error> {

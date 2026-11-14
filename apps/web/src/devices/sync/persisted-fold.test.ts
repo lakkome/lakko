@@ -13,7 +13,9 @@
  * (ADR-0065, 2026-10-26) version 6, and the conversation ends (ADR-0087
  * section 9) version 7, and (ADR-0087 phase B) the `/g/` link fields of a
  * link record version 11, and an own reaction that may name a comment
- * version 13; an older blob is refused, with no migration. Two places read
+ * version 14 (ADR-0090 open question 4, the admission-seed register) and 15
+ * (ADR-0090, the owner key a co-publisher records, 2026-11-14);
+ * an older blob is refused, with no migration. Two places read
  * such bytes back: the sync runtime's seed from
  * this device's own row, and the merge of a restored backup. Both go through
  * `openPersistedFold` / `mergeRestoredFoldBytes`, tested here: a refused blob
@@ -99,9 +101,9 @@ function versionOneBlobs(): Uint8Array[] {
 }
 
 describe("the encoding version", () => {
-  it("this build writes version 13", () => {
+  it("this build writes version 15", () => {
     const s = new wasm.SyncedState();
-    expect(s.toBytes()[0]).toBe(0x0d);
+    expect(s.toBytes()[0]).toBe(0x0f);
     s.free();
   });
 
@@ -190,7 +192,7 @@ describe("openPersistedFold", () => {
     // The next write is the fresh fold's bytes, which read back.
     const rewritten = decodeSyncState(encodeSyncState({ synced: fold.toBytes(), pending: [] }));
     fold.free();
-    expect(rewritten!.synced[0]).toBe(0x0d);
+    expect(rewritten!.synced[0]).toBe(0x0f);
     warn.mockClear();
     const reopened = openPersistedFold(wasm, rewritten!.synced, "stored");
     expect(reopened).not.toBeNull();
@@ -212,7 +214,7 @@ describe("the flag day of ADR-0087 section 9", () => {
     const ended = fresh.composeConversationEnded(mint(), 2, id, 7n);
     expect(ended).toBeDefined();
     const bytes = fresh.toBytes();
-    expect(bytes[0]).toBe(0x0d);
+    expect(bytes[0]).toBe(0x0f);
     expect(openPersistedFold(wasm, bytes, "stored")).not.toBeNull();
   });
 
@@ -264,7 +266,7 @@ describe("mergeRestoredFoldBytes", () => {
       foldWithFolder(F2, "Backup"),
     );
     expect(out).not.toBeNull();
-    expect(out![0]).toBe(0x0d);
+    expect(out![0]).toBe(0x0f);
     expect(folderNames(out!)).toEqual(["Backup", "Local"]);
     expect(warn).not.toHaveBeenCalled();
   });

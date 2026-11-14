@@ -60,7 +60,7 @@ class ChannelSecondDeviceTest {
             held = held.filter { it.channelIdHex != value.channelIdHex } +
                 ChannelRegisterView(
                     value.channelIdHex, current + 1u, true, value.role, value.subscriberSecret,
-                    value.readKey, value.publisherGroupId, value.name, value.handle,
+                    value.readKey, value.publisherGroupId, value.name, value.handle, value.ownerAccountKey,
                 )
             return true
         }
@@ -329,6 +329,29 @@ class ChannelSecondDeviceTest {
         )
         // No key at all: nothing to write.
         assertNull(desiredChannelRegister(LocalChannelFacts(chan, ChannelAccountRole.SUBSCRIBER, false, null, null, null, "News", "", 1uL), null))
+    }
+
+    @Test
+    fun `a co-publisher register carries the recorded owner key, and none without one`() {
+        // ADR-0090 section 2.3 — the joining device's verified issuer key
+        // goes into the register with the group id; with no owner key
+        // anywhere nothing is written; an owner's register carries none.
+        val group = ByteArray(32) { 3 }
+        val owner = ByteArray(32) { 9 }
+        val joined = LocalChannelFacts(
+            chan, ChannelAccountRole.CO_PUBLISHER, true, secret, null, group, "News", "", 1uL,
+            ownerAccountKey = owner,
+        )
+        assertArrayEquals(owner, desiredChannelRegister(joined, null)!!.ownerAccountKey)
+        val noKey = LocalChannelFacts(chan, ChannelAccountRole.CO_PUBLISHER, true, secret, null, group, "News", "", 1uL)
+        assertNull(desiredChannelRegister(noKey, null))
+        // Another device of the account keeps the key the register holds.
+        val held = register(role = ChannelAccountRole.CO_PUBLISHER, groupId = group).let {
+            ChannelRegisterView(it.channelIdHex, it.hlc, true, it.role, it.subscriberSecret, it.readKey, group, it.name, it.handle, owner)
+        }
+        assertArrayEquals(owner, desiredChannelRegister(noKey, held)!!.ownerAccountKey)
+        val ownerSide = LocalChannelFacts(chan, ChannelAccountRole.OWNER, true, secret, null, null, "News", "", 1uL, ownerAccountKey = owner)
+        assertEquals(0, desiredChannelRegister(ownerSide, null)!!.ownerAccountKey.size)
     }
 
     @Test

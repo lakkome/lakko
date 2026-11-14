@@ -200,6 +200,7 @@ final class ChannelSubscriptionSync {
                 coPublishedGroupIdHex: CoPublishedJournals.shared.journalIdHex(channelIdHex: c.id),
                 readKey: extras.readKey,
                 accountRole: extras.accountRole,
+                ownerAccountKey: extras.ownerAccountKey,
                 name: c.sharedName.isEmpty ? c.localName : c.sharedName,
                 handle: c.handle,
                 holdsSeeds: !channels.subscribedSeeds(channelId: c.id).isEmpty)
@@ -209,7 +210,8 @@ final class ChannelSubscriptionSync {
         for id in channels.subscribedSeedsByChannel.keys where !listed.contains(id.lowercased()) {
             out.append(ChannelSubscriptionPlan.Local(
                 id: id.lowercased(), listed: false, subscriberSecret: nil, publishesHere: false,
-                coPublishedGroupIdHex: nil, readKey: nil, accountRole: nil, name: "", handle: "",
+                coPublishedGroupIdHex: nil, readKey: nil, accountRole: nil, ownerAccountKey: nil,
+                name: "", handle: "",
                 holdsSeeds: true))
         }
         return out
@@ -230,10 +232,11 @@ final class ChannelSubscriptionSync {
                 }
                 channels.setSubscriberKeys(
                     channelId: id, keys: ChannelSubscriberKeys(secret: secret, publicKey: kp.`public`()))
-            case .extras(let id, let role, let readKey, let coPublishedGroupId):
+            case .extras(let id, let role, let readKey, let coPublishedGroupId, let ownerAccountKey):
                 channels.updateExtras(id) {
                     $0.accountRole = role
                     if let readKey { $0.readKey = readKey }
+                    if let ownerAccountKey { $0.ownerAccountKey = ownerAccountKey }
                 }
                 if let coPublishedGroupId,
                    CoPublishedJournals.shared.journalIdHex(channelIdHex: id) == nil {
@@ -365,6 +368,9 @@ enum ChannelSubscriptionPlan {
         let readKey: Data?
         /// ``ChannelExtras/accountRole`` as stored.
         let accountRole: String?
+        /// ``ChannelExtras/ownerAccountKey``: a co-published channel's owner
+        /// key this device recorded (contract 3a).
+        var ownerAccountKey: Data? = nil
         let name: String
         let handle: String
         let holdsSeeds: Bool
@@ -379,7 +385,8 @@ enum ChannelSubscriptionPlan {
         case setKey(id: String, secret: Data, replacing: Data?)
         /// The account's role (``ChannelExtras/accountRole``), a read key
         /// this device lacked, and a co-publisher's group id.
-        case extras(id: String, role: String?, readKey: Data?, coPublishedGroupId: Data?)
+        case extras(
+            id: String, role: String?, readKey: Data?, coPublishedGroupId: Data?, ownerAccountKey: Data? = nil)
         /// Unlist a channel the account left, as an unsubscribe does,
         /// without the service call.
         case drop(id: String)
@@ -394,6 +401,8 @@ enum ChannelSubscriptionPlan {
         let subscriberSecret: Data
         let readKey: Data
         let publisherGroupId: Data
+        /// ADR-0090 contract 3a — 32 bytes for a co-publisher, else empty.
+        var ownerAccountKey: Data = Data()
         let name: String
         let handle: String
     }
@@ -436,13 +445,16 @@ enum ChannelSubscriptionPlan {
             let groupId = register.role == .coPublisher && register.publisherGroupId.count == 32
                 ? register.publisherGroupId : nil
             let readKey = register.readKey.count == 32 ? register.readKey : nil
+            let ownerKey = register.role == .coPublisher && register.ownerAccountKey.count == 32
+                ? register.ownerAccountKey : nil
             guard let local, local.listed else {
                 // A channel the account ended and has not joined again: the
                 // register may be a step behind the end (ADR-0087 section 9).
                 if ended.contains(id) { continue }
                 out.applies.append(.add(id: id, name: register.name, handle: register.handle))
                 out.applies.append(.setKey(id: id, secret: register.subscriberSecret, replacing: nil))
-                out.applies.append(.extras(id: id, role: role, readKey: readKey, coPublishedGroupId: groupId))
+                out.applies.append(.extras(
+                    id: id, role: role, readKey: readKey, coPublishedGroupId: groupId, ownerAccountKey: ownerKey))
                 continue
             }
             if local.subscriberSecret != register.subscriberSecret,
@@ -454,9 +466,12 @@ enum ChannelSubscriptionPlan {
             let wantedRole = local.publishesHere ? localRole(local) : role
             let missingReadKey = local.readKey == nil ? readKey : nil
             let missingMark = local.coPublishedGroupIdHex == nil ? groupId : nil
-            if wantedRole != local.accountRole || missingReadKey != nil || missingMark != nil {
+            let missingOwner = local.ownerAccountKey == nil ? ownerKey : nil
+            if wantedRole != local.accountRole || missingReadKey != nil || missingMark != nil
+                || missingOwner != nil {
                 out.applies.append(.extras(
-                    id: id, role: wantedRole, readKey: missingReadKey, coPublishedGroupId: missingMark))
+                    id: id, role: wantedRole, readKey: missingReadKey, coPublishedGroupId: missingMark,
+                    ownerAccountKey: missingOwner))
             }
         }
 
@@ -504,9 +519,15 @@ enum ChannelSubscriptionPlan {
             role = live?.role ?? .subscriber
         }
         var groupId = Data()
+        var ownerKey = Data()
         if role == .coPublisher {
             groupId = local.coPublishedGroupIdHex.flatMap(CoPublisher.hexToData) ?? live?.publisherGroupId ?? Data()
             guard groupId.count == 32 else { return nil }
+            // Contract 3a — required for a co-publisher: the issuer key this
+            // account verified at join (here, or as another device wrote it).
+            ownerKey = local.ownerAccountKey.flatMap { $0.count == 32 ? $0 : nil }
+                ?? live.flatMap { $0.ownerAccountKey.count == 32 ? $0.ownerAccountKey : nil } ?? Data()
+            guard ownerKey.count == 32 else { return nil }
         }
         let readKey = local.readKey.flatMap { $0.count == 32 ? $0 : nil }
             ?? live.flatMap { $0.readKey.count == 32 ? $0.readKey : nil } ?? Data()
@@ -514,7 +535,7 @@ enum ChannelSubscriptionPlan {
         let handle = live.flatMap { $0.handle.isEmpty ? nil : $0.handle } ?? sanitizedHandle(local.handle)
         return Write(
             channelId: channelId, role: role, subscriberSecret: secret, readKey: readKey,
-            publisherGroupId: groupId, name: name, handle: handle)
+            publisherGroupId: groupId, ownerAccountKey: ownerKey, name: name, handle: handle)
     }
 
     static func localRole(_ local: Local) -> String? {
@@ -524,7 +545,8 @@ enum ChannelSubscriptionPlan {
     static func same(_ write: Write, _ register: ChannelSubscriptionRegister) -> Bool {
         register.subscribed && register.role == write.role
             && register.subscriberSecret == write.subscriberSecret && register.readKey == write.readKey
-            && register.publisherGroupId == write.publisherGroupId && register.name == write.name
+            && register.publisherGroupId == write.publisherGroupId
+            && register.ownerAccountKey == write.ownerAccountKey && register.name == write.name
             && register.handle == write.handle
     }
 
@@ -568,7 +590,8 @@ extension DeviceGroupSyncRepository: ChannelSubscriptionSync.RegisterPort {
     func writeLive(_ write: ChannelSubscriptionPlan.Write) -> Bool? {
         setChannelSubscription(
             channelId: write.channelId, role: write.role, subscriberSecret: write.subscriberSecret,
-            readKey: write.readKey, publisherGroupId: write.publisherGroupId, name: write.name,
+            readKey: write.readKey, publisherGroupId: write.publisherGroupId,
+            ownerAccountKey: write.ownerAccountKey, name: write.name,
             handle: write.handle)
     }
 

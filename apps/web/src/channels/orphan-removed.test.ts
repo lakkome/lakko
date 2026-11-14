@@ -39,6 +39,7 @@ const live: ChannelSubscriptionView = {
   subscriberSecret: new Uint8Array(32).fill(1),
   readKey: new Uint8Array(0),
   publisherGroupIdHex: "",
+  ownerAccountKey: new Uint8Array(0),
   name: "",
   handle: "",
 };

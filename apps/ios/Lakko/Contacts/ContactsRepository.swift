@@ -145,7 +145,10 @@ public final class ContactsRepository: ObservableObject {
     /// publisher Welcome by kind), else reads as `false` (a plain Welcome
     /// row goes on to the chat join).
     func landPublisherWelcome(_ welcome: Data, accountIdB64: String, holdWhenNotReady: Bool) throws -> Bool {
-        guard !PendingPublisherRequests.load(accountIdB64: accountIdB64).isEmpty else { return false }
+        // ADR-0090 — a device that waits to be admitted to a channel's
+        // PublisherGroup takes its Welcome here too.
+        guard !PendingPublisherRequests.load(accountIdB64: accountIdB64).isEmpty
+                || ChannelDeviceAdmission.hasWaitingChannels else { return false }
         do {
             guard let lander = publisherWelcomeLander else { throw PublisherWelcomeNotReady() }
             return try lander(welcome, accountIdB64)

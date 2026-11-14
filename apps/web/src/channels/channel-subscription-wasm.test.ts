@@ -48,6 +48,7 @@ describe("the channel-subscription register reaches another device of the accoun
         subscriberSecret: key,
         readKey: new Uint8Array(32).fill(5),
         publisherGroupIdHex: "",
+        ownerAccountKey: new Uint8Array(0),
         name: "Daily news",
         handle: "news",
       });
@@ -59,6 +60,7 @@ describe("the channel-subscription register reaches another device of the accoun
           subscriberSecret: key,
           readKey: new Uint8Array(32).fill(5),
           publisherGroupIdHex: "",
+          ownerAccountKey: new Uint8Array(0),
           name: "Daily news",
           handle: "news",
         }),
@@ -122,6 +124,7 @@ describe("the channel-subscription register reaches another device of the accoun
         subscriberSecret: secret(),
         readKey: new Uint8Array(0),
         publisherGroupIdHex: GROUP,
+        ownerAccountKey: new Uint8Array(32).fill(0x4f),
         name: "",
         handle: "",
       });
@@ -129,6 +132,7 @@ describe("the channel-subscription register reaches another device of the accoun
       expect(channelSubscriptionView(second, wasm, ID)).toMatchObject({
         role: "co-publisher",
         publisherGroupIdHex: GROUP,
+        ownerAccountKey: new Uint8Array(32).fill(0x4f),
       });
       // The growth re-send carries every register.
       expect(first.channelSubscriptionEnvelopes().length).toBeGreaterThan(0);
@@ -147,6 +151,7 @@ describe("the channel-subscription register reaches another device of the accoun
           subscriberSecret: new Uint8Array(31),
           readKey: new Uint8Array(0),
           publisherGroupIdHex: "",
+          ownerAccountKey: new Uint8Array(0),
           name: "",
           handle: "",
         }),

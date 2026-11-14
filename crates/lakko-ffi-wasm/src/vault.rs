@@ -1368,25 +1368,51 @@ impl VaultChunkEntry {
     }
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14). `Debug` redacts the access seed.
 #[wasm_bindgen]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultReentryEpoch {
     inner: rec::ReentryEpoch,
 }
 
-#[wasm_bindgen]
 impl VaultReentryEpoch {
-    /// The epoch (a `bigint`) and the GroupInfo with its ratchet tree, as
-    /// MLS encodes it: opaque to the codec, 1 byte to 1 MiB.
-    #[wasm_bindgen(constructor)]
-    pub fn new(epoch: u64, group_info: &[u8]) -> VaultReentryEpoch {
-        Self {
+    fn try_new(epoch: u64, ds_access_seed: &[u8], group_info: &[u8]) -> Result<Self, Refusal> {
+        Ok(Self {
             inner: rec::ReentryEpoch {
                 epoch,
+                ds_access_seed: SecretBytes::new(fixed::<32>(
+                    ds_access_seed,
+                    "seedLength",
+                    "re-entry access seed",
+                )?),
                 group_info: group_info.to_vec(),
             },
-        }
+        })
+    }
+}
+
+#[wasm_bindgen]
+impl VaultReentryEpoch {
+    /// The epoch (a `bigint`), its 32-byte Delivery Service access seed
+    /// (secret: `PublisherGroup.dsAccessSeed` / `stagedDsAccessSeed`), and
+    /// the GroupInfo with its ratchet tree, as MLS encodes it: opaque to the
+    /// codec, 1 byte to 1 MiB. Throws `seedLength: ...` for a seed that is
+    /// not 32 bytes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        epoch: u64,
+        ds_access_seed: &[u8],
+        group_info: &[u8],
+    ) -> Result<VaultReentryEpoch, JsError> {
+        Ok(Self::try_new(epoch, ds_access_seed, group_info)?)
+    }
+
+    /// The 32-byte Delivery Service access seed of the epoch. Secret: never
+    /// log it; build the epoch's signer with `dsAccessSignerFromSeed`.
+    #[wasm_bindgen(getter, js_name = dsAccessSeed)]
+    pub fn ds_access_seed(&self) -> Vec<u8> {
+        self.inner.ds_access_seed.as_bytes().to_vec()
     }
 
     /// The epoch the GroupInfo describes. A `bigint`.
@@ -1986,8 +2012,8 @@ mod tests {
             plain_message(602, 602, "tail"),
         ]);
         head.set_reentry(vec![
-            VaultReentryEpoch::new(11, &[0x11; 40]),
-            VaultReentryEpoch::new(12, &[0x12; 40]),
+            VaultReentryEpoch::try_new(11, &[0xA1; 32], &[0x11; 40]).unwrap(),
+            VaultReentryEpoch::try_new(12, &[0xA2; 32], &[0x12; 40]).unwrap(),
         ]);
         head.try_set_registrar_seed(2, &[0x5E; 32]).unwrap();
         head
@@ -2188,9 +2214,14 @@ mod tests {
         let reentry = back.reentry();
         assert_eq!(reentry.len(), 2);
         assert_eq!(
-            (reentry[1].epoch(), reentry[1].group_info()),
-            (12, vec![0x12; 40])
+            (
+                reentry[1].epoch(),
+                reentry[1].ds_access_seed(),
+                reentry[1].group_info()
+            ),
+            (12, vec![0xA2; 32], vec![0x12; 40])
         );
+        assert!(!format!("{:?}", reentry[1]).contains("162"));
         assert_eq!(back.registrar_rank(), Some(2));
         assert_eq!(back.registrar_seed(), Some(vec![0x5E; 32]));
         assert_eq!(back.tail().len(), 2);
@@ -2284,7 +2315,8 @@ mod tests {
             (3, vec![2; 16], 20, 2)
         );
 
-        let reentry = vec![VaultReentryEpoch::new(4, &[9; 12])];
+        let reentry = vec![VaultReentryEpoch::try_new(4, &[0x44; 32], &[9; 12]).unwrap()];
+        assert!(VaultReentryEpoch::try_new(4, &[0x44; 31], &[9; 12]).is_err());
         let bytes = try_encode_devices_head(reentry.clone()).unwrap();
         assert_eq!(try_decode_devices_head(&bytes).unwrap(), reentry);
     }
@@ -2298,7 +2330,12 @@ mod tests {
             "repeatedRef"
         );
         assert_eq!(
-            code(&try_encode_devices_head(vec![VaultReentryEpoch::new(1, &[])]).unwrap_err()),
+            code(
+                &try_encode_devices_head(vec![
+                    VaultReentryEpoch::try_new(1, &[0; 32], &[]).unwrap()
+                ])
+                .unwrap_err()
+            ),
             "reentry"
         );
         // Hostile bytes.

@@ -77,7 +77,8 @@ entry's status line, not a mechanical fact.
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 | [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Closed in code (2026-10-19) | a self-removal proof (C-85); host-tested, not walked |
 | [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Open | needs a decision on the key rotation or a grant channel; see the entry |
-| [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Open (accepted for now, 2026-11-13) | needs per-device PublisherGroup leaves; see the entry |
+| [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Closed in code (2026-11-14) | per-device PublisherGroup leaves (ADR-0090) on web, iOS and Android; walked on web only; an owner's channels from before the flag day stay read-only on its own device and show no line; see the entry |
+| [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
 
 ## MLS state machine
 
@@ -3216,6 +3217,42 @@ the adder some other way. Maintainer's decision.
 <a id="g-54"></a>
 ### G-54: A channel has one publishing device per owner or publisher
 
+**CLOSED in code 2026-11-14 by [ADR-0090](../adr/0090-publisher-group-device-leaves.md)
+(S1 to S4: `lakko-mls`, `lakko-contacts`, `lakko-sync`, both FFI surfaces,
+web, iOS, Android; C-90, C-91).** Every PublisherGroup leaf is now a bound
+device; an owner device admits the account's other devices by itself, a
+co-publisher's devices are admitted by an owner device on the co-publisher's
+request, every PublisherGroup commit is staged and merged only on the DS
+commit route's answer, and any owner device rotates. Unit suites green on the
+three clients (web vitest 8301, iOS `LakkoTests` 5303, Android 5695) and the DS
+(98 of 98). **Walked on web only, 2026-11-14, `test.lakko.me`:** an owner
+created a private channel on one device and added a second web device; the
+first admitted it by itself (one staged commit through the DS commit route,
+the reseal, the Welcome); the second got a composer and posted; the first
+received the post.
+
+What remains:
+
+- **Not walked:** a native second device; decision A (a device that restored
+  the account alone re-founds each owned channel); a co-publisher's device
+  request; a rotation by a second owner device; a returning old device
+  dropping to reader and being admitted. `lakko-security` ran on
+  2026-11-14; its three requested changes (owner-only admission mark clamped
+  to rows read, no PublisherGroup deleted on an unauthenticated DS signal,
+  Android's decision A reseal) are made on all three clients, see ADR-0090
+  "As built and walked" item 7.
+- **The flag day, as seen on the walk:** a PublisherGroup that lived in the
+  old account provider is not carried to the device provider, so an owner's
+  channels created before 2026-11-14 are read-only on its own device (three
+  channels of the test owner). Nothing on such a channel tells the person:
+  it shows neither a composer nor the waiting line of ADR-0090 section 8,
+  because the device is neither admitted nor waiting for a sibling. No
+  migration is planned (no production deployment); the UI gap is open.
+- The gate does not compare a committer's update-path leaf node with its old
+  leaf (ADR-0090 "As built (S1 to S3)" item 1).
+
+**As recorded on 2026-11-13** (kept for the record):
+
 **Recorded 2026-11-13 with the maintainer's decision that a second device of
 a channel's owner or co-publisher is a reader for now.** A channel's
 PublisherGroup leaf is the account key (web: the session account identity;
@@ -3244,3 +3281,83 @@ PublisherGroup posts, approves, rotates and admits (UX
 PublisherGroup: device leaves bound to the account key, an add-own-device
 path, one rule for the single rotator among owner devices). A `lakko-mls`
 change under invariant #3; not designed yet.
+
+### G-55: An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service
+
+**Status:** Closed in code on 2026-11-14 (`lakko-mls`, both FFI surfaces, web,
+iOS and Android); host-tested only, not walked live, not deployed. See "As
+built" below.
+
+**Corrected the same day.** The first text of this entry said every knock
+shows the joiner's account key. That was wrong: group and channel knocks are
+sealed to the group's knock key since ADR-0087 section 5 (`lakko-contacts`
+`knock.rs`, used on all three clients). What stays in the clear:
+
+- the owner-device channel entry (ADR-0064 section 7 amendment of 2026-11-14):
+  an external commit is a PublicMessage (RFC 9420), so the entering leaf's
+  ADR-0050 binding names the owner's account key next to the PublisherGroup
+  journal id that ADR-0078 phase 6 derives to hide;
+- the DeviceGroup rejoin knock (ADR-0081 amendment of 2026-10-19), which posts
+  the ADR-0056 pairing payload (login handle, KeyPackage with its binding)
+  unsealed to the account's own DeviceGroup journal.
+
+**Closing (ADR-0078 section 4, last bullet):** the journal row is wrapped under
+a key every member already holds, so the leaf never reaches the DS in the
+clear: the entry row under a key derived from the epoch-N Delivery Service
+access seed (the entering device has it from the vault head, every member
+derives it from the exporter); the rejoin knock under a key derived from the
+account's lineage seed, which every device of the account holds.
+
+**As built (2026-11-14).**
+
+- *Channel entry* (`crates/lakko-mls/src/entry_wrap.rs`). The row is
+  `"lakko/wrapped-entry/v1\0" ‖ version 0x01 ‖ epoch(8 BE) ‖ nonce(12) ‖
+  ChaCha20-Poly1305(commit)` under
+  `BLAKE3-derive-key("lakko/ds/entry-wrap/v1", ds_access_seed_N)`, AAD = the
+  magic, the version, the group id and N. `ds_access_seed_N` is the
+  ADR-0053 access seed of the epoch the commit leaves
+  (`export_secret("lakko/ds/access/v1", group_id, 32)`, now also
+  `Group::ds_access_seed` / `staged_ds_access_seed` in `lakko-mls`; the FFI
+  crates pin the label equal to `lakko_ds_proof::ACCESS_KEY_LABEL` and the
+  value equal to `dsAccessSeed`). `PublisherGroup::enter` takes the saved seed
+  and returns the wrapped row; `PublisherGroup::process_incoming` opens a
+  wrapped row under its current epoch's seed, requires the content to be a
+  `PublicMessage` commit from a `NewMemberCommit` sender framed for this group
+  and epoch (checked on the framing before OpenMLS decrypts anything), and
+  runs the unchanged `check_publisher_commit` gate. A wrapped row that does
+  not open is an error, never processed raw; an external commit that arrives
+  unwrapped is refused (`UnsupportedProposal`). The epoch stays in the clear
+  (every other journal row shows it in its MLS framing), so
+  `epoch_of_message` / `epoch_after_message` answer for a wrapped row and the
+  clients' journal-head and unaccounted-row reads keep working. A wrong seed
+  is not detected by `enter`: the DS refuses the proof signed with it.
+- *Rejoin knock* (`crates/lakko-mls/src/pairing.rs`). `encode_rejoin_knock`
+  takes the lineage seed and returns `"lakko/rejoin-knock/v1\0" ‖ version
+  0x01 ‖ nonce(12) ‖ ChaCha20-Poly1305(len(4 BE) ‖ pairing payload ‖ zeros)`
+  under `BLAKE3-derive-key("lakko/device-group/knock-wrap/v1",
+  lineage_account_seed)`, AAD = the magic, the version and the DeviceGroup id
+  the same seed derives. The plaintext is padded to a multiple of 1024 bytes
+  (chosen; measured: a bound device KeyPackage was 417 bytes and the whole
+  payload with a self-removal proof 631, so a knock is one size, 1075 bytes).
+  The proof is optional, so the knock to an unclaimed journal, which went out
+  as a plain pairing payload, is sealed too. `open_rejoin_knock` opens and
+  then runs the existing `decode`; flag day, no plain-row fallback.
+- FFI: `publisherGroupEnter(..., dsAccessSeed)` / `PublisherGroup.enter(...,
+  dsAccessSeed)`; `buildRejoinKnock(accountIdentity, ...)` /
+  `encodeRejoinKnock(accountIdentity, ...)` and new `openRejoinKnock` on both
+  surfaces (`accountIdentity` is the identity `deviceGroupIdFor` takes).
+  Clients: web `channel-entry.ts`, `devices/pairing.ts`,
+  `DeviceGroupSyncContext.tsx`; iOS `ChannelEntry.swift`, `PairingCodec.swift`,
+  `DeviceGroupSyncRepository.swift`; Android `CoPublisher.kt`,
+  `PairingCodec.kt`, `DeviceGroupSyncRepository.kt` (both knock readers).
+- Tests: `entry_wrap` unit and proptests, the gate proptest extended (raw
+  external commits refused, wrapped forgeries refused by the gate),
+  `a_wrapped_member_commit_is_refused`,
+  `a_wrapped_entry_opens_only_under_this_groups_epoch_key`,
+  `a_wrapped_row_that_holds_no_entry_is_refused`, the entry row checked for
+  the account key, binding and device key; knock round trip, wrong seed,
+  tampering, version, padding and the handle / account key / binding absent
+  from the row. Fuzz targets `rejoin_knock_open` and `wrapped_entry_open`
+  (compile-checked; not run, no cargo-fuzz here).
+- Residual: the DS still sees that a row of entry or knock shape arrived and
+  when, and the epoch of an entry.

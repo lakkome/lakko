@@ -2576,6 +2576,16 @@ pub enum WasmIncomingEnvelopeKind {
     /// PublisherGroup and the MLS sender is a current publisher; requests
     /// before the next rotation collapse into it. Never render it.
     ChannelRotateRequest = 30,
+    /// A co-publisher's device asks an owner device to admit or retire one
+    /// of its account's devices (ADR-0090 section 2.2). `payload` is the
+    /// whole envelope; decode it with `decodePublisherDeviceRequestEnvelope`.
+    /// Only an owner device acts on it. Never render it.
+    PublisherDeviceRequest = 31,
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). `payload` is the whole envelope; decode it with
+    /// `decodeChannelAdmissionMarkEnvelope` and keep the largest mark from a
+    /// current publisher. Never render it.
+    ChannelAdmissionMark = 32,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2965,6 +2975,14 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::GroupContactRequest(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::GroupContactRequest)
+        },
+        IncomingEnvelope::PublisherDeviceRequest(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::PublisherDeviceRequest)
+        },
+        IncomingEnvelope::ChannelAdmissionMark(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ChannelAdmissionMark)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),

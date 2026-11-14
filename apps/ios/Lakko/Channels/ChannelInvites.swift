@@ -56,16 +56,42 @@ enum ChannelInvites {
         let entry = ChannelAdmissionKeyStore.Entry(seed: generateChannelAdmissionSeed(), version: 0)
         all[channelIdHex.lowercased()] = [entry]
         ChannelAdmissionKeyStore.save(all, accountIdB64: account)
+        // ADR-0090 open question 4 — into the account's register, so another
+        // owner device (and a restored one) checks the tickets of this seed.
+        ChannelDeviceAdmission.syncAdmissionSeeds(channelId: channelIdHex)
         return (entry.seed, entry.version)
     }
 
     /// Every admission seed held for a channel, oldest version first: older
     /// versions stay so tickets from older links still open.
+    ///
+    /// ADR-0090 open question 4 — with the owner account's register: every
+    /// seed of every version, from this device and from the account's synced
+    /// state (two seeds of one version both kept), so a ticket of a version
+    /// opens under any of them.
     static func admissionSeeds(channelIdHex: String) -> [(seed: Data, version: UInt16)] {
+        mergedAdmissionSeeds(
+            local: localAdmissionSeeds(channelIdHex: channelIdHex),
+            register: ChannelDeviceAdmission.registerSeeds(channelId: channelIdHex))
+    }
+
+    /// The seeds this device keeps in its own store, oldest version first.
+    static func localAdmissionSeeds(channelIdHex: String) -> [(seed: Data, version: UInt16)] {
         guard let account = AcceptedContactsStore.boundAccountIdB64 else { return [] }
         return (ChannelAdmissionKeyStore.load(accountIdB64: account)[channelIdHex.lowercased()] ?? [])
             .sorted { $0.version < $1.version }
             .map { ($0.seed, $0.version) }
+    }
+
+    /// The union of `local` and `register`, each seed once, oldest version
+    /// first (a version may appear more than once).
+    nonisolated static func mergedAdmissionSeeds(
+        local: [(seed: Data, version: UInt16)], register: [(seed: Data, version: UInt16)]
+    ) -> [(seed: Data, version: UInt16)] {
+        var seen = Set<Data>()
+        return (local + register)
+            .filter { $0.seed.count == 32 && seen.insert($0.seed).inserted }
+            .sorted { $0.version < $1.version }
     }
 
     /// A version the owner sealed to this publisher. The first seed given
@@ -74,7 +100,9 @@ enum ChannelInvites {
         guard let account = AcceptedContactsStore.boundAccountIdB64, seed.count == 32 else { return }
         var all = ChannelAdmissionKeyStore.load(accountIdB64: account)
         var held = all[channelIdHex.lowercased()] ?? []
-        guard !held.contains(where: { $0.version == version }) else { return }
+        // ADR-0090 — two owner devices may mint one version at once: both
+        // seeds of it are kept (each seed once).
+        guard !held.contains(where: { $0.seed == seed }) else { return }
         held.append(ChannelAdmissionKeyStore.Entry(seed: seed, version: version))
         all[channelIdHex.lowercased()] = held
         ChannelAdmissionKeyStore.save(all, accountIdB64: account)

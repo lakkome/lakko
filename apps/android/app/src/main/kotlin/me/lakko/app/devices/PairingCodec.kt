@@ -75,21 +75,50 @@ public object PairingCodec {
 
     /**
      * ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
-     * plus this device's self-removal proof (signed with its old leaf key,
-     * which is its device identity's key) for `keyPackage`. A parsed knock
-     * returns it as `DecodedPairingQr.selfRemovalProof` (not verified there).
+     * plus, when the journal names an epoch, this device's self-removal proof
+     * (signed with its old leaf key, which is its device identity's key) for
+     * `keyPackage`; an empty proof for none.
+     *
+     * G-55: the row is sealed under a key derived from `lineageSeed`, the
+     * 64-byte seed the DeviceGroup id derives from
+     * ([DeviceGroupLifecycle.lineageSeed]), and padded, so the Delivery
+     * Service reads neither the login handle nor the KeyPackage. A sibling
+     * opens it with [openRejoinKnockPayload].
      */
     public fun buildRejoinKnockPayload(
+        lineageSeed: ByteArray,
         loginHandle: ByteArray,
         keyPackage: ByteArray,
         rendezvousPseudonym: ByteArray,
         selfRemovalProof: ByteArray,
-    ): ByteArray = uniffi.lakko_ffi_uniffi.buildRejoinKnock(
-        loginHandle = loginHandle,
-        keyPackage = keyPackage,
-        rendezvousPseudonym = rendezvousPseudonym,
-        selfRemovalProof = selfRemovalProof,
-    )
+    ): ByteArray = uniffi.lakko_ffi_uniffi.Identity.fromSeed(lineageSeed).use { lineage ->
+        uniffi.lakko_ffi_uniffi.buildRejoinKnock(
+            accountIdentity = lineage,
+            loginHandle = loginHandle,
+            keyPackage = keyPackage,
+            rendezvousPseudonym = rendezvousPseudonym,
+            selfRemovalProof = selfRemovalProof,
+        )
+    }
+
+    /**
+     * A sibling's side of [buildRejoinKnockPayload] (G-55): open a row read
+     * from the account's DeviceGroup knock queue under `lineageSeed`, then
+     * check the payload names this account's own handle, as
+     * [parsePairingQrPayload] does. Throws `FfiException` for a row that is
+     * not a sealed knock or does not open under this account's key.
+     */
+    public fun openRejoinKnockPayload(
+        lineageSeed: ByteArray,
+        row: ByteArray,
+        expectedLoginHandle: ByteArray,
+    ): DecodedPairingQr = uniffi.lakko_ffi_uniffi.Identity.fromSeed(lineageSeed).use { lineage ->
+        uniffi.lakko_ffi_uniffi.openRejoinKnock(
+            accountIdentity = lineage,
+            row = row,
+            expectedLoginHandle = expectedLoginHandle,
+        )
+    }
 
     /**
      * Parse a pairing payload and check it names this account: the

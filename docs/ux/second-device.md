@@ -211,6 +211,29 @@ gives the same answer). Unbuilt.
 
 ## 4a. Channels on another device of the account (2026-11-13)
 
+**Amended 2026-11-14 by [ADR-0090](../adr/0090-publisher-group-device-leaves.md)
+section 8 (built on web, iOS and Android; walked on web only).** Every device
+of an owner or a publisher now posts once admitted. The reader device below is
+now a device not yet admitted, and its line says when it will post instead of
+where: owner "You can post here once Lakko opens on your other device."
+(`channels.reader_device.owner`), publisher "You can post here once Lakko opens
+on your other device and on the owner's." (`channels.reader_device.publisher`).
+Once admitted the line goes and the device is the same as the first; nothing
+announces it. "If the publishing device is gone" no longer holds: a device that
+restored the account alone founds the channel's publishing state again
+(decision A). Open, seen on the walk: an owner's channel created before
+2026-11-14 is read-only on the owner's own device and shows neither a composer
+nor this line (G-54).
+
+**Amended 2026-11-14 ([ADR-0064](../adr/0064-conversation-backup-and-device-re-entry.md)
+section 7 amendment, in build).** An owner's device that holds no publishing
+state no longer depends on another device running: it enters the channel by
+itself from a copy the owner's devices keep on the server, and the composer
+appears; nothing is shown while it does. The waiting line stays for a
+co-publisher's device (it still needs an owner device to open Lakko) and for
+an owner's device that cannot enter (no copy saved yet, or the account
+already has eight devices in the channel).
+
 Maintainer decisions of 2026-11-13. Seen live the same day: a channel never
 reached a second device. Every channel the account is subscribed to now
 reaches every device of the account, and each device reads it as the device

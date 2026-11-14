@@ -1123,6 +1123,19 @@ impl ChannelSubscriptionRegister {
             .and_then(|s| s.publisher_group_id.map(|g| g.to_vec()))
             .unwrap_or_default()
     }
+    /// A co-publisher's record of the channel owner's 32-byte account key
+    /// (ADR-0090 section 2.3), or empty. A co-publisher device accepts a
+    /// PublisherGroup Welcome only from a device of this key
+    /// (`PublisherGroup.joinFromWelcome(..., ownerAccountKey)`).
+    #[wasm_bindgen(getter, js_name = ownerAccountKey)]
+    pub fn owner_account_key(&self) -> Vec<u8> {
+        self.inner
+            .value
+            .subscribed
+            .as_ref()
+            .and_then(|s| s.owner_account_key.map(|k| k.to_vec()))
+            .unwrap_or_default()
+    }
     /// The channel name the list falls back to, or empty.
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
@@ -2063,7 +2076,11 @@ impl SyncedState {
     /// a subscribe, and whenever a field changes (a read key learned, the
     /// channel's name or `@name` seen, a co-publisher joined). `readKey` and
     /// `publisherGroupId` are empty for none; `publisherGroupId` is required
-    /// for `CoPublisher` and refused for any other role. Stamped at
+    /// for `CoPublisher` and refused for any other role, and so is
+    /// `ownerAccountKey` (ADR-0090 section 2.3): the channel owner's 32-byte
+    /// account key, which the device that joined as co-publisher takes from
+    /// the issuer of the `/g/` capability it verified; empty for an owner and
+    /// a subscriber. Stamped at
     /// `max(hlc, held + 1)`. `true` when written: then send
     /// `channelSubscriptionEnvelopeFor(channelId)` in a DeviceGroup service
     /// envelope. `false` when the identical subscription is already held.
@@ -2079,6 +2096,7 @@ impl SyncedState {
         subscriber_secret: &[u8],
         read_key: &[u8],
         publisher_group_id: &[u8],
+        owner_account_key: &[u8],
         name: String,
         handle: String,
     ) -> Result<bool, JsError> {
@@ -2089,6 +2107,7 @@ impl SyncedState {
                 .map_err(|_| JsError::new("bounds: subscriber secret must be 32 bytes"))?,
             read_key: optional32(read_key, "read key")?,
             publisher_group_id: optional32(publisher_group_id, "publisher group id")?,
+            owner_account_key: optional32(owner_account_key, "owner account key")?,
             name,
             handle,
         };
@@ -2177,6 +2196,100 @@ impl SyncedState {
     #[wasm_bindgen(js_name = applyChannelSubscriptionEnvelope)]
     pub fn apply_channel_subscription_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
         self.with(|s| s.apply_channel_subscription_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Record a private channel's admission seed of `admissionVersion`, the
+    /// owner account's own copy (ADR-0090 open question 4). Write-once per
+    /// seed: `false` when this seed is held; `true` when written, then send
+    /// `channelAdmissionSeedEnvelopeFor` in a DeviceGroup service envelope.
+    /// Another seed of the same version is kept beside it.
+    #[wasm_bindgen(js_name = setChannelAdmissionSeed)]
+    pub fn set_channel_admission_seed(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        admission_version: u16,
+        seed: &[u8],
+    ) -> Result<bool, JsError> {
+        let id = channel16(channel_id)?;
+        let seed = <[u8; 32]>::try_from(seed)
+            .map_err(|_| JsError::new("admission seed must be 32 bytes"))?;
+        self.with(|s| s.set_channel_admission_seed(hlc, &id, admission_version, &seed))
+    }
+
+    /// Every seed held for `channelId` at `admissionVersion`,
+    /// flat-concatenated 32-byte seeds (more than one when two owner devices
+    /// minted that version at once; empty when none). A ticket of that
+    /// version is checked against EACH; the row is admitted when it opens
+    /// under any.
+    #[wasm_bindgen(js_name = channelAdmissionSeedsFor)]
+    pub fn channel_admission_seeds_for(
+        &self,
+        channel_id: &[u8],
+        admission_version: u16,
+    ) -> Result<Vec<u8>, JsError> {
+        let Ok(id) = <[u8; 16]>::try_from(channel_id) else {
+            return Ok(Vec::new());
+        };
+        self.with(|s| {
+            s.channel_admission_seeds_for(&id, admission_version)
+                .concat()
+        })
+    }
+
+    /// The distinct admission versions held for one channel, ascending; read
+    /// the seeds of each with `channelAdmissionSeedsFor`.
+    #[wasm_bindgen(js_name = channelAdmissionVersions)]
+    pub fn channel_admission_versions(&self, channel_id: &[u8]) -> Result<Vec<u16>, JsError> {
+        let Ok(id) = <[u8; 16]>::try_from(channel_id) else {
+            return Ok(Vec::new());
+        };
+        self.with(|s| {
+            let mut versions: Vec<u16> = s
+                .channel_admission_seeds(&id)
+                .into_iter()
+                .map(|(version, _)| version)
+                .collect();
+            versions.dedup();
+            versions
+        })
+    }
+
+    /// The service envelope carrying the held register of this seed with its
+    /// original stamp, or `undefined` when it is not held.
+    #[wasm_bindgen(js_name = channelAdmissionSeedEnvelopeFor)]
+    pub fn channel_admission_seed_envelope_for(
+        &self,
+        channel_id: &[u8],
+        admission_version: u16,
+        seed: &[u8],
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let (Ok(id), Ok(seed)) = (<[u8; 16]>::try_from(channel_id), <[u8; 32]>::try_from(seed))
+        else {
+            return Ok(None);
+        };
+        self.with(|s| s.channel_admission_seed_envelope_for(&id, admission_version, &seed))
+    }
+
+    /// Every held admission-seed register as service envelopes: the catch-up
+    /// re-send on DeviceGroup growth (NOT in the snapshot parts).
+    #[wasm_bindgen(js_name = channelAdmissionSeedEnvelopes)]
+    pub fn channel_admission_seed_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.channel_admission_seed_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Decode an admission-seed envelope (route on
+    /// `isChannelAdmissionSeedEnvelope`) and fold every register in. Fail
+    /// closed. Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyChannelAdmissionSeedEnvelope)]
+    pub fn apply_channel_admission_seed_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_channel_admission_seed_envelope(envelope))?
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
@@ -2450,6 +2563,15 @@ pub fn group_link_record_id(ledger_id: &[u8]) -> Result<Vec<u8>, JsError> {
     let id = <[u8; 6]>::try_from(ledger_id)
         .map_err(|_| JsError::new("bounds: ledger id must be 6 bytes"))?;
     Ok(lakko_contacts::group_invite::group_link_record_id(&id).to_vec())
+}
+
+/// `true` when `bytes` open with the channel admission-seed envelope domain
+/// (`lakko/sync/channel-admission-seed/v1`, ADR-0090): route it to
+/// `applyChannelAdmissionSeedEnvelope`.
+#[wasm_bindgen(js_name = isChannelAdmissionSeedEnvelope)]
+#[must_use]
+pub fn is_channel_admission_seed_envelope(bytes: &[u8]) -> bool {
+    core::is_channel_admission_seed_envelope(bytes)
 }
 
 /// `true` when `bytes` open with the channel-subscription envelope domain
@@ -3121,6 +3243,7 @@ mod tests {
                 ChannelSubscriptionRole::Owner,
                 &[0x5E; 32],
                 &[0x4B; 32],
+                &[],
                 &[],
                 "News".into(),
                 String::new(),

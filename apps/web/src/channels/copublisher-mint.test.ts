@@ -41,7 +41,9 @@ beforeAll(async () => {
 describe("Add publisher invitation", () => {
   it("carries a card that opens as a publisher invitation naming the channel and the inviter", async () => {
     const owner = real.Identity.fromSeed(new Uint8Array(64).fill(0x61));
-    const group = real.PublisherGroup.openOrCreate(owner, new Uint8Array(16).fill(0x42));
+    // ADR-0090: the group's leaf is a device bound to the owner's account.
+    const device = real.Identity.fromSeedBound(new Uint8Array(64).fill(0x62), owner.ed25519Seed, 1_700_000_000n);
+    const group = new real.PublisherGroup(device, owner.ed25519Seed, new Uint8Array(16).fill(0x42));
     installOwnProfileEnvelopeSource(async () =>
       real.composeProfileEnvelope("Icons QA", undefined, 1n, undefined, undefined, undefined, undefined),
     );

@@ -397,6 +397,16 @@ public class PasskeysViewModel(
                 } catch (e: Throwable) {
                     me.lakko.app.rethrowIfCancelled(e) {}
                 }
+                // ADR-0064 section 1 — the vaults of the channels this
+                // account owns go before the account, best effort and
+                // bounded in time; keys from the lineage identity.
+                me.lakko.app.channels.ChannelVaultHeads.deleteOwnedVaults(
+                    me.lakko.app.auth.conversationAccountSeedOf(
+                        context,
+                        me.lakko.app.auth.base64Encode(secrets.accountId),
+                        secrets.accountIdentitySeed,
+                    ),
+                )
                 try {
                     client.deleteAccount(grant)
                 } catch (e: WebauthnHttpError) {

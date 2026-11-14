@@ -29,7 +29,7 @@ import {
   listSubscribers,
   removeSubscriberAsPublisher,
 } from "./api";
-import { letInVerdict, rowsToAdmit, ticketKeyAdmits } from "./channel-access-record";
+import { letInVerdict, rowsToAdmit, ticketKeyAdmits, withRowsRead } from "./channel-access-record";
 import { loadWasm } from "../wasm";
 import { sealSubscriberSeedEnvelope, type WasmIdentity } from "./composer";
 import { rememberSubscriberCount } from "./ui-cache";
@@ -212,7 +212,13 @@ async function admitTicketedRows(channelIdHex: string, identity: WasmIdentity): 
   for (;;) {
     const mark = channelsActions.accessOf(channelIdHex).admittedThroughSeq;
     const page = await listSubscriberPage(channelIdHex, identity, mark, ADMISSION_PAGE);
-    const rows = rowsToAdmit(page.entries, mark);
+    // ADR-0090 (security pass): the rows this device read itself bound how
+    // far an owner's admission mark counts here.
+    const readTo = page.entries.reduce((m, e) => Math.max(m, e.seq), 0);
+    if (readTo > (channelsActions.accessOf(channelIdHex).rowsReadThroughSeq ?? 0)) {
+      await channelsActions.updateAccessDurable(channelIdHex, (r) => withRowsRead(r, readTo));
+    }
+    const rows = rowsToAdmit(page.entries, channelsActions.accessOf(channelIdHex).admittedThroughSeq);
     if (rows.length === 0) return;
     live ??= new Set((await listInviteKeys(channelIdHex, identity)).map((k) => k.invitePkHex.toLowerCase()));
     const markSet = channelsActions.accessOf(channelIdHex).admissionMarkSet === true;

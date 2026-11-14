@@ -34,10 +34,12 @@ export function epochSeedsToSend(
 }
 
 /**
- * Whether a received hand-over is kept: on this channel's PublisherGroup, on
- * a publisher's device that is not the owner's, addressed to this account,
- * and sent by the channel's owner (the MLS sender resolved at receipt,
- * C-68). Anything else is dropped.
+ * Whether a received hand-over is kept: on this channel's PublisherGroup,
+ * addressed to this account, and sent by the channel's owner account (the
+ * MLS sender resolved at receipt, C-68). ADR-0090 section 6: any owner
+ * DEVICE sends it, and an owner device keeps one addressed to its own
+ * account (a sibling handed it the earlier seeds after admitting it), so
+ * `deviceIsOwner` no longer refuses. Anything else is dropped.
  */
 export function keepsEpochSeeds(input: {
   readonly deviceIsOwner: boolean;
@@ -48,7 +50,6 @@ export function keepsEpochSeeds(input: {
   readonly senderB64: string | undefined;
   readonly ownerKeyB64: string | null;
 }): boolean {
-  if (input.deviceIsOwner) return false;
   if (input.envelopeChannelHex !== input.channelIdHex) return false;
   if (!input.ownAccountKeysB64.includes(input.memberAccountKeyB64)) return false;
   if (input.senderB64 === undefined || input.ownerKeyB64 === null) return false;

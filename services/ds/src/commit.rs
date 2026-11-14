@@ -624,6 +624,106 @@ mod tests {
         assert_eq!(rows(&pool, &gid).await.len(), 2);
     }
 
+    /// ADR-0090 S2: a PublisherGroup journal is claimed under a root every
+    /// owner device derives alike (`journal_root_seed` of the owner's account
+    /// seed), so the DS cannot tell two owner devices apart and takes one
+    /// commit per epoch: the first gets `201`, the second `409`, the first's
+    /// identical re-send `200`. A same-root reset (ADR-0090 decision A, the
+    /// re-founding) then drops the chain the old device holds: its signed
+    /// read under the old epoch key is refused.
+    #[tokio::test]
+    async fn two_owner_devices_get_one_commit_per_epoch_and_a_reset_drops_the_chain() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(0x7E);
+        let owner_account_seed = [0x5A; 32];
+        // Each device derives the root itself.
+        let device_a = StatementSigner::from_seed(&lakko_ds_proof::journal_root_seed(
+            &owner_account_seed,
+            &gid,
+        ));
+        let device_b = StatementSigner::from_seed(&lakko_ds_proof::journal_root_seed(
+            &owner_account_seed,
+            &gid,
+        ));
+        assert_eq!(device_a.public_key(), device_b.public_key());
+        assert_eq!(
+            claim(&app, &gid, &device_a, 1, &key(1)).await,
+            StatusCode::NO_CONTENT
+        );
+
+        let (status, first) = post(
+            &app,
+            &gid,
+            body_for(&gid, &device_a, 2, &key(2), &[], b"rotation by A"),
+            &key(1),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = post(
+            &app,
+            &gid,
+            body_for(&gid, &device_b, 2, &key(0x2B), &[], b"rotation by B"),
+            &key(1),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "one commit per epoch");
+        let (status, again) = post(
+            &app,
+            &gid,
+            body_for(&gid, &device_a, 2, &key(2), &[], b"rotation by A"),
+            &key(1),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the identical re-send");
+        assert_eq!(again["id"], first["id"]);
+        assert_eq!(rows(&pool, &gid).await.len(), 1);
+
+        // The old chain reads.
+        let read = |proof_key: SigningKey, epoch: u64| {
+            let app = app.clone();
+            let uri = messages_uri("group", &gid);
+            async move {
+                send(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &uri,
+                        body: Vec::new(),
+                        proof: Some((&proof_key, epoch)),
+                    },
+                )
+                .await
+                .0
+            }
+        };
+        assert_eq!(read(key(2), 2).await, StatusCode::OK);
+
+        // Decision A: a restored device founds again and resets under the
+        // same root; the chain the old device holds is gone.
+        assert_eq!(
+            send_statement(
+                &app,
+                &gid,
+                &device_b,
+                lakko_ds_proof::StatementBody::Reset {
+                    epoch: 0,
+                    epoch_key: key(0x30).verifying_key().to_bytes(),
+                    registrars: None,
+                },
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(epochs(&pool, &gid).await, vec![0]);
+        assert_eq!(read(key(2), 2).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(read(key(0x30), 0).await, StatusCode::OK);
+    }
+
     /// Decision 1: any other append at an existing epoch is 409, and leaves
     /// nothing behind - another key, or the same key with another row.
     #[tokio::test]

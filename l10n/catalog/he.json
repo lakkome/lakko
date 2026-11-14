@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "אתם מפרסמים בערוץ הזה מהמכשיר שבו יצרתם אותו.",
+      "text": "תוכלו לפרסם כאן ברגע ש-Lakko ייפתח במכשיר האחר שלכם.",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "אתם מפרסמים בערוץ הזה מהמכשיר שבו הפכתם למפרסמים.",
+      "text": "תוכלו לפרסם כאן ברגע ש-Lakko ייפתח במכשיר האחר שלכם ובמכשיר של הבעלים.",
       "status": "machine"
     },
     "channels.rotation.desc": {

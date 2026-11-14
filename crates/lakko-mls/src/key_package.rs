@@ -226,6 +226,25 @@ impl Identity {
         Ok(bundle.key_package().clone())
     }
 
+    /// **Time again.** An ordinary KeyPackage whose lifetime runs out
+    /// `seconds` from now: admissible now, expired after a wait.
+    #[cfg(test)]
+    pub(crate) fn short_lived_key_package(&self, seconds: u64) -> Result<KeyPackage> {
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(crate::device_group::lakko_leaf_capabilities(
+                self.ciphersuite,
+            ))
+            .key_package_lifetime(Lifetime::new(seconds))
+            .build(
+                self.ciphersuite,
+                &self.provider,
+                &self.signature_keys,
+                self.credential.clone(),
+            )
+            .map_err(|e| Error::KeyPackage(format!("{e:?}")))?;
+        Ok(bundle.key_package().clone())
+    }
+
     /// Shared tail: mint a KeyPackage with a caller-chosen capability set,
     /// otherwise identical to [`Identity::create_key_package`].
     fn key_package_with_capabilities(&self, capabilities: Capabilities) -> Result<KeyPackage> {

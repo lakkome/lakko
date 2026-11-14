@@ -256,6 +256,7 @@ final class SubscriberAdmission: ObservableObject {
         state.updateExtras(channelId) {
             $0.admittedThroughSeq = max($0.admittedThroughSeq ?? 0, raised)
             $0.admissionMarkSet = true
+            $0.subscriberRowsReadSeq = max($0.subscriberRowsReadSeq ?? 0, raised)
         }
     }
 
@@ -282,11 +283,15 @@ final class SubscriberAdmission: ObservableObject {
         var stopped = false
         var after: UInt64 = 0
         var all: [String] = []
+        // ADR-0090 security pass — the newest row this device read itself:
+        // an owner's mark counts only up to it.
+        var readThrough: UInt64 = 0
         pages: for _ in 0..<200 {
             let page = try await client.subscriberPage(channelIdHex: channelId, after: after, accountIdentity: identity)
             for row in page.rows {
                 if Task.isCancelled { return }
                 all.append(row.pubkeyHex)
+                readThrough = max(readThrough, row.seq)
                 if let entry = byChannel[channelId]?.status[row.pubkeyHex], entry.status == .ready, entry.epoch == epoch {
                     judged.append((row.seq, .admit))
                     continue
@@ -335,6 +340,10 @@ final class SubscriberAdmission: ObservableObject {
         if raised != mark {
             state.updateExtras(channelId) { $0.admittedThroughSeq = max($0.admittedThroughSeq ?? 0, raised) }
         }
+        if readThrough > (state.extras(channelId).subscriberRowsReadSeq ?? 0) {
+            state.updateExtras(channelId) { $0.subscriberRowsReadSeq = readThrough }
+        }
+        ChannelDeviceAdmission.applyReceivedMark(channelId: channelId, state: state)
         if !stopped {
             var a = byChannel[channelId] ?? ChannelAdmission()
             a.subscribers = all

@@ -229,6 +229,30 @@ public object ChannelAdmissionMark {
     public fun isSet(context: Context, account: String, channelId: String): Boolean =
         ChannelKeyStore.encryptedPrefs(context).getBoolean(setKey(account, channelId), false)
 
+    private fun seenKey(account: String, channelId: String): String = "rows-seen-through|$account|$channelId"
+    private fun pendingKey(account: String, channelId: String): String = "admitted-pending|$account|$channelId"
+
+    /** ADR-0090 security pass — the newest subscriber row seq this device
+     *  has itself read from the channels service. */
+    public fun seenThrough(context: Context, account: String, channelId: String): Long =
+        ChannelKeyStore.encryptedPrefs(context).getLong(seenKey(account, channelId), 0L)
+
+    /** Note rows read up to [seq] (only ever raised). */
+    public fun noteSeen(context: Context, account: String, channelId: String, seq: Long) {
+        if (seq <= seenThrough(context, account, channelId)) return
+        ChannelKeyStore.encryptedPrefs(context).edit().putLong(seenKey(account, channelId), seq).apply()
+    }
+
+    /** A received owner mark above the rows this device has read, or 0. */
+    public fun pending(context: Context, account: String, channelId: String): Long =
+        ChannelKeyStore.encryptedPrefs(context).getLong(pendingKey(account, channelId), 0L)
+
+    public fun setPending(context: Context, account: String, channelId: String, through: Long?) {
+        val edit = ChannelKeyStore.encryptedPrefs(context).edit()
+        if (through == null) edit.remove(pendingKey(account, channelId)) else edit.putLong(pendingKey(account, channelId), through)
+        edit.apply()
+    }
+
     /** Raise the mark to [through]; [markSet] records that this device set
      *  it itself (never cleared). */
     public fun raise(context: Context, account: String, channelId: String, through: Long, markSet: Boolean = false) {
@@ -249,17 +273,35 @@ public object ChannelAdmissionMark {
  * Older versions are kept so tickets from older links still open.
  */
 public object ChannelAdmissionKeys {
-    private fun key(account: String, channelId: String, version: UShort): String = "admission|$account|$channelId|$version"
+    private fun key(account: String, channelId: String, version: UShort, seed: ByteArray): String =
+        "admission|$account|$channelId|$version|${seedTag(seed)}"
     private fun legacyKey(account: String, channelId: String): String = "admission|$account|$channelId"
 
-    /** Every held version, with its seed (the caller wipes each). */
+    /** A short tag of a seed, so two seeds of one version are stored apart. */
+    private fun seedTag(seed: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(seed).take(8).joinToString("") { "%02x".format(it) }
+
+    /** ADR-0090 open question 4 - the owner account's admission-seed register
+     *  (lakko-sync, carried between the account's devices); set by the
+     *  session shell, `null` in a host test. */
+    @Volatile
+    public var register: ((channelId: String) -> List<Pair<UShort, ByteArray>>)? = null
+
+    /** Write a seed to the register (and send it); set by the session shell. */
+    @Volatile
+    public var writeRegister: ((channelId: String, version: UShort, seed: ByteArray) -> Boolean)? = null
+
+    /** Every held seed with its version, this device's and the register's
+     *  (ADR-0090: two seeds of one version may both be held; a ticket of a
+     *  version is tried against every one). The caller wipes each. */
     public fun all(context: Context, account: String, channelId: String): List<Pair<UShort, ByteArray>> {
         val prefs = ChannelKeyStore.encryptedPrefs(context)
         val prefix = "admission|$account|$channelId|"
         val out = ArrayList<Pair<UShort, ByteArray>>()
         for ((k, v) in prefs.all) {
             val version = when {
-                k.startsWith(prefix) -> k.removePrefix(prefix).toIntOrNull()?.takeIf { it in 0..0xFFFF }?.toUShort()
+                k.startsWith(prefix) -> k.removePrefix(prefix).substringBefore('|').toIntOrNull()
+                    ?.takeIf { it in 0..0xFFFF }?.toUShort()
                 k == legacyKey(account, channelId) -> 0u.toUShort()
                 else -> null
             } ?: continue
@@ -272,29 +314,83 @@ public object ChannelAdmissionKeys {
             } ?: continue
             out += version to seed
         }
-        return out.distinctBy { it.first }.sortedBy { it.first }
+        val fromRegister = try {
+            register?.invoke(channelId).orEmpty()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        return mergeAdmissionSeeds(out, fromRegister)
     }
 
-    /** The newest version, or `null`. */
+    /** The newest version (one of its seeds, this device's first), or `null`. */
     public fun current(context: Context, account: String, channelId: String): Pair<UShort, ByteArray>? {
         val all = all(context, account, channelId)
-        all.dropLast(1).forEach { it.second.fill(0) }
-        return all.lastOrNull()
+        val newest = all.lastOrNull() ?: return null
+        all.filter { it !== newest }.forEach { it.second.fill(0) }
+        return newest
     }
 
     public fun put(context: Context, account: String, channelId: String, version: UShort, seed: ByteArray) {
         ChannelKeyStore.encryptedPrefs(context).edit()
-            .putString(key(account, channelId, version), Base64.encodeToString(seed, Base64.NO_WRAP))
+            .putString(key(account, channelId, version, seed), Base64.encodeToString(seed, Base64.NO_WRAP))
             .commit()
     }
 
-    /** The newest version, minting version 0 when none is held (the owner). */
+    /** The newest version, minting version 0 when none is held (the owner);
+     *  a minted seed goes to the register at once. */
     public fun currentOrMint(context: Context, account: String, channelId: String): Pair<UShort, ByteArray> {
         current(context, account, channelId)?.let { return it }
         val seed = uniffi.lakko_ffi_uniffi.generateChannelAdmissionSeed()
         put(context, account, channelId, 0u, seed)
+        toRegister(channelId, 0u, seed)
         return 0u.toUShort() to seed
     }
+
+    /** ADR-0090 - write a seed this owner device holds to the register. */
+    public fun toRegister(channelId: String, version: UShort, seed: ByteArray): Boolean =
+        try {
+            writeRegister?.invoke(channelId, version, seed) ?: false
+        } catch (_: Throwable) {
+            false
+        }
+
+    /** ADR-0090 - every seed this device holds that the register lacks goes
+     *  to it (an owner device's pass). */
+    public fun syncToRegister(context: Context, account: String, channelId: String) {
+        val inRegister = try {
+            register?.invoke(channelId).orEmpty()
+        } catch (_: Throwable) {
+            return
+        }
+        val local = all(context, account, channelId)
+        try {
+            for ((version, seed) in local) {
+                if (inRegister.any { (v, s) -> v == version && s.contentEquals(seed) }) continue
+                toRegister(channelId, version, seed)
+            }
+        } finally {
+            local.forEach { it.second.fill(0) }
+            inRegister.forEach { it.second.fill(0) }
+        }
+    }
+}
+
+/**
+ * ADR-0090 - this device's admission seeds and the register's, as one list:
+ * a seed held in both is listed once, two seeds of one version both stay;
+ * ascending by version, this device's seeds before the register's within a
+ * version. Pure.
+ */
+internal fun mergeAdmissionSeeds(
+    local: List<Pair<UShort, ByteArray>>,
+    register: List<Pair<UShort, ByteArray>>,
+): List<Pair<UShort, ByteArray>> {
+    val out = ArrayList<Pair<UShort, ByteArray>>()
+    for (entry in local + register) {
+        if (out.any { it.first == entry.first && it.second.contentEquals(entry.second) }) continue
+        out += entry
+    }
+    return out.withIndex().sortedWith(compareBy({ it.value.first }, { it.index })).map { it.value }
 }
 
 /** A co-publisher holds no admission seed of a private channel yet: the

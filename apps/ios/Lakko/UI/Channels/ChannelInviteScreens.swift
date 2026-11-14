@@ -51,7 +51,7 @@ struct ChannelInvitePeopleScreen: View {
     private func loadInChannel() async {
         var keys: Set<Data> = []
         if let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed) {
-            keys.insert(identity.signaturePublicKey())
+            keys.insert(identity.accountPublicKey() ?? identity.signaturePublicKey())
             if let group = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil,
                let members = try? group.members() {
                 for member in members {

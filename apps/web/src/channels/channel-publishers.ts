@@ -35,6 +35,7 @@ import {
   requestToCoPublishSealed,
 } from "./copublisher";
 import { sharedPublisherGroup, withPublisherGroup } from "./publisher-group-registry";
+import { publisherDeviceOrNull } from "./publisher-device";
 import { ChannelError } from "./channel-access";
 import type { OpenedChannelInvite } from "./channel-invites";
 import { channelIdFromHex, type WasmIdentity } from "./composer";
@@ -64,10 +65,12 @@ export function installSelfPublisherKey(keyB64: string | null): void {
   setSelfKey(keyB64);
 }
 
-/** One publisher as the PublisherGroup lists it. */
+/** One publisher as the PublisherGroup lists it (ADR-0090: one row per
+ *  DEVICE leaf; `isOwner` from the owner's account key the group records). */
 interface GroupPublisher {
   readonly accountKeyB64: string;
   readonly leafIndex: number;
+  readonly isOwner?: boolean;
 }
 
 /** The PublisherGroup's members per channel, as last read here. */
@@ -87,8 +90,10 @@ export function notePublisherGroupMembers(idHex: string, group: PublisherGroup):
   let list: GroupPublisher[];
   try {
     const raw = group.members() as WasmGroupMember[];
+    const ownerB64 = base64Encode(group.ownerAccountKey());
     list = raw.map((m) => {
-      const out = { accountKeyB64: base64Encode(m.accountKey), leafIndex: m.leafIndex };
+      const key = base64Encode(m.accountKey);
+      const out = { accountKeyB64: key, leafIndex: m.leafIndex, isOwner: key === ownerB64 };
       m.free?.();
       return out;
     });
@@ -117,7 +122,9 @@ export function forgetPublisherGroupMembers(idHex: string): void {
 export function publishersFromMembers(members: readonly GroupPublisher[]): ChannelPublisher[] {
   if (members.length === 0) return [];
   const ownerLeaf = Math.min(...members.map((m) => m.leafIndex));
-  const owner = members.find((m) => m.leafIndex === ownerLeaf);
+  // ADR-0090: the group records the owner's account; the lowest leaf only
+  // for a list read without it.
+  const owner = members.find((m) => m.isOwner === true) ?? members.find((m) => m.leafIndex === ownerLeaf);
   const out: ChannelPublisher[] = [];
   if (owner !== undefined) out.push({ accountKeyB64: owner.accountKeyB64, isOwner: true });
   for (const m of [...members].sort((a, b) => a.leafIndex - b.leafIndex)) {
@@ -318,6 +325,7 @@ export async function acceptPublisherInvite(
           channelIdHex: r.channelIdHex,
           groupIdHex: bytesToHex(r.groupId),
           joinerKeyB64: base64Encode(r.joinerKey),
+          ownerKeyB64: base64Encode(r.ownerKey),
           name: opened.name,
           description: opened.description,
           requestedAtMs: Date.now(),
@@ -340,6 +348,7 @@ export async function acceptPublisherInvite(
       req.groupId,
       req.joinerKey,
       req.channelIdHex,
+      req.ownerKey,
       channelsState.keysByChannel().get(req.channelIdHex)?.signingKeySeed,
     ).catch(() => null);
     if (keys !== null) {
@@ -394,11 +403,15 @@ export async function landPendingPublisherWelcome(
 ): Promise<boolean> {
   const pending = loadPendingPublisherRequests(accountIdB64);
   if (pending.length === 0) return false;
-  const ownKey = base64Encode(identity.signaturePublicKey);
+  const device = publisherDeviceOrNull();
+  if (device === null) return false;
+  const ownKey = base64Encode(device.signaturePublicKey);
   for (const r of pending) {
     // The Welcome is sealed to the knocked KeyPackage, whose private key is
-    // in this identity's provider only when the request was made with it.
-    if (r.joinerKeyB64 !== ownKey) continue;
+    // in this DEVICE's provider only when the request was made from it
+    // (ADR-0090: the leaf is the device). An older record names no owner
+    // key, so no Welcome lands it.
+    if (r.joinerKeyB64 !== ownKey || r.ownerKeyB64 === undefined) continue;
     const groupId = hexBytes(r.groupIdHex);
     if (groupId === null) continue;
     const keys = await joinCoPublishWelcome(
@@ -406,6 +419,7 @@ export async function landPendingPublisherWelcome(
       welcome,
       groupId,
       r.channelIdHex,
+      b64ToBytes(r.ownerKeyB64),
       channelsState.keysByChannel().get(r.channelIdHex)?.signingKeySeed,
     );
     if (keys === null) continue;
@@ -504,9 +518,9 @@ export async function afterPublisherRemoved(identity: WasmIdentity, idHex: strin
 export async function stepDownAsPublisher(identity: WasmIdentity, idHex: string): Promise<void> {
   if (channelsActions.coPublisherGroupIdOf(idHex) === undefined) throw new ChannelError("not-publisher");
   const ds = new DsClient();
-  await withPublisherGroup(identity, idHex, async (group) => {
-    if (group.isOwnedBy(identity)) throw new ChannelError("not-publisher");
-    const message = group.stepDown(identity);
+  await withPublisherGroup(identity, idHex, async (group, device) => {
+    if (group.isOwnerDevice(device)) throw new ChannelError("not-publisher");
+    const message = group.stepDown(device);
     // The sending ratchet moved: record it before the message leaves (a
     // crash in between would reuse the generation, G-34 class). A refused
     // write publishes nothing.

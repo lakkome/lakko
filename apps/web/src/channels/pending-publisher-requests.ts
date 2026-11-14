@@ -26,9 +26,13 @@ export interface PendingPublisherRequest {
   readonly channelIdHex: string;
   /** The PublisherGroup the link named. */
   readonly groupIdHex: string;
-  /** base64 of the account key the knocked KeyPackage belongs to (the
-   *  conversation account identity at the time of the request). */
+  /** base64 of the leaf key of the knocked KeyPackage: since ADR-0090 this
+   *  DEVICE's key (the account key on an older record). */
   readonly joinerKeyB64: string;
+  /** ADR-0090: base64 of the owner's account key (the `/g/` capability's
+   *  issuer), which the Welcome's sender must be a device of. Absent on an
+   *  older record: no Welcome lands it. */
+  readonly ownerKeyB64?: string;
   /** What the link said, for the channel row once joined. */
   readonly name: string;
   readonly description: string;

@@ -339,15 +339,20 @@ private val PUBLISHER_STEP_DOWN_PREFIX = "lakko/publisher-step-down/v1\u0000".to
 private val CHANNEL_READ_KEY_PREFIX = "lakko/channel-read-key/v1\u0000".toByteArray(Charsets.US_ASCII)
 private val CHANNEL_EPOCH_SEEDS_PREFIX = "lakko/channel-epoch-seeds/v1\u0000".toByteArray(Charsets.US_ASCII)
 private val CHANNEL_ROTATE_REQUEST_PREFIX = "lakko/channel-rotate-request/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val PUBLISHER_DEVICE_REQUEST_PREFIX = "lakko/publisher-device-request/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val CHANNEL_ADMISSION_MARK_PREFIX = "lakko/channel-admission-mark/v1\u0000".toByteArray(Charsets.US_ASCII)
 
 /** `true` for the ADR-0087 step-down, channel read-key, earlier channel
- *  seeds and rotate-request envelopes: a NUL-terminated domain peek, no
- *  decode. */
+ *  seeds and rotate-request envelopes, and the ADR-0090 publisher device
+ *  request and admission mark: a NUL-terminated domain peek, no decode. */
 internal fun looksLikePublisherChannelEnvelope(payload: ByteArray): Boolean =
     startsWith(payload, PUBLISHER_STEP_DOWN_PREFIX) ||
         startsWith(payload, CHANNEL_READ_KEY_PREFIX) ||
         startsWith(payload, CHANNEL_EPOCH_SEEDS_PREFIX) ||
-        startsWith(payload, CHANNEL_ROTATE_REQUEST_PREFIX)
+        startsWith(payload, CHANNEL_ROTATE_REQUEST_PREFIX) ||
+        // ADR-0090 - a publisher's device request and the admission mark.
+        startsWith(payload, PUBLISHER_DEVICE_REQUEST_PREFIX) ||
+        startsWith(payload, CHANNEL_ADMISSION_MARK_PREFIX)
 
 private fun startsWith(payload: ByteArray, prefix: ByteArray): Boolean {
     if (payload.size < prefix.size) return false

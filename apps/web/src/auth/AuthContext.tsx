@@ -214,6 +214,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 // this device defer to a candidate it has no current evidence about.
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { rehydrateMlsState } from "../chat/rehydrate";
+import { retireOwnPublisherLeaves } from "../channels/publisher-devices";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { SessionBinding, StaleBindingError } from "./binding-epoch";
 import { releaseWakeBinding } from "../push/wake-binding";
@@ -7903,6 +7904,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // effort, once: the wipe below leaves nothing to retry it with. (The
       // row delete above tombstoned this device's id; the wipe removes the
       // device seed, so the next setup on this browser mints a new one.)
+      // ADR-0090 section 2.4: a retire request for this device's own leaf of
+      // every channel PublisherGroup it holds, before the wipe; another device
+      // of the account (or the owner's) applies it. Best effort, bounded.
+      {
+        const lineage = chats.conversationAccountIdentity();
+        if (lineage !== null) {
+          await Promise.race([
+            retireOwnPublisherLeaves(lineage).catch(() => undefined),
+            new Promise((resolve) => setTimeout(resolve, 5_000)),
+          ]);
+        }
+      }
       void serverLogout(sessionTokens.pair());
       // The device-key-wrapped phrase cache is wiped below, so an owed phrase
       // can no longer be shown on this device; drop the in-memory copy (the

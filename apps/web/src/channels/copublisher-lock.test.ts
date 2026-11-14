@@ -94,6 +94,9 @@ vi.mock("../state/channels-state", () => ({
     recordPublisherCommit: async () => {},
     savePublisherCommit: async () => {},
     finishPublisherCommit: async () => {},
+    persistPublisherGroupDurable: async () => {},
+    notePublisherGroupChanged: () => {},
+    updateAccessDurable: async () => {},
     coPublisherGroupIdOf: () => undefined,
     // A channel from before phase B: no flag, every row resealed.
     accessOf: () => ({ visibility: null, readKeyB64: null, admittedThroughSeq: 0, admissionSeeds: [] }),
@@ -102,6 +105,10 @@ vi.mock("../state/channels-state", () => ({
 }));
 
 import { approveCoPublisher, pollCoPublisherJournal } from "./copublisher";
+import { installPublisherDeviceSource } from "./publisher-device";
+
+// ADR-0090: the group calls take this device's identity (a stand-in here).
+installPublisherDeviceSource(() => ({}) as never);
 import { fakeAccessSigner, withCommitRoute } from "../ds/access-test-doubles";
 import type { DsClient } from "../ds/client";
 
@@ -151,6 +158,7 @@ function statefulPublisherGroup(
   order: string[],
 ): { group: unknown; epoch: () => number } {
   let epoch = 5;
+  let staged = false;
   const group = {
     groupId: () => groupId,
     dsAccessSigner: fakeAccessSigner(() => BigInt(epoch)),
@@ -162,10 +170,24 @@ function statefulPublisherGroup(
       order.push(`seed@${epoch}`);
       return new Uint8Array([epoch]);
     }),
-    approveExternalJoin: vi.fn(() => {
-      epoch += 1; // the eager merge
-      order.push("approve-merge");
+    // ADR-0090: the approve is STAGED (the epoch stays) and merged only
+    // when the journal took it.
+    hasStagedCommit: () => staged,
+    dsStagedAccessSigner: (id: unknown) => (staged ? fakeAccessSigner(() => BigInt(epoch + 1))(id) : undefined),
+    stageApproveExternalJoin: vi.fn(() => {
+      staged = true;
+      order.push("approve-stage");
       return { commit: new Uint8Array([1]), welcome: new Uint8Array([2]), free: () => undefined };
+    }),
+    mergeStagedCommit: vi.fn(() => {
+      staged = false;
+      epoch += 1;
+      order.push("approve-merge");
+      return true;
+    }),
+    abandonStagedCommit: vi.fn(() => {
+      staged = false;
+      return true;
     }),
     processIncomingVerifyingRoles: vi.fn((_id: unknown, p: Uint8Array) => {
       epoch += 1; // applying a commit advances the epoch
@@ -237,9 +259,10 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     // Whether `fetch` lands before or after the approve's merge is scheduling
     // and not asserted (it moved when the approve lost an `await`); the merge
     // precedes its publish, and the fetch happened.
-    expect([...order].sort()).toEqual(["approve-merge", "fetch", "publish-commit"]);
-    expect(order.indexOf("approve-merge")).toBeLessThan(order.indexOf("publish-commit"));
-    expect(g.epoch()).toBe(6);
+    expect([...order].sort()).toEqual(["approve-stage", "fetch", "publish-commit"]);
+    expect(order.indexOf("approve-stage")).toBeLessThan(order.indexOf("publish-commit"));
+    // ADR-0090: staged, not merged, while the journal has not answered.
+    expect(g.epoch()).toBe(5);
     expect(applyMock(g.group)).not.toHaveBeenCalled();
 
     publishGate.resolve();
@@ -248,11 +271,13 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
 
     // The reseal happened INSIDE the region, so it read the epoch the approve
     // committed (6) — not one a concurrent apply had already moved past.
+    // ADR-0090: merged on the journal's answer, resealed, then the Welcome.
     expect(order.filter((o) => o !== "fetch")).toEqual([
-      "approve-merge",
+      "approve-stage",
       "publish-commit",
-      "publish-welcome",
+      "approve-merge",
       "seed@6",
+      "publish-welcome",
       "apply:#7",
     ]);
     // The one fetch is the poll's network half: before the commit publish
@@ -316,7 +341,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     // 5 -> 6 by the Add. The two journal commits apply only AFTER the reseal.
     expect(seeds).toEqual([6]);
     expect(g.epoch()).toBe(8);
-    expect(order).toEqual(["approve-merge", "seed@6", "apply:#8", "apply:#9"]);
+    expect(order).toEqual(["approve-stage", "approve-merge", "seed@6", "apply:#8", "apply:#9"]);
 
   });
 });

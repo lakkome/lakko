@@ -3539,6 +3539,7 @@ name = "lakko-sync"
 version = "0.0.0"
 dependencies = [
  "lakko-contacts",
+ "lakko-crypto",
  "proptest",
  "serde",
  "thiserror 1.0.69",

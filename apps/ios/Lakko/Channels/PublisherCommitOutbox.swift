@@ -4,42 +4,30 @@
 import Foundation
 import Security
 
-/// Durable record of a channel PublisherGroup commit (G-50, the ADR-0040
-/// treatment the chat groups have). Swift mirror of
-/// `apps/web/src/channels/publisher-commit-outbox.ts`.
+/// Durable record of a channel PublisherGroup commit (G-50, ADR-0090
+/// section 3). Swift mirror of `apps/web/src/channels/publisher-commit-outbox.ts`.
 ///
-/// A PublisherGroup commit (a co-publisher approve, a rotation) eager-merges
-/// epoch N -> N+1 in the channel provider (``ChannelPublisherIdentity``). Its
-/// effects then leave the device in steps: the N+1 epoch key is registered on
-/// the Delivery Service and the Add commit published to the journal, the
-/// joiner's Welcome is written to its mailbox (approve), every subscriber is
-/// resealed to the N+1 seed and the channels service moves to the next epoch,
-/// and the newcomer's co-publisher key is appointed (approve).
+/// ADR-0090: every PublisherGroup commit (a co-publisher approve, a rotation,
+/// a publisher's removal, the admission or retirement of devices) is STAGED:
+/// the group stays at epoch N holding the commit, and merges it only when the
+/// Delivery Service took it (`201`, or `200` for the identical re-send);
+/// a `409` abandons it (another owner device's commit won the epoch) and
+/// nothing of it leaves the device. The reseal follows the merge, never the
+/// stage, so a lost race never puts a seed only the loser holds in front of
+/// the subscribers (C-90 proposed). An unanswered commit stays staged and
+/// owed: every pass and every start sends it again until the DS answers.
 ///
-/// ## Order — entry first, then the N+1 snapshot, then the steps
+/// ## Order — entry first, then the snapshot carrying the staged commit
 ///
-/// iOS has no transaction spanning the entry and the provider snapshot, so
-/// this takes ADR-0040's second sanctioned ordering, the one the iOS chat
-/// outbox (`Chat/CommitOutbox.swift`) takes: the entry is written FIRST, then
-/// the N+1 provider snapshot, both fail-closed, both before any step runs.
-/// "N+1 durable with no entry" is impossible by construction. The one torn
-/// state, an entry whose snapshot did not land, is a commit none of whose
-/// steps ran, so the restart replay DISCARDS it (``replayVerdict(_:restoredEpoch:)``).
+/// The entry is written FIRST, then the provider snapshot holding the
+/// staged commit, both fail-closed, before the commit is sent. "A staged
+/// commit durable with no entry" is impossible by construction. The torn
+/// state, an entry whose snapshot did not land, restores a group that holds
+/// no staged commit and is still at N: the replay DISCARDS it
+/// (``replayVerdict(_:restoredEpoch:staged:)``).
 ///
 /// Each step marks itself done as it lands; the entry is dropped once none is
-/// left. A replay runs the remaining steps again, each idempotent: the DS
-/// journal drops a duplicate commit, a second Welcome for a group the joiner
-/// is already in is skipped by it, the reseal targets the epoch recorded in
-/// the entry and counts as done once the service is at or past it, and an
-/// appointment is an upsert.
-///
-/// ## What an entry holds
-///
-/// The commit and the Welcome (public MLS artefacts the DS stores anyway),
-/// the joiner's key and the epochs. The joiner's `reply` grant is NOT
-/// recorded here (web records it because it holds the grant in memory only):
-/// ``ReachCenter`` keeps it in the Keychain. Entries live in one
-/// device-key-encrypted record per account (``PublisherCommitStore``).
+/// left. A replay runs the remaining steps again, each idempotent.
 public struct PublisherCommitEntry: Codable, Equatable, Sendable {
     /// Which commit an entry records.
     public enum Kind: String, Codable, Sendable {
@@ -49,6 +37,14 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         /// applies its step-down): every leaf of the account in one commit.
         /// `joinerKeyB64` holds the removed account key.
         case removal
+        /// ADR-0090 section 2 — devices of an account that already publishes
+        /// admitted and / or retired in one commit. `joinerKeyB64` holds the
+        /// ACCOUNT key the Welcome goes to (when anything was admitted).
+        case devices
+        /// ADR-0064 section 7 (amendment of 2026-11-14) — this owner device
+        /// enters the group by an external commit built from a saved
+        /// GroupInfo. `proofEpoch` / `proofSeedB64` are the saved epoch's.
+        case entry
     }
 
     /// The steps of an entry, in the order they run.
@@ -87,10 +83,9 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
     /// ADR-0081 — standard base64 of that epoch's 32-byte access seed. Lives
     /// only in this device-key-encrypted record and goes with it.
     public let proofSeedB64: String?
-    /// ADR-0081 — the DS answered the journal step with `409` or a definitive
-    /// refusal: nothing of the commit is on the journal, so an approve
-    /// delivers no Welcome and appoints nobody (the reseal still runs: the
-    /// owner's posts are sealed under the merged seed). `nil` reads `false`.
+    /// ADR-0090 — the DS answered the journal step with `409` or a definitive
+    /// refusal: the staged commit was abandoned and nothing of it leaves the
+    /// device (no Welcome, no appointment, no reseal). `nil` reads `false`.
     public var journalLost: Bool?
     /// The steps that have landed.
     public var done: [Step]
@@ -128,9 +123,13 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
     /// The steps an entry of `kind` runs, in order.
     public static func steps(of kind: Kind) -> [Step] {
         switch kind {
-        case .approve: return [.journal, .welcome, .reseal, .appoint]
+        // ADR-0090 — the reseal before the Welcome: the admitted device then
+        // reads the channel's epoch from the service at landing.
+        case .approve: return [.journal, .reseal, .welcome, .appoint]
         case .rotation: return [.journal, .reseal]
         case .removal: return [.journal, .unappoint, .reseal]
+        case .devices: return [.journal, .reseal, .welcome]
+        case .entry: return [.journal, .reseal]
         }
     }
 
@@ -149,17 +148,23 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
 
     /// What a restart does with an entry.
     public enum ReplayVerdict: Equatable, Sendable {
-        /// The commit's N+1 never became durable (a torn write, or the group
-        /// is gone): none of its steps ran, drop it.
+        /// The commit's staged state never became durable (a torn write, or
+        /// the group is gone), or it was abandoned: drop it.
         case discard
-        /// Run the remaining steps.
+        /// Run the remaining steps (the journal step first when the commit
+        /// is still staged: the owed verdict).
         case replay
     }
 
     /// The verdict for an entry, given the epoch the restored group is at
-    /// (`nil`: the group did not load at all).
-    public static func replayVerdict(_ entry: PublisherCommitEntry, restoredEpoch: UInt64?) -> ReplayVerdict {
+    /// (`nil`: the group did not load at all) and whether it still holds a
+    /// staged commit.
+    public static func replayVerdict(
+        _ entry: PublisherCommitEntry, restoredEpoch: UInt64?, staged: Bool = false
+    ) -> ReplayVerdict {
         guard let restoredEpoch else { return .discard }
+        if entry.journalLost == true { return .discard }
+        if staged, !entry.done.contains(.journal) { return .replay }
         return restoredEpoch < entry.targetEpoch ? .discard : .replay
     }
 
@@ -185,6 +190,7 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         guard isHex(id, 32), isHex(channelIdHex, 32), isHex(groupIdHex, 64) else { return false }
         if kind == .approve, commitB64 == nil || welcomeB64 == nil || joinerKeyB64 == nil { return false }
         if kind == .removal, commitB64 == nil || joinerKeyB64 == nil { return false }
+        if kind == .devices || kind == .entry, commitB64 == nil { return false }
         return true
     }
 }
@@ -201,6 +207,15 @@ public struct PublisherCommitPorts {
     /// ADR-0081 — whether a failed journal step is lost (`409`, a definitive
     /// refusal): nothing of the commit is or will be on the DS.
     public var isLost: (Error) -> Bool
+    /// ADR-0090 — whether the commit is already merged (a replay after the
+    /// merge whose `done` mark did not land): the group holds no staged
+    /// commit and is at or past the target epoch. The journal step is then
+    /// done without a send.
+    public var alreadyMerged: @MainActor () -> Bool
+    /// ADR-0090 — the DS's verdict on the staged commit: `true` merges it
+    /// (and persists), `false` abandons it (and persists). Throws when the
+    /// group could not be written.
+    public var adjudicate: @MainActor (_ accepted: Bool) throws -> Void
     /// Write the Welcome to the joiner's mailbox.
     public var deliverWelcome: @MainActor (_ welcome: Data, _ joinerKey: Data) async throws -> Void
     /// The channels service's current epoch.
@@ -220,6 +235,8 @@ public struct PublisherCommitPorts {
     public init(
         commitToJournal: @escaping @MainActor (Data, (epoch: UInt64, seed: Data)?) async throws -> Void,
         isLost: @escaping (Error) -> Bool = DsCommitFailure.isLost,
+        alreadyMerged: @escaping @MainActor () -> Bool = { false },
+        adjudicate: @escaping @MainActor (Bool) throws -> Void = { _ in },
         deliverWelcome: @escaping @MainActor (Data, Data) async throws -> Void,
         serverEpoch: @escaping @MainActor () async throws -> UInt32,
         reseal: @escaping @MainActor (UInt32) async throws -> Void,
@@ -230,6 +247,8 @@ public struct PublisherCommitPorts {
     ) {
         self.commitToJournal = commitToJournal
         self.isLost = isLost
+        self.alreadyMerged = alreadyMerged
+        self.adjudicate = adjudicate
         self.deliverWelcome = deliverWelcome
         self.serverEpoch = serverEpoch
         self.reseal = reseal
@@ -244,17 +263,18 @@ public struct PublisherCommitPorts {
 public enum PublisherCommitRunner {
     /// Run the remaining steps of `entry` in order, recording each as it
     /// lands. Throws the first step's failure, leaving the entry (with what
-    /// did land) for the next run. A rotation's journal step that failed for
-    /// an unknown reason (the network) is the exception: the other steps run
-    /// and the entry is kept, not finished, so the next replay sends the
-    /// journal step again.
+    /// did land) for the next run. ADR-0090: the journal step sends the
+    /// staged commit and merges it on acceptance; a lost commit (`409`, a
+    /// definitive refusal) is abandoned and the entry finishes with no other
+    /// step (no Welcome, no appointment, no reseal: C-90 proposed). An
+    /// unanswered send throws and keeps the commit staged and owed.
     @MainActor
     public static func run(_ entry: PublisherCommitEntry, ports: PublisherCommitPorts) async throws {
         var current = entry
-        var journalDeferred = false
-        stepLoop: for step in current.remainingSteps {
+        for step in current.remainingSteps {
             switch step {
             case .journal:
+                if ports.alreadyMerged() { break }
                 if let commit = current.commitB64.flatMap({ Data(base64Encoded: $0) }) {
                     var proof: (epoch: UInt64, seed: Data)?
                     if let epoch = current.proofEpoch,
@@ -264,22 +284,21 @@ public enum PublisherCommitRunner {
                     do {
                         try await ports.commitToJournal(commit, proof)
                     } catch where ports.isLost(error) {
-                        // ADR-0081 — nothing of this commit is or will be on
-                        // the DS (a co-publisher's rotation is refused like
-                        // this: its root is not the journal's).
-                        NSLog("ADR-0081: PublisherGroup commit not taken by the journal (%@)",
+                        // Another owner device's commit took the epoch (or the
+                        // DS refused this one): abandon, apply the winner on the
+                        // next journal read, and send nothing of it.
+                        NSLog("ADR-0090: PublisherGroup commit not taken by the journal (%@); abandoned",
                               current.kind.rawValue)
+                        try ports.adjudicate(false)
                         current.journalLost = true
-                    } catch {
-                        guard current.kind == .rotation else { throw error }
-                        // The subscribers' reseal does not wait on the DS.
-                        NSLog("ADR-0081: PublisherGroup rotation commit deferred")
-                        journalDeferred = true
-                        continue stepLoop
+                        ports.finish(current)
+                        return
                     }
+                    NSLog("ADR-0090: PublisherGroup commit taken by the journal (%@); merged",
+                          current.kind.rawValue)
+                    try ports.adjudicate(true)
                 }
             case .welcome:
-                if current.journalLost == true { break }
                 if let welcome = current.welcomeB64.flatMap({ Data(base64Encoded: $0) }),
                    let joiner = current.joinerKeyB64.flatMap({ Data(base64Encoded: $0) }) {
                     try await ports.deliverWelcome(welcome, joiner)
@@ -289,7 +308,6 @@ public enum PublisherCommitRunner {
                     try await ports.reseal(current.serverTargetEpoch)
                 }
             case .appoint:
-                if current.journalLost == true { break }
                 if let joiner = current.joinerKeyB64.flatMap({ Data(base64Encoded: $0) }) {
                     do {
                         try await ports.appoint(joiner)
@@ -313,7 +331,6 @@ public enum PublisherCommitRunner {
             current = current.withStepDone(step)
             try ports.save(current)
         }
-        if journalDeferred { return }
         ports.finish(current)
     }
 }

@@ -1137,9 +1137,12 @@ private suspend fun mintCoPublisherLink(
         }
     }
     val avatar = handle?.sharedMeta()?.fullRecord()?.avatar
-    val mint = pub.withIdentity(persist = false) { id ->
-        me.lakko.app.channels.CoPublisher.openPublisherGroup(id, channelId, state.coPublished).use { pg ->
-            me.lakko.app.channels.CoPublisher.mintCoPublisherLink(id, pg, name, inviter, avatar)
+    // ADR-0090 — the capability is signed with the owner ACCOUNT seed (its
+    // issuer is the owner's account key every joiner checks the Welcome
+    // against); the group is this device's leaf's.
+    val mint = pub.withChannel { ids ->
+        me.lakko.app.channels.CoPublisher.openPublisherGroup(ids, channelId, state.coPublished).use { pg ->
+            me.lakko.app.channels.CoPublisher.mintCoPublisherLink(ids.account, pg, name, inviter, avatar)
         }
     }
     val discovery = me.lakko.app.discovery.DiscoveryClient()

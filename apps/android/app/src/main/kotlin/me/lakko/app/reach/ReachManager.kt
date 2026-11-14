@@ -2044,6 +2044,31 @@ public class ReachManager internal constructor(
         return ComposedDelegations(envelope, signed = false)
     }
 
+    /**
+     * ADR-0090 section 2.2 - committer delegations into THIS account's own
+     * mailbox, one per candidate committer account key ([candidateKeys], at
+     * most the core's maximum), signed with this account's own `contact` key
+     * and living [ttlMs] (at most 24 h): a co-publisher's device sends them
+     * with a request to admit its sibling, so an owner device can write the
+     * Welcome without holding a grant for this account. Empty when no session
+     * is bound or no contact key is held.
+     */
+    public fun composeOwnMailboxDelegations(
+        candidateKeys: List<ByteArray>,
+        ttlMs: Long = DELEGATION_TTL_MS,
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<ByteArray> {
+        val b = binding.get() ?: return emptyList()
+        val grant = grant(ReachKind.CONTACT) ?: return emptyList()
+        val mailbox = mailboxCrypto.address(b.mailboxPk)
+        val expires = (nowMs + ttlMs).toULong()
+        val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
+        return candidateKeys.take(max).map { candidate ->
+            val nonce = ByteArray(DELEGATION_NONCE_LEN).also(random::nextBytes)
+            uniffi.lakko_ffi_uniffi.signDelegationBlob(grant.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
+        }
+    }
+
     // -----------------------------------------------------------------
     // A person found in Everyone (ADR-0060 section 6, amended 2026-10-29)
     // -----------------------------------------------------------------

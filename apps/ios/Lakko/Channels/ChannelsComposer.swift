@@ -173,18 +173,16 @@ public enum ChannelsComposer {
                     throw ChannelsComposerError.ffi("the co-published group is not in this provider")
                 }
                 group = joined
-            } else if let existing = try LakkoCore.publisherGroupLoad(identity: identity, channelId: channelId) {
+            } else if let existing = try CoPublisher.loadPublisherGroup(
+                identity: identity, channelIdHex: channelIdHex) {
                 group = existing
             } else {
-                // The trap rule (ADR-0087 section 12 as amended 2026-11-13):
-                // only New channel founds; anywhere else a missing group means
-                // this device reads the channel and publishes nothing.
+                // ADR-0090 — only New channel (and decision A's re-founding)
+                // founds; anywhere else a missing group means this device
+                // reads the channel and waits to be admitted.
                 guard mayFound else { throw CoPublisherError.notOnThisDevice }
-                group = try LakkoCore.publisherGroupOpenOrCreate(
-                    identity: identity,
-                    channelId: channelId
-                )
-                CoPublisher.markFounded(group, accountIdB64: accountIdB64)
+                group = try CoPublisher.foundPublisherGroup(
+                    identity: identity, accountIdB64: accountIdB64, channelIdHex: channelIdHex)
             }
             seedBytes = try group.channelSeed(identity: identity)
             groupEpoch = try? group.epoch()

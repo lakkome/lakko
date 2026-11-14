@@ -245,6 +245,9 @@ struct NewChannelScreen: View {
                 root: try CoPublisher.rootSigner(identity: identity, publisherGroup: publisherGroup),
                 journalId: groupId, epoch: signer.epoch(), epochKey: signer.verifyingKey(), ds: DsClient())
             JournalFoundingMarks.shared.clear(journalIdHex: DsClient.pseudonymHex(groupId))
+            // ADR-0064 section 7 (2026-11-14) — a new channel gets its vault
+            // head now, so an owner device added later can enter it alone.
+            await ChannelVaultHead.writeCurrent(channelIdHex: id, group: publisherGroup, identity: identity)
             state.addChannel(.init(
                 id: id, localName: channelName, localDescription: channelDescription,
                 addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000), handle: written.handle))

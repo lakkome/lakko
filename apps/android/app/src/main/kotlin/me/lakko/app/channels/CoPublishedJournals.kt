@@ -50,6 +50,15 @@ public interface CoPublishedJournalMarks {
      *  co-publishes it, else `null` (it owns the channel, or does not
      *  publish). */
     public fun journalIdOf(channelIdHex: String): String?
+
+    /** ADR-0090 section 2.3 — record the channel owner's account key this
+     *  account verified as the `/g/` capability's issuer (or read from the
+     *  account's register): the only key a co-publisher device takes a
+     *  PublisherGroup Welcome from. */
+    public fun markOwner(channelIdHex: String, ownerAccountKey: ByteArray) {}
+
+    /** The recorded owner account key of a co-published [channelIdHex]. */
+    public fun ownerKeyOf(channelIdHex: String): ByteArray? = null
 }
 
 /** A process-local [CoPublishedJournalMarks], for tests. */
@@ -73,6 +82,16 @@ public class InMemoryCoPublishedJournalMarks : CoPublishedJournalMarks {
 
     override fun journalIdOf(channelIdHex: String): String? =
         synchronized(marks) { channels[channelIdHex.lowercase()] }
+
+    private val owners = mutableMapOf<String, ByteArray>()
+
+    override fun markOwner(channelIdHex: String, ownerAccountKey: ByteArray) {
+        if (ownerAccountKey.size != 32) return
+        synchronized(marks) { owners[channelIdHex.lowercase()] = ownerAccountKey.copyOf() }
+    }
+
+    override fun ownerKeyOf(channelIdHex: String): ByteArray? =
+        synchronized(marks) { owners[channelIdHex.lowercase()]?.copyOf() }
 }
 
 /**
@@ -128,12 +147,38 @@ public class SharedPreferencesCoPublishedJournalMarks(
             ?.substringAfter(':')
     }
 
+    override fun markOwner(channelIdHex: String, ownerAccountKey: ByteArray) {
+        if (ownerAccountKey.size != 32) return
+        val acct = account() ?: return
+        me.lakko.app.account.AccountStoreGate.write(acct) {
+            synchronized(LOCK) {
+                val key = ownersKeyOf(acct)
+                val channel = channelIdHex.lowercase()
+                val hex = ownerAccountKey.joinToString("") { "%02x".format(it) }
+                val current = prefs.getStringSet(key, emptySet()).orEmpty()
+                val next = current.filterNot { it.substringBefore(':') == channel }.toSet() + "$channel:$hex"
+                prefs.edit().putStringSet(key, next).apply()
+            }
+        }
+    }
+
+    override fun ownerKeyOf(channelIdHex: String): ByteArray? {
+        val acct = account() ?: return null
+        val channel = channelIdHex.lowercase()
+        val hex = prefs.getStringSet(ownersKeyOf(acct), emptySet()).orEmpty()
+            .firstOrNull { it.substringBefore(':') == channel }
+            ?.substringAfter(':')
+            ?.takeIf { it.length == 64 } ?: return null
+        return ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    }
+
     /** Forget device: drop [accountIdB64]'s marks and the retired set. */
     public fun deleteAccount(accountIdB64: String) {
         synchronized(LOCK) {
             prefs.edit()
                 .remove(keyOf(accountIdB64))
                 .remove(channelsKeyOf(accountIdB64))
+                .remove(ownersKeyOf(accountIdB64))
                 .remove(RETIRED_KEY)
                 .apply()
         }
@@ -150,6 +195,10 @@ public class SharedPreferencesCoPublishedJournalMarks(
 
         fun channelsKeyOf(accountIdB64: String): String =
             CHANNELS_KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+        /** ADR-0090 — `channel:ownerKeyHex` entries per account. */
+        fun ownersKeyOf(accountIdB64: String): String =
+            "co-published-owners.v1:" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
     }
 }
 

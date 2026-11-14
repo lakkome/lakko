@@ -56,6 +56,8 @@
 //! - [`channel_comment`] — the account's own comments under channel posts
 //!   (the nonce each comment's write key is derived from, so any device can
 //!   delete it), bounded the same way, and their envelope.
+//! - [`channel_admission_seed`] — a private channel's admission seeds, the
+//!   owner account's own copy (ADR-0090 open question 4).
 //! - [`channel_subscription`] — the account's channel subscriptions (the
 //!   role, the one subscriber key per channel, the read key, a
 //!   co-publisher's PublisherGroup id; 2026-11-13) and their envelope.
@@ -65,6 +67,7 @@
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
+pub mod channel_admission_seed;
 pub mod channel_comment;
 pub mod channel_reaction;
 pub mod channel_subscription;
@@ -77,6 +80,14 @@ pub mod quick_reaction;
 pub mod recovery_email;
 pub mod state;
 
+pub use channel_admission_seed::{
+    compose_channel_admission_seed_envelope, decode_channel_admission_seed_envelope,
+    is_channel_admission_seed_envelope, ChannelAdmissionSeedEntry,
+    ChannelAdmissionSeedEnvelopeError, CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN,
+    CHANNEL_ADMISSION_SEED_ENVELOPE_DOMAIN_V1, CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_LEN, CHANNEL_ADMISSION_SEED_ENVELOPE_MIN_LEN,
+    CHANNEL_ADMISSION_SEED_ENVELOPE_VERSION_V1, CHANNEL_ADMISSION_SEED_LEN,
+};
 pub use channel_comment::{
     compose_channel_comment_envelope, decode_channel_comment_envelope, is_channel_comment_envelope,
     ChannelCommentEntry, ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT,

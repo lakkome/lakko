@@ -18,12 +18,19 @@ vi.mock("../wasm", async () => {
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import {
+  foundPublisherGroup,
   openHeldPublisherGroup,
-  openOrFoundPublisherGroup,
   PublisherGroupNotHeldError,
   type UnconfirmedFoundingStorage,
 } from "./composer";
 import { openPublisherGroup } from "./copublisher";
+import { installPublisherDeviceSource } from "./publisher-device";
+
+/** ADR-0090: this DEVICE, bound to `account`, is installed as the leaf. */
+function installDeviceOf(account: wasm.Identity, fill: number): { device: wasm.Identity; uninstall: () => void } {
+  const device = wasm.Identity.fromSeedBound(new Uint8Array(64).fill(fill), account.ed25519Seed, 1_700_000_000n);
+  return { device, uninstall: installPublisherDeviceSource(() => device) };
+}
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -54,6 +61,7 @@ describe("a device with no PublisherGroup for a channel founds nothing", () => {
   it("openHeldPublisherGroup refuses, makes no request and leaves no group behind", async () => {
     // The owner's second device: the same account seed, no group state.
     const reader = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x71));
+    const { device, uninstall } = installDeviceOf(reader, 0x81);
     const channelId = new Uint8Array(16).fill(0x72);
     const st = mem();
     const ds = vi.fn(async () => new Response(null, { status: 204 }));
@@ -64,22 +72,25 @@ describe("a device with no PublisherGroup for a channel founds nothing", () => {
       );
       expect(ds).not.toHaveBeenCalled();
       expect(st.data.size).toBe(0);
-      expect(wasm.PublisherGroup.load(reader, channelId)).toBeUndefined();
+      expect(wasm.PublisherGroup.load(device, reader.ed25519Seed, channelId)).toBeUndefined();
     } finally {
+      uninstall();
       reader.free();
     }
   });
 
   it("every path but New channel (openPublisherGroup) refuses the same way", async () => {
     const reader = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x73));
+    const { device, uninstall } = installDeviceOf(reader, 0x83);
     const channelId = new Uint8Array(16).fill(0x74);
     const ds = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", ds);
     try {
       await expect(openPublisherGroup(reader, hex(channelId))).rejects.toBeInstanceOf(PublisherGroupNotHeldError);
       expect(ds).not.toHaveBeenCalled();
-      expect(wasm.PublisherGroup.load(reader, channelId)).toBeUndefined();
+      expect(wasm.PublisherGroup.load(device, reader.ed25519Seed, channelId)).toBeUndefined();
     } finally {
+      uninstall();
       reader.free();
     }
   });
@@ -87,17 +98,19 @@ describe("a device with no PublisherGroup for a channel founds nothing", () => {
   it("the device that founded the group (New channel) opens it, claiming nothing again", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x75));
+    const { uninstall } = installDeviceOf(owner, 0x85);
     const channelId = new Uint8Array(16).fill(0x76);
     const st = mem();
     try {
       vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
+      (await foundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
       const later = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", later);
       const held = await openHeldPublisherGroup(wasm, owner, channelId, st, ACCOUNT);
       expect(later).not.toHaveBeenCalled();
       held.free();
     } finally {
+      uninstall();
       owner.free();
       warn.mockRestore();
     }
@@ -106,11 +119,12 @@ describe("a device with no PublisherGroup for a channel founds nothing", () => {
   it("a held group whose founding claim never landed claims again, as before", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x77));
+    const { uninstall } = installDeviceOf(owner, 0x87);
     const channelId = new Uint8Array(16).fill(0x78);
     const st = mem();
     try {
       vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
-      await expect(openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
+      await expect(foundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
       expect(st.data.size).toBe(1);
       const ok = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", ok);
@@ -118,6 +132,7 @@ describe("a device with no PublisherGroup for a channel founds nothing", () => {
       expect(ok).toHaveBeenCalledTimes(1);
       expect(st.data.size).toBe(0);
     } finally {
+      uninstall();
       owner.free();
       warn.mockRestore();
     }

@@ -7,6 +7,7 @@
  * destructive ones last and behind the in-page confirmation (ADR-0045 UX §14).
  */
 import { revokeAllMintedLinks } from "../contacts/own-links";
+import { deleteOwnedChannelVaults } from "../channels/channel-vault-head";
 import { base64Encode } from "./account-id";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
@@ -274,6 +275,9 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       } catch {
         /* best-effort: the deletion does not wait on a link */
       }
+      // ADR-0064 section 1: the saved copies of the channels this account
+      // owns, while the account still exists. Bounded; never throws.
+      await deleteOwnedChannelVaults();
       try {
         await c.deleteAccount(grant);
       } catch (err) {

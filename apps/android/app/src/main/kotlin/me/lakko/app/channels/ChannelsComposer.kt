@@ -9,7 +9,6 @@ import uniffi.lakko_ffi_uniffi.ChannelSubscriberKeypair
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
-import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate as uniffiPublisherGroupOpenOrCreate
 import uniffi.lakko_ffi_uniffi.channelExporterLabel as uniffiChannelExporterLabel
 import uniffi.lakko_ffi_uniffi.channelSeedEnvelopeLen as uniffiChannelSeedEnvelopeLen
 import uniffi.lakko_ffi_uniffi.channelSeedFromMlsExporterOutput as uniffiChannelSeedFromMlsExporterOutput
@@ -190,50 +189,34 @@ public object ChannelsComposer {
      * [existingSigningSeed] falls back to a fresh seed rather
      * than failing the open.
      */
-    public fun freshPublisherKeys(
-        identity: Identity,
+    public suspend fun freshPublisherKeys(
+        ids: ChannelIdentity,
         channelIdHex: String,
         existingSigningSeed: ByteArray? = null,
         /** ADR-0078 section 6 — a co-published channel's group id (the
          *  owner's derivation, which this account cannot compute): the group
          *  is opened under it and never created. */
         joinedGroupId: ByteArray? = null,
-        /** New channel only: found the group when absent. Everywhere else the
-         *  group is loaded, and a miss throws
+        /** New channel (and ADR-0090 decision A) only: found the group when
+         *  absent. Everywhere else the group is loaded, and a miss throws
          *  [ChannelsComposerException.NotPublishedHere]. */
         allowFound: Boolean = false,
     ): ChannelPublisherKeys {
-        val channelId = channelIdFromHex(channelIdHex)
-
-        // G4-2-mls-persistence step 3 — load-or-create the
-        // PublisherGroup keyed by `channelId`. The first
-        // publish mints + persists; every subsequent publish
-        // reuses the same MLS state so the exporter output is
-        // stable across process restarts. Subscribers who
-        // received a sealed seed envelope in a prior epoch
-        // continue to decrypt new posts.
-        //
-        // Replaces the throwaway-group path that lived here
-        // before (flagged as the follow-up in the G-27
-        // closeout). See
-        // `crates/lakko-mls/src/publisher_group.rs` for the
-        // Rust-core invariant.
+        // ADR-0090 — the PublisherGroup lives on this device's bound leaf
+        // ([ChannelIdentity]); a device with no leaf reads and waits to be
+        // admitted by another device of the account.
         var seedEpoch: UInt? = null
         val seed: ByteArray = try {
-            val publisher = when (publisherGroupOpenMode(joined = joinedGroupId != null, allowFound = allowFound)) {
-                PublisherGroupOpenMode.LOAD_JOINED ->
-                    uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined(identity, joinedGroupId ?: ByteArray(0), channelId)
-                        ?: throw ChannelsComposerException.NotPublishedHere()
-                PublisherGroupOpenMode.LOAD ->
-                    uniffi.lakko_ffi_uniffi.publisherGroupLoad(identity, channelId)
-                        ?: throw ChannelsComposerException.NotPublishedHere()
-                PublisherGroupOpenMode.LOAD_OR_FOUND -> uniffiPublisherGroupOpenOrCreate(identity, channelId)
-            }
+            val publisher = CoPublisher.openPublisherGroupOn(ids, channelIdHex, joinedGroupId, allowFound)
+                ?: throw ChannelsComposerException.NotPublishedHere()
             try {
-                // The PublisherGroup epoch the seed serves (both the group and
-                // the channel start at 0; each commit moves both by one).
-                seedEpoch = publisher.epoch().coerceAtMost(UInt.MAX_VALUE.toULong()).toUInt()
-                publisher.channelSeed(identity)
+                ids.mls { device ->
+                    // The channel epoch the seed serves: the group's epoch plus
+                    // this channel's offset (ADR-0090 decision A: 0 unless the
+                    // group was founded again under a live channel).
+                    seedEpoch = ChannelEpochOffsets.channelEpochOf(channelIdHex, publisher.epoch())
+                    publisher.channelSeed(device)
+                }
             } finally {
                 publisher.close()
             }
@@ -242,7 +225,7 @@ public object ChannelsComposer {
             if (LegacyChannelV1.isLegacyRefusalText(e.message)) {
                 throw LegacyChannelException(LegacyChannelKind.CHANNEL)
             }
-            throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup open_or_create failed")
+            throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup open failed")
         } catch (e: FfiException.Channels) {
             throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup exporter failed")
         } catch (e: FfiException.Codec) {

@@ -752,6 +752,10 @@ publisher control (UX `second-device.md` section 4a), and never founds a Publish
 or resets the channel journal: founding happens only in create-channel. A lost
 publishing device leaves the channel without anyone who can post (G-54).
 
+**Amended again 2026-11-13 ([ADR-0090](0090-publisher-group-device-leaves.md), accepted,
+not built).** Every device of the owner and of each publisher will hold its own
+PublisherGroup leaf and post; the reader rule above stays until that is built.
+
 ### 13. A post carries what a message can
 
 **The plaintext of a post is the chat envelope.** `classify_post_plaintext` keeps its
@@ -1017,6 +1021,15 @@ owner returns (a removal is itself the owner's commit, so the rotation after it 
 the owner's device at once; a step-down waits for the owner's device anyway). No core or
 server change; the clients drop the rotation pass for channels they
 do not own.
+
+**Any owner device rotates (amended 2026-11-13, maintainer decision,
+[ADR-0090](0090-publisher-group-device-leaves.md)).** "The owner's device alone" above
+becomes: any device of the owner that holds the PublisherGroup runs the rotation policy,
+every PublisherGroup commit is staged and sent through the ADR-0081 commit route, and the
+DS takes exactly one commit per epoch; the loser abandons its staged commit and reseals
+nothing. Co-publisher devices still never rotate. Nothing of ADR-0090 is built yet; until
+it is, the 2026-11-13 note of section 12 holds (only the device holding the
+PublisherGroup publishes).
 
 **A publisher asks the owner to rotate (amended 2026-11-08, maintainer decision).** A
 publisher may remove a subscriber (this section), and a removal is followed by a rotation

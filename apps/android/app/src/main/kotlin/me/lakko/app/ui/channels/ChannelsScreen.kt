@@ -450,8 +450,8 @@ internal suspend fun createChannel(
     // ADR-0057 finding 3 — the PublisherGroup journal is claimed with the
     // owner's root BEFORE anything announces the channel.
     try {
-        publisher.withIdentity { identity ->
-            DsClient().use { ds -> CoPublisher.foundAndClaimAtCreation(ds, identity, id) }
+        publisher.withChannel { ids ->
+            DsClient().use { ds -> CoPublisher.foundAndClaimAtCreation(ds, ids, id) }
         }
     } catch (e: LegacyChannelException) {
         throw e
@@ -475,12 +475,12 @@ internal suspend fun createChannel(
     }
     val owner = publisher.withIdentity(persist = false) { identity -> ChannelsClient.ownerSigner(identity, id) }
     owner.use { client.createChannel(id, it, private = private) }
-    val keys = publisher.withIdentity { identity ->
+    val keys = publisher.withChannel { ids ->
         // New channel is the one flow that may found the PublisherGroup
         // (docs/ux/second-device.md section 4a); it was founded and claimed
         // just above.
         ChannelsComposer.freshPublisherKeys(
-            identity = identity,
+            ids = ids,
             channelIdHex = id,
             existingSigningSeed = state.persistedPublisherSigningSeed(id),
             allowFound = true,
@@ -496,6 +496,11 @@ internal suspend fun createChannel(
         ),
     )
     state.setKeys(id, keys)
+    // ADR-0090 decision A — a channel founded here is never founded again by
+    // a pending re-founding of this device.
+    state.boundAccount?.let { acct ->
+        me.lakko.app.channels.ChannelRefounding.markDone(context = me.lakko.app.channels.SubscriberAdmission.appContext ?: return@let, account = acct, channelId = id)
+    }
     // ADR-0051 §4 / ADR-0087 section 18.2 — the v3 record is the first post:
     // subscribers title the channel from it and read its @name and flag. It
     // is kept here before it is sent and owed until it lands, so a failed
@@ -731,13 +736,12 @@ public suspend fun joinAsCoPublisher(
     // identity's provider; the join below must run on the SAME identity, and
     // the joined group is persisted with it.
     val request = me.lakko.app.discovery.DiscoveryClient().use { discovery ->
-        publisher.withIdentityPersistingFirst { identity, persistNow ->
+        publisher.withChannel { ids ->
             CoPublisher.requestToCoPublish(
                 ds,
-                identity,
+                ids,
                 link,
                 coPublished,
-                persistNow,
                 { blobId -> discovery.fetchGroupInvite(blobId) },
                 ownProfileEnvelopeWithAccount(context, state.boundAccount),
                 beforeKnock = { r ->
@@ -750,6 +754,7 @@ public suspend fun joinAsCoPublisher(
                             joinerKeyB64 = java.util.Base64.getEncoder().encodeToString(r.joinerKey),
                             name = channelName,
                             requestedAtMs = System.currentTimeMillis(),
+                            ownerAccountKeyB64 = java.util.Base64.getEncoder().encodeToString(r.ownerAccountKey),
                         ),
                     )
                 },
@@ -769,21 +774,19 @@ public suspend fun joinAsCoPublisher(
             if (!PendingPublisherRequests.isPending(context, account, request.channelIdHex)) {
                 return@withLock state.keysByChannel.value.containsKey(request.channelIdHex)
             }
-            val keys = publisher.withIdentityPersistingFirst { identity, persistNow ->
+            val keys = publisher.withChannel { ids ->
+                // Joined: the PublisherGroup is persisted with the device's
+                // provider at the post-approve epoch before anything else.
                 CoPublisher.pollForCoPublishWelcome(
                     ds,
-                    identity,
+                    ids,
                     request.groupId,
-                    request.joinerKey,
+                    request.ownerAccountKey,
                     request.channelIdHex,
                     coPublished,
                     // G-29 — reuse the persisted signing seed on a re-poll.
                     state.persistedPublisherSigningSeed(request.channelIdHex),
-                )?.also {
-                    // Joined: the PublisherGroup now lives in the provider at
-                    // the post-approve epoch; on disk before anything else.
-                    persistNow()
-                }
+                )
             } ?: return@withLock false
             settleLandedRequest(context, state, account, request.channelIdHex, channelName, keys)
             true
@@ -841,28 +844,71 @@ public suspend fun landPendingPublisherWelcome(
     welcome: ByteArray,
 ): Boolean {
     val account = state.boundAccount ?: return false
-    if (PendingPublisherRequests.load(context, account).isEmpty()) return false
     val publisher = state.publisher ?: return false
+    if (!publisher.hasDevice()) return false
     return publisherLanding.withLock {
-        val ownKey = publisher.withIdentity(persist = false) { it.signaturePublicKey() }
-            .let { java.util.Base64.getEncoder().encodeToString(it) }
+        val ownKey = publisher.withChannel { ids -> java.util.Base64.getEncoder().encodeToString(ids.device.signaturePublicKey()) }
         for (r in PendingPublisherRequests.load(context, account)) {
             // The Welcome is sealed to the knocked KeyPackage, whose private
-            // key is in this identity's provider only when the request was
-            // made with it.
+            // key is in this device's provider only when the request was made
+            // on it.
             if (r.joinerKeyB64 != ownKey) continue
             val groupId = hexToBytesOrNull(r.groupIdHex) ?: continue
-            val keys = publisher.withIdentityPersistingFirst { identity, persistNow ->
+            val ownerKey = r.ownerAccountKeyB64?.let {
+                try {
+                    java.util.Base64.getDecoder().decode(it)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            } ?: continue
+            val keys = publisher.withChannel { ids ->
                 CoPublisher.joinCoPublishWelcome(
-                    identity,
+                    ids,
                     welcome,
                     groupId,
+                    ownerKey,
                     r.channelIdHex,
                     coPublished,
                     state.persistedPublisherSigningSeed(r.channelIdHex),
-                )?.also { persistNow() }
+                )
             } ?: continue
             settleLandedRequest(context, state, account, r.channelIdHex, r.name, keys)
+            return@withLock true
+        }
+        // ADR-0090 section 2.3 — an owner device admitted this device to a
+        // channel the account owns or co-publishes (the subscription
+        // register), and this device holds no group for it yet.
+        val registers = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.channelSubscriptions?.value.orEmpty()
+        for (reg in registers) {
+            if (!reg.subscribed || reg.role == uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole.SUBSCRIBER) continue
+            val channelIdHex = ChannelsComposer.bytesToHex(reg.channelId)
+            if (state.keysByChannel.value.containsKey(channelIdHex)) continue
+            if (state.channels.value.none { it.id == channelIdHex }) continue
+            val owned = reg.role == uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole.OWNER
+            val keys = try {
+                publisher.withChannel { ids ->
+                    CoPublisher.joinAdmissionWelcome(
+                        ids,
+                        welcome,
+                        channelIdHex,
+                        owned = owned,
+                        joinedGroupId = if (owned) null else reg.publisherGroupId.takeIf { it.size == 32 },
+                        ownerAccountKey = if (owned) {
+                            null
+                        } else {
+                            me.lakko.app.channels.coPublisherWelcomeOwnerKey(reg.ownerAccountKey, coPublished.ownerKeyOf(channelIdHex))
+                        },
+                        coPublished = coPublished,
+                        existingSigningSeed = state.persistedPublisherSigningSeed(channelIdHex),
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            state.setKeys(channelIdHex, keys)
+            Log.i(TAG, "ADR-0090: admitted to post in a channel of the account")
             return@withLock true
         }
         false

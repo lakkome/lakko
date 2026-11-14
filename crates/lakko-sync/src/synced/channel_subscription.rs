@@ -41,6 +41,16 @@
 //! - `publisher_group_id`: for a co-publisher, the 32-byte PublisherGroup id
 //!   it joined (not derivable: it came from the `/g/` link); none for every
 //!   other role (an owner's is derived from the account seed).
+//! - `owner_account_key`: for a co-publisher, the channel owner's 32-byte
+//!   account key, recorded by the device that joined from the issuer of the
+//!   `/g/` capability it verified (ADR-0090 section 2.3). It is the
+//!   AUTHORITY a co-publisher's other devices use: a co-publisher device
+//!   accepts a PublisherGroup Welcome only from a device of this key
+//!   (`PublisherGroup::join_from_welcome` takes it), never from what the
+//!   Welcome says about itself. Required for a co-publisher; absent for an
+//!   owner (the owner's key is the account's own key, derived from the
+//!   account seed, and recording it could only disagree with it) and for a
+//!   subscriber.
 //! - `name`, `handle`: what the channel list falls back to before the
 //!   channel's own metadata record is read; each may be empty.
 //!
@@ -60,7 +70,7 @@
 //!
 //! ```text
 //! domain(35) "lakko/sync/channel-subscription/v1\0"
-//! version(1) = 0x01
+//! version(1) = 0x02            (0x01 refused: it carried no owner key)
 //! count(1)                      1..=16
 //! count x {
 //!     hlc(8, BE)                the register's ORIGINAL stamp
@@ -73,6 +83,8 @@
 //!     read_key
 //!     publisher_group_id_len(1) 32 for a co-publisher, else 0
 //!     publisher_group_id
+//!     owner_account_key_len(1)  32 for a co-publisher, else 0
+//!     owner_account_key
 //!     name_len(1)               0..=255, a display name when not empty
 //!     name
 //!     handle_len(1)             0 or 3..=32, a canonical name when not empty
@@ -126,7 +138,10 @@ pub const CHANNEL_SUBSCRIPTIONS_MAX_CLIENT: usize = 1000;
 pub const CHANNEL_SUBSCRIPTION_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/sync/channel-subscription/v1\0";
 
 /// The version byte this build writes and accepts.
-pub const CHANNEL_SUBSCRIPTION_ENVELOPE_VERSION_V1: u8 = 0x01;
+pub const CHANNEL_SUBSCRIPTION_ENVELOPE_VERSION_V1: u8 = 0x02;
+
+/// Length of the channel owner's account key a co-publisher records.
+pub const CHANNEL_SUBSCRIPTION_OWNER_KEY_LEN: usize = 32;
 
 /// Most entries one envelope carries.
 pub const CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_ENTRIES: usize = 16;
@@ -145,6 +160,8 @@ const ENTRY_MAX_LEN: usize = 8
     + CHANNEL_SUBSCRIPTION_READ_KEY_LEN
     + 1
     + CHANNEL_SUBSCRIPTION_GROUP_ID_LEN
+    + 1
+    + CHANNEL_SUBSCRIPTION_OWNER_KEY_LEN
     + 1
     + CHANNEL_SUBSCRIPTION_NAME_MAX_BYTES
     + 1
@@ -217,6 +234,11 @@ pub struct ChannelSubscribed {
     /// The PublisherGroup id a co-publisher joined; `None` for every other
     /// role.
     pub publisher_group_id: Option<[u8; CHANNEL_SUBSCRIPTION_GROUP_ID_LEN]>,
+    /// The channel owner's account key a co-publisher recorded from the
+    /// verified `/g/` capability issuer; `None` for every other role. A
+    /// co-publisher device accepts a PublisherGroup Welcome only from a
+    /// device of this key.
+    pub owner_account_key: Option<[u8; CHANNEL_SUBSCRIPTION_OWNER_KEY_LEN]>,
     /// The channel's name as this account last knew it, or empty.
     pub name: String,
     /// The channel's `@name` without the `@`, or empty.
@@ -231,6 +253,7 @@ impl core::fmt::Debug for ChannelSubscribed {
             .field("role", &self.role)
             .field("has_read_key", &self.read_key.is_some())
             .field("has_publisher_group_id", &self.publisher_group_id.is_some())
+            .field("has_owner_account_key", &self.owner_account_key.is_some())
             .field("name_len", &self.name.len())
             .field("handle_len", &self.handle.len())
             .finish_non_exhaustive()
@@ -252,6 +275,9 @@ impl ChannelSubscribed {
         let co_publisher = self.role == ChannelSubscriptionRole::CoPublisher;
         if co_publisher != self.publisher_group_id.is_some() {
             return Err(BoundsError::ChannelSubscriptionPublisherGroup);
+        }
+        if co_publisher != self.owner_account_key.is_some() {
+            return Err(BoundsError::ChannelSubscriptionOwnerKey);
         }
         if !self.name.is_empty()
             && (self.name.len() > CHANNEL_SUBSCRIPTION_NAME_MAX_BYTES
@@ -318,6 +344,7 @@ impl ChannelSubscriptionEntry {
         out.extend_from_slice(&s.subscriber_secret);
         put_opt(out, s.read_key.as_ref().map(<[u8; 32]>::as_slice));
         put_opt(out, s.publisher_group_id.as_ref().map(<[u8; 32]>::as_slice));
+        put_opt(out, s.owner_account_key.as_ref().map(<[u8; 32]>::as_slice));
         put_opt(out, Some(s.name.as_bytes()));
         put_opt(out, Some(s.handle.as_bytes()));
     }
@@ -336,6 +363,7 @@ impl ChannelSubscriptionEntry {
                 let read_key = take_opt32(cur, BoundsError::ChannelSubscriptionReadKey)?;
                 let publisher_group_id =
                     take_opt32(cur, BoundsError::ChannelSubscriptionPublisherGroup)?;
+                let owner_account_key = take_opt32(cur, BoundsError::ChannelSubscriptionOwnerKey)?;
                 let name = take_text(
                     cur,
                     CHANNEL_SUBSCRIPTION_NAME_MAX_BYTES,
@@ -351,6 +379,7 @@ impl ChannelSubscriptionEntry {
                     subscriber_secret,
                     read_key,
                     publisher_group_id,
+                    owner_account_key,
                     name,
                     handle,
                 })
@@ -537,6 +566,8 @@ mod tests {
                     read_key: Some([0x4B; 32]),
                     publisher_group_id: (role == ChannelSubscriptionRole::CoPublisher)
                         .then_some([0x9A; 32]),
+                    owner_account_key: (role == ChannelSubscriptionRole::CoPublisher)
+                        .then_some([0x0E; 32]),
                     name: "News".to_string(),
                     handle: "news".to_string(),
                 }),
@@ -557,7 +588,7 @@ mod tests {
         assert_eq!(CHANNEL_SUBSCRIPTION_ENVELOPE_MIN_LEN, 35 + 2 + 8 + 16 + 1);
         let wire = compose_channel_subscription_envelope(&[left(1, 9)]).unwrap_or_default();
         assert_eq!(wire.len(), CHANNEL_SUBSCRIPTION_ENVELOPE_MIN_LEN);
-        assert_eq!(wire[35], 0x01);
+        assert_eq!(wire[35], 0x02);
         assert_eq!(wire[36], 1);
         assert_eq!(&wire[37..45], &9u64.to_be_bytes());
         assert_eq!(&wire[45..61], &[1u8; 16]);
@@ -575,16 +606,27 @@ mod tests {
         assert_eq!(on[95], 32);
         assert_eq!(&on[96..128], &[0x4B; 32]);
         assert_eq!(on[128], 0);
-        assert_eq!(on[129], 4);
-        assert_eq!(&on[130..134], b"News");
-        assert_eq!(on[134], 4);
-        assert_eq!(&on[135..139], b"news");
-        assert_eq!(on.len(), 139);
+        assert_eq!(on[129], 0);
+        assert_eq!(on[130], 4);
+        assert_eq!(&on[131..135], b"News");
+        assert_eq!(on[135], 4);
+        assert_eq!(&on[136..140], b"news");
+        assert_eq!(on.len(), 140);
+        let co = compose_channel_subscription_envelope(&[live(
+            2,
+            ChannelSubscriptionRole::CoPublisher,
+            7,
+        )])
+        .unwrap_or_default();
+        assert_eq!(co[128], 32);
+        assert_eq!(&co[129..161], &[0x9A; 32]);
+        assert_eq!(co[161], 32);
+        assert_eq!(&co[162..194], &[0x0E; 32]);
         assert!(is_channel_subscription_envelope(&on));
         assert!(!is_channel_subscription_envelope(
             b"lakko/sync/link-record/v1\0"
         ));
-        assert_eq!(CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN, 35 + 2 + 16 * 413);
+        assert_eq!(CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN, 35 + 2 + 16 * 446);
     }
 
     #[test]
@@ -614,6 +656,41 @@ mod tests {
             owner.validate(),
             Err(BoundsError::ChannelSubscriptionPublisherGroup)
         );
+    }
+
+    /// ADR-0090 section 2.3: a co-publisher records the owner's account key
+    /// (required); an owner and a subscriber record none.
+    #[test]
+    fn an_owner_key_belongs_to_a_co_publisher_alone() {
+        let mut co = live(1, ChannelSubscriptionRole::CoPublisher, 1).value;
+        if let Some(s) = co.subscribed.as_mut() {
+            s.owner_account_key = None;
+        }
+        assert_eq!(co.validate(), Err(BoundsError::ChannelSubscriptionOwnerKey));
+        for role in [
+            ChannelSubscriptionRole::Owner,
+            ChannelSubscriptionRole::Subscriber,
+        ] {
+            let mut e = live(1, role, 1).value;
+            assert!(e.validate().is_ok());
+            if let Some(s) = e.subscribed.as_mut() {
+                s.owner_account_key = Some([1; 32]);
+            }
+            assert_eq!(e.validate(), Err(BoundsError::ChannelSubscriptionOwnerKey));
+        }
+        // A key-less co-publisher entry on the wire is refused.
+        let wire = compose_channel_subscription_envelope(&[live(
+            4,
+            ChannelSubscriptionRole::CoPublisher,
+            1,
+        )])
+        .unwrap_or_default();
+        let mut damaged = wire[..161].to_vec();
+        damaged.push(0);
+        damaged.extend_from_slice(&wire[194..]);
+        assert!(decode_channel_subscription_envelope(&damaged).is_err());
+        let text = format!("{:?}", live(4, ChannelSubscriptionRole::CoPublisher, 1));
+        assert!(text.contains("has_owner_account_key: true"), "{text}");
     }
 
     #[test]
@@ -694,7 +771,7 @@ mod tests {
             );
         }
         let mut version = wire.clone();
-        version[35] = 2;
+        version[35] = 1;
         assert_eq!(
             decode_channel_subscription_envelope(&version),
             Err(ChannelSubscriptionEnvelopeError::UnknownVersion)
@@ -716,8 +793,9 @@ mod tests {
             (62, 4),    // role
             (95, 31),   // read key length
             (128, 32),  // a group id for a subscriber
-            (129, 255), // name length runs past the bytes
-            (134, 33),  // handle length past its bound
+            (129, 32),  // an owner key for a subscriber
+            (130, 255), // name length runs past the bytes
+            (135, 33),  // handle length past its bound
         ] {
             let mut damaged = wire.clone();
             damaged[at] = value;
@@ -727,13 +805,13 @@ mod tests {
             );
         }
         let mut name = wire.clone();
-        name[130] = 0xFF;
+        name[131] = 0xFF;
         assert_eq!(
             decode_channel_subscription_envelope(&name),
             Err(ChannelSubscriptionEnvelopeError::Truncated)
         );
         // Swap the two entries: not canonical.
-        let first_len = 8 + 16 + 1 + 1 + 32 + 33 + 1 + 5 + 5;
+        let first_len = 8 + 16 + 1 + 1 + 32 + 33 + 1 + 1 + 5 + 5;
         let mut swapped = wire[..37].to_vec();
         swapped.extend_from_slice(&wire[37 + first_len..]);
         swapped.extend_from_slice(&wire[37..37 + first_len]);
@@ -755,13 +833,14 @@ mod tests {
                 any::<[u8; 32]>(),
                 proptest::option::of(any::<[u8; 32]>()),
                 any::<[u8; 32]>(),
+                any::<[u8; 32]>(),
                 "[A-Za-z]{0,20}",
                 "[a-z0-9_]{3,32}|",
             )),
         )
             .prop_map(|(channel_id, s)| ChannelSubscriptionEntry {
                 channel_id,
-                subscribed: s.map(|(role, secret, read_key, group, name, handle)| {
+                subscribed: s.map(|(role, secret, read_key, group, owner, name, handle)| {
                     let role = match role {
                         0 => ChannelSubscriptionRole::Subscriber,
                         1 => ChannelSubscriptionRole::Owner,
@@ -773,6 +852,8 @@ mod tests {
                         read_key,
                         publisher_group_id: (role == ChannelSubscriptionRole::CoPublisher)
                             .then_some(group),
+                        owner_account_key: (role == ChannelSubscriptionRole::CoPublisher)
+                            .then_some(owner),
                         name,
                         handle,
                     }

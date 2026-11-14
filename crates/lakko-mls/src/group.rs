@@ -294,7 +294,18 @@ pub struct Group {
     /// [`Group::load`] — so a request survives the owner's app restart, which
     /// is the one thing the in-memory v1 could not offer.
     pending_external_joins: Vec<PendingExternalJoin>,
+    /// Where this device stands with a group it entered by an external commit
+    /// ([ADR-0064] section 7, amendment of 2026-11-14): see
+    /// [`external_entry`]. [`EntryState::Member`] for every other group.
+    ///
+    /// [ADR-0064]: ../../../docs/adr/0064-conversation-backup-and-device-re-entry.md
+    entry: external_entry::EntryState,
 }
+
+mod external_entry;
+pub(crate) use external_entry::ExternalEntryView;
+#[cfg(test)]
+pub(crate) use external_entry::{builds_with_lifetime_check, forge_external_commit};
 
 /// The provider row key for `group_id`'s retained external-join requests.
 fn pending_external_joins_row_key(group_id: &[u8]) -> Vec<u8> {
@@ -368,6 +379,7 @@ fn delete_stored_group(identity: &Identity, stored: &mut MlsGroup) -> Result<()>
         .write()
         .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?
         .retain(|key, _| !key.starts_with(&queued));
+    external_entry::drop_rows(identity, &group_id)?;
     Group::drop_pending_external_joins_row(identity, &group_id)
 }
 
@@ -1562,7 +1574,7 @@ impl Group {
         self.stage_add_members(identity, validated)
     }
 
-    fn validate_key_packages(
+    pub(crate) fn validate_key_packages(
         identity: &Identity,
         key_packages: &[&[u8]],
     ) -> Result<Vec<KeyPackage>> {
@@ -1594,45 +1606,6 @@ impl Group {
         leaf: LeafNodeIndex,
     ) -> Result<MlsMessageOut> {
         self.remove_member_finishing(identity, leaf, DirectFinish::Merge)
-    }
-
-    /// Remove every leaf in `leaves` in ONE commit, merged eagerly: the
-    /// PublisherGroup publisher removal ([ADR-0087] section 15, note of
-    /// 2026-11-05), where one person may hold several leaves. Only a group
-    /// with **no role table** takes it (a `PublisherGroup`): a role-table
-    /// group changes membership through proposals (ADR-0045), and a direct
-    /// commit there would be refused by every peer. The caller decides who
-    /// may remove whom; this checks only the group's state.
-    ///
-    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Group`] for an empty list, a group carrying a role table, a
-    /// staged commit or pending proposals, or an OpenMLS failure (a leaf not
-    /// in the group, the committer's own leaf: `CannotRemoveSelf`).
-    pub(crate) fn remove_leaves_directly(
-        &mut self,
-        identity: &Identity,
-        leaves: &[LeafNodeIndex],
-    ) -> Result<Vec<u8>> {
-        if leaves.is_empty() {
-            return Err(Error::Group("remove_leaves: no leaf named".into()));
-        }
-        if self.group_roles().is_some() {
-            return Err(Error::Group(
-                "remove_leaves: a group with a role table changes membership through proposals"
-                    .into(),
-            ));
-        }
-        self.refuse_if_commit_staged("remove_leaves")?;
-        self.refuse_if_proposals_pending("remove_leaves")?;
-        let (commit, _welcome, _group_info) = self
-            .inner
-            .remove_members(&identity.provider, &identity.signature_keys, leaves)
-            .map_err(|e| Error::Group(format!("remove_members: {e:?}")))?;
-        self.finish_direct(identity, DirectFinish::Merge)?;
-        encode_message(&commit)
     }
 
     /// [`Self::remove_member`], staged ([ADR-0081]; see
@@ -2340,28 +2313,33 @@ impl Group {
         Ok(proposal)
     }
 
-    /// Approve a retained external-join request as a **direct commit**, for a
-    /// group that has no role table and therefore no committer to sweep a
-    /// proposal (ADR-0045 S7).
+    /// The KeyPackage of a retained external-join request, for a **direct
+    /// commit** in a group that has no role table and therefore no committer
+    /// to sweep a proposal (ADR-0045 S7; [ADR-0090] section 3: the
+    /// PublisherGroup approve is staged).
     ///
     /// `pub(crate)` and reachable from exactly one place —
-    /// [`crate::PublisherGroup::approve_external_join`] — so the direct route
-    /// exists only where the proposal route cannot. It is not a fallback: it
-    /// **refuses** a group that carries a role table rather than quietly
-    /// direct-committing into one that has a committer, which would be the
-    /// second ungated route into membership ADR-0045 names as the hazard
+    /// [`crate::PublisherGroup::stage_approve_external_join`] — so the direct
+    /// route exists only where the proposal route cannot. It is not a
+    /// fallback: it **refuses** a group that carries a role table rather than
+    /// quietly direct-committing into one that has a committer, which would be
+    /// the second ungated route into membership ADR-0045 names as the hazard
     /// rebuilt under a prudent name.
+    ///
+    /// The request stays retained: it is reaped when the commit that admits
+    /// the joiner merges ([`Self::merge_staged_sweep`]), so an abandoned
+    /// approve leaves it where it was.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
     ///
     /// # Errors
     ///
     /// [`Error::Group`] when the group carries a role table, when no retained
-    /// request matches `proposal_ref`, when that joiner is already a member, or
-    /// on any OpenMLS-side add failure.
-    pub(crate) fn approve_external_join_directly(
-        &mut self,
-        identity: &Identity,
+    /// request matches `proposal_ref`, or when that joiner is already a member.
+    pub(crate) fn retained_join_for_direct_commit(
+        &self,
         proposal_ref: &[u8],
-    ) -> Result<MemberAddition> {
+    ) -> Result<KeyPackage> {
         if self.group_roles().is_some() {
             return Err(Error::Group(
                 "direct external join approve refused: this group carries a role table, so it \
@@ -2369,15 +2347,165 @@ impl Group {
                     .into(),
             ));
         }
-        // A counted-zero no-op here (a table-less group's receipt gate stores
-        // nothing), kept for the same reason every other direct path keeps it:
-        // the guard belongs to the shape, not to the group.
-        self.refuse_if_proposals_pending("external join approve")?;
-        let key_package = self.pending_external_join_key_package(proposal_ref)?;
-        let addition = self.add_member(identity, key_package)?;
-        self.drop_pending_external_join(proposal_ref);
-        self.persist_pending_external_joins(identity)?;
-        Ok(addition)
+        self.pending_external_join_key_package(proposal_ref)
+    }
+
+    /// Build ONE commit carrying `adds`, `removals` and, when
+    /// `force_self_update`, an update path, and leave it **staged** at epoch N
+    /// ([ADR-0090] section 3, the PublisherGroup's only commit path). The
+    /// lifecycle is the sweep's: [`Self::has_staged_sweep`],
+    /// [`Self::staged_export_secret`], [`Self::merge_staged_sweep`] on the
+    /// Delivery Service's acceptance, [`Self::abandon_staged_sweep`] on its
+    /// refusal. Returns the commit and, when `adds` is not empty, the Welcome.
+    ///
+    /// Only a group with no role table takes it; the caller decides who may
+    /// commit what (the PublisherGroup's rule, [`crate::PublisherGroup`]).
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] for a commit that would change nothing, a group
+    /// carrying a role table, a pending proposal, or an OpenMLS failure (a
+    /// key already in the group, a leaf not in the group, the committer's own
+    /// leaf: `CannotRemoveSelf`); a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] while a commit is staged.
+    pub(crate) fn stage_table_less_commit(
+        &mut self,
+        identity: &Identity,
+        adds: Vec<KeyPackage>,
+        removals: Vec<LeafNodeIndex>,
+        force_self_update: bool,
+    ) -> Result<(MlsMessageOut, Option<MlsMessageOut>)> {
+        if adds.is_empty() && removals.is_empty() && !force_self_update {
+            return Err(Error::Group("stage commit: nothing to commit".into()));
+        }
+        if self.entry == external_entry::EntryState::Abandoned {
+            self.refuse_unless_entry_settled("stage commit")?;
+        }
+        if self.group_roles().is_some() {
+            return Err(Error::Group(
+                "stage commit: a group with a role table changes membership through proposals"
+                    .into(),
+            ));
+        }
+        self.refuse_if_commit_staged("stage commit")?;
+        self.refuse_if_proposals_pending("stage commit")?;
+        let bundle = self
+            .inner
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_adds(adds)
+            .propose_removals(removals)
+            .force_self_update(force_self_update)
+            .load_psks(identity.provider.storage())
+            .map_err(|e| Error::Group(format!("stage commit load_psks: {e:?}")))?
+            // ADR-0064 section 7: always build the GroupInfo of the next epoch,
+            // with the ratchet tree and the external public key, whatever the
+            // group's join config says.
+            .use_ratchet_tree_extension(true)
+            .build(
+                identity.provider.rand(),
+                identity.provider.crypto(),
+                &identity.signature_keys,
+                // The filter also sees the proposals this call adds itself,
+                // so it keeps everything; the store is empty (refused above)
+                // and not consumed.
+                |_| true,
+            )
+            .map_err(|e| Error::Group(format!("stage commit build: {e:?}")))?
+            .stage_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("stage commit: {e:?}")))?;
+        let (commit, welcome, group_info) = bundle.into_messages();
+        // ADR-0064 section 7: the GroupInfo of the epoch this commit moves to,
+        // kept beside the staged commit so the caller can save it before it
+        // sends the commit. Durable with the staged commit; dropped by the
+        // merge and the abandon.
+        if let Some(info) = group_info {
+            external_entry::write_staged_group_info(
+                identity,
+                &self.group_id(),
+                &encode_message(&info)?,
+            )?;
+        }
+        Ok((commit, welcome))
+    }
+
+    /// Process one message, running `check` on a Commit **before** it merges
+    /// ([ADR-0090] section 1: the PublisherGroup commit gate). `check` sees
+    /// the pre-merge roster, the committer's leaf (`None` for any sender that
+    /// is not a member) and the staged commit; an `Err` refuses the commit,
+    /// which is not merged. Every other message is processed as
+    /// [`Self::process_incoming`] processes it: an application message is
+    /// returned with its sender, a member proposal is surfaced and stored
+    /// nowhere, a stranger's external-join proposal is retained.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::process_incoming`] returns, and whatever `check` returns.
+    pub(crate) fn process_incoming_checked<F>(
+        &mut self,
+        identity: &Identity,
+        bytes: &[u8],
+        check: F,
+    ) -> Result<Incoming>
+    where
+        F: FnOnce(&[MemberRecord], Option<u32>, &StagedCommit) -> Result<()>,
+    {
+        self.refuse_unless_entry_settled("process_incoming")?;
+        let mls_in = decode_message(bytes)?;
+        let protocol = mls_in
+            .try_into_protocol_message()
+            .map_err(|e| Error::Message(format!("not a protocol message: {e:?}")))?;
+        let processed = self
+            .inner
+            .process_message(&identity.provider, protocol)
+            .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
+        let sender_leaf: Option<u32> = match processed.sender() {
+            Sender::Member(idx) => Some(idx.u32()),
+            _ => None,
+        };
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
+                bytes: app.into_bytes(),
+                sender_leaf,
+                sender_account: sender_leaf.and_then(|l| self.account_key_at(l)),
+            }),
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                check(&self.members(), sender_leaf, &staged)?;
+                self.inner
+                    .merge_staged_commit(&identity.provider, *staged)
+                    .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
+                self.reap_joined_external_joins_after_merge(identity)?;
+                Ok(Incoming::Commit)
+            },
+            ProcessedMessageContent::ProposalMessage(qp) => {
+                Ok(Incoming::Proposal(ProposalRecord {
+                    sender_leaf,
+                    kind: classify(qp.proposal()),
+                    stored: false,
+                }))
+            },
+            ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
+                self.retain_external_join(identity, &qp)
+            },
+        }
+    }
+
+    /// Delete this group's stored state whether or not it is active
+    /// ([ADR-0090] section 2.5: a PublisherGroup whose journal was reset under
+    /// it, or one about to be founded again). The same rows go as for
+    /// [`Self::delete`].
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on a storage failure.
+    pub(crate) fn delete_regardless(&mut self, identity: &Identity) -> Result<()> {
+        self.delete_stored(identity, |_| false)
     }
 
     /// Reject a retained external-join proposal — discards it locally without
@@ -3606,7 +3734,8 @@ impl Group {
     /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
     #[must_use]
     pub fn has_staged_sweep(&self) -> bool {
-        self.inner.pending_commit().is_some()
+        self.entry == external_entry::EntryState::Unconfirmed
+            || self.inner.pending_commit().is_some()
     }
 
     /// Export a secret from the epoch a staged sweep **moves to** (N+1), while
@@ -3639,6 +3768,16 @@ impl Group {
         context: &[u8],
         length: usize,
     ) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        if self.entry == external_entry::EntryState::Unconfirmed {
+            // An unconfirmed external entry already sits at the epoch it moves
+            // to (OpenMLS merges an external commit when it builds it); that
+            // epoch's secrets are its staged ones.
+            let secret = self
+                .inner
+                .export_secret(identity.provider.crypto(), label, context, length)
+                .map_err(|e| Error::Exporter(format!("{e:?}")))?;
+            return Ok(Some(Zeroizing::new(secret)));
+        }
         let Some(staged) = self.inner.pending_commit() else {
             return Ok(None);
         };
@@ -3660,9 +3799,13 @@ impl Group {
     ///
     /// [`Error::Group`] on any OpenMLS-side merge failure.
     pub fn merge_staged_sweep(&mut self, identity: &Identity) -> Result<bool> {
+        if self.entry == external_entry::EntryState::Unconfirmed {
+            return self.confirm_external_entry(identity);
+        }
         if !self.has_staged_sweep() {
             return Ok(false);
         }
+        external_entry::drop_staged_group_info(identity, &self.group_id())?;
         self.inner
             .merge_pending_commit(&identity.provider)
             .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
@@ -3700,9 +3843,13 @@ impl Group {
     /// this re-reads the state afterwards and refuses to report success on a
     /// group it did not actually roll back (fail-closed, invariant #4).
     pub fn abandon_staged_sweep(&mut self, identity: &Identity) -> Result<bool> {
+        if self.entry == external_entry::EntryState::Unconfirmed {
+            return self.discard_external_entry(identity);
+        }
         if !self.has_staged_sweep() {
             return Ok(false);
         }
+        external_entry::drop_staged_group_info(identity, &self.group_id())?;
         self.inner
             .clear_pending_commit(identity.provider.storage())
             .map_err(|e| Error::Group(format!("clear_pending_commit: {e:?}")))?;
@@ -4030,6 +4177,7 @@ impl Group {
         identity: &Identity,
         plaintext: &[u8],
     ) -> Result<MlsMessageOut> {
+        self.refuse_unless_entry_settled("create_application_message")?;
         // Nothing pending — the overwhelmingly common case, and byte-for-byte
         // the pre-ADR-0045 path with no proposal-store traffic at all.
         let parked: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
@@ -4245,6 +4393,63 @@ impl Group {
         }
     }
 
+    /// The Delivery Service access seed of the current epoch (ADR-0053):
+    /// `export_secret(DS_ACCESS_EXPORTER_LABEL, group_id, 32)`, the value the
+    /// FFI's `dsAccessSeed` returns. Also the input of the G-55 entry wrap key
+    /// ([`crate::entry_wrap`]).
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::export_secret`] returns.
+    pub fn ds_access_seed(&self, identity: &Identity) -> Result<Zeroizing<[u8; 32]>> {
+        let secret = self.export_secret(
+            identity,
+            crate::entry_wrap::DS_ACCESS_EXPORTER_LABEL,
+            &self.group_id(),
+            32,
+        )?;
+        let mut out = Zeroizing::new([0u8; 32]);
+        if secret.len() != 32 {
+            return Err(Error::Exporter(format!(
+                "access seed length {} != 32",
+                secret.len()
+            )));
+        }
+        out.copy_from_slice(&secret);
+        Ok(out)
+    }
+
+    /// The Delivery Service access seed of the epoch a staged commit (or a
+    /// held external entry) moves to, `None` when nothing is staged: the
+    /// value the FFI's `stagedDsAccessSeed` returns.
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::staged_export_secret`] returns.
+    pub fn staged_ds_access_seed(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>> {
+        let Some(secret) = self.staged_export_secret(
+            identity,
+            crate::entry_wrap::DS_ACCESS_EXPORTER_LABEL,
+            &self.group_id(),
+            32,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut out = Zeroizing::new([0u8; 32]);
+        if secret.len() != 32 {
+            return Err(Error::Exporter(format!(
+                "access seed length {} != 32",
+                secret.len()
+            )));
+        }
+        out.copy_from_slice(&secret);
+        Ok(Some(out))
+    }
+
     /// Derive a `length`-byte secret bound to this group's current epoch.
     ///
     /// Wraps `MlsGroup::export_secret` (RFC 9420 §8.5). The output is the
@@ -4262,6 +4467,8 @@ impl Group {
         context: &[u8],
         length: usize,
     ) -> Result<Zeroizing<Vec<u8>>> {
+        self.refuse_unless_entry_settled("export_secret")
+            .map_err(|e| Error::Exporter(e.to_string()))?;
         let secret = self
             .inner
             .export_secret(identity.provider.crypto(), label, context, length)
@@ -4322,7 +4529,7 @@ impl Group {
     /// would break that inference silently).
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.inner.is_active()
+        self.entry != external_entry::EntryState::Abandoned && self.inner.is_active()
     }
 
     /// Local leaf index of `identity` in the group, if present.
@@ -4334,7 +4541,13 @@ impl Group {
     /// Current group epoch (advances on every Commit).
     #[must_use]
     pub fn epoch(&self) -> u64 {
-        self.inner.epoch().as_u64()
+        let epoch = self.inner.epoch().as_u64();
+        // An unconfirmed external entry holds the epoch its commit moves to;
+        // like every staged commit, it reports the epoch it leaves.
+        if self.entry == external_entry::EntryState::Unconfirmed {
+            return epoch.saturating_sub(1);
+        }
+        epoch
     }
 
     /// Number of members in the group at the current epoch.
@@ -4446,9 +4659,13 @@ impl Group {
         let id = GroupId::from_slice(group_id);
         let loaded = MlsGroup::load(identity.provider.storage(), &id)
             .map_err(|e| Error::Group(format!("load: {e:?}")))?;
-        Ok(loaded.map(|inner| Self {
+        let Some(inner) = loaded else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             inner,
             pending_external_joins: Self::load_pending_external_joins(identity, group_id),
+            entry: external_entry::stored_entry_state(identity, group_id)?,
         }))
     }
 
@@ -4463,6 +4680,7 @@ impl Group {
         Self {
             inner,
             pending_external_joins: Vec::new(),
+            entry: external_entry::EntryState::Member,
         }
     }
 }
@@ -5282,8 +5500,15 @@ fn decode_message(bytes: &[u8]) -> Result<MlsMessageIn> {
 /// message variant with no epoch (a `Welcome` / `KeyPackage` / `GroupInfo`) —
 /// the caller treats an empty / epoch-less journal head as epoch `0` (a
 /// freshly created group with no commits yet).
+///
+/// A wrapped external entry ([`crate::entry_wrap`], G-55) carries no MLS
+/// framing; its clear header names the epoch the commit leaves, which is
+/// returned here.
 #[must_use]
 pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
+    if crate::entry_wrap::is_wrapped_entry(bytes) {
+        return crate::entry_wrap::wrapped_entry_epoch(bytes);
+    }
     let mut slice = bytes;
     let msg = MlsMessageIn::tls_deserialize(&mut slice).ok()?;
     let proto = msg.try_into_protocol_message().ok()?;
@@ -5304,6 +5529,10 @@ pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
 /// Returns `None` exactly where [`epoch_of_message`] does.
 #[must_use]
 pub fn epoch_after_message(bytes: &[u8]) -> Option<u64> {
+    // A wrapped external entry (G-55) is a commit leaving the epoch it names.
+    if crate::entry_wrap::is_wrapped_entry(bytes) {
+        return crate::entry_wrap::wrapped_entry_epoch(bytes).map(|e| e.saturating_add(1));
+    }
     let mut slice = bytes;
     let msg = MlsMessageIn::tls_deserialize(&mut slice).ok()?;
     let proto = msg.try_into_protocol_message().ok()?;
@@ -5315,6 +5544,34 @@ pub fn epoch_after_message(bytes: &[u8]) -> Option<u64> {
             epoch
         },
     )
+}
+
+/// Whether `bytes` are an external commit framed for `group_id` at `epoch`:
+/// a `PublicMessage` commit from a `NewMemberCommit` sender, read from the
+/// cleartext framing only. The check a wrapped entry's content must pass
+/// before it is processed (G-55), so a member's commit sealed into a wrapped
+/// row never reaches OpenMLS's decryption.
+#[must_use]
+pub(crate) fn is_external_commit_framed_for(bytes: &[u8], group_id: &[u8], epoch: u64) -> bool {
+    let mut slice = bytes;
+    let Ok(msg) = MlsMessageIn::tls_deserialize(&mut slice) else {
+        return false;
+    };
+    let Ok(proto) = msg.try_into_protocol_message() else {
+        return false;
+    };
+    if proto.group_id().as_slice() != group_id
+        || proto.epoch().as_u64() != epoch
+        || proto.content_type() != openmls::framing::ContentType::Commit
+    {
+        return false;
+    }
+    match proto {
+        openmls::framing::ProtocolMessage::PublicMessage(public) => {
+            matches!(public.sender(), Sender::NewMemberCommit)
+        },
+        openmls::framing::ProtocolMessage::PrivateMessage(_) => false,
+    }
 }
 
 /// Whether `bytes` are an external-join proposal for `group_id`: a
@@ -8272,24 +8529,27 @@ mod external_join_tests {
     fn a_table_less_group_refuses_the_proposal_approve_and_keeps_the_direct_one() {
         use crate::publisher_group::{ChannelId, PublisherGroup, CHANNEL_ID_LEN};
 
-        let alice = Identity::from_seed(&[0xADu8; 64]).expect("alice");
+        let owner_seed = [0xA1u8; 32];
+        let alice = Identity::from_seed_bound(&[0xADu8; 64], &owner_seed, 1).expect("alice");
         let cid = ChannelId::try_from_slice(&[0x77u8; CHANNEL_ID_LEN]).expect("channel id");
-        let mut pg = PublisherGroup::create(&alice, &cid).expect("publisher group");
+        let mut pg = PublisherGroup::create(&alice, &owner_seed, &cid).expect("publisher group");
         assert!(
             pg.inner().group_roles().is_none(),
             "a PublisherGroup carries no role table, which is why it keeps direct commits",
         );
 
-        let bob = Identity::from_seed(&[0xBDu8; 64]).expect("bob");
+        let bob = Identity::from_seed_bound(&[0xBDu8; 64], &[0xB1u8; 32], 1).expect("bob");
         let bob_pk = pk(&bob);
         let req = external_join_proposal(&bob, &pg.group_id(), pg.epoch());
-        pg.inner_mut()
-            .process_incoming(&alice, &req)
+        pg.process_incoming(&alice, &req)
             .expect("process bob's request");
 
-        // The proposal path is refused, by name.
-        let refusal = pg
-            .inner_mut()
+        // The proposal path is refused, by name: a raw handle on the group
+        // shows it (a PublisherGroup exposes no proposal approve at all).
+        let mut raw = Group::load(&alice, &pg.group_id())
+            .expect("load")
+            .expect("stored");
+        let refusal = raw
             .approve_external_join(&alice, &bob_pk)
             .map(|_| ())
             .expect_err("a table-less group has no committer");
@@ -8297,16 +8557,7 @@ mod external_join_tests {
             refusal.to_string().contains("no role table"),
             "the refusal must say why: {refusal}",
         );
-        assert!(pg.inner().pending_proposals().is_empty());
-
-        // And the group's SHAPE is diagnosed ahead of the request lookup: a
-        // caller on the wrong entry point must be told which entry point is
-        // wrong, not that its perfectly valid ref is unknown. This is what the
-        // explicit `role_table_or_refuse` at the top of the proposal approve
-        // buys — `propose_add_member` would refuse a table-less group too, but
-        // only after the lookup had already failed for an unrelated reason.
-        let misdirected = pg
-            .inner_mut()
+        let misdirected = raw
             .approve_external_join(&alice, b"not a pending request")
             .map(|_| ())
             .expect_err("still refused");
@@ -8314,17 +8565,18 @@ mod external_join_tests {
             misdirected.to_string().contains("no role table"),
             "the group's shape must be diagnosed before the request lookup: {misdirected}",
         );
+        assert!(raw.pending_proposals().is_empty());
 
-        // The direct path works, and hands back a Commit + a Welcome.
+        // The direct path is staged (ADR-0090) and hands back a Commit + a
+        // Welcome; the request stays retained until the commit merges.
         let addition = pg
-            .approve_external_join(&alice, &bob_pk)
+            .stage_approve_external_join(&alice, &bob_pk)
             .expect("the direct approve is the one that survives here");
-        let welcome = encode_message(&addition.welcome).expect("encode welcome");
-        // A table-less group's Welcome joins through the table-less entry point
-        // only (ADR-0081 second amendment: the conversation one refuses it).
-        Group::join_table_less_from_welcome(&welcome, &bob, None)
+        assert_eq!(pg.pending_external_joins(), vec![bob_pk.clone()]);
+        assert!(pg.merge_staged_commit(&alice).expect("merge"));
+        Group::join_table_less_from_welcome(&addition.welcome, &bob, None)
             .expect("bob joins from the Welcome");
-        assert!(pg.inner().pending_external_joins().is_empty());
+        assert!(pg.pending_external_joins().is_empty());
     }
 
     /// ADR-0045 S7 — and the direct approve refuses a group that *does* carry a
@@ -8341,7 +8593,7 @@ mod external_join_tests {
 
         let epoch = alice_g.epoch();
         let refusal = alice_g
-            .approve_external_join_directly(&alice, &dave_pk)
+            .retained_join_for_direct_commit(&dave_pk)
             .map(|_| ())
             .expect_err("the direct approve must refuse a role-enabled group");
         assert!(

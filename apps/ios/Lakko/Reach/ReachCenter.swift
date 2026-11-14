@@ -1697,6 +1697,29 @@ public final class ReachCenter: ObservableObject {
         return (wire, covered)
     }
 
+    /// ADR-0090 section 2.2 — what a co-publisher's device request carries so
+    /// an owner device can write the added device's Welcome to THIS account's
+    /// mailbox without holding a grant: the own mailbox binding, and one
+    /// delegation per `delegates` account key signed with this account's own
+    /// `contact` reach seed for its own mailbox (at most the core's cap).
+    /// `nil` when no own mailbox or contact seed is known.
+    public func ownMailboxDelegations(delegates: [Data]) -> (binding: Data, blobs: [Data])? {
+        guard let mailbox = ownMailbox, let issuer = ownContactSeed() else { return nil }
+        let expires = clockMs() + ReachRules.delegationLifetimeMs
+        var blobs: [Data] = []
+        for delegate in delegates.prefix(Int(maxCommitterDelegations())) {
+            var nonce = Data(count: 16)
+            guard nonce.withUnsafeMutableBytes({
+                SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
+            }) == errSecSuccess,
+                  let blob = try? signDelegationBlob(
+                    issuerSeed: issuer, mailbox: mailbox.address, delegatePk: delegate,
+                    expiresAtMs: expires, nonce: nonce) else { continue }
+            blobs.append(blob)
+        }
+        return (mailbox.binding, blobs)
+    }
+
     /// The account keys (b64) this device holds any grant for.
     public func heldAccountKeys() -> [String] {
         heldPeople().map { $0.base64EncodedString() }

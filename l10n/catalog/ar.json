@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "تنشر في هذه القناة من الجهاز الذي أنشأتها عليه.",
+      "text": "يمكنك النشر هنا بعد أن يُفتح Lakko على جهازك الآخر.",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "تنشر في هذه القناة من الجهاز الذي أصبحت عليه ناشرًا.",
+      "text": "يمكنك النشر هنا بعد أن يُفتح Lakko على جهازك الآخر وعلى جهاز المالك.",
       "status": "machine"
     },
     "channels.rotation.desc": {

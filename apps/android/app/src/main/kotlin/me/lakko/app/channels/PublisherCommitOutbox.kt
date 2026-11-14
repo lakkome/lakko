@@ -18,9 +18,15 @@ import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
  * `apps/web/src/channels/publisher-commit-outbox.ts` and
  * `apps/ios/Lakko/Channels/PublisherCommitOutbox.swift`.
  *
- * A PublisherGroup commit (a co-publisher approve, a rotation) eager-merges
- * epoch N -> N+1 in the channel provider ([ChannelPublisherIdentity]). Its
- * effects then leave the device in steps: the N+1 epoch key is registered on
+ * ADR-0090 section 3: a PublisherGroup commit (a co-publisher approve, a
+ * rotation, a publisher removal, an admission or retirement of devices) is
+ * STAGED on this device's leaf and recorded, with the provider snapshot
+ * carrying the staged commit and the epoch-N access seed, before anything
+ * leaves the device. The commit route then decides: taken (`201`, or `200`
+ * for the identical re-send), the stage is merged and the other steps run;
+ * `409`, the stage is abandoned, the entry dropped and nothing more happens
+ * (the journal read applies the winner). The reseal follows the merge,
+ * never the stage. Its effects then leave the device in steps: the N+1 epoch key is registered on
  * the Delivery Service and the Add commit published to the journal, the
  * joiner's Welcome is written to its mailbox (approve), every subscriber is
  * resealed to the N+1 seed and the channels service moves to the next epoch,
@@ -74,11 +80,14 @@ public data class PublisherCommitEntry(
     /** ADR-0081 — standard base64 of that epoch's 32-byte access seed. Lives
      *  only in this device-key-sealed record and goes with it. */
     val proofSeedB64: String? = null,
-    /** ADR-0081 — the DS answered the journal step with `409` or a definitive
-     *  refusal: nothing of the commit is on the journal, so an approve
-     *  delivers no Welcome and appoints nobody (the reseal still runs: the
-     *  owner's posts are sealed under the merged seed). */
+    /** Kept for reading entries written before ADR-0090; never set now: a
+     *  lost commit is abandoned and its entry dropped. */
     val journalLost: Boolean = false,
+    /** ADR-0090 section 2.2 — the committer delegation header a
+     *  co-publisher's device request carried for its mailbox (ADMIT). */
+    val delegationHeader: String? = null,
+    /** ADR-0090 — standard base64 of that request's 97-byte mailbox binding. */
+    val delegationBindingB64: String? = null,
     /** The steps that have landed. */
     val done: List<Step> = emptyList(),
 ) {
@@ -92,6 +101,17 @@ public data class PublisherCommitEntry(
          *  ([joinerKeyB64] = its account key): every leaf of it in one
          *  commit, which also changes the content seed. */
         REMOVE,
+
+        /** ADR-0090 sections 2.1 / 2.2 — devices of an account that already
+         *  publishes admitted and / or retired in one commit; [joinerKeyB64]
+         *  is the account the Welcome goes to (absent for a retirement). */
+        ADMIT,
+
+        /** ADR-0064 section 7 (amendment of 2026-11-14) — this owner device
+         *  entered the PublisherGroup by an external commit from a GroupInfo
+         *  saved in the channel's vault head ([proofEpoch] / [proofSeedB64]:
+         *  that saved epoch and its access seed). */
+        ENTER,
     }
 
     /** The steps of an entry, in the order they run. */
@@ -104,6 +124,14 @@ public data class PublisherCommitEntry(
 
         /** The removed publisher's appointment is withdrawn at the service. */
         UNAPPOINT,
+
+        /** ADR-0090 section 6 — the account of the admitted devices is owed
+         *  the read key, the admission seeds and the epoch seeds again. */
+        HANDOVER,
+
+        /** ADR-0064 section 7 — the channel's vault head gets the epoch the
+         *  commit landed at. Never holds the entry. */
+        HEAD,
     }
 
     /** The steps still to run, in order. */
@@ -126,15 +154,24 @@ public data class PublisherCommitEntry(
             if (targetEpoch < 0 || serverTargetEpoch < 0) return false
             if (kind == Kind.APPROVE && (commitB64 == null || welcomeB64 == null || joinerKeyB64 == null)) return false
             if (kind == Kind.REMOVE && (commitB64 == null || joinerKeyB64 == null)) return false
+            if (kind == Kind.ADMIT && commitB64 == null) return false
+            if (kind == Kind.ENTER && (commitB64 == null || proofEpoch == null || proofSeedB64 == null)) return false
             return true
         }
 
     public companion object {
         /** The steps an entry of [kind] runs, in order. */
         public fun stepsOf(kind: Kind): List<Step> = when (kind) {
-            Kind.APPROVE -> listOf(Step.JOURNAL, Step.WELCOME, Step.RESEAL, Step.APPOINT)
+            // ADR-0090 — the Welcome after the reseal: the joining device
+            // learns the channel epoch its group's epoch serves from the
+            // service when it lands (ChannelEpochOffsets).
+            Kind.APPROVE -> listOf(Step.JOURNAL, Step.RESEAL, Step.WELCOME, Step.APPOINT)
             Kind.ROTATION -> listOf(Step.JOURNAL, Step.RESEAL)
             Kind.REMOVE -> listOf(Step.JOURNAL, Step.RESEAL, Step.UNAPPOINT)
+            Kind.ADMIT -> listOf(Step.JOURNAL, Step.RESEAL, Step.WELCOME, Step.HANDOVER)
+            // ADR-0064 section 7 — merge on the DS's answer, reseal the new
+            // seed as after any admission, then save the head.
+            Kind.ENTER -> listOf(Step.JOURNAL, Step.RESEAL, Step.HEAD)
         }
 
         /** A fresh random 16-byte hex id. */
@@ -156,17 +193,39 @@ public enum class PublisherCommitReplay {
 }
 
 /** The verdict for [entry], given the epoch the restored group is at
- *  (`null`: the group did not load at all). */
-public fun replayVerdict(entry: PublisherCommitEntry, restoredEpoch: Long?): PublisherCommitReplay =
-    if (restoredEpoch == null || restoredEpoch < entry.targetEpoch) {
-        PublisherCommitReplay.DISCARD
-    } else {
-        PublisherCommitReplay.REPLAY
+ *  (`null`: the group did not load at all) and whether it holds a staged
+ *  commit (ADR-0090: the entry's commit, staged at `targetEpoch - 1`, whose
+ *  verdict the DS has not given yet). */
+public fun replayVerdict(entry: PublisherCommitEntry, restoredEpoch: Long?, staged: Boolean = false): PublisherCommitReplay =
+    when {
+        restoredEpoch == null -> PublisherCommitReplay.DISCARD
+        restoredEpoch >= entry.targetEpoch -> PublisherCommitReplay.REPLAY
+        staged && restoredEpoch == entry.targetEpoch - 1 -> PublisherCommitReplay.REPLAY
+        else -> PublisherCommitReplay.DISCARD
     }
+
+/** How running an entry ended (ADR-0090 section 3). */
+public enum class PublisherCommitOutcome {
+    /** The DS took the commit, the stage merged, every step landed. */
+    LANDED,
+
+    /** The DS took another device's commit at that epoch (`409`): the stage
+     *  was abandoned and the entry dropped; nothing of it left the device. */
+    LOST,
+}
 
 /** What running the steps of one entry needs; injected so the order is
  *  testable without a network. */
 public interface PublisherCommitPorts {
+    /** ADR-0064 section 7 — before the commit is sent: the channel's vault
+     *  head gets the GroupInfo of the epoch the staged commit moves to. One
+     *  attempt; a failure (thrown or not) never stops the commit. */
+    public suspend fun beforeSend() {}
+
+    /** ADR-0064 section 7 — the [PublisherCommitEntry.Step.HEAD] step: the
+     *  head gets the current epoch. Never holds the entry. */
+    public suspend fun writeHead() {}
+
     /** ADR-0081 decision 1 — register the group's CURRENT epoch key (the N+1
      *  one) with the channel's root AND append [commit] to the group journal,
      *  in one request (`POST .../commit`), proven under the recorded key of
@@ -179,8 +238,20 @@ public interface PublisherCommitPorts {
      *  refusal): nothing of the commit is or will be on the DS. */
     public fun isLost(cause: Throwable): Boolean
 
-    /** Write the Welcome to the joiner's mailbox. */
-    public suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray)
+    /** ADR-0090 — the DS took the commit: merge the staged commit (a no-op
+     *  when it already merged) and persist the provider. */
+    public suspend fun merge() {}
+
+    /** ADR-0090 — the DS took another commit: abandon the staged one and
+     *  persist the provider. */
+    public suspend fun abandon() {}
+
+    /** Write the Welcome to [accountKey]'s mailbox (the account of the
+     *  joiner, or of the admitted devices). */
+    public suspend fun deliverWelcome(entry: PublisherCommitEntry, welcome: ByteArray, accountKey: ByteArray)
+
+    /** ADR-0090 section 6 — [accountKey] is owed the hand-over again. */
+    public suspend fun handOver(accountKey: ByteArray) {}
 
     /** The channels service's current epoch. */
     public suspend fun serverEpoch(): Long
@@ -207,10 +278,12 @@ private fun b64(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
 
 /**
  * Run the remaining steps of [entry] in order, recording each as it lands.
- * Throws the first step's failure, leaving the entry (with what did land) for
- * the next run. A rotation's journal step that failed for an unknown reason
- * (the network) is the exception: the other steps run and the entry is kept,
- * not finished, so the next replay sends the journal step again.
+ * ADR-0090 section 3: the journal step comes first; a `409` abandons the
+ * stage, drops the entry and returns [PublisherCommitOutcome.LOST]; any other
+ * failure there leaves the stage and the entry for the next run (the owed
+ * verdict). Only once the DS took the commit is the stage merged and is
+ * anything else (a Welcome, the reseal) done. A later step's failure throws,
+ * leaving the entry (with what did land) for the next run.
  */
 public suspend fun runPublisherCommit(
     entry: PublisherCommitEntry,
@@ -220,50 +293,46 @@ public suspend fun runPublisherCommit(
     warn: (message: String, cause: Throwable) -> Unit = { message, cause ->
         android.util.Log.w("PublisherCommit", message, cause)
     },
-) {
+): PublisherCommitOutcome {
     var current = entry
-    var journalDeferred = false
     for (step in current.remainingSteps) {
         when (step) {
             PublisherCommitEntry.Step.JOURNAL -> {
                 val commit = current.commitB64
                 if (commit != null) {
+                    // ADR-0064 section 7 — the head first, best effort.
+                    try {
+                        ports.beforeSend()
+                    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        warn("ADR-0064: the channel head was not written before the commit", e)
+                    }
                     try {
                         ports.commitToJournal(b64(commit), current.proofEpoch, current.proofSeedB64?.let(::b64))
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                         throw e
                     } catch (e: Throwable) {
-                        if (ports.isLost(e)) {
-                            // ADR-0081 — nothing of this commit is or will be on
-                            // the DS (a co-publisher's rotation is refused like
-                            // this: its root is not the journal's).
-                            warn("ADR-0081: PublisherGroup commit not taken by the journal", e)
-                            current = current.copy(journalLost = true)
-                        } else if (current.kind == PublisherCommitEntry.Kind.ROTATION) {
-                            // The subscribers' reseal does not wait on the DS.
-                            warn("ADR-0081: rotation commit deferred", e)
-                            journalDeferred = true
-                            continue
-                        } else {
-                            throw e
-                        }
+                        if (!ports.isLost(e)) throw e
+                        // ADR-0090 — another owner device committed at this
+                        // epoch: nothing of ours is on the journal.
+                        warn("ADR-0090: PublisherGroup commit not taken by the journal", e)
+                        ports.abandon()
+                        ports.finish(current)
+                        return PublisherCommitOutcome.LOST
                     }
                 }
+                ports.merge()
             }
             PublisherCommitEntry.Step.WELCOME -> {
-                if (current.journalLost) {
-                    current = current.withStepDone(step)
-                    ports.save(current)
-                    continue
-                }
                 val welcome = current.welcomeB64
                 val joiner = current.joinerKeyB64
-                if (welcome != null && joiner != null) ports.deliverWelcome(b64(welcome), b64(joiner))
+                if (welcome != null && joiner != null) ports.deliverWelcome(current, b64(welcome), b64(joiner))
             }
             PublisherCommitEntry.Step.RESEAL ->
                 if (!current.resealLanded(ports.serverEpoch())) ports.reseal(current.serverTargetEpoch)
             PublisherCommitEntry.Step.APPOINT ->
-                current.joinerKeyB64?.takeIf { !current.journalLost }?.let { joiner ->
+                current.joinerKeyB64?.let { joiner ->
                     try {
                         ports.appoint(b64(joiner))
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {
@@ -275,7 +344,7 @@ public suspend fun runPublisherCommit(
                     }
                 }
             PublisherCommitEntry.Step.UNAPPOINT ->
-                current.joinerKeyB64?.takeIf { !current.journalLost }?.let { removed ->
+                current.joinerKeyB64?.let { removed ->
                     try {
                         ports.unappoint(b64(removed))
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {
@@ -284,12 +353,22 @@ public suspend fun runPublisherCommit(
                         warn("ADR-0087: withdrawing a removed publisher's appointment failed", e)
                     }
                 }
+            PublisherCommitEntry.Step.HANDOVER ->
+                current.joinerKeyB64?.let { account -> ports.handOver(b64(account)) }
+            PublisherCommitEntry.Step.HEAD ->
+                try {
+                    ports.writeHead()
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    warn("ADR-0064: the channel head was not written after the commit", e)
+                }
         }
         current = current.withStepDone(step)
         ports.save(current)
     }
-    if (journalDeferred) return
     ports.finish(current)
+    return PublisherCommitOutcome.LANDED
 }
 
 /**
@@ -373,7 +452,7 @@ public class PublisherCommitStore(private val storage: SealedBlobStorage) {
  */
 public suspend fun resealToSubscribers(
     channelsClient: ChannelsClient,
-    identity: Identity,
+    ids: ChannelIdentity,
     publisherGroup: PublisherGroup,
     channelIdHex: String,
     targetEpoch: Long,
@@ -384,10 +463,11 @@ public suspend fun resealToSubscribers(
      *  of the channel (hex): resealed to whatever the mark says. */
     alwaysKeys: Set<String> = emptySet(),
 ) {
-    val seed = publisherGroup.channelSeed(identity)
+    // ADR-0090 C-90: only the seed of a MERGED epoch (never a staged one).
+    val seed = ids.mls { device -> publisherGroup.channelSeed(device) }
     val channelIdBytes = publisherGroup.channelId()
     val target = targetEpoch.toUInt()
-    ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
+    ChannelPublisherSigners.derive(ids.account, channelIdHex).use { proofs ->
         val subscribers = if (throughSeq == null) {
             channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
         } else {
@@ -412,8 +492,47 @@ public suspend fun resealToSubscribers(
             val envelope = sealSubscriberSeedEnvelope(subscriberBytes, channelIdBytes, target, seed)
             batch.add(
                 RotateBatchEntry(
-                    subscriber_pubkey_hex = subscriberHex,
-                    envelope_b64 = java.util.Base64.getEncoder().encodeToString(envelope),
+                    subscriber_id = subscriberHex,
+                    envelope_b64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(envelope),
+                ),
+            )
+        }
+        var start = 0
+        while (start < batch.size) {
+            val end = minOf(start + ChannelsClient.MAX_STAGE_CHUNK_ENTRIES, batch.size)
+            channelsClient.stageRotation(channelIdHex, target, batch.subList(start, end), proofs)
+            start = end
+        }
+        channelsClient.commitRotation(channelIdHex, target, proofs)
+    }
+}
+
+/**
+ * ADR-0090 decision A — reseal [publisherGroup]'s current seed to exactly
+ * [keys] (lower-case hex subscriber keys: the rows a re-founding device let
+ * in by their tickets, and the account's own reader key), then move the
+ * service to [targetEpoch]. The same chunked stage + atomic commit as
+ * [resealToSubscribers].
+ */
+public suspend fun resealToKeys(
+    channelsClient: ChannelsClient,
+    ids: ChannelIdentity,
+    publisherGroup: PublisherGroup,
+    channelIdHex: String,
+    targetEpoch: Long,
+    keys: Collection<String>,
+) {
+    val seed = ids.mls { device -> publisherGroup.channelSeed(device) }
+    val channelIdBytes = publisherGroup.channelId()
+    val target = targetEpoch.toUInt()
+    ChannelPublisherSigners.derive(ids.account, channelIdHex).use { proofs ->
+        val batch = keys.map { it.lowercase() }.distinct().map { subscriberHex ->
+            val subscriberBytes = hexToBytesOrNull(subscriberHex)
+                ?: throw CoPublisher.CoPublisherException.MalformedSubscriberHex(subscriberHex)
+            RotateBatchEntry(
+                subscriber_id = subscriberHex,
+                envelope_b64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    sealSubscriberSeedEnvelope(subscriberBytes, channelIdBytes, target, seed),
                 ),
             )
         }

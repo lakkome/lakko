@@ -145,7 +145,7 @@ class ChannelsPublisherProofTest {
         val call = proofs.calls.single()
         assertEquals("/v1/channels/$channelId/rotate/stage", call.path)
         assertEquals(
-            """{"target_epoch":3,"envelopes":[{"subscriber_pubkey_hex":"${"cd".repeat(32)}","envelope_b64":"ZW52"}]}""",
+            """{"target_epoch":3,"envelopes":[{"subscriber_id":"${"cd".repeat(32)}","envelope_b64":"ZW52"}]}""",
             call.body.toString(Charsets.UTF_8),
         )
         assertArrayEquals(call.body, seen.single().body)

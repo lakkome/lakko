@@ -444,6 +444,117 @@ device's leaf. Until PublisherGroup leaves are per device (G-54), every
 device of an owner or co-publisher but the one holding the PublisherGroup is a
 reader of the channel (UX `second-device.md` section 4a).
 
+**Amended 2026-11-14 (maintainer), after [ADR-0090](0090-publisher-group-device-leaves.md).**
+PublisherGroup leaves are now bound devices, so the "owned or co-published"
+paragraph above becomes buildable, and it is built ahead of the rest of this
+ADR, for owned channels only. The case it closes: an owner's device that
+holds no PublisherGroup (it was added after the publishing device last ran,
+and that device is gone; or decision A cannot fire because the account has
+other devices) waits forever, since only a device holding the group can admit
+it. The maintainer chose entry from a server-held GroupInfo over a manual
+"take back posting" re-founding.
+
+1. **Only the owner's devices enter.** A co-publisher's new device is admitted
+   by an owner device (ADR-0090 decision B); a co-publisher never enters by an
+   external commit.
+2. **The vault.** Each owned channel has a vault at the channel's conversation
+   ref under the owner account's vault root (section 1). Its head is a
+   `ConversationHead` whose `reentry` holds the two newest PublisherGroup
+   GroupInfos (with the ratchet tree and the external public key), and no
+   registrar seed: the journal root derives from the owner's account seed
+   (ADR-0057). Posts and seeds are not put in it by this amendment.
+3. **Who writes, and when.** Every owner device that holds the group: before
+   it sends a PublisherGroup commit through the DS commit route (ADR-0081), it
+   writes the head with the GroupInfo of the epoch the staged commit moves to;
+   after it applies a commit another owner device made, it writes the head with
+   the current GroupInfo. A write that meets `409` reads the head, keeps the two
+   newest epochs of both, and writes again. A failed head write does not stop
+   the commit: the commit is what makes the channel work, the head only lets a
+   device that lost everything come back, and a stale head degrades to the
+   waiting line, never to a wrong group.
+4. **The entry.** An owner device that holds no PublisherGroup for an owned
+   channel reads the head and, newest saved epoch first: builds the external
+   commit (ExternalInit alone, its own bound device leaf), sends it through the
+   DS commit route signed with the journal root (the owner's seed), and on
+   `201` adopts the group and reseals the new channel seed to the subscribers
+   as after any admission (ADR-0090 section 5). `409` or a refused proof: try
+   the older saved epoch; none left: wait as today. An owner device that holds
+   the group and reads the entry commit applies it like any other.
+5. **The gate.** `check_publisher_commit` accepts a commit from a sender that
+   is not yet a member when, and only when, it is an external commit carrying
+   exactly the ExternalInit, its leaf carries a valid device binding to the
+   owner's account, and that account holds fewer than eight leaves. It changes
+   no GroupContext extension. Every other external commit to a PublisherGroup
+   is refused, as today (C-91 extended).
+6. **Decision A** (ADR-0090) remains the fallback for an owned channel with no
+   head (a channel created before this build, or a head that was never
+   written).
+7. Not covered: channels created before this build have no head (test
+   accounts only, no production); a co-publisher whose every device is gone is
+   admitted by the owner as today.
+8. The head's reentry entry also carries the epoch's Delivery Service access
+   seed (`Group::export_secret("lakko/ds/access/v1", ...)` at that epoch), so
+   an entering device can prove the epoch-N read and send the commit without
+   any server change; the head is sealed under the owner's vault key, so this
+   gives nothing to anyone but the owner.
+9. Cost accepted by the maintainer (2026-11-14): the entry commit is a
+   PublicMessage (RFC 9420), so the Delivery Service reads the entering leaf's
+   binding and with it the owner's account key next to the PublisherGroup
+   journal. Recorded as G-55; closed the same day by wrapping the entry row
+   under a key derived from the epoch-N access seed (ADR-0078 section 4).
+10. A device that lost its PublisherGroup state but kept its signature key
+    and whose leaf is still in the tree cannot enter (the resync Remove
+    OpenMLS adds is refused by the gate) until another owner device retires
+    that leaf. A reinstall loses the key with the state, so this needs a
+    store failure that spares the identity.
+
+**As built (2026-11-14), host-tested only, nothing walked or deployed.**
+- `services/storage`: the vault routes of section 1 (`src/vault.rs`, a
+  `VaultIndex` beside the blob index in both the MariaDB and file
+  implementations, migration `0004`). A write body and a read answer are
+  `version (u64 BE) || sealed object`, so the version is inside the signed
+  body and a captured write cannot be replayed at another version. Object
+  files are named by version and a random reservation token, so a writer
+  whose reservation timed out cannot overwrite the one that took over; a
+  reservation not committed within 60 s is taken over by the next writer (no
+  sweep). Limits chosen: 64 MiB, 256 chunks and 240 writes per hour per vault.
+  Not built: rebuilding a lost index from the files, forwarding to another
+  node.
+- `lakko-mls`: `PublisherGroup::enter`, `group_info`, `staged_group_info`, the
+  external-entry arm of `check_publisher_commit` (and a refusal of any
+  PublisherGroup commit that changes a GroupContext extension). OpenMLS 0.8.1
+  merges an external commit while building it, so the entry is built in a
+  throwaway provider, copied in and held by a provider row until
+  `merge_staged_commit` / `abandon_staged_commit`. Lifetime validation is
+  skipped when entering (residual 9): a co-publisher leaf never commits, so its
+  KeyPackage lifetime would otherwise block every entry once it ran out.
+- `lakko-vault`: a reentry epoch carries the epoch's Delivery Service access
+  seed (item 8).
+- Clients (web and desktop, iOS, Android): a vault client, the head writer
+  (before every PublisherGroup commit, after applying another owner device's
+  commit, at creation and after decision A), and the entry as a recorded
+  PublisherGroup commit kind replayed after a restart, tried before decision
+  A. The vault and the journal root are both named by the account's lineage
+  identity, so a head survives an ADR-0074 key rotation. A head is rebuilt on
+  each write with only its reentry carried over.
+- Known: in a private channel the entering device reseals only the account's
+  own reader key at once; admitted subscribers get the new seed on the next
+  admission pass, as after decision A.
+- The client deletes a channel's vault after the owner deletes the channel,
+  and the vaults of every channel the account owns before the account is
+  deleted (best effort, bounded in time: web 5 s, iOS 10 s, Android 15 s,
+  chosen), as section 1 requires.
+- Not built: the rest of this ADR (conversation history, the conversation and
+  DeviceGroup entries, the index vault).
+- `lakko-security` (2026-11-14): APPROVE WITH NOTES. Recorded residual
+  (MEDIUM): a device removed from the account that keeps the lineage seed and
+  runs a modified client can enter again, since removal changes no seed and
+  co-publisher peers cannot see the owner's roster; it could already reset and
+  re-found the channel with that seed. Mitigation: an owner device that applies
+  another device's entry runs the own-device reconcile at once (C-91). Fixed:
+  after decision A the head is replaced, not merged, since the re-founded
+  group's low epochs would otherwise lose to the dead group's.
+
 ## Alternatives considered
 
 1. **History inside the account backup.** One 4 MiB blob rewritten whole,

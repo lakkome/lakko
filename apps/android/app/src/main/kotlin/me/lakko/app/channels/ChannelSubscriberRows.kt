@@ -142,6 +142,7 @@ public object ChannelSubscriberRows {
         while (true) {
             val page = ChannelPublisherSigners.derive(pub, channelId).use { client.subscriberPage(channelId, it, after) }
             for (r in page.rows) out += Row(r.pubkeyHex, inviteKeyOf(context, account, channelId, r.pubkeyHex, r.sealedTicket), r.seq)
+            page.rows.maxOfOrNull { it.seq }?.let { ChannelAdmissionMark.noteSeen(context, account, channelId, it) }
             if (page.rows.isEmpty() || page.nextAfter <= after) break
             after = page.nextAfter
         }
@@ -208,6 +209,7 @@ public object ChannelSubscriberRows {
             val page = ChannelPublisherSigners.derive(pub, channelId).use { client.subscriberPage(channelId, it, after) }
             val last = page.rows.lastOrNull() ?: break
             through = maxOf(through, last.seq)
+            ChannelAdmissionMark.noteSeen(context, account, channelId, last.seq)
             if (page.nextAfter <= after) break
             after = page.nextAfter
         }

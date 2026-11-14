@@ -93,6 +93,7 @@ beforeEach(() => {
     subscriberSecret: account.secret,
     readKey: new Uint8Array(0),
     publisherGroupIdHex: "",
+    ownerAccountKey: new Uint8Array(0),
     name: "",
     handle: "",
   };
@@ -181,11 +182,17 @@ describe("the account's reader key on the publishing device", () => {
       channelSeed: () => new Uint8Array(32).fill(8),
       channelId: () => new Uint8Array(16).fill(0x5a),
     } as unknown as Parameters<typeof resealToSubscribers>[0];
-    await resealToSubscribers(group, {} as Parameters<typeof resealToSubscribers>[1], ID, 7);
-    const staged = api.stageRotation.mock.calls.flatMap(
-      (c) => (c as unknown as [string, number, { subscriber_pubkey_hex: string }[]])[2],
+    await resealToSubscribers(
+      group,
+      {} as Parameters<typeof resealToSubscribers>[1],
+      {} as Parameters<typeof resealToSubscribers>[2],
+      ID,
+      7,
     );
-    expect(staged.map((e) => e.subscriber_pubkey_hex)).toEqual([below.hex, account.hex]);
+    const staged = api.stageRotation.mock.calls.flatMap(
+      (c) => (c as unknown as [string, number, { subscriber_id: string }[]])[2],
+    );
+    expect(staged.map((e) => e.subscriber_id)).toEqual([below.hex, account.hex]);
     expect(api.commitRotation).toHaveBeenCalledTimes(1);
   });
 

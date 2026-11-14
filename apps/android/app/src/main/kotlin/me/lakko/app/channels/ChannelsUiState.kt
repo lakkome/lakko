@@ -394,6 +394,7 @@ public class ChannelsUiState(
                 }
             }
             publisher?.bind(accountIdB64, accountIdentitySeed, currentAccountSeed)
+            ChannelEpochOffsets.boundAccount = accountIdB64
             // ADR-0073 phase 2 / UX 16.6 — re-read: the reset that records
             // the set runs between two binds of the same account.
             _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
@@ -476,10 +477,10 @@ public class ChannelsUiState(
         val pub = publisher ?: return
         val store = commitStore ?: return
         val landed = try {
-            pub.withIdentity { identity ->
+            pub.withChannel { ids ->
                 me.lakko.app.ds.DsClient().use { ds ->
                     ChannelsClient().use { client ->
-                        val finished = CoPublisher.replayPublisherCommits(ds, client, identity, accountIdB64, store, coPublished)
+                        val finished = CoPublisher.replayPublisherCommits(ds, client, ids, accountIdB64, store, coPublished)
                         // The epoch each finished commit's reseal landed at.
                         finished.map { id ->
                             id to try {
@@ -526,9 +527,9 @@ public class ChannelsUiState(
         val pub = publisher ?: return
         if (channelId !in _keysByChannel.value) return
         try {
-            val keys = pub.withIdentity(persist = false) { identity ->
+            val keys = pub.withChannel { ids ->
                 ChannelsComposer.freshPublisherKeys(
-                    identity = identity,
+                    ids = ids,
                     channelIdHex = channelId,
                     existingSigningSeed = persistedPublisherSigningSeed(channelId),
                     joinedGroupId = joinedGroupIdOf(channelId),
@@ -609,7 +610,7 @@ public class ChannelsUiState(
     /** Re-open the publisher keys ([channelsToReopen]) on the bound
      *  [publisher]. A channel whose open fails is skipped and logged; the
      *  owner sees it as a channel without a composer until the next bind. */
-    private suspend fun reopenPublisherKeys() {
+    public suspend fun reopenPublisherKeys() {
         val pub = publisher ?: return
         val targets = channelsToReopenExcludingOrphaned(
             channelsToReopen(
@@ -622,14 +623,17 @@ public class ChannelsUiState(
             orphaned = _orphaned.value,
         )
         for (channel in targets) {
+            // ADR-0090 security pass — a suspected reset: no composer until an
+            // owner-signed Welcome replaces the group.
+            if (ChannelSuspensions.isSuspendedNow(channel.id)) continue
             try {
                 // docs/ux/second-device.md section 4a — load only: a channel
                 // whose PublisherGroup this device does not hold is READ here,
                 // never founded again (founding at the derived id would reset
                 // the live channel journal).
-                val keys = pub.withIdentity { identity ->
+                val keys = pub.withChannel { ids ->
                     ChannelsComposer.freshPublisherKeys(
-                        identity = identity,
+                        ids = ids,
                         channelIdHex = channel.id,
                         existingSigningSeed = persistedPublisherSigningSeed(channel.id),
                         joinedGroupId = joinedGroupIdOf(channel.id),
@@ -648,6 +652,7 @@ public class ChannelsUiState(
      *  identity; everything persisted stays for the next sign-in. Logout. */
     public fun unbind() {
         publisher?.unbind()
+        ChannelEpochOffsets.boundAccount = null
         boundAccountIdB64 = null
         _publisherKeysReady.value = false
         orphansRemoved = emptySet()
@@ -812,6 +817,21 @@ public class ChannelsUiState(
         publisherSigningSeedByChannel =
             publisherSigningSeedByChannel + (channelId to keys.signingKeySeed)
         persistPublisherSigningSeeds()
+    }
+
+    /**
+     * ADR-0090 section 2.5 - this device no longer publishes [channelId]
+     * (its journal was reset under it by a re-founding on another device of
+     * the account): the composer goes and the device reads, until another
+     * device admits it again. The seeds kept per epoch stay (its older posts
+     * stay readable), and so do the signing seed and the publish counter (a
+     * later admission signs on under them, never rewinding the counter).
+     */
+    public fun dropPublisherKeys(channelId: String) {
+        val keys = _keysByChannel.value[channelId] ?: return
+        val served = keys.seedEpoch ?: _epochByChannel.value[channelId]
+        if (served != null && subscribedSeeds(channelId)[served] == null) setSubscribedSeed(channelId, served, keys.seed)
+        _keysByChannel.update { it - channelId }
     }
 
     /** The persisted per-channel publisher signing seed, or `null`

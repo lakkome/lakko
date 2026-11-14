@@ -15,6 +15,10 @@ struct PendingPublisherRequest: Codable, Equatable {
     /// base64 of the signature key the knocked KeyPackage belongs to (the
     /// channel provider identity's at the time of the request).
     let joinerKeyB64: String
+    /// ADR-0090 — the owner's account key (the link's issuer) the Welcome's
+    /// sender must be a device of; empty in a record from before ADR-0090,
+    /// which then lands nothing.
+    var ownerAccountKeyB64: String = ""
     /// What the link said, for the channel row once joined.
     let name: String
     let description: String
@@ -163,6 +167,7 @@ enum CoPublisherJoin {
                             channelIdHex: request.channelIdHex,
                             groupIdHex: DsClient.pseudonymHex(request.groupId),
                             joinerKeyB64: base64Encode(request.joinerKey),
+                            ownerAccountKeyB64: base64Encode(request.ownerAccountKey),
                             name: name, description: "",
                             requestedAtMs: Int64(Date().timeIntervalSince1970 * 1000)),
                         accountIdB64: accountIdB64)
@@ -183,13 +188,14 @@ enum CoPublisherJoin {
                     groupId: request.groupId,
                     joinerKey: request.joinerKey,
                     channelIdHex: request.channelIdHex,
+                    ownerAccountKey: request.ownerAccountKey,
                     // G-29 — reuse the persisted signing seed on a re-poll.
                     existingSigningSeed: state.persistedPublisherSigningSeed(channelId: request.channelIdHex)
                 )
                 if let keys {
                     try settle(
                         channelIdHex: request.channelIdHex, name: name, description: "", keys: keys,
-                        state: state, accountIdB64: accountIdB64)
+                        state: state, accountIdB64: accountIdB64, ownerAccountKey: request.ownerAccountKey)
                     return .joined(channelIdHex: request.channelIdHex)
                 }
                 try? await Task.sleep(nanoseconds: pollIntervalNs)
@@ -224,7 +230,7 @@ enum CoPublisherJoin {
     /// record then stays.
     static func settle(
         channelIdHex: String, name: String, description: String, keys: ChannelPublisherKeys,
-        state: ChannelsUiState, accountIdB64: String?,
+        state: ChannelsUiState, accountIdB64: String?, ownerAccountKey: Data? = nil,
         persist: (() throws -> Void)? = nil
     ) throws {
         if !state.channels.contains(where: { $0.id == channelIdHex }) {
@@ -236,6 +242,12 @@ enum CoPublisherJoin {
             ))
         }
         state.setKeys(channelId: channelIdHex, keys: keys)
+        // ADR-0090 contract 3a — the issuer key verified at join, written to
+        // the register with the group id so the account's other devices join
+        // only from that owner's devices.
+        if let ownerAccountKey, ownerAccountKey.count == 32 {
+            state.updateExtras(channelIdHex) { $0.ownerAccountKey = ownerAccountKey }
+        }
         // The joined group and the keys on disk before the record goes (and
         // before the mailbox cursor moves past the Welcome).
         if let persist { try persist() } else { try ChannelPublisherIdentity.shared.persistOrThrow() }
@@ -256,10 +268,12 @@ enum CoPublisherJoin {
     /// durable (the caller holds its mailbox cursor).
     static func landPendingWelcome(
         _ welcome: Data, accountIdB64: String, identity: Identity, state: ChannelsUiState,
-        join: (Identity, Data, Data, String, Data?) throws -> ChannelPublisherKeys? = { identity, welcome, groupId, channelIdHex, seed in
+        join: (Identity, Data, Data, String, Data, Data?) throws -> ChannelPublisherKeys? = {
+            identity, welcome, groupId, channelIdHex, ownerKey, seed in
             try CoPublisher.joinCoPublishWelcome(
                 identity: identity, accountIdB64: AcceptedContactsStore.boundAccountIdB64, welcome: welcome,
-                groupId: groupId, channelIdHex: channelIdHex, existingSigningSeed: seed)
+                groupId: groupId, channelIdHex: channelIdHex, ownerAccountKey: ownerKey,
+                existingSigningSeed: seed)
         },
         persist: (() throws -> Void)? = nil
     ) throws -> String? {
@@ -272,13 +286,15 @@ enum CoPublisherJoin {
             // made with it.
             guard request.joinerKeyB64 == ownKey,
                   let groupId = CoPublisher.hexToData(request.groupIdHex) else { continue }
-            guard let keys = try? join(
-                identity, welcome, groupId, request.channelIdHex,
+            guard let ownerKey = Data(base64Encoded: request.ownerAccountKeyB64), ownerKey.count == 32,
+                  let keys = try? join(
+                identity, welcome, groupId, request.channelIdHex, ownerKey,
                 state.persistedPublisherSigningSeed(channelId: request.channelIdHex))
             else { continue }
             try settle(
                 channelIdHex: request.channelIdHex, name: request.name, description: request.description,
-                keys: keys, state: state, accountIdB64: accountIdB64, persist: persist)
+                keys: keys, state: state, accountIdB64: accountIdB64, ownerAccountKey: ownerKey,
+                persist: persist)
             return request.channelIdHex
         }
         return nil

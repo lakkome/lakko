@@ -85,6 +85,7 @@ import { ticketInviteKeyHex } from "./subscriber-admission";
 import { channelIdForHandle, forgetClaimedHandle } from "./claimed-handles";
 import { LegacyChannelError } from "./legacy-v1";
 import { composerSeedFor, outgoingPublisherSeed, readsPublicSeeds } from "./publisher-seed";
+import { deleteChannelVault } from "./channel-vault-head";
 import { listedStamp, nextListingStamp } from "../discover/listing";
 import { channelsActions, channelsState, awaitChannelsHydration } from "../state/channels-state";
 import {
@@ -589,6 +590,11 @@ export async function createChannelFull(
     // pass (`settleOwedRecord`), composed from this access record.
     recordOwed: true,
   }));
+  // ADR-0090: the founded group lives in the device provider; on disk now.
+  await channelsActions.persistPublisherGroupDurable().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn("[channels] the founded PublisherGroup was not written yet", err instanceof Error ? err.name : "");
+  });
   // A failure is logged by `settleOwedRecord` and stays owed.
   await settleOwedRecord(id, async () => {
     await publishChannelMeta(
@@ -1277,6 +1283,9 @@ export async function deleteChannel(lineage: WasmIdentity, current: WasmIdentity
     throw new ChannelError(serviceErrorCode(err), { cause: err });
   }
   await revokeOwnLinks(lineage, idHex);
+  // ADR-0064 section 1: the channel's saved copy (section 7) goes with it.
+  // Best effort; the channel is already deleted.
+  await deleteChannelVault(lineage, channelIdFromHex(idHex));
   await forgetHandle("channel", idHex).catch(() => undefined);
   stopChannel?.(idHex);
 }

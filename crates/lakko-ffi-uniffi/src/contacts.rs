@@ -2552,6 +2552,17 @@ pub enum FfiIncomingEnvelopeKind {
     /// publisher; requests before the next rotation collapse into it. Never
     /// render it. Appended last.
     ChannelRotateRequest,
+    /// A co-publisher's device asks an owner device to admit or retire one
+    /// of its account's devices (ADR-0090 section 2.2). `payload` is the
+    /// whole envelope; decode it with `decodePublisherDeviceRequestEnvelope`.
+    /// Only an owner device acts on it, under the rule in that function's
+    /// documentation. Never render it. Appended last.
+    PublisherDeviceRequest,
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). `payload` is the whole envelope; decode it with
+    /// `decodeChannelAdmissionMarkEnvelope` and keep the largest mark from a
+    /// current publisher. Never render it. Appended last.
+    ChannelAdmissionMark,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2793,6 +2804,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ChannelRotateRequest(channel) => FfiIncomingEnvelope {
             payload: channel.to_vec(),
             ..FfiIncomingEnvelope::of(K::ChannelRotateRequest)
+        },
+        IncomingEnvelope::PublisherDeviceRequest(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PublisherDeviceRequest)
+        },
+        IncomingEnvelope::ChannelAdmissionMark(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelAdmissionMark)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),

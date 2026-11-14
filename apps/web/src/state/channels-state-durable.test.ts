@@ -36,8 +36,13 @@ function fakeIdentity(): {
   };
 }
 
+const providerWrites = vi.fn(async () => undefined);
+
 async function armed(snapshotProvider: () => Uint8Array | null): Promise<typeof import("./channels-state")> {
   const mod = await import("./channels-state");
+  // ADR-0090: the device provider the PublisherGroups live in is written
+  // after the channel log (the conversation snapshot, stubbed here).
+  mod.installPublisherProviderPersister(providerWrites);
   await mod.hydrateChannelsState({
     accountIdB64: "acct",
     deviceKey: DEVICE_KEY,
@@ -73,6 +78,14 @@ describe("channelsActions.persistPublisherGroupDurable", () => {
     expect(options).toEqual({ durable: true });
     // Base64 of [4, 5, 6]: the snapshot of the provider as it is at the call.
     expect(JSON.stringify(payload)).toContain("BAUG");
+    // ADR-0090: and the device provider, after the log.
+    expect(providerWrites).toHaveBeenCalled();
+  });
+
+  it("ADR-0090: rejects when no device-provider persister is installed (fail-closed)", async () => {
+    const mod = await armed(() => new Uint8Array([1]));
+    mod.installPublisherProviderPersister(null);
+    await expect(mod.channelsActions.persistPublisherGroupDurable()).rejects.toThrow("no device provider persister");
   });
 
   it("rejects when the write fails, and the failure does not poison later writes", async () => {

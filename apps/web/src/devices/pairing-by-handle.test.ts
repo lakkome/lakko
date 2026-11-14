@@ -570,3 +570,32 @@ describe("no lookup before the session in the restore screens", () => {
     expect(src).toMatch(/requestHandle=/);
   });
 });
+
+describe("G-55: the DeviceGroup rejoin knock is sealed under the lineage seed", () => {
+  it("opens only under the same lineage identity and carries no login handle in the clear", () => {
+    const lineage = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x21));
+    const other = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x22));
+    const handle = new Uint8Array(32).fill(0x11);
+    try {
+      const row = wasm.encodeRejoinKnock(
+        lineage,
+        handle,
+        new Uint8Array(64).fill(7),
+        new Uint8Array(32).fill(9),
+        new Uint8Array(0),
+      );
+      const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+      expect(hex(row).includes(hex(handle))).toBe(false);
+      const opened = wasm.openRejoinKnock(lineage, row, handle);
+      expect(Array.from(opened.keyPackage)).toEqual(Array.from(new Uint8Array(64).fill(7)));
+      expect(opened.selfRemovalProof).toBeUndefined();
+      opened.free();
+      expect(() => wasm.openRejoinKnock(other, row, handle)).toThrow();
+      // No plain read: the pairing decoder does not take a sealed knock.
+      expect(() => wasm.decodePairingQr(row, handle)).toThrow();
+    } finally {
+      lineage.free();
+      other.free();
+    }
+  });
+});

@@ -83,6 +83,12 @@ public actor RotationCron {
         /// Optional callback after a successful rotation
         /// (carries the new server-side epoch).
         public let onRotated: (@Sendable (UInt32) -> Void)?
+        /// ADR-0090 section 4 — run when a rotation is due, before anything
+        /// is staged: the random 0-60 s wait and the journal re-read (which
+        /// applies another owner device's rotation that landed meanwhile).
+        /// Returns the rotation state to re-evaluate the policy on, or `nil`
+        /// to keep the one given. `nil` hook: stage at once.
+        public var beforeStage: (@Sendable () async -> ChannelRotationState?)? = nil
 
         /// Hex-encoded 16-byte channel id (URL slot).
         public var channelIdHex: String { commits.channelIdHex }
@@ -149,39 +155,39 @@ public actor RotationCron {
             return OnceResult(rotated: false, newState: state, newEpoch: nil)
         }
 
-        // 1. The server epoch the envelopes will bind to,
-        //    read BEFORE the local rotation: after the eager
-        //    merge nothing may fail before the commit's record
-        //    is durable (G-50), and this is a network read.
+        // ADR-0090 section 4 — any owner device rotates; the wait and the
+        // journal re-read make two of them staging on one epoch rare, the DS
+        // commit route makes it harmless.
+        if let beforeStage = context.beforeStage {
+            let reread = await beforeStage()
+            if let reread, !channelShouldRotate(policy: policy, state: reread, nowMs: Self.currentMs()) {
+                NSLog("ADR-0090: a rotation landed from another owner device; none staged here")
+                return OnceResult(rotated: false, newState: reread, newEpoch: nil)
+            }
+        }
+
+        // 1. The server epoch the envelopes will bind to.
         let currentEpoch = try await context.commits.channelsClient.fetchEpoch(
             channelIdHex: context.channelIdHex
         )
         let newServerEpoch = currentEpoch &+ 1
         if newServerEpoch < currentEpoch {
-            // Wrap-around (currentEpoch == UInt32.max). Refuse
-            // to rotate further — operator should investigate.
             throw CronError.unexpectedServerEpoch(currentEpoch)
         }
 
-        // 2. Advance the local MLS epoch (the self-update
-        //    commit eager-merges N -> N+1 in the channel
-        //    provider) and record the rotation, then the N+1
-        //    provider snapshot, durably, before any of its
-        //    steps runs. A refused record runs nothing.
-        let entry = try await Self.recordRotation(
-            context.commits, state: context.state,
-            serverEpoch: currentEpoch, serverTargetEpoch: newServerEpoch)
+        // 2. Stage the self-update (the group stays at N), record it with
+        //    the epoch-N proof, send it through the commit route; merged
+        //    only when the DS took it, then the reseal (ADR-0090 section 3).
+        let landed = try await Self.stageRotation(
+            context, serverEpoch: currentEpoch, serverTargetEpoch: newServerEpoch)
+        // ADR-0090 open question 1 — the commit-route outcome of every
+        // rotation, so the wait can be set from what is seen.
+        NSLog("ADR-0090: rotation commit %@", landed ? "taken" : "lost to another owner device")
+        guard landed else {
+            return OnceResult(rotated: false, newState: state, newEpoch: nil)
+        }
 
-        // 3. The steps: the N+1 epoch key and the rotation
-        //    commit on the DS in one request (ADR-0057,
-        //    ADR-0081; best effort for a rotation), reseal the
-        //    N+1 seed to every subscriber and commit the
-        //    rotation on the channels service with the ADR-0030
-        //    chunked fanout (C-42: the commit is the one atomic
-        //    point).
-        try await Self.runEntry(entry, context: context)
-
-        // 4. Stamp the new state + persist.
+        // 3. Stamp the new state + persist.
         let newState = channelRotationStateAfterRotation(nowMs: now)
         try await context.saveState(newState)
         context.onRotated?(newServerEpoch)
@@ -190,44 +196,17 @@ public actor RotationCron {
     }
 
     @MainActor
-    private static func recordRotation(
-        _ commits: ChannelPublisherCommits.Context, state: ChannelsUiState?,
-        serverEpoch: UInt32, serverTargetEpoch: UInt32
-    ) throws -> PublisherCommitEntry {
-        let (identity, group) = try commits.open()
-        // Section 13 — the seed this rotation leaves still opens the posts of
-        // `serverEpoch` on this device.
-        ChannelPublisherCommits.keepOutgoingSeed(
-            state: state, channelIdHex: commits.channelIdHex, serverEpoch: serverEpoch,
-            group: group, identity: identity)
-        // ADR-0081 — the proof of the epoch the rotation leaves, taken before
-        // the eager merge and recorded with the rotation, so a replay after a
-        // restart can still prove it.
-        let proofEpoch = try group.epoch()
-        let proofSeed = try group.dsAccessSeed(identity: identity)
-        let commit = try group.rotate(identity: identity)
-        let entry = PublisherCommitEntry(
-            kind: .rotation,
-            channelIdHex: commits.channelIdHex.lowercased(),
-            groupIdHex: DsClient.pseudonymHex(try group.groupId()),
-            targetEpoch: try group.epoch(),
-            serverTargetEpoch: serverTargetEpoch,
-            commitB64: commit.base64EncodedString(),
-            proofEpoch: proofEpoch,
-            proofSeedB64: proofSeed.base64EncodedString())
-        try ChannelPublisherCommits.record(entry, accountIdB64: commits.accountIdB64)
-        return entry
+    private static func stageRotation(
+        _ context: Context, serverEpoch: UInt32, serverTargetEpoch: UInt32
+    ) async throws -> Bool {
+        try await ChannelPublisherCommits.stageAndRun(
+            context.commits, state: context.state, kind: .rotation, joinerKey: nil,
+            serverTargetEpoch: serverTargetEpoch, serverEpoch: serverEpoch
+        ) { identity, group in
+            .init(commit: try group.stageRotate(identity: identity), welcome: nil)
+        }.landed
     }
 
-    @MainActor
-    private static func runEntry(
-        _ entry: PublisherCommitEntry, context: Context
-    ) async throws {
-        try await PublisherCommitRunner.run(
-            entry, ports: ChannelPublisherCommits.ports(context.commits, state: context.state))
-        ChannelPublisherCommits.refreshContentSeed(
-            context.commits, state: context.state, landedEpoch: entry.serverTargetEpoch)
-    }
 
     /// Start a periodic rotation poller. Returns a `Task`
     /// whose `.cancel()` stops the underlying loop. Safe

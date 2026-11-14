@@ -38,6 +38,16 @@ final class ChannelPublisherLoops {
     /// (ADR-0087 section 15, the rotate request); several collapse into one.
     private var rotateRequested: Set<String> = []
     private var running = false
+    /// ADR-0090 section 4 — since when this owner device has held an MLS
+    /// epoch the channel service has not taken (the unfinished-reseal
+    /// takeover), by channel.
+    private var trailingSince: [String: UInt64] = [:]
+
+    /// ADR-0090 section 4 — the random wait before a due rotation is staged
+    /// (0 to 60 s, chosen, not measured) and the unfinished-reseal wait
+    /// (5 minutes, chosen, not measured).
+    nonisolated static let rotationJitterMaxMs: UInt64 = 60_000
+    nonisolated static let resealTakeoverMs: UInt64 = 5 * 60_000
 
     /// A channel created on this device: its group is open and claimed.
     func markOpened(_ channelId: String) { opened.insert(channelId) }
@@ -48,7 +58,11 @@ final class ChannelPublisherLoops {
         knockCursor = [:]
         journalCursor = [:]
         rotateRequested = []
+        trailingSince = [:]
         ChannelAccountReaderKey.reset()
+        ChannelDeviceAdmission.reset()
+        ChannelVaultHead.reset()
+        ChannelEntry.reset()
     }
 
     func runLoop(
@@ -68,6 +82,11 @@ final class ChannelPublisherLoops {
         channelsRef = channels
         running = true
         defer { running = false }
+        // ADR-0090 — a recorded commit still staged (its DS verdict owed) is
+        // sent again first; a group holding one refuses membership operations.
+        await ChannelPublisherCommits.replayAll(
+            accountIdB64: accountIdB64, currentSeed: seed, state: channels, channelsClient: client)
+        ChannelDeviceAdmission.waitingState = channels
         for channelId in channels.keysByChannel.keys.sorted() {
             if Task.isCancelled { return }
             if channels.orphanedByReset(channelId: channelId) { continue }
@@ -100,6 +119,106 @@ final class ChannelPublisherLoops {
             // out under the committed epoch until the owner's reseal moves the
             // channel there (``ChannelPublisherSeed``).
             refreshPublisherSeed(channelId: channelId, channels: channels, seed: seed)
+            await deviceAdmissionPass(
+                channelId: channelId, channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
+        }
+        // ADR-0090 section 8 / decision A — the channels this device reads
+        // while the account publishes them.
+        await ChannelDeviceAdmission.passWaiting(
+            state: channels, client: client, seed: seed, accountIdB64: accountIdB64)
+    }
+
+    /// ADR-0090 — the per-channel device work of one pass: an owner device
+    /// admits and retires the account's devices, applies co-publishers'
+    /// device requests, keeps the admission seeds in the account's register,
+    /// sends its own account the hand-over, and takes over a reseal its
+    /// rotator never finished; a co-publisher's device asks for its own
+    /// devices; every device sends its admission mark when it advanced.
+    private func deviceAdmissionPass(
+        channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
+    ) async {
+        guard opened.contains(channelId),
+              let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
+              let group = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil,
+              (try? group.isActive()) == true, (try? group.hasStagedCommit()) == false else { return }
+        let ds = DsClient()
+        let context = ChannelPublisherCommits.Context(
+            channelIdHex: channelId, currentSeed: seed, accountIdB64: accountIdB64, channelsClient: client)
+        // Decision A — a device admitted since: the channel's epoch offset
+        // from the service, then the composer's seed epoch.
+        if channels.extras(channelId).epochOffsetToLearn == true {
+            await ChannelDeviceAdmission.learnEpochOffsetIfOwed(
+                channelId: channelId, state: channels, group: group, client: client)
+            refreshPublisherSeed(channelId: channelId, channels: channels, seed: seed)
+        }
+        if (try? group.isOwnerDevice(identity: identity)) == true {
+            ChannelDeviceAdmission.syncAdmissionSeeds(channelId: channelId)
+            await ChannelDeviceAdmission.reconcileOwnDevices(
+                context: context, state: channels, identity: identity, group: group)
+            if let current = (try? context.open())?.group {
+                await ChannelDeviceAdmission.applyQueuedRequests(
+                    context: context, state: channels, identity: identity, group: current)
+            }
+            if let current = (try? context.open())?.group {
+                await ChannelDeviceAdmission.sendOwnHandoverIfOwed(
+                    channelId: channelId, state: channels, identity: identity, group: current, ds: ds)
+                await resealTakeover(
+                    channelId: channelId, channels: channels, client: client, seed: seed,
+                    identity: identity, group: current)
+            }
+        } else {
+            await ChannelDeviceAdmission.requestOwnDevices(
+                channelId: channelId, identity: identity, group: group, ds: ds, accountIdB64: accountIdB64)
+        }
+        if let current = (try? context.open())?.group {
+            await ChannelDeviceAdmission.sendMarkIfOwed(
+                channelId: channelId, state: channels, identity: identity, group: current, ds: ds)
+        }
+    }
+
+    /// Whether an owner device takes over a reseal: the group's MLS epoch is
+    /// the channel service's next one, and has been for `takeoverMs`.
+    nonisolated static func takesOverReseal(
+        groupEpoch: UInt64, serverEpoch: UInt32, trailingSinceMs: UInt64?, nowMs: UInt64,
+        takeoverMs: UInt64 = resealTakeoverMs
+    ) -> Bool {
+        guard groupEpoch == UInt64(serverEpoch) &+ 1, let trailingSinceMs else { return false }
+        return nowMs >= trailingSinceMs &+ takeoverMs
+    }
+
+    /// ADR-0090 section 4 — an MLS epoch whose seed the channel service has
+    /// not taken for 5 minutes: this owner device reseals it itself (a second
+    /// device doing the same is refused at `current + 1` by the service).
+    private func resealTakeover(
+        channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data,
+        identity: Identity, group: PublisherGroup
+    ) async {
+        guard channels.extras(channelId).epochOffsetToLearn != true,
+              let mls = try? group.epoch(),
+              let server = try? await client.fetchEpoch(channelIdHex: channelId) else { return }
+        let groupEpoch = UInt64(ChannelDeviceAdmission.channelEpoch(
+            mls: mls, offset: channels.extras(channelId).epochOffset))
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        guard groupEpoch == UInt64(server) &+ 1 else {
+            trailingSince[channelId] = nil
+            return
+        }
+        if trailingSince[channelId] == nil { trailingSince[channelId] = now }
+        guard Self.takesOverReseal(
+            groupEpoch: groupEpoch, serverEpoch: server, trailingSinceMs: trailingSince[channelId], nowMs: now)
+        else { return }
+        let extras = channels.extras(channelId)
+        do {
+            NSLog("ADR-0090: an unfinished reseal is taken over by this owner device")
+            try await ChannelReseal.resealToSubscribers(
+                publisherGroup: group, identity: identity, ownerIdentity: try Identity.fromSeed(seed: seed),
+                channelIdHex: channelId, targetEpoch: server &+ 1, client: client,
+                throughSeq: ChannelReseal.resealThrough(isPublic: extras.isPublic, mark: extras.admittedThroughSeq),
+                ownReaderKeyHex: extras.readerKeyRegisteredHex)
+            trailingSince[channelId] = nil
+            await afterRotation(channelId: channelId, epoch: server &+ 1, channels: channels, client: client, seed: seed)
+        } catch {
+            NSLog("[channels] the reseal takeover did not complete; tried again next pass")
         }
     }
 
@@ -134,32 +253,47 @@ final class ChannelPublisherLoops {
     private func refreshPublisherSeed(channelId: String, channels: ChannelsUiState, seed: Data) {
         guard opened.contains(channelId), let held = channels.keysByChannel[channelId] else { return }
         let owner = ChannelOwnership.isOwner(channelId: channelId, state: channels)
-        guard !owner || held.seedEpoch == nil,
-              let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
+        // ADR-0090 — another owner device's commit moves this owner device's
+        // group too: follow the group once it is past the held keys.
+        guard let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
               let group = try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId),
               (try? group.isActive()) != false,
-              let epoch = try? group.epoch(),
+              channels.extras(channelId).epochOffsetToLearn != true,
+              let mls = try? group.epoch(),
+              case let epoch = ChannelDeviceAdmission.channelEpoch(
+                mls: mls, offset: channels.extras(channelId).epochOffset),
+              !owner || held.seedEpoch == nil || epoch > (held.seedEpoch ?? 0),
               let groupSeed = try? group.channelSeed(identity: identity) else { return }
-        channels.notePublisherSeedAt(channelId: channelId, epoch: UInt32(clamping: epoch), seed: groupSeed)
+        channels.notePublisherSeedAt(channelId: channelId, epoch: epoch, seed: groupSeed)
     }
 
     private func rotateIfDue(
         channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
     ) async {
-        // Maintainer, 2026-11-08: only the channel's owner rotates its key; a
-        // co-publisher's device never runs the rotation policy.
+        // ADR-0090 decision C: every OWNER device runs the rotation policy; a
+        // co-publisher's device never does.
         guard opened.contains(channelId), Self.rotates(channelId: channelId, channels: channels) else { return }
-        let cron = RotationCron(context: RotationCron.Context(
+        var context = RotationCron.Context(
             commits: ChannelPublisherCommits.Context(
                 channelIdHex: channelId, currentSeed: seed, accountIdB64: accountIdB64, channelsClient: client),
             state: channels,
             saveState: { newState in
                 ChannelRotationStateStore.save(accountIdB64: accountIdB64, channelId: channelId, state: newState)
             },
-            onRotated: nil))
-        let state = ChannelRotationStateStore.loadOrSeed(
-            accountIdB64: accountIdB64, channelId: channelId,
-            nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+            onRotated: nil)
+        // ADR-0090 section 4 — wait a random 0-60 s, re-read the journal head
+        // (another owner device's rotation applies and restarts the clock),
+        // then re-evaluate.
+        context.beforeStage = { [weak self] in
+            let waitMs = UInt64.random(in: 0...Self.rotationJitterMaxMs)
+            try? await Task.sleep(nanoseconds: waitMs * 1_000_000)
+            await self?.pollJournal(channelId: channelId, seed: seed)
+            return await MainActor.run {
+                Self.rotationState(channelId: channelId, channels: channels, accountIdB64: accountIdB64)
+            }
+        }
+        let cron = RotationCron(context: context)
+        let state = Self.rotationState(channelId: channelId, channels: channels, accountIdB64: accountIdB64)
         do {
             let result = try await cron.runOnce(policy: channelRotationPolicyDefault(), state: state)
             if let epoch = result.newEpoch {
@@ -168,6 +302,33 @@ final class ChannelPublisherLoops {
         } catch {
             NSLog("[channels] a scheduled rotation did not complete; tried again next pass")
         }
+    }
+
+    /// ADR-0090 section 4 — the policy's inputs as every owner device sees
+    /// them: the start of the current epoch (the DS row time of the commit
+    /// that began it, kept by the journal poll) and the posts listed under
+    /// the current epoch id.
+    static func rotationState(
+        channelId: String, channels: ChannelsUiState, accountIdB64: String
+    ) -> ChannelRotationState {
+        let stored = ChannelRotationStateStore.loadOrSeed(
+            accountIdB64: accountIdB64, channelId: channelId,
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        guard let epoch = channels.epochByChannel[channelId] else { return stored }
+        let posts = postsUnder(
+            epoch: epoch, payloads: (channels.postsByChannel[channelId] ?? []).map(\.payloadB64))
+        return ChannelRotationState(lastRotationMs: stored.lastRotationMs, postsSinceRotation: posts)
+    }
+
+    /// The posts whose wire names `epoch`.
+    nonisolated static func postsUnder(epoch: UInt32, payloads: [String]) -> UInt32 {
+        var count: UInt32 = 0
+        for b64 in payloads {
+            guard let wire = base64UrlDecodeNoPad(b64),
+                  let post = try? decodeChannelPost(wire: wire), post.epochId() == epoch else { continue }
+            count &+= 1
+        }
+        return count
     }
 
     /// A subscriber of a private channel was removed (section 7.3): the
@@ -438,22 +599,62 @@ final class ChannelPublisherLoops {
         }
     }
 
-    private func pollJournal(channelId: String, seed: Data) async {
+    func pollJournal(channelId: String, seed: Data) async {
         guard opened.contains(channelId),
               let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
               let group = try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)
         else { return }
         let owner = channelsRef.map { ChannelOwnership.isOwner(channelId: channelId, state: $0) } ?? false
+        // ADR-0090 — a group holding a staged commit applies nothing until the
+        // DS's verdict on it (``ChannelPublisherCommits/replayAll``).
+        guard (try? group.hasStagedCommit()) == false else { return }
         let ds = DsClient()
-        if let outcome = try? await CoPublisher.pollJournal(
-            ds: ds, identity: identity, publisherGroup: group,
-            knockAfter: knockCursor[channelId] ?? 0,
-            readKnocks: owner,
-            after: journalCursor[channelId] ?? 0) {
+        let epochBefore = try? group.epoch()
+        let leavesBefore = ChannelDeviceAdmission.leafAccounts(group)
+        let polled: CoPublisher.PollOutcome?
+        do {
+            polled = try await CoPublisher.pollJournal(
+                ds: ds, identity: identity, publisherGroup: group,
+                knockAfter: knockCursor[channelId] ?? 0,
+                readKnocks: owner,
+                after: journalCursor[channelId] ?? 0)
+            ChannelDeviceAdmission.noteReadOk(channelId: channelId)
+        } catch {
+            polled = nil
+            // ADR-0090 section 2.5 — a journal reset under this device
+            // (decision A on a restored device) refuses its signed reads.
+            if ChannelDeviceAdmission.isRefusedRead(error), let channels = channelsRef,
+               ChannelDeviceAdmission.noteRefusedRead(
+                channelId: channelId, state: channels, identity: identity, group: group) {
+                opened.remove(channelId)
+                journalCursor[channelId] = nil
+                knockCursor[channelId] = nil
+                return
+            }
+        }
+        if let outcome = polled {
             knockCursor[channelId] = outcome.knockCursor
             journalCursor[channelId] = outcome.journalCursor
             ChannelPublisherIdentity.shared.persist()
+            // ADR-0090 section 4 — a commit applied here (another owner
+            // device's rotation, admission, removal) began a new epoch: the
+            // policy's clock restarts at its DS row time.
+            if let at = outcome.lastCommitAtMs, at > 0, let account = AcceptedContactsStore.boundAccountIdB64 {
+                ChannelRotationStateStore.save(
+                    accountIdB64: account, channelId: channelId,
+                    state: channelRotationStateAfterRotation(nowMs: UInt64(at)))
+            }
+            if let channels = channelsRef {
+                ChannelDeviceAdmission.receiveMarks(
+                    outcome.applications, channelId: channelId, group: group, state: channels)
+            }
             if owner {
+                ChannelDeviceAdmission.noteRequests(outcome.applications, channelId: channelId)
+                // ADR-0090 section 6 — the hand-over another owner device
+                // sealed to this account (read key, seeds) is kept here too.
+                ChannelAdmissionSeedShare.receive(
+                    outcome.applications, ownerAccountKey: outcome.ownerAccountKey,
+                    channelId: channelId, currentSeed: seed, state: channelsRef)
                 ChannelAdmissionSeedShare.rememberRequests(outcome.requests, channelId: channelId)
                 if let groupId = try? group.groupId() {
                     PublisherLinkApproval.remember(outcome.requests, groupId: groupId)
@@ -476,6 +677,21 @@ final class ChannelPublisherLoops {
         }
         // Reopened: a step-down applied above moved the group.
         let current = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? group
+        // ADR-0064 section 7 (2026-11-14) — a commit another owner device made
+        // (or an owner device's entry) was applied here: the channel's head
+        // gets the current epoch. Owner devices only (``ChannelVaultHead/writes``).
+        if Self.headOwed(before: epochBefore, after: try? current.epoch()) {
+            await ChannelVaultHead.writeCurrent(channelIdHex: channelId, group: current, identity: identity)
+            // Security pass — an applied entry (a new owner device leaf) is
+            // reconciled against the DeviceGroup roster in this pass.
+            if let channels = channelsRef, let account = AcceptedContactsStore.boundAccountIdB64 {
+                await ChannelDeviceAdmission.afterApplied(
+                    before: leavesBefore,
+                    context: ChannelPublisherCommits.Context(
+                        channelIdHex: channelId, currentSeed: seed, accountIdB64: account),
+                    state: channels, identity: identity, group: current)
+            }
+        }
         CoPublisher.refreshPublishers(identity: identity, group: current, channelIdHex: channelId)
         if !owner {
             await sendOwnBindingIfOwed(channelId: channelId, identity: identity, group: current, ds: ds)
@@ -548,6 +764,12 @@ final class ChannelPublisherLoops {
     /// This device no longer publishes `channelId`: its publisher keys go,
     /// and the channel with them unless the account also reads it as a
     /// subscriber (UX 15.2: they stay subscribed if they were).
+    /// Whether a journal poll applied a commit: the group's epoch moved.
+    nonisolated static func headOwed(before: UInt64?, after: UInt64?) -> Bool {
+        guard let before, let after else { return false }
+        return after > before
+    }
+
     private func endPublishing(channelId: String) {
         guard let channels = channelsRef else { return }
         opened.remove(channelId)

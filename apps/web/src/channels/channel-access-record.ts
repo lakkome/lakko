@@ -69,7 +69,10 @@ export interface ChannelAccessRecord {
   readonly readKeyB64: string | null;
   /** A private reader registered and not yet let in. */
   readonly waiting: boolean;
-  /** Admission seeds by version (owner and publishers), standard base64. */
+  /** Admission seeds (owner and publishers), standard base64. ADR-0090
+   *  open question 4: two seeds of ONE version may coexist (two owner devices
+   *  minted the same version at once); a ticket of that version is tried with
+   *  every one of them. */
   readonly admissionSeeds: readonly { readonly version: number; readonly seedB64: string }[];
   readonly inviteLinks: readonly ChannelInviteLinkRecord[];
   /** Account keys (standard base64) the owner invited to publish. */
@@ -114,6 +117,53 @@ export interface ChannelAccessRecord {
    * says, so the account's reader devices keep reading a private channel.
    */
   readonly readerKeyRegisteredHex?: string;
+  /** ADR-0090 section 6: what this owner device handed its OWN account's
+   *  devices (the epoch seeds and admission seeds), per device like the
+   *  publishers' records; cleared when an admission adds an own device. */
+  readonly ownHandover?: PublisherEntry | null;
+  /** ADR-0090: the channel epoch minus the PublisherGroup epoch, when they
+   *  differ (a group founded again at a live channel's epoch, decision A;
+   *  learned from the channels service when a device joined). Absent: 0. */
+  readonly epochOffset?: number;
+  /** ADR-0090: on a co-publisher's device, the channel owner's account key
+   *  (standard base64) it verified as the `/g/` capability's issuer when it
+   *  joined; written into the account's channel-subscription register. */
+  readonly ownerAccountKeyB64?: string;
+  /** ADR-0090 section 6 (security pass): the highest admission mark the
+   *  channel OWNER's devices sent; counted only up to
+   *  {@link rowsReadThroughSeq}. */
+  readonly markPendingSeq?: number;
+  /** The newest subscriber row (service `seq`) this device has itself read
+   *  from the channels service. */
+  readonly rowsReadThroughSeq?: number;
+  /** ADR-0090 section 2.5 (security pass): the DS suggests the journal was
+   *  founded again elsewhere (refused reads, another epoch). This device
+   *  stopped publishing and rotating and waits as a reader; the group state
+   *  is KEPT until an owner-signed Welcome for the same group replaces it. */
+  readonly resetSuspected?: true;
+}
+
+/**
+ * ADR-0090 section 6 (security pass), pure: the admission mark this device
+ * counts: the owner's pending mark, but never past the rows this device has
+ * itself read; never below what it held.
+ */
+export function effectiveAdmissionMark(held: number, pendingSeq: number, rowsReadThroughSeq: number): number {
+  return Math.max(held, Math.min(pendingSeq, rowsReadThroughSeq));
+}
+
+/** The record after this device read subscriber rows up to `seq`: the read
+ *  position moves, and a pending owner mark counts that much further. */
+export function withRowsRead(record: ChannelAccessRecord, seq: number): ChannelAccessRecord {
+  const read = Math.max(record.rowsReadThroughSeq ?? 0, seq);
+  const admitted = effectiveAdmissionMark(record.admittedThroughSeq, record.markPendingSeq ?? 0, read);
+  if (read === (record.rowsReadThroughSeq ?? 0) && admitted === record.admittedThroughSeq) return record;
+  return { ...record, rowsReadThroughSeq: read, admittedThroughSeq: admitted };
+}
+
+/** The channel epoch a PublisherGroup epoch serves (ADR-0090). */
+export function channelEpochOfGroup(record: ChannelAccessRecord, groupEpoch: bigint | number): number {
+  return Number(groupEpoch) + (record.epochOffset ?? 0);
 }
 
 /** One publisher the owner approved here. */
@@ -124,8 +174,12 @@ export interface PublisherEntry {
   readonly copublisherKeyB64: string;
   /** Lower-case hex of the 16-byte account id the request named, or "". */
   readonly accountIdHex: string;
-  /** The admission-seed versions already sent to this publisher. */
+  /** The admission-seed versions already sent to this publisher (older
+   *  entries; {@link sentSeedIds} decides since ADR-0090). */
   readonly sentVersions: readonly number[];
+  /** ADR-0090: the admission seeds already sent, by {@link admissionSeedId}
+   *  (every seed of a version is sent, not one per version). */
+  readonly sentSeedIds?: readonly string[];
   /** ADR-0087 phase B: the channel's read key was sent to this publisher
    *  (it never changes, so once is enough). */
   readonly readKeySent?: boolean;
@@ -138,10 +192,41 @@ export interface PublisherEntry {
 /** The admission-seed versions a publisher still needs, ascending (ADR-0087
  *  section 7: every version, so tickets of older links still open). */
 export function versionsToSend(record: ChannelAccessRecord, p: PublisherEntry): number[] {
+  return [...new Set(seedsToSend(record, p).map((s) => s.version))].sort((a, b) => a - b);
+}
+
+/** A short id of an admission seed for the hand-over records (a prefix of
+ *  its encoding; the records live in the same encrypted log as the seeds). */
+export function admissionSeedId(seedB64: string): string {
+  return seedB64.slice(0, 16);
+}
+
+/** ADR-0090 open question 4 — every admission seed a publisher still needs:
+ *  every seed of every version not yet sent, ascending by version. A seed
+ *  sent under the older per-version record counts as sent only when it is
+ *  the one seed of its version. */
+export function seedsToSend(
+  record: ChannelAccessRecord,
+  p: PublisherEntry,
+): { readonly version: number; readonly seedB64: string }[] {
+  const sentIds = new Set(p.sentSeedIds ?? []);
   return record.admissionSeeds
-    .map((s) => s.version)
-    .filter((v) => !p.sentVersions.includes(v))
-    .sort((a, b) => a - b);
+    .filter((s) => {
+      if (sentIds.has(admissionSeedId(s.seedB64))) return false;
+      const sameVersion = record.admissionSeeds.filter((x) => x.version === s.version).length;
+      return !(sameVersion === 1 && p.sentSeedIds === undefined && p.sentVersions.includes(s.version));
+    })
+    .sort((a, b) => a.version - b.version);
+}
+
+/** The seeds with `add` folded in once each (by seed, not by version). */
+export function withAdmissionSeeds(
+  held: readonly { readonly version: number; readonly seedB64: string }[],
+  add: readonly { readonly version: number; readonly seedB64: string }[],
+): { readonly version: number; readonly seedB64: string }[] {
+  const out = [...held];
+  for (const a of add) if (!out.some((x) => x.seedB64 === a.seedB64)) out.push(a);
+  return out;
 }
 
 export function emptyAccessRecord(): ChannelAccessRecord {
@@ -197,6 +282,40 @@ function decodeLink(raw: unknown): ChannelInviteLinkRecord | null {
   };
 }
 
+function decodePublisherEntry(e: unknown): PublisherEntry | null {
+  if (typeof e !== "object" || e === null) return null;
+  const p = e as Record<string, unknown>;
+  if (!(isB64(p.accountKeyB64) && p.accountKeyB64.length === KEY_B64_LEN && isB64(p.copublisherKeyB64))) return null;
+  const sent = (Array.isArray(p.sentVersions) ? p.sentVersions : []).filter(
+    (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0,
+  );
+  return {
+    accountKeyB64: p.accountKeyB64,
+    copublisherKeyB64: p.copublisherKeyB64,
+    accountIdHex: typeof p.accountIdHex === "string" && /^([0-9a-f]{32})?$/.test(p.accountIdHex) ? p.accountIdHex : "",
+    sentVersions: [...new Set(sent)],
+    ...(Array.isArray(p.sentSeedIds)
+      ? {
+          sentSeedIds: [
+            ...new Set((p.sentSeedIds as unknown[]).filter((v: unknown): v is string => typeof v === "string" && v.length <= 24)),
+          ],
+        }
+      : {}),
+    ...(p.readKeySent === true ? { readKeySent: true } : {}),
+    ...(Array.isArray(p.sentEpochs)
+      ? {
+          sentEpochs: [
+            ...new Set(
+              (p.sentEpochs as unknown[]).filter(
+                (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0,
+              ),
+            ),
+          ],
+        }
+      : {}),
+  };
+}
+
 /** Strict per field: a malformed field reads as absent, never as a guess.
  *  `null` only when the value is not an object at all. */
 export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
@@ -213,7 +332,7 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
     const e = s as Record<string, unknown>;
     if (typeof e.version !== "number" || !Number.isInteger(e.version) || e.version < 0) continue;
     if (!isB64(e.seedB64) || e.seedB64.length !== KEY_B64_LEN) continue;
-    if (seeds.some((x) => x.version === e.version)) continue;
+    if (seeds.some((x) => x.seedB64 === e.seedB64)) continue;
     seeds.push({ version: e.version, seedB64: e.seedB64 });
   }
   const links: ChannelInviteLinkRecord[] = [];
@@ -267,38 +386,33 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
         : 0,
     ...(r.admissionMarkSet === true ? { admissionMarkSet: true as const } : {}),
     ...(r.recordOwed === true ? { recordOwed: true } : {}),
+    ...(typeof r.markPendingSeq === "number" && Number.isInteger(r.markPendingSeq) && r.markPendingSeq > 0
+      ? { markPendingSeq: r.markPendingSeq }
+      : {}),
+    ...(typeof r.rowsReadThroughSeq === "number" && Number.isInteger(r.rowsReadThroughSeq) && r.rowsReadThroughSeq > 0
+      ? { rowsReadThroughSeq: r.rowsReadThroughSeq }
+      : {}),
+    ...(r.resetSuspected === true ? { resetSuspected: true as const } : {}),
+    ...(isB64(r.ownerAccountKeyB64) && r.ownerAccountKeyB64.length === KEY_B64_LEN
+      ? { ownerAccountKeyB64: r.ownerAccountKeyB64 }
+      : {}),
+    ...(typeof r.epochOffset === "number" && Number.isInteger(r.epochOffset) && r.epochOffset > 0
+      ? { epochOffset: r.epochOffset }
+      : {}),
     ...(r.rotateRequestOwed === true ? { rotateRequestOwed: true } : {}),
     ...(typeof r.readerKeyRegisteredHex === "string" && /^[0-9a-f]{64}$/.test(r.readerKeyRegisteredHex)
       ? { readerKeyRegisteredHex: r.readerKeyRegisteredHex }
       : {}),
     publisherKeys: (Array.isArray(r.publisherKeys) ? r.publisherKeys : []).flatMap((e: unknown) => {
-      if (typeof e !== "object" || e === null) return [];
-      const p = e as Record<string, unknown>;
-      if (!(isB64(p.accountKeyB64) && p.accountKeyB64.length === KEY_B64_LEN && isB64(p.copublisherKeyB64))) return [];
-      const sent = (Array.isArray(p.sentVersions) ? p.sentVersions : []).filter(
-        (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0,
-      );
-      return [
-        {
-          accountKeyB64: p.accountKeyB64,
-          copublisherKeyB64: p.copublisherKeyB64,
-          accountIdHex: typeof p.accountIdHex === "string" && /^([0-9a-f]{32})?$/.test(p.accountIdHex) ? p.accountIdHex : "",
-          sentVersions: [...new Set(sent)],
-          ...(p.readKeySent === true ? { readKeySent: true } : {}),
-          ...(Array.isArray(p.sentEpochs)
-            ? {
-                sentEpochs: [
-                  ...new Set(
-                    (p.sentEpochs as unknown[]).filter(
-                      (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0,
-                    ),
-                  ),
-                ],
-              }
-            : {}),
-        },
-      ];
+      const d = decodePublisherEntry(e);
+      return d === null ? [] : [d];
     }),
+    ...(r.ownHandover !== undefined && r.ownHandover !== null
+      ? ((): { ownHandover?: PublisherEntry } => {
+          const d = decodePublisherEntry(r.ownHandover);
+          return d === null ? {} : { ownHandover: d };
+        })()
+      : {}),
   };
 }
 

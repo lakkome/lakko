@@ -140,6 +140,7 @@ import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { conversationWithContact } from "./contact-conversation";
 import { duplicateOneToOneFolds, type HeldConversationGroup } from "./duplicate-one-to-one";
 import { landPendingPublisherWelcome } from "../channels/channel-publishers";
+import { landPublisherDeviceWelcome } from "../channels/publisher-devices";
 import { buildLineage } from "../chat/lineage";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
@@ -381,7 +382,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   async function landPublisherWelcome(accountIdB64: string, welcome: Uint8Array): Promise<boolean> {
     const identity = chats.conversationAccountIdentity();
     if (identity === null) return false;
-    return landPendingPublisherWelcome(identity, accountIdB64, welcome);
+    if (await landPendingPublisherWelcome(identity, accountIdB64, welcome)) return true;
+    // ADR-0090 section 2.3: a sibling (or the owner) admitted this device to
+    // a channel the account owns or co-publishes.
+    return landPublisherDeviceWelcome(identity, welcome);
   }
 
   /** Whether this device holds a live one-to-one with the person. */

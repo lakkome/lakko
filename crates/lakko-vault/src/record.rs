@@ -64,7 +64,8 @@
 //! shared_pin := message_id u64 || pinned bool || updated_at_ms u64
 //! personal_pin := message_id u64 || pinned_at_ms u64
 //! chunk_entry := count u16 || first_id u64 || last_id u64 || version u64
-//! reentry := epoch u64 || group_info_len u32 (1..=1 MiB) || group_info
+//! reentry := epoch u64 || ds_access_seed(32) || group_info_len u32 (1..=1 MiB)
+//!   || group_info
 //! registrar := rank u8 || seed(32)
 //!
 //! devices_head := version || reentry_count u8 (<= 2) || reentry*
@@ -193,7 +194,7 @@ const MIN_PERSON_LEN: usize = 32 + 1 + 1 + 1;
 const SHARED_PIN_LEN: usize = 8 + 1 + 8;
 const PERSONAL_PIN_LEN: usize = 8 + 8;
 const CHUNK_ENTRY_LEN: usize = 2 + 8 + 8 + 8;
-const MIN_REENTRY_LEN: usize = 8 + 4;
+const MIN_REENTRY_LEN: usize = 8 + 32 + 4;
 const MIN_INDEX_ENTRY_LEN: usize = 3 + 8 + 1;
 
 /// Why a record was refused. Reason codes only: no variant carries input.
@@ -608,11 +609,18 @@ pub struct ChunkEntry {
     pub version: u64,
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReentryEpoch {
     /// The epoch the GroupInfo describes.
     pub epoch: u64,
+    /// The Delivery Service access seed of that epoch: the group's
+    /// `export_secret("lakko/ds/access/v1", group_id, 32)` at `epoch`, the
+    /// input of the journal's access signer (ADR-0053). An entering device
+    /// signs the epoch-`epoch` proof of its entry commit with it. Secret;
+    /// redacted in `Debug`.
+    pub ds_access_seed: SecretBytes<32>,
     /// The GroupInfo with its ratchet tree, as MLS encodes it. Opaque here.
     pub group_info: Vec<u8>,
 }
@@ -1030,6 +1038,7 @@ fn put_reentry(out: &mut Vec<u8>, reentry: &[ReentryEpoch]) -> Result<(), Record
     put_len_u8(out, reentry.len());
     for epoch in reentry {
         out.extend_from_slice(&epoch.epoch.to_be_bytes());
+        out.extend_from_slice(epoch.ds_access_seed.as_bytes());
         put_bytes_u32(out, &epoch.group_info);
         check_size(out)?;
     }
@@ -1522,6 +1531,7 @@ fn read_reentry(r: &mut Reader<'_>) -> Result<Vec<ReentryEpoch>, RecordError> {
     let mut reentry = Vec::with_capacity(count);
     for _ in 0..count {
         let epoch = r.u64()?;
+        let ds_access_seed = SecretBytes::new(r.array::<32>()?);
         let info_len = r.len_u32()?;
         if info_len == 0 {
             return Err(RecordError::Reentry);
@@ -1529,7 +1539,11 @@ fn read_reentry(r: &mut Reader<'_>) -> Result<Vec<ReentryEpoch>, RecordError> {
         let group_info = r
             .bounded(info_len, MAX_GROUP_INFO_BYTES, RecordError::Reentry)?
             .to_vec();
-        reentry.push(ReentryEpoch { epoch, group_info });
+        reentry.push(ReentryEpoch {
+            epoch,
+            ds_access_seed,
+            group_info,
+        });
     }
     Ok(reentry)
 }

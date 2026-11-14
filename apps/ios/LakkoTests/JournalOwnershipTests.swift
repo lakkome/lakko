@@ -184,9 +184,13 @@ final class JournalOwnershipTests: XCTestCase {
     /// claim would squat the journal against the owner. A device marked as a
     /// co-publisher never claims (on open or lazily); the owner does.
     func testACoPublisherNeverClaimsThePublisherGroupJournal() async throws {
-        let identity = try Identity.fromSeed(seed: Data(repeating: 0x61, count: 32))
+        let accountSeed = Data(repeating: 0x61, count: 32)
+        let identity = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x63, count: 32), accountSeed: accountSeed, issuedAtUnixSecs: 1_700_000_000)
         let channelId = Data((0..<16).map { UInt8($0) &+ 0x40 })
-        let group = try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+        let group = try PublisherGroup.create(identity: identity, ownerAccountSeed: accountSeed, channelId: channelId)
+        ChannelPublisherIdentity.noteOwnerSeed(accountSeed)
+        defer { ChannelPublisherIdentity.noteOwnerSeed(nil) }
         let hex = DsClient.pseudonymHex(try group.groupId())
         let marks = JournalFoundingMarks(
             defaults: try XCTUnwrap(UserDefaults(suiteName: "marks-\(UUID().uuidString)")))

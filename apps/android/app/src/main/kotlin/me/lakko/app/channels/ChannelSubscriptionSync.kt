@@ -38,6 +38,9 @@ public class ChannelRegisterView(
     public val publisherGroupId: ByteArray,
     public val name: String,
     public val handle: String,
+    /** ADR-0090 — 32 bytes for a co-publisher (the owner's account key its
+     *  joining device verified as the `/g/` issuer), else empty. */
+    public val ownerAccountKey: ByteArray = ByteArray(0),
 ) {
     /** Same value, stamp aside. */
     public fun sameValueAs(other: ChannelRegisterView): Boolean =
@@ -48,7 +51,8 @@ public class ChannelRegisterView(
             readKey.contentEquals(other.readKey) &&
             publisherGroupId.contentEquals(other.publisherGroupId) &&
             name == other.name &&
-            handle == other.handle
+            handle == other.handle &&
+            ownerAccountKey.contentEquals(other.ownerAccountKey)
 
     override fun toString(): String = "ChannelRegisterView($channelIdHex, subscribed=$subscribed, role=$role, <redacted>)"
 }
@@ -72,6 +76,8 @@ public class LocalChannelFacts(
     public val handle: String,
     /** When this device listed the channel (unix ms). */
     public val addedAtMs: ULong,
+    /** ADR-0090 — the owner account key recorded for a co-published channel. */
+    public val ownerAccountKey: ByteArray? = null,
 ) {
     override fun toString(): String = "LocalChannelFacts($channelIdHex, role=$role, <redacted>)"
 }
@@ -139,6 +145,15 @@ internal fun desiredChannelRegister(local: LocalChannelFacts, held: ChannelRegis
                 ?: return null
         else -> ByteArray(0)
     }
+    // ADR-0090 section 2.3 — a co-publisher register carries the owner's
+    // account key (required by the register); an owner's or a reader's none.
+    val ownerKey = when (role) {
+        ChannelAccountRole.CO_PUBLISHER ->
+            local.ownerAccountKey?.takeIf { it.size == 32 }
+                ?: live?.ownerAccountKey?.takeIf { it.size == 32 }
+                ?: return null
+        else -> ByteArray(0)
+    }
     val readKey = local.readKey?.takeIf { it.size == 32 }
         ?: live?.readKey?.takeIf { it.size == 32 }
         ?: ByteArray(0)
@@ -159,6 +174,7 @@ internal fun desiredChannelRegister(local: LocalChannelFacts, held: ChannelRegis
         publisherGroupId = groupId,
         name = name,
         handle = handle,
+        ownerAccountKey = ownerKey,
     )
 }
 
@@ -254,6 +270,7 @@ internal fun viewOf(register: uniffi.lakko_ffi_uniffi.ChannelSubscriptionRegiste
         publisherGroupId = register.publisherGroupId,
         name = register.name,
         handle = register.handle,
+        ownerAccountKey = register.ownerAccountKey,
     )
 
 /** Where the reconcile reads and writes the account's registers; the
@@ -289,6 +306,7 @@ public class SyncChannelRegisterPort(
             subscriberSecret = value.subscriberSecret,
             readKey = value.readKey,
             publisherGroupId = value.publisherGroupId,
+            ownerAccountKey = value.ownerAccountKey,
             name = value.name,
             handle = value.handle,
             expectedHlc = value.hlc,
@@ -485,6 +503,7 @@ public object ChannelSubscriptionSync {
                 name = c.sharedName.ifBlank { c.localName },
                 handle = c.handle,
                 addedAtMs = c.addedAtMs,
+                ownerAccountKey = state.coPublished?.ownerKeyOf(c.id),
             )
         }
         val plan = planChannelReconcile(
@@ -546,6 +565,11 @@ public object ChannelSubscriptionSync {
 
     private fun markJoined(state: ChannelsUiState, r: ChannelRegisterView) {
         if (r.role != ChannelAccountRole.CO_PUBLISHER || r.publisherGroupId.size != 32) return
+        // ADR-0090 — the owner key the joining device recorded: this device
+        // takes a PublisherGroup Welcome only from that account's devices.
+        if (r.ownerAccountKey.size == 32 && state.coPublished?.ownerKeyOf(r.channelIdHex) == null) {
+            state.coPublished?.markOwner(r.channelIdHex, r.ownerAccountKey)
+        }
         if (state.joinedGroupIdOf(r.channelIdHex) != null) return
         state.coPublished?.markChannel(ChannelsComposer.bytesToHex(r.publisherGroupId), r.channelIdHex)
     }

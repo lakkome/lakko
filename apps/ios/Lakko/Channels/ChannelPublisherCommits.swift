@@ -59,25 +59,107 @@ public enum ChannelPublisherCommits {
         }
     }
 
-    /// Record `entry` for a commit just created in the channel provider:
-    /// the entry FIRST, then the N+1 provider snapshot, both fail-closed. On
-    /// a failure the entry is removed, the in-memory provider (which holds
-    /// the unrecorded N+1) is dropped so the next open restores the durable
-    /// epoch N, and the error is rethrown: nothing runs.
-    public static func record(_ entry: PublisherCommitEntry, accountIdB64: String) throws {
+    /// Record `entry` for a commit just STAGED in the device provider: the
+    /// entry FIRST, then the provider snapshot carrying the staged commit,
+    /// both fail-closed. On a failure the staged commit is abandoned (the
+    /// group stays at N), the entry removed, and the error rethrown: nothing
+    /// is sent.
+    public static func record(
+        _ entry: PublisherCommitEntry, accountIdB64: String, abandon: () -> Void = {}
+    ) throws {
         do {
             try PublisherCommitStore.shared.put(accountIdB64: accountIdB64, entry)
         } catch {
-            ChannelPublisherIdentity.shared.unbind()
+            abandon()
             throw error
         }
         do {
             try ChannelPublisherIdentity.shared.persistOrThrow()
         } catch {
             PublisherCommitStore.shared.remove(accountIdB64: accountIdB64, id: entry.id)
-            ChannelPublisherIdentity.shared.unbind()
+            abandon()
             throw error
         }
+    }
+
+    /// What one staged commit carries.
+    public struct Staged {
+        public let commit: Data
+        public let welcome: Data?
+    }
+
+    /// Entries whose steps are running now (a replay skips them).
+    static var running: Set<String> = []
+
+    /// Thrown when a commit is asked for while an earlier one of the group is
+    /// still staged (its owed verdict runs first, ``replayAll``).
+    public struct CommitStillStaged: Error {}
+
+    /// ADR-0090 section 3 — stage one PublisherGroup commit with `build`,
+    /// record it (fail closed) with the epoch-N proof seed, then run its
+    /// steps: the commit route, the merge on acceptance (or the abandon on a
+    /// `409`), then the Welcome / reseal / appointment. Returns the entry as
+    /// recorded; the caller reads `journalLost` from the store-less result
+    /// through ``PublisherCommitRunner``'s effects (`landed`).
+    @discardableResult
+    public static func stageAndRun(
+        _ context: Context, state: ChannelsUiState?, kind: PublisherCommitEntry.Kind,
+        joinerKey: Data?, serverTargetEpoch: UInt32, serverEpoch: UInt32,
+        build: (Identity, PublisherGroup) throws -> Staged
+    ) async throws -> (entry: PublisherCommitEntry, landed: Bool) {
+        let (identity, group) = try context.open()
+        guard (try? group.hasStagedCommit()) != true else { throw CommitStillStaged() }
+        guard try group.isOwnerDevice(identity: identity) else { throw CoPublisherError.notOnThisDevice }
+        let proofEpoch = try group.epoch()
+        let proofSeed = try group.dsAccessSeed(identity: identity)
+        let staged = try build(identity, group)
+        let entry = PublisherCommitEntry(
+            kind: kind,
+            channelIdHex: context.channelIdHex.lowercased(),
+            groupIdHex: DsClient.pseudonymHex(try group.groupId()),
+            targetEpoch: proofEpoch &+ 1,
+            serverTargetEpoch: serverTargetEpoch,
+            commitB64: staged.commit.base64EncodedString(),
+            welcomeB64: staged.welcome?.base64EncodedString(),
+            joinerKeyB64: joinerKey?.base64EncodedString(),
+            proofEpoch: proofEpoch,
+            proofSeedB64: proofSeed.base64EncodedString())
+        try record(entry, accountIdB64: context.accountIdB64) {
+            _ = try? group.abandonStagedCommit(identity: identity)
+        }
+        // Section 13 — the seed this commit leaves still opens the posts of
+        // the current server epoch here; kept now (the commit may merge).
+        keepOutgoingSeed(
+            state: state, channelIdHex: context.channelIdHex, serverEpoch: serverEpoch,
+            group: group, identity: identity)
+        // ADR-0064 section 7 (2026-11-14) — the channel's vault head gets the
+        // epoch this commit moves to before it is sent: one attempt, and a
+        // failure never stops the commit.
+        await ChannelVaultHead.writeStaged(channelIdHex: context.channelIdHex, group: group, identity: identity)
+        let landed = try await runRecorded(entry, context: context, state: state)
+        if landed {
+            refreshContentSeed(context, state: state, landedEpoch: serverTargetEpoch)
+        }
+        return (entry, landed)
+    }
+
+    /// Run the steps of an entry recorded here (``record(_:accountIdB64:abandon:)``)
+    /// while marked running. Whether its commit landed (`false`: the journal
+    /// lost it and it was abandoned). Throws a step's failure, the entry kept.
+    static func runRecorded(
+        _ entry: PublisherCommitEntry, context: Context, state: ChannelsUiState?
+    ) async throws -> Bool {
+        var landed = true
+        running.insert(entry.id)
+        defer { running.remove(entry.id) }
+        let base = ports(context, state: state)
+        var watched = base
+        watched.finish = { finished in
+            if finished.journalLost == true { landed = false }
+            base.finish(finished)
+        }
+        try await PublisherCommitRunner.run(entry, ports: watched)
+        return landed
     }
 
     /// The ports a recorded commit runs through. `state`, when given, gets
@@ -95,7 +177,11 @@ public enum ChannelPublisherCommits {
         return PublisherCommitPorts(
             commitToJournal: { commit, proof in
                 let (identity, group) = try context.open()
-                let next = try group.dsAccessSigner(identity: identity)
+                // ADR-0090 — the N+1 key of the STAGED commit is the one the
+                // statement registers; the proof is the epoch-N key.
+                guard let next = try group.dsStagedAccessSigner(identity: identity) else {
+                    throw CommitStillStaged()
+                }
                 let proofSigner: DsGroupSigner
                 if let proof {
                     proofSigner = try DsProofSigner.forGroup(epoch: proof.epoch, accessSeed: proof.seed)
@@ -106,8 +192,27 @@ public enum ChannelPublisherCommits {
                     ds: context.ds, identity: identity, publisherGroup: group,
                     next: next, proof: proofSigner, row: commit)
             },
+            alreadyMerged: {
+                guard let (_, group) = try? context.open(),
+                      (try? group.hasStagedCommit()) == false else { return false }
+                return true
+            },
+            adjudicate: { accepted in
+                let (identity, group) = try context.open()
+                if accepted {
+                    _ = try group.mergeStagedCommit(identity: identity)
+                } else {
+                    _ = try group.abandonStagedCommit(identity: identity)
+                }
+                try ChannelPublisherIdentity.shared.persistOrThrow()
+            },
             deliverWelcome: { welcome, joinerKey in
-                try await CoPublisher.deliverWelcome(ds: context.ds, welcome: welcome, joinerKey: joinerKey)
+                // ADR-0090 — an approve records the joiner's DEVICE leaf; the
+                // Welcome goes to the mailbox of the account it is bound to.
+                let account = (try? context.open()).flatMap { opened in
+                    CoPublisher.accountKey(ofLeaf: joinerKey, in: opened.group)
+                } ?? joinerKey
+                try await CoPublisher.deliverWelcome(ds: context.ds, welcome: welcome, joinerKey: account)
             },
             serverEpoch: {
                 try await context.channelsClient.fetchEpoch(channelIdHex: context.channelIdHex)
@@ -129,9 +234,10 @@ public enum ChannelPublisherCommits {
                     ownReaderKeyHex: extras?.readerKeyRegisteredHex)
                 state?.setEpoch(channelId: context.channelIdHex, epoch: targetEpoch)
             },
-            appoint: { joinerKey in
+            appoint: { joinerLeaf in
                 let (_, group) = try context.open()
                 let groupId = try group.groupId()
+                let joinerKey = CoPublisher.accountKey(ofLeaf: joinerLeaf, in: group) ?? joinerLeaf
                 guard let key = await CoPublisherKeyBook.shared.key(
                     groupId: groupId, joinerKey: joinerKey, accountIdB64: account) else {
                     NSLog("ADR-0059: no co-publisher binding read for the approved joiner; not appointed")
@@ -212,7 +318,11 @@ public enum ChannelPublisherCommits {
         guard let state, state.keysByChannel[context.channelIdHex] != nil,
               let opened = try? context.open(),
               let seed = try? opened.group.channelSeed(identity: opened.identity) else { return }
-        guard let epoch = landedEpoch ?? (try? opened.group.epoch()).map({ UInt32(clamping: $0) }) else { return }
+        // ADR-0090 decision A — the group's MLS epoch maps to the channel's
+        // through the recorded offset.
+        guard let epoch = landedEpoch ?? (try? opened.group.epoch()).map({
+            ChannelDeviceAdmission.channelEpoch(mls: $0, offset: state.extras(context.channelIdHex).epochOffset)
+        }) else { return }
         state.notePublisherSeedAt(channelId: context.channelIdHex, epoch: epoch, seed: seed)
     }
 
@@ -224,7 +334,8 @@ public enum ChannelPublisherCommits {
         accountIdB64: String, currentSeed: Data, state: ChannelsUiState?,
         channelsClient: ChannelsClient = ChannelsClient(), ds: DsClient = DsClient()
     ) async {
-        for entry in PublisherCommitStore.shared.entries(accountIdB64: accountIdB64) {
+        for entry in PublisherCommitStore.shared.entries(accountIdB64: accountIdB64)
+        where !running.contains(entry.id) {
             // Without the account's channel provider nothing is judged: an
             // entry is dropped only against a provider that did restore.
             guard accountIdB64 == AcceptedContactsStore.boundAccountIdB64,
@@ -236,11 +347,23 @@ public enum ChannelPublisherCommits {
             let loaded = (try? CoPublisher.loadPublisherGroup(
                 identity: identity, channelIdHex: entry.channelIdHex)) ?? nil
             let restored = loaded.flatMap { try? $0.epoch() }
-            switch PublisherCommitEntry.replayVerdict(entry, restoredEpoch: restored) {
+            let staged = (loaded.flatMap { try? $0.hasStagedCommit() }) ?? false
+            switch PublisherCommitEntry.replayVerdict(entry, restoredEpoch: restored, staged: staged) {
             case .discard:
-                NSLog("Channels: a PublisherGroup commit whose epoch never became durable was dropped")
+                NSLog("Channels: a PublisherGroup commit whose staged state never became durable was dropped")
+                // A staged commit with no entry left would freeze the group's
+                // membership: abandon what this entry staged.
+                if staged, let loaded { _ = try? loaded.abandonStagedCommit(identity: identity) }
                 PublisherCommitStore.shared.remove(accountIdB64: accountIdB64, id: entry.id)
             case .replay:
+                // ADR-0064 section 7 — a commit still owed to the journal: the
+                // head carries its epoch (a no-op when this session wrote it).
+                if staged, entry.kind != .entry, !entry.done.contains(.journal), let loaded {
+                    await ChannelVaultHead.writeStaged(
+                        channelIdHex: entry.channelIdHex, group: loaded, identity: identity)
+                }
+                running.insert(entry.id)
+                defer { running.remove(entry.id) }
                 do {
                     try await PublisherCommitRunner.run(entry, ports: ports(context, state: state))
                     refreshContentSeed(context, state: state, landedEpoch: entry.serverTargetEpoch)
@@ -307,7 +430,7 @@ public enum ChannelReseal {
                 subscriberPub: subscriberBytes, channelId: channelIdBytes,
                 epochId: targetEpoch, seed: seed)
             batch.append(RotateBatchEntry(
-                subscriberPubkeyHex: subscriberHex, envelopeB64: envelope.base64EncodedString()))
+                subscriberPubkeyHex: subscriberHex, envelopeB64: base64UrlEncodeNoPad(envelope)))
         }
         let chunkSize = ChannelsClient.maxStageChunkEntries
         var offset = 0

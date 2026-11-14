@@ -611,6 +611,21 @@ struct LakkoApp: App {
         chat.lineageReadyWatch = sync.$ready
             .receive(on: RunLoop.main)
             .sink { [weak chat] ready in if ready { chat?.foldDuplicateOneToOnes() } }
+        // ADR-0090 — a channel's PublisherGroup leaf is this device: the
+        // channel paths open, found and join it in the chat provider (the one
+        // holding the KeyPackage a sibling admits) and persist through it.
+        ChannelPublisherIdentity.shared.deviceIdentityProvider = { [weak chat] in chat?.canonicalIdentity }
+        ChannelPublisherIdentity.shared.devicePersister = { [weak chat] in
+            guard let chat else { throw ChannelPublisherIdentity.NotBound() }
+            try chat.persistDeviceProviderOrThrow()
+        }
+        // ADR-0090 — the account's DeviceGroup roster decides which devices an
+        // owner device admits to a channel's PublisherGroup; a device that
+        // founded the DeviceGroup alone re-founds owned channels (decision A);
+        // the owner account's admission seeds ride the synced state.
+        ChannelDeviceAdmission.deviceGroupRoster = { [weak chat] in chat?.ownDeviceGroupRosterProvider() }
+        ChannelDeviceAdmission.foundedDeviceGroupAlone = { [weak sync] in sync?.rejoinAnswer == .founded }
+        ChannelDeviceAdmission.seedRegister = sync
         chat.ownDeviceGroupRosterProvider = { [weak sync, weak auth] in
             if let live = sync?.rosterDeviceKeys() { return live }
             guard let secrets = auth?.identitySecrets else { return nil }
@@ -2009,8 +2024,17 @@ private struct SessionRoot: View, Equatable {
                 // ADR-0045 decision 2 — a publisher request's Welcome lands
                 // through the mailbox loop whenever the owner approves.
                 contactsRepository.publisherWelcomeLander = { welcome, accountIdB64 in
-                    try CoPublisherAcceptance.shared.landPendingWelcome(welcome, accountIdB64: accountIdB64)
+                    // ADR-0090 section 2.3 — an owner device admitted this one
+                    // (or a co-publisher's other device) to a channel's
+                    // PublisherGroup: joined into the waiting channel.
+                    if AcceptedContactsStore.boundAccountIdB64 == accountIdB64,
+                       ChannelDeviceAdmission.landWelcome(welcome) != nil {
+                        return true
+                    }
+                    return try CoPublisherAcceptance.shared.landPendingWelcome(welcome, accountIdB64: accountIdB64)
                 }
+                ChannelDeviceAdmission.waitingState = channelsState
+                ChannelDeviceAdmission.currentSeed = { accountIdentitySeed }
                 ReachCenter.shared.contactsProvider = { [contactsRepository] in
                     contactsRepository.state.accepted.compactMap { contact in
                         guard let id = contact.request.fromAccountId else { return nil }

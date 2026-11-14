@@ -35,12 +35,16 @@ public object PendingPublisherRequests {
         val channelIdHex: String,
         /** The PublisherGroup the link named (lower-case hex). */
         val groupIdHex: String,
-        /** base64 of the publisher identity's signature key the knocked
-         *  KeyPackage belongs to. */
+        /** base64 of this device's leaf key the knocked KeyPackage belongs
+         *  to (ADR-0090: a bound device). */
         val joinerKeyB64: String,
         /** The channel's name the link carried, for its row once joined. */
         val name: String,
         val requestedAtMs: Long,
+        /** ADR-0090 — base64 of the owner's account key (the capability's
+         *  issuer): the Welcome must come from one of its devices. A record
+         *  without it never lands (written before ADR-0090). */
+        val ownerAccountKeyB64: String? = null,
     )
 
     private val json = Json { ignoreUnknownKeys = true }

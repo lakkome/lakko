@@ -46,6 +46,7 @@ function live(over: Partial<ChannelSubscriptionView> = {}): ChannelSubscriptionV
     subscriberSecret: KEY_A,
     readKey: new Uint8Array(0),
     publisherGroupIdHex: "",
+    ownerAccountKey: new Uint8Array(0),
     name: "Daily news",
     handle: "news",
     ...over,
@@ -89,6 +90,7 @@ describe("the channel-subscription plan", () => {
           subscriberSecret: KEY_A,
           readKey: new Uint8Array(0),
           publisherGroupIdHex: "",
+          ownerAccountKey: new Uint8Array(0),
           name: "Daily news",
           handle: "news",
         },
@@ -144,6 +146,7 @@ describe("the channel-subscription plan", () => {
           subscriberSecret: FRESH,
           readKey: READ,
           publisherGroupIdHex: "",
+          ownerAccountKey: new Uint8Array(0),
           name: "Daily news",
           handle: "news",
         },
@@ -158,12 +161,17 @@ describe("the channel-subscription plan", () => {
     expect(overLeave[0]).toMatchObject({ kind: "write", value: { role: "owner", subscriberSecret: FRESH } });
   });
 
-  it("a co-publisher's publishing device writes its group id", () => {
-    const steps = plan([local({ publishing: true, coPublisherGroupIdHex: GROUP })], []);
+  it("a co-publisher's publishing device writes its group id and the owner key it recorded", () => {
+    const owner = new Uint8Array(32).fill(0x4f);
+    const steps = plan([local({ publishing: true, coPublisherGroupIdHex: GROUP, coPublisherOwnerKey: owner })], []);
     expect(steps[0]).toMatchObject({
       kind: "write",
-      value: { role: "co-publisher", publisherGroupIdHex: GROUP, subscriberSecret: KEY_A },
+      value: { role: "co-publisher", publisherGroupIdHex: GROUP, subscriberSecret: KEY_A, ownerAccountKey: owner },
     });
+  });
+
+  it("ADR-0090: a co-publisher device with no recorded owner key writes no register yet", () => {
+    expect(plan([local({ publishing: true, coPublisherGroupIdHex: GROUP })], []).filter((s) => s.kind === "write")).toEqual([]);
   });
 
   it("a reader device follows the owner's register and writes nothing", () => {
@@ -193,6 +201,7 @@ describe("the channel-subscription plan", () => {
           subscriberSecret: KEY_A,
           readKey: new Uint8Array(0),
           publisherGroupIdHex: "",
+          ownerAccountKey: new Uint8Array(0),
           name: "Daily news",
           handle: "news",
         },

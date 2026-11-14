@@ -13517,6 +13517,47 @@ public class ChatRepository(
     public fun currentAccountIdB64(): String? = currentAccountIdB64.get()
 
     /**
+     * ADR-0090 section 1 - a channel's PublisherGroup leaf is this device's
+     * bound identity, in this provider: the one whose KeyPackage the
+     * directory serves, so the Welcome an owner device writes after admitting
+     * this device opens here. Every call runs under [providerLock] with no
+     * network inside, as the chat regions do; the snapshot is the chat one.
+     */
+    public val channelDevicePort: me.lakko.app.channels.ChannelDevicePort =
+        object : me.lakko.app.channels.ChannelDevicePort {
+            override fun deviceFor(accountIdB64: String): Identity? {
+                val bound = currentAccountIdB64.get() ?: return null
+                if (me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(bound) !=
+                    me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+                ) {
+                    return null
+                }
+                val identity = canonicalIdentity.get() ?: return null
+                // An unbound fallback identity (no device seed) cannot hold a
+                // PublisherGroup leaf: the core refuses it.
+                return identity.takeIf { runCatching { it.deviceBinding() }.getOrNull() != null }
+            }
+
+            override suspend fun <T> locked(device: Identity, block: (Identity) -> T): T =
+                withContext(mlsDispatcher) {
+                    providerLock.sessionLock {
+                        check(canonicalIdentity.get() === device) { "the device identity changed" }
+                        MainThreadGuard.assertOffMain("ChatRepository.channelDevicePort")
+                        block(device)
+                    }
+                }
+
+            override suspend fun persistDurably(device: Identity) {
+                withContext(mlsDispatcher) {
+                    providerLock.sessionLock {
+                        check(canonicalIdentity.get() === device) { "the device identity changed" }
+                        persistSnapshotDurableOrThrow()
+                    }
+                }
+            }
+        }
+
+    /**
      * ADR-0045 S7 residual 1 / ADR-0050 section 2.5a point 5 — the
      * `Not applied` rows the user has not dismissed: own requests whose
      * automatic re-request stopped ([reRequestSupersededAfterCommit]).

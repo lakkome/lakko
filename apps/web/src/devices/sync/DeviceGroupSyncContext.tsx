@@ -109,6 +109,7 @@ import {
 } from "../device-group-rejoin";
 import { openRejoinWatch } from "../rejoin-watch";
 import { answerForRejoinOutcome, recordRestoreAnswer } from "../../backup/restored-marker";
+import { markFoundedAlone } from "../../channels/founded-alone-marker";
 import { runKnockListener } from "../knock-listener";
 import { createReplacementQueue } from "./handle-replacements";
 import { isRecoveryPayloadRow } from "../recovery-payload";
@@ -119,12 +120,11 @@ import {
 } from "../device-group-commit-runtime";
 import { DiscoveryClient } from "../../discovery/client";
 import {
-  buildPairingQrPayload,
   buildRejoinKnockPayload,
   generateRendezvousPseudonym,
   isMissingUsername,
+  openRejoinKnockPayload,
   ownPairingHandle,
-  parsePairingQrPayload,
 } from "../pairing";
 import { base64Decode } from "../../auth/account-id";
 import {
@@ -153,6 +153,11 @@ import {
   installChannelSubscriptionRegister,
   type ChannelSubscriptionPort,
 } from "../../channels/channel-subscription-register";
+import {
+  channelAdmissionSeedsChanged,
+  installChannelAdmissionSeedRegister,
+  type ChannelAdmissionSeedPort,
+} from "../../channels/channel-admission-seed-register";
 import {
   allChannelSubscriptionViews,
   channelSubscriptionView,
@@ -547,6 +552,7 @@ export function DeviceGroupSyncProvider(props: {
   let uninstallOwnFeedbackRegister: (() => void) | null = null;
   /** 2026-11-13: the account's channel subscriptions. */
   let uninstallChannelSubscriptionRegister: (() => void) | null = null;
+  let uninstallChannelAdmissionSeedRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -722,6 +728,7 @@ export function DeviceGroupSyncProvider(props: {
     ownFeedbackChanged();
     // 2026-11-13: the account's channel subscriptions.
     channelSubscriptionsChanged();
+    channelAdmissionSeedsChanged();
     setStateVersion((v) => v + 1);
   }
 
@@ -878,7 +885,11 @@ export function DeviceGroupSyncProvider(props: {
     handleGeneration = ensured.generation;
     // docs/ux/identity-recovery.md 7.2: founded here because no other device
     // of the account was listed, so no device will add this one to its chats.
-    if (ensured.bootstrapped) recordRestoreAnswer(accountIdB64, "founded");
+    if (ensured.bootstrapped) {
+      recordRestoreAnswer(accountIdB64, "founded");
+      // ADR-0090 decision A: kept until every owned channel is re-founded.
+      markFoundedAlone(accountIdB64);
+    }
 
     // Removed while the app was closed: the persisted snapshot already
     // carries the commit that removed this device. Nothing is polled, folded
@@ -966,6 +977,11 @@ export function DeviceGroupSyncProvider(props: {
     uninstallChannelSubscriptionRegister?.();
     uninstallChannelSubscriptionRegister = installChannelSubscriptionRegister(
       channelSubscriptionPortFor(wasm, accountIdB64),
+    );
+    void flushUnsentChannelAdmissionSeeds();
+    uninstallChannelAdmissionSeedRegister?.();
+    uninstallChannelAdmissionSeedRegister = installChannelAdmissionSeedRegister(
+      channelAdmissionSeedPortFor(accountIdB64),
     );
   }
 
@@ -1164,6 +1180,8 @@ export function DeviceGroupSyncProvider(props: {
     uninstallOwnFeedbackRegister = null;
     uninstallChannelSubscriptionRegister?.();
     uninstallChannelSubscriptionRegister = null;
+    uninstallChannelAdmissionSeedRegister?.();
+    uninstallChannelAdmissionSeedRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -1295,6 +1313,9 @@ export function DeviceGroupSyncProvider(props: {
       // included, each with its original stamp: how a new device learns the
       // account's channels.
       await sendLineageEnvelopes(synced.channelSubscriptionEnvelopes());
+      // ADR-0090 open question 4 - and every channel admission seed, the
+      // same way (never in the snapshot parts).
+      await sendLineageEnvelopes(synced.channelAdmissionSeedEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -1687,6 +1708,80 @@ export function DeviceGroupSyncProvider(props: {
       leave: async (channelIdHex) => {
         if (synced === null || activeAccountIdB64 !== accountIdB64) return false;
         return sent(writeChannelLeave(synced, mintHlc(), channelIdHex));
+      },
+    };
+  }
+
+  // ----- ADR-0090 open question 4: the channel admission-seed register -----
+
+  const channelAdmissionSeedsUnsentKey = (account: string): string =>
+    `lakko.channel-admission-seeds.unsent.v1.${account}`;
+
+  async function sendChannelAdmissionSeedEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      localStorage.setItem(channelAdmissionSeedsUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: this send is the only attempt */
+    }
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(channelAdmissionSeedsUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "channel admission seed send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentChannelAdmissionSeeds(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(channelAdmissionSeedsUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.channelAdmissionSeedEnvelopes();
+    } catch {
+      return;
+    }
+    await sendChannelAdmissionSeedEnvelopes(account, envelopes);
+  }
+
+  /** The port the channel runtime reads and writes the account's channel
+   *  admission seeds through (write-once per seed; two seeds of one version
+   *  are both kept). */
+  function channelAdmissionSeedPortFor(accountIdB64: string): ChannelAdmissionSeedPort {
+    const idBytes = (hex: string): Uint8Array => {
+      const out = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      return out;
+    };
+    return {
+      accountIdB64,
+      versions: (channelIdHex) => (synced === null ? [] : Array.from(synced.channelAdmissionVersions(idBytes(channelIdHex)))),
+      seedsFor: (channelIdHex, version) => {
+        if (synced === null) return [];
+        const flat = synced.channelAdmissionSeedsFor(idBytes(channelIdHex), version);
+        const out: Uint8Array[] = [];
+        for (let i = 0; i + 32 <= flat.length; i += 32) out.push(flat.slice(i, i + 32));
+        flat.fill(0);
+        return out;
+      },
+      set: async (channelIdHex, version, seed) => {
+        if (synced === null || activeAccountIdB64 !== accountIdB64) throw new Error("synced state not loaded");
+        const id = idBytes(channelIdHex);
+        if (!synced.setChannelAdmissionSeed(mintHlc(), id, version, seed)) return false;
+        const envelope = synced.channelAdmissionSeedEnvelopeFor(id, version, seed);
+        refresh();
+        if (envelope !== undefined && activeAccountIdB64 === accountIdB64) {
+          await sendChannelAdmissionSeedEnvelopes(accountIdB64, [envelope]);
+        }
+        return true;
       },
     };
   }
@@ -2613,6 +2708,16 @@ export function DeviceGroupSyncProvider(props: {
       knockCursor = Math.max(knockCursor, last);
       return false;
     }
+    // G-55: a knock is sealed under the seed the DeviceGroup id derives from.
+    const lineageSeed = await deviceGroupLineageSeed(
+      accountIdB64,
+      deviceKey,
+      auth.identitySecrets()?.accountIdentitySeed,
+    );
+    if (lineageSeed === null) {
+      knockCursor = Math.max(knockCursor, last);
+      return false;
+    }
     const ds = new DsClient();
     const wasm = await loadWasm();
     const loginHandle = await ownPairingHandle(username);
@@ -2630,9 +2735,9 @@ export function DeviceGroupSyncProvider(props: {
       knockCursor = Math.max(knockCursor, knock.id);
       let decoded;
       try {
-        decoded = await parsePairingQrPayload(knock.payload, loginHandle);
+        decoded = await openRejoinKnockPayload(lineageSeed, knock.payload, loginHandle);
       } catch {
-        continue; // not a payload for this account (or not a pairing payload)
+        continue; // not a sealed knock of this account (or not a pairing payload)
       }
       const keyBytes = wasm.keyPackageSignatureKey(decoded.keyPackage);
       const keyHex = bytesToHex(keyBytes);
@@ -2879,6 +2984,7 @@ export function DeviceGroupSyncProvider(props: {
           // docs/ux/identity-recovery.md 7.2: whether another device answered
           // the knock decides whether the restored chat list shows its card.
           recordRestoreAnswer(account, answerForRejoinOutcome(outcome));
+          if (outcome === "founded") markFoundedAlone(account);
           if (outcome === "joined" || outcome === "founded") {
             // eslint-disable-next-line no-console
             console.info(`DeviceGroup rejoin: ${outcome}`);
@@ -2934,8 +3040,13 @@ export function DeviceGroupSyncProvider(props: {
           if (isMissingUsername(err)) return null;
           throw err;
         }
+        const lineageSeed = await deviceGroupLineageSeed(
+          account,
+          deviceKey,
+          auth.identitySecrets()?.accountIdentitySeed,
+        );
         const groupId = await deviceGroupIdOf(account, deviceKey, auth.identitySecrets()?.accountIdentitySeed);
-        if (groupId === null) throw new Error("the DeviceGroup id cannot be derived yet");
+        if (groupId === null || lineageSeed === null) throw new Error("the DeviceGroup id cannot be derived yet");
         const seed = await ensureDeviceIdentitySeed(account, deviceKey);
         const joiner = wasm.Identity.fromSeed(seed);
         seed.fill(0);
@@ -2949,15 +3060,17 @@ export function DeviceGroupSyncProvider(props: {
           // sibling readmit it under the attested-removal policy without a
           // passkey. An unclaimed journal names no epoch: no proof.
           const probe = await new DsClient().knock(groupId, []);
-          const payload =
+          // G-55: sealed under the lineage seed either way; an unclaimed
+          // journal gets the knock with no proof.
+          const payload = await buildRejoinKnockPayload(
+            lineageSeed,
+            loginHandle,
+            keyPackage,
+            rendezvous,
             probe.epoch === null
-              ? await buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
-              : await buildRejoinKnockPayload(
-                  loginHandle,
-                  keyPackage,
-                  rendezvous,
-                  wasm.signDeviceGroupSelfRemoval(joiner, groupId, BigInt(probe.epoch), keyPackage),
-                );
+              ? new Uint8Array(0)
+              : wasm.signDeviceGroupSelfRemoval(joiner, groupId, BigInt(probe.epoch), keyPackage),
+          );
           // Kept BEFORE the knock (the caller saves it): the joiner's
           // provider is the only thing that can open the Welcome a sibling
           // sends.
@@ -3127,6 +3240,18 @@ export function DeviceGroupSyncProvider(props: {
       if (wasmSync !== null && wasmSync.isChannelSubscriptionEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyChannelSubscriptionEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // ADR-0090 open question 4 - a channel admission seed, the same way.
+      if (wasmSync !== null && wasmSync.isChannelAdmissionSeedEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyChannelAdmissionSeedEnvelope(parsed.serviceEnvelope) === true) {
             observeHlc(synced.maxHlc());
             refresh();
           }

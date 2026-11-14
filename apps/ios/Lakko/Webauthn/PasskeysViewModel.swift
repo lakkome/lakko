@@ -414,6 +414,10 @@ public final class PasskeysViewModel: ObservableObject {
             // directory cannot delete this account's links. Revoke every live
             // link this device keeps a record of first, while the session
             // still works; one it has no record of lives until it expires.
+            // ADR-0064 section 1 — the vaults of the channels this account
+            // owns go before the account, best effort and bounded in time.
+            await ChannelVaultHead.deleteOwnedVaults(
+                accountIdB64: base64Encode(secrets.accountId), currentSeed: secrets.accountIdentitySeed)
             await OwnLinks.revokeAll(
                 accountIdB64: base64Encode(secrets.accountId),
                 discovery: DiscoveryClient(

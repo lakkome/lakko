@@ -348,6 +348,11 @@ struct ChannelInfoSheet: View {
             try await client.deleteChannel(channelIdHex: channelId, accountIdentity: identity)
             state.endDeleted(channelId)
             onUnsubscribed()
+            // ADR-0064 section 1 — the channel's vault goes with it, best
+            // effort: a failure does not undo the delete.
+            let id = channelId
+            let seed = accountIdentitySeed
+            Task { @MainActor in await ChannelVaultHead.deleteVault(channelIdHex: id, currentSeed: seed) }
         } catch {
             deleteFailed = true
         }
@@ -577,7 +582,8 @@ struct ChannelPublishersScreen: View {
     private func load() {
         guard let (identity, group) = open(), let members = try? group.members() else { return }
         let owner = CoPublisher.ownerAccountKey(group)
-        let own = identity.signaturePublicKey()
+        // ADR-0090 — leaves are devices; "you" is this ACCOUNT.
+        let own = identity.accountPublicKey() ?? identity.signaturePublicKey()
         var seen: Set<Data> = []
         var list: [Row] = []
         for member in members.sorted(by: { $0.leafIndex < $1.leafIndex }) {

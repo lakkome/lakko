@@ -32,6 +32,7 @@ vi.mock("../state/channels-state", async (importOriginal) => {
       addChannel: vi.fn(),
       setKeys,
       persistPublisherGroupDurable: persisted,
+      updateAccessDurable: vi.fn(async () => undefined),
     },
   };
 });
@@ -41,7 +42,11 @@ vi.mock("./composer", async (importOriginal) => {
 });
 vi.mock("./api", async (importOriginal) => {
   const real = await importOriginal<typeof import("./api")>();
-  return { ...real, rememberPublisherRole: vi.fn(async () => undefined) };
+  return {
+    ...real,
+    rememberPublisherRole: vi.fn(async () => undefined),
+    fetchEpoch: vi.fn(async () => ({ epoch: 1 })),
+  };
 });
 
 import { landPendingPublisherWelcome } from "./channel-publishers";
@@ -50,6 +55,12 @@ import { dispatchMailboxRows } from "../contacts/client";
 import { sealRowFor, type MailboxTarget } from "../contacts/mailbox-row";
 import { base64Encode } from "../auth/account-id";
 import { MemoryStorage } from "../test/fake-storage";
+import { installPublisherDeviceSource } from "./publisher-device";
+
+/** ADR-0090: a device identity bound to `account`. */
+function deviceOf(account: wasm.Identity, fill: number): wasm.Identity {
+  return wasm.Identity.fromSeedBound(new Uint8Array(64).fill(fill), account.ed25519Seed, 1_700_000_000n);
+}
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -74,26 +85,33 @@ describe("a publisher request's Welcome lands whenever it arrives", () => {
   it("a raw Welcome in a welcome-rendezvous row lands the recorded request", async () => {
     const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x51));
     const joiner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x52));
+    // ADR-0090: both leaves are devices bound to their accounts.
+    const ownerDevice = deviceOf(owner, 0x61);
+    const joinerDevice = deviceOf(joiner, 0x62);
+    const uninstall = installPublisherDeviceSource(() => joinerDevice);
     const channelId = new Uint8Array(16).fill(0x07);
-    const pg = wasm.PublisherGroup.openOrCreate(owner, channelId);
+    const pg = new wasm.PublisherGroup(ownerDevice, owner.ed25519Seed, channelId);
     const joinerKey = wasm.MailboxKey.fromAccountIdentity(joiner);
     try {
-      // The joiner knocks with a KeyPackage and records the request.
-      const kp = joiner.createKeyPackage();
+      // The joiner's DEVICE knocks with a KeyPackage and records the request,
+      // with the owner's account key the link named.
+      const kp = joinerDevice.createKeyPackage();
       recordPendingPublisherRequest(ACCOUNT, {
         channelIdHex: hex(channelId),
         groupIdHex: hex(pg.groupId()),
-        joinerKeyB64: base64Encode(joiner.signaturePublicKey),
+        joinerKeyB64: base64Encode(joinerDevice.signaturePublicKey),
+        ownerKeyB64: base64Encode(owner.signaturePublicKey),
         name: "Pixel Pub Walk",
         description: "",
         requestedAtMs: 1,
       });
-      // The owner approves, any time later.
-      const req = pg.retainJoinRequest(owner, kp);
-      const added = pg.approveExternalJoin(owner, req.joinerSignatureKey);
+      // The owner's device approves, any time later; the journal took it.
+      const req = pg.retainJoinRequest(ownerDevice, kp);
+      const added = pg.stageApproveExternalJoin(ownerDevice, req.joinerSignatureKey);
       const welcome = added.welcome;
       req.free();
       added.free();
+      expect(pg.mergeStagedCommit(ownerDevice)).toBe(true);
 
       // Its Welcome reaches the joiner's mailbox as a welcome-rendezvous row
       // whose body is the raw Welcome.
@@ -103,14 +121,50 @@ describe("a publisher request's Welcome lands whenever it arrives", () => {
       if (ev?.kind !== "publisher-welcome") throw new Error("expected a publisher welcome");
 
       expect(await landPendingPublisherWelcome(joiner, ACCOUNT, ev.welcomeBytes)).toBe(true);
-      expect(setKeys).toHaveBeenCalledWith(hex(channelId), { joined: true });
+      expect(setKeys).toHaveBeenCalledWith(hex(channelId), expect.objectContaining({ joined: true }));
       expect(persisted).toHaveBeenCalled();
       expect(loadPendingPublisherRequests(ACCOUNT)).toEqual([]);
     } finally {
+      uninstall();
       joinerKey.free();
       pg.free();
       owner.free();
       joiner.free();
+    }
+  });
+
+  it("a Welcome sent by a device of another account than the link's owner does not land", async () => {
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x54));
+    const stranger = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x55));
+    const joiner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x56));
+    const strangerDevice = deviceOf(stranger, 0x64);
+    const joinerDevice = deviceOf(joiner, 0x65);
+    const uninstall = installPublisherDeviceSource(() => joinerDevice);
+    const channelId = new Uint8Array(16).fill(0x08);
+    // The stranger founds a group of its own; the request names the owner.
+    const pg = new wasm.PublisherGroup(strangerDevice, stranger.ed25519Seed, channelId);
+    try {
+      const kp = joinerDevice.createKeyPackage();
+      recordPendingPublisherRequest(ACCOUNT, {
+        channelIdHex: hex(channelId),
+        groupIdHex: hex(pg.groupId()),
+        joinerKeyB64: base64Encode(joinerDevice.signaturePublicKey),
+        ownerKeyB64: base64Encode(owner.signaturePublicKey),
+        name: "",
+        description: "",
+        requestedAtMs: 1,
+      });
+      const req = pg.retainJoinRequest(strangerDevice, kp);
+      const added = pg.stageApproveExternalJoin(strangerDevice, req.joinerSignatureKey);
+      const welcome = added.welcome;
+      req.free();
+      added.free();
+      expect(await landPendingPublisherWelcome(joiner, ACCOUNT, welcome)).toBe(false);
+      expect(setKeys).not.toHaveBeenCalled();
+      expect(loadPendingPublisherRequests(ACCOUNT)).toHaveLength(1);
+    } finally {
+      uninstall();
+      pg.free();
     }
   });
 

@@ -31,7 +31,7 @@ use lakko_contacts::device_card::{decode_device_card, DEVICE_CARD_ENVELOPE_MAX_L
 use lakko_mls::pairing as inner;
 
 use crate::device_card::FfiDeviceCard;
-use crate::FfiError;
+use crate::{FfiError, Identity};
 
 // The pairing payload's card bound is the device-card envelope bound;
 // `lakko-mls` restates it because it does not depend on `lakko-contacts`.
@@ -98,9 +98,17 @@ pub fn build_pairing_qr(
     )?)
 }
 
-/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
-/// the device's self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137
-/// bytes) for `key_package`.
+/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus,
+/// when the journal names an epoch, the device's self-removal proof
+/// (`signDeviceGroupSelfRemoval`, exactly 137 bytes) for `key_package`; an
+/// empty proof for none.
+///
+/// **Sealed (G-55).** `account_identity` is the account identity the
+/// DeviceGroup id derives from (the one `deviceGroupIdFor` takes: the oldest
+/// own predecessor after a rotation, else the current one); the row is sealed
+/// under a key derived from its seed and padded, so the Delivery Service reads
+/// neither the login handle nor the KeyPackage. Open it with
+/// [`open_rejoin_knock`].
 ///
 /// # Errors
 ///
@@ -108,6 +116,7 @@ pub fn build_pairing_qr(
 /// proof.
 #[uniffi::export]
 pub fn build_rejoin_knock(
+    account_identity: &Identity,
     login_handle: Vec<u8>,
     key_package: Vec<u8>,
     rendezvous_pseudonym: Vec<u8>,
@@ -122,11 +131,38 @@ pub fn build_rejoin_knock(
             ))
         })?;
     Ok(inner::encode_rejoin_knock(
+        &account_identity.inner.ed25519_seed_bytes(),
         &handle,
         &key_package,
         &rendezvous,
         &self_removal_proof,
     )?)
+}
+
+/// A sibling's side of [`build_rejoin_knock`] (G-55): open a row read from
+/// the account's DeviceGroup knock queue under `account_identity` (the same
+/// identity `deviceGroupIdFor` takes), then parse the pairing payload bound
+/// to `expected_login_handle` as [`parse_pairing_qr`] does.
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] when the row is not a sealed knock or does not open
+/// under this account's key; then what [`parse_pairing_qr`] returns.
+#[uniffi::export]
+pub fn open_rejoin_knock(
+    account_identity: &Identity,
+    row: Vec<u8>,
+    expected_login_handle: Vec<u8>,
+) -> Result<DecodedPairingQr, FfiError> {
+    let handle = handle_array(&expected_login_handle, "expected_login_handle")?;
+    let decoded =
+        inner::open_rejoin_knock(&account_identity.inner.ed25519_seed_bytes(), &row, &handle)?;
+    Ok(DecodedPairingQr {
+        key_package: decoded.key_package,
+        rendezvous_pseudonym: decoded.rendezvous_pseudonym.to_vec(),
+        self_removal_proof: decoded.self_removal_proof,
+        device_card: decoded_card(&decoded.device_card),
+    })
 }
 
 /// Confirming side: parse the wire bytes, verify the embedded
@@ -233,6 +269,33 @@ mod tests {
         let got = parse_pairing_qr(wire, vec![0x11; 32]).unwrap();
         assert_eq!(got.device_card, None);
         assert_eq!(got.key_package, vec![7u8; 64]);
+    }
+
+    #[test]
+    fn a_rejoin_knock_opens_only_under_its_lineage_identity() {
+        let lineage = Identity::from_seed(vec![0x21; 64]).unwrap();
+        let other = Identity::from_seed(vec![0x22; 64]).unwrap();
+        let handle = vec![0x11u8; 32];
+        let row = build_rejoin_knock(
+            &lineage,
+            handle.clone(),
+            vec![7u8; 64],
+            vec![9u8; 32],
+            vec![],
+        )
+        .unwrap();
+        assert!(
+            !row.windows(32).any(|w| w == handle.as_slice()),
+            "no handle in the row"
+        );
+        let got = open_rejoin_knock(&lineage, row.clone(), handle.clone()).unwrap();
+        assert_eq!(got.key_package, vec![7u8; 64]);
+        assert_eq!(got.self_removal_proof, None);
+        assert!(open_rejoin_knock(&other, row.clone(), handle.clone()).is_err());
+        assert!(
+            parse_pairing_qr(row, handle).is_err(),
+            "no plain read of a knock"
+        );
     }
 
     /// The code route seals the payload with `lakko-device-link`, which

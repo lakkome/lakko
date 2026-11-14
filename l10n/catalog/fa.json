@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "در این کانال از دستگاهی پست می‌گذارید که کانال را روی آن ساختید.",
+      "text": "وقتی Lakko روی دستگاه دیگر شما باز شود، می‌توانید اینجا پست بگذارید.",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "در این کانال از دستگاهی پست می‌گذارید که روی آن ناشر شدید.",
+      "text": "وقتی Lakko روی دستگاه دیگر شما و دستگاه مالک باز شود، می‌توانید اینجا پست بگذارید.",
       "status": "machine"
     },
     "channels.rotation.desc": {

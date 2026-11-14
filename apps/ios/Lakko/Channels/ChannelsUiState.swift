@@ -347,6 +347,15 @@ public final class ChannelsUiState: ObservableObject {
     /// stepped down) but the account still reads the channel as a
     /// subscriber: the publisher keys go, the channel and its posts stay.
     /// The publish counter stays a floor, as in ``removeChannel(_:)``.
+    /// ADR-0090 section 2.5 — the channel's journal was reset under this
+    /// device: its publisher keys go, but the ACCOUNT still owns or
+    /// co-publishes it (no register rewrite); the device reads and waits.
+    public func dropPublisherKeysKeepingRole(_ channelId: String) {
+        keysByChannel[channelId] = nil
+        publisherContentSeedByChannel[channelId] = nil
+        persistPublisherKeys()
+    }
+
     public func dropPublisherKeys(_ channelId: String) {
         keysByChannel[channelId] = nil
         publisherSigningSeedByChannel[channelId] = nil

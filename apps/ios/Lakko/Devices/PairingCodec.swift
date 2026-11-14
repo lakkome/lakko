@@ -75,21 +75,46 @@ public enum PairingCodec {
     }
 
     /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
-    /// plus this device's self-removal proof (signed with its old leaf key,
-    /// which is its device identity's key) for `keyPackage`. A parsed knock
-    /// returns it as `DecodedPairingQr.selfRemovalProof` (not verified there).
+    /// plus, when the journal names an epoch, this device's self-removal
+    /// proof (signed with its old leaf key, which is its device identity's
+    /// key) for `keyPackage`; an empty proof for none.
+    ///
+    /// G-55: the row is sealed under a key derived from `lineageSeed`, the
+    /// 64-byte seed the DeviceGroup id derives from
+    /// (``DeviceGroupLifecycle/lineageSeed(accountIdB64:currentSeed:predecessors:)``),
+    /// and padded, so the Delivery Service reads neither the login handle nor
+    /// the KeyPackage. A sibling opens it with ``openRejoinKnockPayload``.
     public static func buildRejoinKnockPayload(
+        lineageSeed: Data,
         loginHandle: Data,
         keyPackage: Data,
         rendezvousPseudonym: Data,
         selfRemovalProof: Data
     ) throws -> Data {
+        let lineage = try Identity.fromSeed(seed: lineageSeed)
         return try buildRejoinKnock(
+            accountIdentity: lineage,
             loginHandle: loginHandle,
             keyPackage: keyPackage,
             rendezvousPseudonym: rendezvousPseudonym,
             selfRemovalProof: selfRemovalProof
         )
+    }
+
+    /// A sibling's side of ``buildRejoinKnockPayload`` (G-55): open a row
+    /// read from the account's DeviceGroup knock queue under `lineageSeed`,
+    /// then check the payload names this account's own handle, as
+    /// ``parsePairingQrPayload(wireBytes:expectedLoginHandle:)`` does. Throws
+    /// for a row that is not a sealed knock or does not open under this
+    /// account's key.
+    public static func openRejoinKnockPayload(
+        lineageSeed: Data,
+        row: Data,
+        expectedLoginHandle: Data
+    ) throws -> DecodedPairingQr {
+        let lineage = try Identity.fromSeed(seed: lineageSeed)
+        return try openRejoinKnock(
+            accountIdentity: lineage, row: row, expectedLoginHandle: expectedLoginHandle)
     }
 
     /// Parse a pairing QR payload and check it names this device's own

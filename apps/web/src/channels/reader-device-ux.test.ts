@@ -33,6 +33,7 @@ function register(idHex: string, role: ChannelSubscriptionView["role"]): Channel
     subscriberSecret: new Uint8Array(32).fill(3),
     readKey: new Uint8Array(0),
     publisherGroupIdHex: role === "co-publisher" ? "ab".repeat(32) : "",
+    ownerAccountKey: new Uint8Array(0),
     name: "",
     handle: "",
   };

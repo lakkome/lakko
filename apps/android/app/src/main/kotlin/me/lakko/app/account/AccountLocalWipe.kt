@@ -309,6 +309,9 @@ public object AccountLocalWipe {
             me.lakko.app.channels.PendingPublisherRequests.forgetAccount(ctx, acct)
         },
         Step("channel-copublisher-bindings") { ctx, acct -> me.lakko.app.channels.CoPublisherBindingStore.forgetAccount(ctx, acct) },
+        Step("channel-refounding") { ctx, acct -> me.lakko.app.channels.ChannelRefounding.forgetAccount(ctx, acct) },
+        Step("channel-epoch-offsets") { ctx, acct -> me.lakko.app.channels.ChannelEpochOffsets.forgetAccount(ctx, acct) },
+        Step("channel-suspensions") { ctx, acct -> me.lakko.app.channels.ChannelSuspensions.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },

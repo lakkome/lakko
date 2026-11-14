@@ -31,6 +31,7 @@ pub fn head_decode(data: &[u8]) {
             Ok(data),
             "the head encoding is canonical"
         );
+        reentry_seeds_in_place(data, &head.reentry);
     }
     if let Ok(head) = DevicesHead::decode(data) {
         assert!(head.validate().is_ok(), "a decoded devices head validates");
@@ -38,6 +39,28 @@ pub fn head_decode(data: &[u8]) {
             head.encode().as_deref(),
             Ok(data),
             "the devices head encoding is canonical"
+        );
+        reentry_seeds_in_place(data, &head.reentry);
+    }
+}
+
+/// Every decoded re-entry epoch's access seed is the 32 bytes that follow its
+/// epoch number in the input, verbatim (ADR-0064 section 7 amendment): a
+/// decoder that shifted, truncated or zeroed the seed would hand an entering
+/// device a key that signs nothing the Delivery Service registered.
+fn reentry_seeds_in_place(data: &[u8], reentry: &[crate::record::ReentryEpoch]) {
+    for epoch in reentry {
+        let mut needle = epoch.epoch.to_be_bytes().to_vec();
+        needle.extend_from_slice(epoch.ds_access_seed.as_bytes());
+        needle.extend_from_slice(
+            &u32::try_from(epoch.group_info.len())
+                .unwrap_or(0)
+                .to_be_bytes(),
+        );
+        needle.extend_from_slice(&epoch.group_info);
+        assert!(
+            data.windows(needle.len()).any(|w| w == needle.as_slice()),
+            "a re-entry epoch's access seed is read in place"
         );
     }
 }

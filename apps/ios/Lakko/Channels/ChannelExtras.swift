@@ -59,6 +59,37 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
     /// ticket: it removes nobody and moves its mark only past rows it let in
     /// (``SubscriberAdmission/letInVerdict(seq:ticketLive:mark:markSet:isOwnKey:)``).
     public var admissionMarkSet: Bool?
+    /// ADR-0090 section 6 — the highest mark this device sent on the
+    /// PublisherGroup (`channel_admission_mark`) or received from a current
+    /// publisher; a mark above it is sent at the next pass. `nil` reads 0.
+    public var admissionMarkSentSeq: UInt64?
+    /// ADR-0090 decision A — channel epoch minus PublisherGroup MLS epoch.
+    /// A re-founded group restarts at MLS epoch 0 while the channels service
+    /// goes on from N, so the two differ from then on; `nil` reads 0 (a group
+    /// founded with its channel). Set by the re-founding device, learned from
+    /// the service by a device admitted later (``epochOffsetToLearn``).
+    public var epochOffset: Int64?
+    /// ADR-0090 — this device was admitted and has not yet read the channel
+    /// service's epoch to learn ``epochOffset``.
+    public var epochOffsetToLearn: Bool?
+    /// ADR-0090 contract 3a — a co-published channel: the owner's 32-byte
+    /// account key, the issuer of the `/g/` capability this account verified
+    /// when it joined (carried by the subscription register). A
+    /// PublisherGroup Welcome is joined only from a device of this account;
+    /// with none recorded, this device joins nothing.
+    public var ownerAccountKey: Data?
+    /// ADR-0090 security pass — the highest admission mark the channel OWNER's
+    /// devices sent, held until this device has read that far
+    /// (``subscriberRowsReadSeq``); only the part it has read counts.
+    public var admissionMarkReceived: UInt64?
+    /// The newest subscriber row number this device has itself read from the
+    /// channels service.
+    public var subscriberRowsReadSeq: UInt64?
+    /// ADR-0090 security pass — the DS refused this device's signed reads of
+    /// the channel's journal: a reset is suspected. The device stops posting
+    /// and rotating under the old seed but KEEPS its group state; only an
+    /// owner-signed Welcome for the same group replaces it.
+    public var resetSuspected: Bool?
     /// ADR-0050 section 2.9 (amended 2026-11-13) — what the ACCOUNT is in the
     /// channel as its synced subscription register says: `"owner"` or
     /// `"coPublisher"`; `nil` for a subscriber or before a register landed.

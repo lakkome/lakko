@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "Você publica neste canal pelo dispositivo em que o criou.",
+      "text": "Você poderá publicar aqui quando o Lakko abrir no seu outro dispositivo.",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "Você publica neste canal pelo dispositivo em que se tornou editor.",
+      "text": "Você poderá publicar aqui quando o Lakko abrir no seu outro dispositivo e no do proprietário.",
       "status": "machine"
     },
     "channels.rotation.desc": {

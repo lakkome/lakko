@@ -1339,6 +1339,8 @@ public class DeviceGroupSyncRepository(
         subscriberSecret: ByteArray,
         readKey: ByteArray,
         publisherGroupId: ByteArray,
+        /** ADR-0090 — 32 bytes for a co-publisher, else empty. */
+        ownerAccountKey: ByteArray,
         name: String,
         handle: String,
         expectedHlc: ULong? = null,
@@ -1347,7 +1349,7 @@ public class DeviceGroupSyncRepository(
             val held = runCatching { state.channelSubscription(channelId) }.getOrNull()?.hlc ?: 0uL
             if (held != expectedHlc) return@writeChannelSubscription false
         }
-        state.setChannelSubscription(Hlc.mint(), channelId, role, subscriberSecret, readKey, publisherGroupId, name, handle)
+        state.setChannelSubscription(Hlc.mint(), channelId, role, subscriberSecret, readKey, publisherGroupId, ownerAccountKey, name, handle)
     }
 
     /** Write the leave of [channelId] at once and send it. `false` when
@@ -1381,6 +1383,75 @@ public class DeviceGroupSyncRepository(
             }
         }
         return true
+    }
+
+    // ------------------------------------------------------------
+    // ADR-0090 section 3 / open question 4 - the owner account's channel
+    // admission seeds (lakko-sync `channel_admission_seed`)
+    // ------------------------------------------------------------
+
+    /**
+     * Write one admission seed of [channelId] at [version] and send it to the
+     * account's other devices. Write-once per seed; another seed of the same
+     * version is kept beside it (two owner devices minting one version at
+     * once both survive). `false` when the state is not open, the seed was
+     * refused, or it was already held.
+     */
+    public fun setChannelAdmissionSeed(channelId: ByteArray, version: UShort, seed: ByteArray): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                state.setChannelAdmissionSeed(Hlc.mint(), channelId, version, seed)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "channel admission seed refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.channelAdmissionSeedEnvelopeFor(channelId, version, seed) }.getOrNull()
+        }
+        if (envelope != null) {
+            scope.launchBound(sessionBinding) {
+                try {
+                    sendServiceEnvelope(envelope)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "channel admission seed not published (${cause.javaClass.simpleName})")
+                    pendingFlag?.recordFailure()
+                }
+            }
+        }
+        return true
+    }
+
+    /** Every admission seed of [channelId] the register holds, each with its
+     *  version (a version may appear more than once); empty while the state
+     *  is not open. The caller wipes the seeds. */
+    public fun channelAdmissionSeeds(channelId: ByteArray): List<Pair<UShort, ByteArray>> =
+        synchronized(stateLock) {
+            val state = syncedState ?: return emptyList()
+            runCatching { state.channelAdmissionSeeds(channelId) }.getOrNull().orEmpty()
+                .map { it.admissionVersion to it.seed }
+        }
+
+    /** A received admission seed envelope, folded by its own stamp. */
+    private fun applyChannelAdmissionSeed(envelope: ByteArray) {
+        synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyChannelAdmissionSeedEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "channel admission seed envelope refused (${cause.javaClass.simpleName})")
+            }
+        }
+    }
+
+    /** ADR-0090 section 2.1 - the signature keys of the account's DeviceGroup
+     *  roster (the authority on which devices belong to the account), or
+     *  `null` while no DeviceGroup is open. */
+    public fun rosterSignatureKeys(): List<ByteArray>? {
+        val g = group.get() ?: return null
+        return runCatching { g.devices().map { it.signaturePublicKey } }.getOrNull()
     }
 
     /** A received channel subscription envelope, folded by its own stamp. */
@@ -1756,6 +1827,10 @@ public class DeviceGroupSyncRepository(
         for (envelope in runCatching { restored.channelSubscriptionEnvelopes() }.getOrNull().orEmpty()) {
             applyChannelSubscription(envelope)
         }
+        // ADR-0090 - and the owner account's channel admission seeds.
+        for (envelope in runCatching { restored.channelAdmissionSeedEnvelopes() }.getOrNull().orEmpty()) {
+            applyChannelAdmissionSeed(envelope)
+        }
     }
 
     /** Permanently destroy the repository — cancels the
@@ -2067,6 +2142,12 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.channelSubscriptionEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in channelSubscriptionEnvelopes) sendServiceEnvelope(envelope)
+        // ADR-0090 - nor are the channel admission seeds, each with its own
+        // stamp (re-sent on growth like the subscriptions).
+        val admissionSeedEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.channelAdmissionSeedEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in admissionSeedEnvelopes) sendServiceEnvelope(envelope)
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -2376,6 +2457,12 @@ public class DeviceGroupSyncRepository(
                                 // channel the account subscribed to or left on
                                 // another of its devices.
                                 applyChannelSubscription(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isChannelAdmissionSeedEnvelope(body.envelope)
+                            ) {
+                                // ADR-0090 - an admission seed another owner
+                                // device of the account minted or holds.
+                                applyChannelAdmissionSeed(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isChannelReactionEnvelope(body.envelope)
                             ) {
@@ -2764,6 +2851,9 @@ public class DeviceGroupSyncRepository(
         me.lakko.app.backup.BackupRestoreStore.recordRejoinAnswer(
             applicationContext, accountIdB64, me.lakko.app.backup.RestoreRejoinAnswer.FOUNDED,
         )
+        // ADR-0090 decision A - this device is the account's only one: it
+        // founds again the PublisherGroup of every channel the account owns.
+        me.lakko.app.channels.ChannelRefounding.markFoundedAlone(applicationContext, accountIdB64)
         rejoinJob = null
         forgetCachedJournalSigners(accountIdB64)
         adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, 0L, false)
@@ -2843,6 +2933,10 @@ public class DeviceGroupSyncRepository(
                 ?: throw RejoinUnavailable("no-login-handle")
             val groupId = DeviceGroupLifecycle.groupId(applicationContext, accountIdB64)
                 ?: throw RejoinUnavailable("no-account-seed")
+            // G-55: the knock is sealed under the seed the DeviceGroup id
+            // derives from.
+            val lineageSeed = DeviceGroupLifecycle.lineageSeed(applicationContext, accountIdB64)
+                ?: throw RejoinUnavailable("no-account-seed")
             val seed = me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
                 context = applicationContext, accountIdB64 = accountIdB64,
             )
@@ -2865,16 +2959,15 @@ public class DeviceGroupSyncRepository(
                 // attested-removal policy without a passkey. An unclaimed
                 // journal names no epoch: no proof.
                 val probeEpoch = DsClient().use { ds -> ds.knock(groupId, emptyList()) }.epoch
-                payload = if (probeEpoch == null) {
-                    me.lakko.app.devices.PairingCodec.buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
+                val proof = if (probeEpoch == null) {
+                    ByteArray(0)
                 } else {
-                    val proof = uniffi.lakko_ffi_uniffi.signDeviceGroupSelfRemoval(
-                        joiner, groupId, probeEpoch, keyPackage,
-                    )
-                    me.lakko.app.devices.PairingCodec.buildRejoinKnockPayload(
-                        loginHandle, keyPackage, rendezvous, proof,
-                    )
+                    uniffi.lakko_ffi_uniffi.signDeviceGroupSelfRemoval(joiner, groupId, probeEpoch, keyPackage)
                 }
+                // G-55: sealed under the lineage seed either way.
+                payload = me.lakko.app.devices.PairingCodec.buildRejoinKnockPayload(
+                    lineageSeed, loginHandle, keyPackage, rendezvous, proof,
+                )
                 val snapshot = joiner.snapshotStorage()
                 state = try {
                     RejoinState(
@@ -2887,6 +2980,7 @@ public class DeviceGroupSyncRepository(
                 }
             } finally {
                 joiner.close()
+                lineageSeed.fill(0)
             }
             // Kept BEFORE the knock: the joiner's provider is the only thing
             // that can open the Welcome a sibling sends.
@@ -3091,12 +3185,15 @@ public class DeviceGroupSyncRepository(
                 val ownKey = runCatching { identity.get()?.signaturePublicKey() }.getOrNull()
                 val nowMs = System.currentTimeMillis()
                 var forThisAccount = false
+                // G-55: knocks are sealed under the seed the DeviceGroup id
+                // derives from.
+                val lineageSeed = DeviceGroupLifecycle.lineageSeed(applicationContext, accountIdB64) ?: continue
                 for (knock in result.messages) {
                     if (!answered.add(knock.id)) continue
                     val decoded = try {
-                        me.lakko.app.devices.PairingCodec.parsePairingQrPayload(knock.payload, loginHandle)
+                        me.lakko.app.devices.PairingCodec.openRejoinKnockPayload(lineageSeed, knock.payload, loginHandle)
                     } catch (_: Throwable) {
-                        continue // not a payload for this account
+                        continue // not a sealed knock of this account
                     }
                     forThisAccount = true
                     val knockingKey = runCatching {
@@ -3161,6 +3258,8 @@ public class DeviceGroupSyncRepository(
         val id = identity.get() ?: return
         if (admissions == null) return
         val loginHandle = knockLoginHandle(accountIdB64) ?: return
+        // G-55: knocks are sealed under the seed the DeviceGroup id derives from.
+        val lineageSeed = DeviceGroupLifecycle.lineageSeed(applicationContext, accountIdB64) ?: return
         val knocks = DsClient().use { ds -> ds.fetchKnocks(g.groupId(), after = knockCursor) }
         if (!bound.isCurrent || knocks.messages.isEmpty()) return
         // A page that was full: the next check reads on.
@@ -3179,9 +3278,9 @@ public class DeviceGroupSyncRepository(
             // reopens this runtime), and the knocks after it are read again.
             knockCursor = maxOf(knockCursor, knock.id)
             val decoded = try {
-                me.lakko.app.devices.PairingCodec.parsePairingQrPayload(knock.payload, loginHandle)
+                me.lakko.app.devices.PairingCodec.openRejoinKnockPayload(lineageSeed, knock.payload, loginHandle)
             } catch (_: Throwable) {
-                continue // not a payload for this account (or not a pairing payload)
+                continue // not a sealed knock of this account (or not a pairing payload)
             }
             val keyBytes = runCatching { uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage) }
                 .getOrNull() ?: continue

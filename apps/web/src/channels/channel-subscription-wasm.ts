@@ -57,6 +57,7 @@ export function viewOfRegister(reg: Register, roles: RoleEnum): ChannelSubscript
       subscriberSecret: reg.subscriberSecret.slice(),
       readKey: reg.readKey.slice(),
       publisherGroupIdHex: hexOfBytes(reg.publisherGroupId),
+      ownerAccountKey: reg.ownerAccountKey.slice(),
       name: reg.name,
       handle: reg.handle,
     };
@@ -103,6 +104,8 @@ export function writeChannelSubscription(
     value.subscriberSecret,
     value.readKey.length === 32 ? value.readKey : new Uint8Array(0),
     groupId,
+    // ADR-0090: the owner key only for a co-publisher (refused otherwise).
+    value.role === "co-publisher" ? value.ownerAccountKey : new Uint8Array(0),
     value.name,
     value.handle,
   );

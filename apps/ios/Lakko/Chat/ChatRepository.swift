@@ -6832,6 +6832,16 @@ public final class ChatRepository: ObservableObject {
         try snapshotStore.putSnapshotDurable(accountIdB64: accountIdB64, blob: blob)
     }
 
+    /// ADR-0090 — the channel PublisherGroups live in this provider too: the
+    /// fail-closed write the channel paths call before a PublisherGroup
+    /// commit or application message leaves. Unlike
+    /// ``persistSnapshotDurableOrThrow()`` it THROWS when nothing is bound,
+    /// since a channel caller always has state to keep.
+    func persistDeviceProviderOrThrow() throws {
+        guard canonicalIdentity != nil, currentAccountIdB64 != nil else { throw StaleBindingError() }
+        try persistSnapshotDurableOrThrow()
+    }
+
     func persistSnapshotDurableOrThrow() throws {
         guard let identity = canonicalIdentity,
               let accountIdB64 = currentAccountIdB64 else { return }

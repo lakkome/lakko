@@ -61,7 +61,9 @@ describe("keepsEpochSeeds", () => {
   it("drops one naming another channel, another account, or arriving at the owner's device", () => {
     expect(keepsEpochSeeds({ ...base, envelopeChannelHex: "bb" })).toBe(false);
     expect(keepsEpochSeeds({ ...base, memberAccountKeyB64: "SOMEONE" })).toBe(false);
-    expect(keepsEpochSeeds({ ...base, deviceIsOwner: true })).toBe(false);
+    // ADR-0090 section 6: an owner device keeps one its own account was
+    // sent by another owner device.
+    expect(keepsEpochSeeds({ ...base, deviceIsOwner: true })).toBe(true);
   });
 });
 

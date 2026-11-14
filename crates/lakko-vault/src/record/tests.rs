@@ -129,6 +129,7 @@ fn head() -> ConversationHead {
         tail: vec![minimal(12)],
         reentry: vec![ReentryEpoch {
             epoch: 13,
+            ds_access_seed: SecretBytes::new([0x5E; 32]),
             group_info: vec![0xEE, 0xEF],
         }],
         registrar_seed: Some(RegistrarSeed {
@@ -328,6 +329,7 @@ fn a_head_is_pinned() {
     e.extend_from_slice(&minimal_message_bytes(12));
     e.push(1); // reentry_count
     e.extend_from_slice(&13u64.to_be_bytes()); // epoch
+    e.extend_from_slice(&[0x5E; 32]); // ds_access_seed
     e.extend_from_slice(&2u32.to_be_bytes()); // group_info_len
     e.extend_from_slice(&[0xEE, 0xEF]);
     e.push(1); // registrar present
@@ -344,19 +346,23 @@ fn a_devices_head_and_an_index_are_pinned() {
         reentry: vec![
             ReentryEpoch {
                 epoch: 4,
+                ds_access_seed: SecretBytes::new([0x44; 32]),
                 group_info: vec![0xA1],
             },
             ReentryEpoch {
                 epoch: 5,
+                ds_access_seed: SecretBytes::new([0x55; 32]),
                 group_info: vec![0xA2, 0xA3],
             },
         ],
     };
     let mut e = vec![0x01, 0x02];
     e.extend_from_slice(&4u64.to_be_bytes());
+    e.extend_from_slice(&[0x44; 32]);
     e.extend_from_slice(&1u32.to_be_bytes());
     e.push(0xA1);
     e.extend_from_slice(&5u64.to_be_bytes());
+    e.extend_from_slice(&[0x55; 32]);
     e.extend_from_slice(&2u32.to_be_bytes());
     e.extend_from_slice(&[0xA2, 0xA3]);
     assert_eq!(devices.encode().unwrap(), e);
@@ -399,6 +405,7 @@ fn records_round_trip() {
     rich.tail = vec![full(20), minimal(21)];
     rich.reentry.push(ReentryEpoch {
         epoch: 14,
+        ds_access_seed: SecretBytes::new([0x14; 32]),
         group_info: vec![1; 300],
     });
     for h in [rich, empty_head()] {
@@ -690,6 +697,7 @@ fn epochs(count: usize, info_len: usize) -> Vec<ReentryEpoch> {
     (0..count as u64)
         .map(|epoch| ReentryEpoch {
             epoch,
+            ds_access_seed: SecretBytes::new([0x6B; 32]),
             group_info: vec![0x6A; info_len],
         })
         .collect()
@@ -1217,4 +1225,15 @@ fn reason_codes_are_distinct() {
     let codes: BTreeSet<&str> = all.iter().map(|e| e.code()).collect();
     assert_eq!(codes.len(), all.len());
     assert!(codes.iter().all(|c| !c.is_empty()));
+}
+
+#[test]
+fn a_reentry_epoch_keeps_its_access_seed_out_of_debug() {
+    let epoch = ReentryEpoch {
+        epoch: 3,
+        ds_access_seed: SecretBytes::new([0xA7; 32]),
+        group_info: vec![1],
+    };
+    let shown = format!("{epoch:?}");
+    assert!(!shown.contains("a7") && !shown.contains("A7") && !shown.contains("167"));
 }

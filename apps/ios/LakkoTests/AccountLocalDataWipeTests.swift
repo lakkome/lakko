@@ -417,6 +417,10 @@ final class AccountLocalDataWipeTests: XCTestCase {
         ContactsInboxStore().save(PersistedContactsInbox.empty, accountIdB64: x)
         StateBundle.saveKnownGroupIds(["abc"], accountIdB64: x)
         CoPublishedJournals(defaults: standard, accountIdB64: { x }).mark(journalIdHex: "ab", accountIdB64: x)
+        // ADR-0090 — an owed own-account hand-over and a queued device request.
+        ChannelDeviceAdmissionStore(accountIdB64: x).markHandoverOwed(channelHex)
+        ChannelDeviceAdmissionStore(accountIdB64: x).enqueue(
+            [(plaintext: Data([1]), sender: Data(repeating: 2, count: 32))], channelId: channelHex)
         MediaPrefs(defaults: standard, accountIdB64: { x }).markPlayed("played", accountIdB64: x)
         EmojiIndex.saveRecent(["\u{1F600}"], standard, accountIdB64: x)
         EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], standard, accountIdB64: x)

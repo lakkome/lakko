@@ -150,7 +150,7 @@ public object ChannelAdmissionSeedShare {
     ): Boolean {
         val versions = ChannelAdmissionKeys.all(context, account, channelId).let { all ->
             try {
-                all.map { it.first.toString() }
+                all.map { (v, seed) -> admissionSeedMark(v, seed) }
             } finally {
                 all.forEach { it.second.fill(0) }
             }
@@ -170,14 +170,9 @@ public object ChannelAdmissionSeedShare {
         context: Context,
         account: String,
         channelId: String,
-        identity: Identity,
+        ids: ChannelIdentity,
         group: PublisherGroup,
         ds: me.lakko.app.ds.DsClient,
-        /** Snapshot the provider, throwing when it was not written. Called
-         *  after each message is sealed and before it is published, so a
-         *  crash between the two never reuses a ratchet generation (G-34
-         *  class); a failure publishes nothing. */
-        persistNow: () -> Unit,
         /** ADR-0087 section 15 (2026-11-08) — the owner's epoch map, every
          *  channel seed this device holds by epoch: the newest
          *  [EPOCH_SEEDS_MAX] a publisher lacks go to it in one envelope. */
@@ -192,7 +187,8 @@ public object ChannelAdmissionSeedShare {
         try {
             for ((keyHex, accountIdHex) in fillPublisherAccountIds(context, account, channelId)) {
                 val already = sent(context, account, channelId, keyHex)
-                val owed = seeds.filter { it.first.toString() !in already }
+                // ADR-0090 — EVERY seed of a version, not one per version.
+                val owed = seeds.filter { (v, seed) -> admissionSeedMark(v, seed) !in already }
                 val readKeyOwed = READ_KEY_MARK !in already
                 val epochsOwed = epochSeedEpochsToSend(epochSeeds.keys, already, maxSeeds)
                 if (owed.isEmpty() && !readKeyOwed && epochsOwed.isEmpty()) continue
@@ -222,16 +218,14 @@ public object ChannelAdmissionSeedShare {
                         version,
                         seed,
                     )
-                    val message = group.createApplicationMessage(identity, envelope)
-                    persistNow()
-                    ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
-                    marks = marks + version.toString()
+                    CoPublisher.publishApplication(ds, ids, group, envelope)
+                    marks = marks + admissionSeedMark(version, seed)
                     prefs(context).edit().putStringSet("sent|$account|$channelId|$keyHex", marks).apply()
                 }
                 if (readKeyOwed) {
                     // ADR-0087 section 15 (phase B) — the channel's read key,
                     // so a publisher mints public links and files public seeds.
-                    val readKey = ChannelDiscovery.readKey(identity, channelId)
+                    val readKey = ChannelDiscovery.readKey(ids.account, channelId)
                     try {
                         val envelope = uniffi.lakko_ffi_uniffi.composeChannelReadKeyEnvelope(
                             group.channelId(),
@@ -239,9 +233,7 @@ public object ChannelAdmissionSeedShare {
                             x,
                             readKey,
                         )
-                        val message = group.createApplicationMessage(identity, envelope)
-                        persistNow()
-                        ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
+                        CoPublisher.publishApplication(ds, ids, group, envelope)
                     } finally {
                         readKey.fill(0)
                     }
@@ -257,9 +249,7 @@ public object ChannelAdmissionSeedShare {
                         x,
                         epochsOwed.map { e -> uniffi.lakko_ffi_uniffi.FfiChannelEpochSeed(e, epochSeeds.getValue(e)) },
                     )
-                    val message = group.createApplicationMessage(identity, envelope)
-                    persistNow()
-                    ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
+                    CoPublisher.publishApplication(ds, ids, group, envelope)
                     marks = marks + epochsOwed.map(::epochSeedMark)
                     prefs(context).edit().putStringSet("sent|$account|$channelId|$keyHex", marks).apply()
                 }
@@ -271,6 +261,30 @@ public object ChannelAdmissionSeedShare {
         } finally {
             seeds.forEach { it.second.fill(0) }
         }
+    }
+
+    /**
+     * ADR-0090 section 6 — a device of [accountKey]'s account was admitted:
+     * that account is owed the read key, every admission seed and the epoch
+     * seeds again (its new device holds none; a device that does drops the
+     * duplicates). For this account's own key the publisher record is made
+     * here, under this account's id. Best effort.
+     */
+    public fun owedAgain(account: String, channelId: String, accountKey: ByteArray, ownAccountKey: ByteArray) {
+        val context = SubscriberAdmission.appContext ?: return
+        val keyHex = hex(accountKey)
+        val editor = prefs(context).edit().remove("sent|$account|$channelId|$keyHex")
+        if (accountKey.contentEquals(ownAccountKey)) {
+            val accountId = try {
+                java.util.Base64.getDecoder().decode(account)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+            if (accountId != null && accountId.size == 16) {
+                editor.putString("pub|$account|$channelId|$keyHex", hex(accountId))
+            }
+        }
+        editor.apply()
     }
 
     /** A removed publisher gets nothing more: its record goes. */
@@ -391,6 +405,11 @@ internal fun resolvePublisherAccountIdHex(
     if (id.size != 16) return ""
     return id.joinToString("") { "%02x".format(it) }
 }
+
+/** ADR-0090 — the sent mark of one admission seed: its version and a short
+ *  tag of the seed, so every seed of a version is sent. */
+internal fun admissionSeedMark(version: UShort, seed: ByteArray): String =
+    "$version:" + java.security.MessageDigest.getInstance("SHA-256").digest(seed).take(6).joinToString("") { "%02x".format(it) }
 
 /** The most seeds one earlier-seeds envelope carries (`channelEpochSeedsMax`). */
 internal const val EPOCH_SEEDS_MAX: Int = 64

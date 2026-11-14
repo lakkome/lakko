@@ -20,6 +20,10 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 # The display-name character rule a folder name follows (ADR-0058 section 4).
 lakko-contacts.workspace = true
+# The register key of an admission seed (ADR-0090 open question 4): a BLAKE3
+# derive-key of the seed, so two seeds of one version are two registers.
+# Already in the graph through lakko-contacts.
+lakko-crypto.workspace = true
 
 [dev-dependencies]
 proptest = "1"

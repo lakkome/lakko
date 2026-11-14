@@ -107,6 +107,7 @@ pub mod passkey_vault;
 pub mod phrase_check;
 pub mod pow_solver;
 pub mod presence;
+pub mod publisher_devices;
 pub mod push;
 pub mod push_wake;
 pub mod reaction_rules;

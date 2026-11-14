@@ -40,6 +40,9 @@ export interface LocalChannelState {
   readonly publishing: boolean;
   /** The co-published group id this device has marked, 64 hex, or `null`. */
   readonly coPublisherGroupIdHex: string | null;
+  /** ADR-0090: the channel owner's account key this co-publisher device
+   *  recorded when it joined (the `/g/` issuer it verified), or `null`. */
+  readonly coPublisherOwnerKey?: Uint8Array | null;
   /** This device's subscriber key seed, or `null`. */
   readonly subscriberSecret: Uint8Array | null;
   /** The read key this device holds, or `null`. */
@@ -130,6 +133,7 @@ function sameValue(held: ChannelSubscriptionView, v: ChannelSubscriptionValue): 
     sameBytes(held.subscriberSecret, v.subscriberSecret) &&
     sameBytes(held.readKey, v.readKey) &&
     held.publisherGroupIdHex === (v.role === "co-publisher" ? v.publisherGroupIdHex : "") &&
+    sameBytes(held.ownerAccountKey, v.role === "co-publisher" ? v.ownerAccountKey : empty()) &&
     held.name === v.name &&
     held.handle === v.handle
   );
@@ -144,6 +148,7 @@ function withValue(
     subscriberSecret: held.subscriberSecret,
     readKey: held.readKey,
     publisherGroupIdHex: held.publisherGroupIdHex,
+    ownerAccountKey: held.ownerAccountKey,
     name: held.name,
     handle: held.handle,
     ...change,
@@ -165,6 +170,12 @@ export function planChannelSubscriptions(input: PlanInput): ChannelSubscriptionS
     const intent = input.intents.get(c.idHex);
     if (c.publishing) {
       const role: ChannelSubscriptionRoleName = c.coPublisherGroupIdHex === null ? "owner" : "co-publisher";
+      // ADR-0090: a co-publisher register carries the owner key; with none
+      // recorded here (nor held) nothing is written yet.
+      const ownerKey =
+        role === "co-publisher"
+          ? (nonEmpty(c.coPublisherOwnerKey ?? null) ?? (live && held.ownerAccountKey.length === 32 ? held.ownerAccountKey : null))
+          : empty();
       const secret = live
         ? held.subscriberSecret
         : (nonEmpty(c.subscriberSecret) ?? input.freshSecret());
@@ -173,10 +184,11 @@ export function planChannelSubscriptions(input: PlanInput): ChannelSubscriptionS
         subscriberSecret: secret,
         readKey: nonEmpty(c.readKey) ?? (live ? held.readKey : empty()),
         publisherGroupIdHex: role === "co-publisher" ? (c.coPublisherGroupIdHex ?? "") : "",
+        ownerAccountKey: ownerKey ?? empty(),
         name: registerName(c.name) || (live ? held.name : ""),
         handle: registerHandle(c.handle) || (live ? held.handle : ""),
       };
-      if (!live || !sameValue(held, value)) steps.push({ kind: "write", idHex: c.idHex, value });
+      if (ownerKey !== null && (!live || !sameValue(held, value))) steps.push({ kind: "write", idHex: c.idHex, value });
       if (live && c.subscriberSecret !== null && !sameBytes(c.subscriberSecret, held.subscriberSecret)) {
         steps.push({ kind: "adopt-key", idHex: c.idHex, secret: held.subscriberSecret, oldSecret: c.subscriberSecret });
       }
@@ -188,6 +200,7 @@ export function planChannelSubscriptions(input: PlanInput): ChannelSubscriptionS
         const value = withValue(held, {
           role: "subscriber",
           publisherGroupIdHex: "",
+          ownerAccountKey: empty(),
           readKey: nonEmpty(c.readKey) ?? held.readKey,
         });
         if (!sameValue(held, value)) steps.push({ kind: "write", idHex: c.idHex, value });
@@ -227,6 +240,7 @@ export function planChannelSubscriptions(input: PlanInput): ChannelSubscriptionS
         subscriberSecret: secret,
         readKey: nonEmpty(c.readKey) ?? empty(),
         publisherGroupIdHex: "",
+        ownerAccountKey: empty(),
         name: registerName(c.name),
         handle: registerHandle(c.handle),
       },

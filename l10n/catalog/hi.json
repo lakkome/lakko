@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "आप इस चैनल में उसी डिवाइस से पोस्ट करते हैं जिस पर आपने इसे बनाया था।",
+      "text": "आपके दूसरे डिवाइस पर Lakko खुलते ही आप यहाँ पोस्ट कर सकेंगे।",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "आप इस चैनल में उसी डिवाइस से पोस्ट करते हैं जिस पर आप प्रकाशक बने थे।",
+      "text": "आपके दूसरे डिवाइस पर और मालिक के डिवाइस पर Lakko खुलते ही आप यहाँ पोस्ट कर सकेंगे।",
       "status": "machine"
     },
     "channels.rotation.desc": {

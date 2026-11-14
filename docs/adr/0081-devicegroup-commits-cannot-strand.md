@@ -607,6 +607,22 @@ failures, 1 skipped (from the XML reports); iOS `xcodebuild
 build-for-testing` succeeded (tests not run). The fuzz target was compiled,
 not run. Nothing was walked live and nothing was deployed.
 
+**Note (2026-11-14, G-55): the rejoin knock is sealed.** The knock posted
+the pairing payload (login handle, KeyPackage with its account binding) to
+the DeviceGroup knock queue in the clear, so the Delivery Service read the
+account key next to the DeviceGroup journal id ADR-0078 phase 6 derives to
+hide. `pairing::encode_rejoin_knock` now takes the lineage seed (the seed
+the DeviceGroup id derives from) and returns `"lakko/rejoin-knock/v1\0" ‖
+0x01 ‖ nonce(12) ‖ ChaCha20-Poly1305(len(4 BE) ‖ payload ‖ zeros)` under
+`BLAKE3-derive-key("lakko/device-group/knock-wrap/v1", lineage_seed)`, AAD
+binding the DeviceGroup id, padded to 1024-byte steps (one size, 1075 bytes,
+for the payloads measured); the self-removal proof becomes optional so the
+knock to an unclaimed journal is sealed the same way; a sibling opens it with
+`open_rejoin_knock` and then runs the unchanged `decode`. Flag day, no plain
+fallback. FFI `buildRejoinKnock` / `encodeRejoinKnock` take the lineage
+`accountIdentity`; new `openRejoinKnock`. All three clients' knock senders and
+readers moved; host-tested only. See `docs/security/known-gaps.md` G-55.
+
 ## Amendment (2026-10-19, second): a conversation is joined only from a Welcome with a role table and a kind, and the clients' direct-commit paths are gone
 
 Decided by the maintainer on 2026-10-19 (option (b): close the core gap

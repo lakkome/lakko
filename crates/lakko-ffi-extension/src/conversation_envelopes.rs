@@ -8,8 +8,9 @@
 //! admission-seed envelope (section 7), the read-key envelope (section 7,
 //! phase B), the earlier-seeds envelope to a new publisher (section 7,
 //! amended 2026-11-08), a publisher's request that the owner rotate
-//! (section 15, amended 2026-11-08) and a co-publisher's step-down (section
-//! 15, phase B).
+//! (section 15, amended 2026-11-08), a co-publisher's step-down (section
+//! 15, phase B), and the ADR-0090 publisher bookkeeping: a co-publisher
+//! device's admit / retire request and a publishing device's admission mark.
 //!
 //! ## Why the NSE needs this
 //!
@@ -27,6 +28,9 @@
 //! separator answers `false`, and the chain falls through.
 
 use lakko_contacts::admission_seed::{decode_admission_seed, ADMISSION_SEED_ENVELOPE_LEN};
+use lakko_contacts::channel_admission_mark::{
+    decode_channel_admission_mark, CHANNEL_ADMISSION_MARK_ENVELOPE_LEN,
+};
 use lakko_contacts::channel_epoch_seeds::{
     decode_channel_epoch_seeds, CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN,
     CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN,
@@ -46,6 +50,10 @@ use lakko_contacts::group_reactions::{
     decode_group_reactions, GROUP_REACTIONS_ENVELOPE_MAX_LEN, GROUP_REACTIONS_ENVELOPE_MIN_LEN,
 };
 use lakko_contacts::knock_seed::{decode_knock_seed, KNOCK_SEED_ENVELOPE_LEN};
+use lakko_contacts::publisher_device_request::{
+    decode_publisher_device_request, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN,
+    PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN,
+};
 
 fn len_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -211,6 +219,43 @@ pub fn publisher_step_down_envelope_len() -> u32 {
     len_u32(lakko_mls::PUBLISHER_STEP_DOWN_LEN)
 }
 
+/// Whether `plaintext` is a co-publisher device's admit / retire request
+/// (ADR-0090 section 2.2, any channel).
+#[uniffi::export]
+#[must_use]
+pub fn is_publisher_device_request_envelope(plaintext: Vec<u8>) -> bool {
+    decode_publisher_device_request(&plaintext).is_ok()
+}
+
+/// The shortest device-request envelope (a retire).
+#[uniffi::export]
+#[must_use]
+pub fn publisher_device_request_envelope_min_len() -> u32 {
+    len_u32(PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN)
+}
+
+/// The longest device-request envelope.
+#[uniffi::export]
+#[must_use]
+pub fn publisher_device_request_envelope_max_len() -> u32 {
+    len_u32(PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN)
+}
+
+/// Whether `plaintext` is a publishing device's admission mark (ADR-0090
+/// section 6, any channel).
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_admission_mark_envelope(plaintext: Vec<u8>) -> bool {
+    decode_channel_admission_mark(&plaintext).is_ok()
+}
+
+/// The one length of an admission-mark envelope.
+#[uniffi::export]
+#[must_use]
+pub fn channel_admission_mark_envelope_len() -> u32 {
+    len_u32(CHANNEL_ADMISSION_MARK_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +325,28 @@ mod tests {
         lakko_mls::compose_publisher_step_down(&channel)
     }
 
+    fn device_request() -> Vec<u8> {
+        use lakko_contacts::publisher_device_request::{
+            compose_publisher_device_request, PublisherDeviceAction, PublisherDeviceRequest,
+        };
+        compose_publisher_device_request(&PublisherDeviceRequest {
+            channel_id: [0x0C; 16],
+            action: PublisherDeviceAction::Retire {
+                device_key: [0x7E; 32],
+            },
+        })
+        .unwrap()
+    }
+
+    fn admission_mark() -> Vec<u8> {
+        lakko_contacts::channel_admission_mark::compose_channel_admission_mark(
+            &lakko_contacts::channel_admission_mark::ChannelAdmissionMark {
+                channel_id: [0x0C; 16],
+                through_seq: 7,
+            },
+        )
+    }
+
     #[test]
     fn recognises_each_envelope_and_refuses_chat() {
         assert!(is_group_photo_envelope(photo()));
@@ -291,6 +358,8 @@ mod tests {
         assert!(is_channel_epoch_seeds_envelope(epoch_seeds()));
         assert!(is_channel_rotate_request_envelope(rotate_request()));
         assert!(is_publisher_step_down_envelope(step_down()));
+        assert!(is_publisher_device_request_envelope(device_request()));
+        assert!(is_channel_admission_mark_envelope(admission_mark()));
         let chat = lakko_attachments::compose("hello", Vec::new()).unwrap();
         assert!(!is_group_photo_envelope(chat.clone()));
         assert!(!is_group_reactions_envelope(chat.clone()));
@@ -300,6 +369,8 @@ mod tests {
         assert!(!is_channel_read_key_envelope(chat.clone()));
         assert!(!is_channel_epoch_seeds_envelope(chat.clone()));
         assert!(!is_channel_rotate_request_envelope(chat.clone()));
+        assert!(!is_publisher_device_request_envelope(chat.clone()));
+        assert!(!is_channel_admission_mark_envelope(chat.clone()));
         assert!(!is_publisher_step_down_envelope(chat));
     }
 
@@ -315,6 +386,8 @@ mod tests {
             epoch_seeds(),
             rotate_request(),
             step_down(),
+            device_request(),
+            admission_mark(),
         ] {
             assert_eq!(
                 lakko_attachments::parse_body(&w),
@@ -341,6 +414,9 @@ mod tests {
         assert_eq!(channel_epoch_seeds_envelope_max_len(), 2431);
         assert_eq!(channel_rotate_request_envelope_len(), 49);
         assert_eq!(publisher_step_down_envelope_len(), 46);
+        assert_eq!(publisher_device_request_envelope_min_len(), 84);
+        assert_eq!(publisher_device_request_envelope_max_len(), 7208);
+        assert_eq!(channel_admission_mark_envelope_len(), 57);
         let p = photo();
         assert_eq!(&p[..21], b"lakko/group-photo/v1\x00");
         assert_eq!(p.len(), 31);
@@ -368,7 +444,13 @@ mod tests {
         let d = step_down();
         assert_eq!(&d[..29], b"lakko/publisher-step-down/v1\x00");
         assert_eq!(d.len(), 46);
-        for w in [p, r, h, k, a, c, e, q, d] {
+        let v = device_request();
+        assert_eq!(&v[..34], b"lakko/publisher-device-request/v1\x00");
+        assert_eq!(v.len(), 84);
+        let m = admission_mark();
+        assert_eq!(&m[..32], b"lakko/channel-admission-mark/v1\x00");
+        assert_eq!(m.len(), 57);
+        for w in [p, r, h, k, a, c, e, q, d, v, m] {
             assert_eq!(w[0], 0x6c);
         }
     }
@@ -385,8 +467,10 @@ mod tests {
             epoch_seeds(),
             rotate_request(),
             step_down(),
+            device_request(),
+            admission_mark(),
         ];
-        let tests: [fn(Vec<u8>) -> bool; 9] = [
+        let tests: [fn(Vec<u8>) -> bool; 11] = [
             is_group_photo_envelope,
             is_group_reactions_envelope,
             is_conversation_handle_envelope,
@@ -396,6 +480,8 @@ mod tests {
             is_channel_epoch_seeds_envelope,
             is_channel_rotate_request_envelope,
             is_publisher_step_down_envelope,
+            is_publisher_device_request_envelope,
+            is_channel_admission_mark_envelope,
         ];
         for (i, w) in all.iter().enumerate() {
             for (j, t) in tests.iter().enumerate() {

@@ -1600,7 +1600,21 @@ private fun SessionRoot(
                     ?.let { me.lakko.app.channels.ChannelsComposer.bytesToHex(it.publicKey) }
             }
         }
+        // ADR-0090 - PublisherGroups live on this device's bound identity,
+        // in the chat repository's provider.
+        me.lakko.app.channels.ChannelPublisherIdentity.devicePort = chatRepository.channelDevicePort
+        // ADR-0090 open question 4 - the owner account's admission seeds
+        // ride the account's synced register.
+        me.lakko.app.channels.ChannelAdmissionKeys.register = { id ->
+            deviceGroupSync.channelAdmissionSeeds(me.lakko.app.channels.ChannelsComposer.channelIdFromHex(id))
+        }
+        me.lakko.app.channels.ChannelAdmissionKeys.writeRegister = { id, version, seed ->
+            deviceGroupSync.setChannelAdmissionSeed(me.lakko.app.channels.ChannelsComposer.channelIdFromHex(id), version, seed)
+        }
         onDispose {
+            me.lakko.app.channels.ChannelPublisherIdentity.devicePort = null
+            me.lakko.app.channels.ChannelAdmissionKeys.register = null
+            me.lakko.app.channels.ChannelAdmissionKeys.writeRegister = null
             me.lakko.app.channels.ChannelReseal.accountReaderKeyOf = null
             me.lakko.app.devices.StateBundle.channelSeedSource = null
             me.lakko.app.devices.StateBundle.channelSeedSink = null
@@ -2177,8 +2191,15 @@ private fun SessionRoot(
     val publisherLoop = remember(channelsState, channelsClient) {
         me.lakko.app.channels.ChannelPublisherLoop.forChannels(publisherLoopContext, channelsState, channelsClient)
     }
-    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys) {
-        if (identitySecrets == null || publisherChannels.isEmpty()) return@LaunchedEffect
+    // ADR-0090 — a device of an account that owns or co-publishes a channel
+    // runs the loop even before it holds a PublisherGroup: it adopts one an
+    // owner device admitted it to, and re-founds when it is the only device.
+    val registeredPublisherChannels by deviceGroupSync.channelSubscriptions.collectAsStateWithLifecycle()
+    val publishesSomewhere = registeredPublisherChannels.orEmpty().any {
+        it.subscribed && it.role != uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole.SUBSCRIBER
+    }
+    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys, publishesSomewhere) {
+        if (identitySecrets == null || (publisherChannels.isEmpty() && !publishesSomewhere)) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             var lastAdmitMs = 0L
             while (true) {
@@ -2196,7 +2217,12 @@ private fun SessionRoot(
                     }
                     publisherLoop.passAll()
                 }
-                kotlinx.coroutines.delay(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS)
+                // ADR-0090 section 2.1 — the next pass comes at the interval,
+                // or at once when the account's DeviceGroup grows or shrinks.
+                val roster = me.lakko.app.devices.DeviceRosterChanges.revision.value
+                kotlinx.coroutines.withTimeoutOrNull(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS) {
+                    me.lakko.app.devices.DeviceRosterChanges.revision.first { it != roster }
+                }
             }
         }
     }
@@ -2280,7 +2306,7 @@ private fun SessionRoot(
     // KeyPackage out of the directory while the session is still readable;
     // last, auth.forgetDevice() runs the one on-device wipe
     // (AccountLocalWipe: every per-account store) and ends the session.
-    val forgetDevice = {
+    val forgetDeviceNowBody = {
         // ADR-0042, amended 2026-09-30 — first, as in logout above.
         me.lakko.app.push.PushSignOut.clearFirst(appContext)
         me.lakko.app.calls.AppCallHost.reset()
@@ -2292,6 +2318,26 @@ private fun SessionRoot(
         deviceGroupSync.clear()
         chatRepository.forgetDevice()
         authRepository.forgetDevice()
+    }
+    val forgetDevice: () -> Unit = {
+        // ADR-0090 section 2.4 — before anything stops: this device asks an
+        // owner device to retire its leaf in every channel it publishes
+        // (best effort, bounded; if lost, the account's other device retires
+        // it when the DeviceGroup no longer lists this one).
+        val publisherLoop = me.lakko.app.channels.ChannelPublisherLoop.peek(channelsState)
+        channelLinkScope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(RETIRE_BEFORE_FORGET_MS) {
+                try {
+                    publisherLoop?.retireOwnLeavesBestEffort()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // Best effort.
+                }
+            }
+            forgetDeviceNowBody()
+        }
+        Unit
     }
 
     // `No, thanks` on the guest offer reaches the orchestration above from
@@ -3807,3 +3853,8 @@ private fun LoadingScreen() {
         androidx.compose.material3.CircularProgressIndicator()
     }
 }
+
+/** ADR-0090 section 2.4 - how long Forget device waits for the retire
+ *  requests of this device's channel leaves before it stops everything
+ *  (chosen, not measured). */
+private const val RETIRE_BEFORE_FORGET_MS: Long = 4_000L

@@ -119,6 +119,16 @@
 //! [`SyncedState::apply_channel_subscription_envelope`], persisted with the
 //! rest (so the backup carries it), never in [`StateSnapshot`].
 //!
+//! ## Channel admission seeds (ADR-0090 open question 4)
+//!
+//! One register per `(channel id, admission version)`: the owner account's
+//! own copy of a private channel's admission seed
+//! ([`super::channel_admission_seed`]). Write-once at the writer, folded by
+//! the rule above, carried by
+//! [`SyncedState::channel_admission_seed_envelopes`] /
+//! [`SyncedState::apply_channel_admission_seed_envelope`], persisted with the
+//! rest (so the backup carries it), never in [`StateSnapshot`].
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -162,6 +172,12 @@
 
 use std::collections::BTreeMap;
 
+use super::channel_admission_seed::{
+    compose_channel_admission_seed_envelope, decode_channel_admission_seed_envelope,
+    ChannelAdmissionSeedEntry, ChannelAdmissionSeedEnvelopeError,
+    CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN, CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_ADMISSION_SEED_LEN,
+};
 use super::channel_comment::{
     compose_channel_comment_envelope, decode_channel_comment_envelope, ChannelCommentEntry,
     ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT, CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES,
@@ -226,11 +242,14 @@ use super::recovery_email::{
 /// 2026-11-05: target, invite seed, admission version, capability), `12`
 /// since an own reaction may name a comment (ADR-0087 phase B, 2026-11-06:
 /// target and comment cursor), `13` since the channel-subscription register
-/// (maintainer decision of 2026-11-13). Older
+/// (maintainer decision of 2026-11-13), `14` since the channel admission-seed
+/// register (ADR-0090 open question 4), `15` since a co-publisher's
+/// channel subscription records the owner's account key (ADR-0090 section
+/// 2.3). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 13;
+const STATE_VERSION: u8 = 15;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,7 +471,8 @@ impl SyncedState {
                 | SyncEntry::ChannelReaction(_)
                 | SyncEntry::ChannelComment(_)
                 | SyncEntry::QuickReaction(_)
-                | SyncEntry::ChannelSubscription(_) => {},
+                | SyncEntry::ChannelSubscription(_)
+                | SyncEntry::ChannelAdmissionSeed(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -1574,6 +1594,134 @@ impl SyncedState {
             entries
                 .into_iter()
                 .map(|s| (s.hlc, SyncEntry::ChannelSubscription(s.value))),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Channel admission seeds (ADR-0090 open question 4).
+    // -----------------------------------------------------------------
+
+    /// Record the admission seed of `admission_version` for `channel_id`, the
+    /// owner account's own copy. **Write-once per seed**: `false` when this
+    /// seed is already held; `true` when written and to be sent
+    /// ([`Self::channel_admission_seed_envelope_for`]). Another seed of the
+    /// same version is another register and is kept beside it (two owner
+    /// devices minting one version at once both hand out links).
+    pub fn set_channel_admission_seed(
+        &mut self,
+        hlc: u64,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        admission_version: u16,
+        seed: &[u8; CHANNEL_ADMISSION_SEED_LEN],
+    ) -> bool {
+        let entry = ChannelAdmissionSeedEntry {
+            channel_id: *channel_id,
+            admission_version,
+            seed: *seed,
+        };
+        let (c, v, id) = entry.sort_key();
+        if self
+            .registers
+            .contains_key(&RegisterKey::ChannelAdmissionSeed(c, v, id))
+        {
+            return false;
+        }
+        matches!(
+            self.apply(hlc, SyncEntry::ChannelAdmissionSeed(entry)),
+            Ok(ApplyOutcome::Applied)
+        )
+    }
+
+    /// Every seed held for `channel_id` at `admission_version`: a ticket of
+    /// that version is checked against each of them.
+    #[must_use]
+    pub fn channel_admission_seeds_for(
+        &self,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        admission_version: u16,
+    ) -> Vec<[u8; CHANNEL_ADMISSION_SEED_LEN]> {
+        self.all_channel_admission_seeds()
+            .into_iter()
+            .filter(|s| {
+                &s.value.channel_id == channel_id && s.value.admission_version == admission_version
+            })
+            .map(|s| s.value.seed)
+            .collect()
+    }
+
+    /// Every admission-seed register, ascending by `(channel id, version,
+    /// seed id)`.
+    #[must_use]
+    pub fn all_channel_admission_seeds(&self) -> Vec<Stamped<ChannelAdmissionSeedEntry>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelAdmissionSeed(a) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: a.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `(version, seed)` pairs held for one channel, ascending by
+    /// version; a version may appear more than once.
+    #[must_use]
+    pub fn channel_admission_seeds(
+        &self,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+    ) -> Vec<(u16, [u8; CHANNEL_ADMISSION_SEED_LEN])> {
+        self.all_channel_admission_seeds()
+            .into_iter()
+            .filter(|s| &s.value.channel_id == channel_id)
+            .map(|s| (s.value.admission_version, s.value.seed))
+            .collect()
+    }
+
+    /// The envelope carrying the held register of this seed with its
+    /// original stamp, `None` when it is not held.
+    #[must_use]
+    pub fn channel_admission_seed_envelope_for(
+        &self,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        admission_version: u16,
+        seed: &[u8; CHANNEL_ADMISSION_SEED_LEN],
+    ) -> Option<Vec<u8>> {
+        let held = self.all_channel_admission_seeds().into_iter().find(|s| {
+            &s.value.channel_id == channel_id
+                && s.value.admission_version == admission_version
+                && &s.value.seed == seed
+        })?;
+        compose_channel_admission_seed_envelope(&[held]).ok()
+    }
+
+    /// Every held admission-seed register with its original stamp, as
+    /// envelopes of at most [`CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES`]
+    /// entries: the catch-up re-send after the DeviceGroup grew.
+    #[must_use]
+    pub fn channel_admission_seed_envelopes(&self) -> Vec<Vec<u8>> {
+        self.all_channel_admission_seeds()
+            .chunks(CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_admission_seed_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode an admission-seed envelope and fold every register in with its
+    /// original stamp. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelAdmissionSeedEnvelopeError`].
+    pub fn apply_channel_admission_seed_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelAdmissionSeedEnvelopeError> {
+        let entries = decode_channel_admission_seed_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelAdmissionSeed(s.value))),
         ))
     }
 
@@ -2712,15 +2860,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 13);
-        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
+        assert_eq!(old[0], 15);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![13, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![15, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -3137,6 +3285,111 @@ mod tests {
         assert!(x.channel_comments_on(&[1; 16], 7).is_empty());
     }
 
+    /// ADR-0090 open question 4: an admission seed is written once per seed,
+    /// reaches another owner device by its envelope, is carried in the
+    /// persisted state (so the backup), and is not in the growth snapshot.
+    #[test]
+    fn an_admission_seed_is_written_once_carried_and_persisted() {
+        let ch = [6u8; 16];
+        let mut a = SyncedState::new();
+        assert!(a.set_channel_admission_seed(1, &ch, 0, &[0x11; 32]));
+        assert!(
+            !a.set_channel_admission_seed(9, &ch, 0, &[0x11; 32]),
+            "write-once"
+        );
+        assert!(a.set_channel_admission_seed(2, &ch, 1, &[0x33; 32]));
+        assert_eq!(a.channel_admission_seeds_for(&ch, 0), vec![[0x11; 32]]);
+        assert_eq!(
+            a.channel_admission_seeds(&ch),
+            vec![(0, [0x11; 32]), (1, [0x33; 32])]
+        );
+        assert!(a.channel_admission_seeds(&[7u8; 16]).is_empty());
+
+        let mut b = SyncedState::new();
+        for envelope in a.channel_admission_seed_envelopes() {
+            assert_eq!(b.apply_channel_admission_seed_envelope(&envelope), Ok(true));
+            assert_eq!(
+                b.apply_channel_admission_seed_envelope(&envelope),
+                Ok(false)
+            );
+        }
+        assert_eq!(
+            b.all_channel_admission_seeds(),
+            a.all_channel_admission_seeds()
+        );
+        let one = a
+            .channel_admission_seed_envelope_for(&ch, 1, &[0x33; 32])
+            .expect("held");
+        assert!(a
+            .channel_admission_seed_envelope_for(&ch, 1, &[0x34; 32])
+            .is_none());
+        let mut c = SyncedState::new();
+        assert_eq!(c.apply_channel_admission_seed_envelope(&one), Ok(true));
+        assert_eq!(c.channel_admission_seeds_for(&ch, 1), vec![[0x33; 32]]);
+        assert!(c.channel_admission_seeds_for(&ch, 0).is_empty());
+
+        let restored = SyncedState::from_bytes(&a.to_bytes()).expect("persisted");
+        assert_eq!(
+            restored.all_channel_admission_seeds(),
+            a.all_channel_admission_seeds()
+        );
+        assert_eq!(
+            a.snapshot(),
+            SyncedState::new().snapshot(),
+            "not in the snapshot"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
+
+        /// ADR-0090 open question 4: two owner devices mint the same version
+        /// at once, each with its own seed and any stamps; folded in either
+        /// order on two devices, BOTH seeds are held on BOTH devices, so the
+        /// subscribers admitted under either keep passing their ticket check.
+        #[test]
+        fn concurrent_mints_of_one_version_both_survive_in_either_order(
+            seed_x in proptest::prelude::any::<[u8; 32]>(),
+            seed_y in proptest::prelude::any::<[u8; 32]>(),
+            hlc_x in proptest::prelude::any::<u64>(),
+            hlc_y in proptest::prelude::any::<u64>(),
+            version in proptest::prelude::any::<u16>(),
+        ) {
+            proptest::prop_assume!(seed_x != seed_y);
+            let ch = [8u8; 16];
+            let mut x = SyncedState::new();
+            let mut y = SyncedState::new();
+            proptest::prop_assert!(x.set_channel_admission_seed(hlc_x, &ch, version, &seed_x));
+            proptest::prop_assert!(y.set_channel_admission_seed(hlc_y, &ch, version, &seed_y));
+            let ex = x.channel_admission_seed_envelopes();
+            let ey = y.channel_admission_seed_envelopes();
+            // x folds y's mint after its own, y folds x's after its own.
+            for e in &ey {
+                proptest::prop_assert_eq!(x.apply_channel_admission_seed_envelope(e), Ok(true));
+            }
+            for e in &ex {
+                proptest::prop_assert_eq!(y.apply_channel_admission_seed_envelope(e), Ok(true));
+            }
+            for state in [&x, &y] {
+                let held = state.channel_admission_seeds_for(&ch, version);
+                proptest::prop_assert_eq!(held.len(), 2);
+                proptest::prop_assert!(held.contains(&seed_x) && held.contains(&seed_y));
+            }
+            proptest::prop_assert_eq!(x.all_channel_admission_seeds(), y.all_channel_admission_seeds());
+            // A third device folding both, in either order, holds the same.
+            let mut z1 = SyncedState::new();
+            let mut z2 = SyncedState::new();
+            for e in ex.iter().chain(ey.iter()) {
+                let _ = z1.apply_channel_admission_seed_envelope(e);
+            }
+            for e in ey.iter().chain(ex.iter()) {
+                let _ = z2.apply_channel_admission_seed_envelope(e);
+            }
+            proptest::prop_assert_eq!(z1.all_channel_admission_seeds(), x.all_channel_admission_seeds());
+            proptest::prop_assert_eq!(z2.all_channel_admission_seeds(), x.all_channel_admission_seeds());
+        }
+    }
+
     #[test]
     fn an_own_reaction_is_set_taken_off_carried_and_persisted() {
         let ch = [4u8; 16];
@@ -3196,6 +3449,7 @@ mod tests {
             subscriber_secret: [0x5E; 32],
             read_key: Some([0x4B; 32]),
             publisher_group_id: (role == R::CoPublisher).then_some([0x9A; 32]),
+            owner_account_key: (role == R::CoPublisher).then_some([0x0E; 32]),
             name: name.to_string(),
             handle: String::new(),
         }

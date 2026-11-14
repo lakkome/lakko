@@ -306,6 +306,10 @@ pub enum BoundsError {
     /// co-publisher, or present for another role.
     #[error("channel subscription publisher group id does not fit its role")]
     ChannelSubscriptionPublisherGroup,
+    /// A channel subscription's owner account key was not 32 bytes for a
+    /// co-publisher, or present for another role (ADR-0090 section 2.3).
+    #[error("channel subscription owner key does not fit its role")]
+    ChannelSubscriptionOwnerKey,
     /// A channel subscription's name was neither empty nor a display name.
     #[error("channel subscription name fails the display-name rule")]
     ChannelSubscriptionName,
@@ -1055,6 +1059,9 @@ pub enum SyncEntry {
     /// One of the account's channel subscriptions, or its leave (2026-11-13).
     /// Appended last.
     ChannelSubscription(super::channel_subscription::ChannelSubscriptionEntry),
+    /// One of a private channel's admission seeds, the owner account's own
+    /// copy (ADR-0090 open question 4). Appended last.
+    ChannelAdmissionSeed(super::channel_admission_seed::ChannelAdmissionSeedEntry),
 }
 
 /// Which register an entry writes.
@@ -1116,6 +1123,14 @@ pub enum RegisterKey {
     /// The subscription register of this channel. Appended last, so the
     /// register order of every older kind is unchanged.
     ChannelSubscription([u8; super::channel_subscription::CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN]),
+    /// The admission-seed register of this channel, version and seed id
+    /// (two seeds of one version coexist). Appended
+    /// last, so the register order of every older kind is unchanged.
+    ChannelAdmissionSeed(
+        [u8; super::channel_admission_seed::CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        u16,
+        [u8; 32],
+    ),
 }
 
 impl RegisterKey {
@@ -1152,6 +1167,7 @@ const TAG_CHANNEL_REACTION: u8 = 17;
 const TAG_CHANNEL_COMMENT: u8 = 18;
 const TAG_QUICK_REACTION: u8 = 19;
 const TAG_CHANNEL_SUBSCRIPTION: u8 = 20;
+const TAG_CHANNEL_ADMISSION_SEED: u8 = 21;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1185,6 +1201,10 @@ impl SyncEntry {
             },
             Self::QuickReaction(_) => RegisterKey::QuickReaction,
             Self::ChannelSubscription(c) => RegisterKey::ChannelSubscription(c.channel_id),
+            Self::ChannelAdmissionSeed(a) => {
+                let (channel, version, seed_id) = a.sort_key();
+                RegisterKey::ChannelAdmissionSeed(channel, version, seed_id)
+            },
         }
     }
 
@@ -1219,7 +1239,8 @@ impl SyncEntry {
             | Self::Draft(_)
             | Self::ConversationOrder(_)
             | Self::DeviceAck(_)
-            | Self::ChannelComment(_) => Ok(()),
+            | Self::ChannelComment(_)
+            | Self::ChannelAdmissionSeed(_) => Ok(()),
         }
     }
 
@@ -1317,6 +1338,10 @@ impl SyncEntry {
             Self::ChannelSubscription(c) => {
                 out.push(TAG_CHANNEL_SUBSCRIPTION);
                 c.encode_body(&mut out);
+            },
+            Self::ChannelAdmissionSeed(a) => {
+                out.push(TAG_CHANNEL_ADMISSION_SEED);
+                a.encode_body(&mut out);
             },
             Self::LinkRecord(r) => {
                 out.push(TAG_LINK_RECORD);
@@ -1508,6 +1533,9 @@ impl SyncEntry {
             ),
             TAG_CHANNEL_SUBSCRIPTION => Self::ChannelSubscription(
                 super::channel_subscription::ChannelSubscriptionEntry::take_body(&mut cur)?,
+            ),
+            TAG_CHANNEL_ADMISSION_SEED => Self::ChannelAdmissionSeed(
+                super::channel_admission_seed::ChannelAdmissionSeedEntry::take_body(&mut cur)?,
             ),
             _ => return Err(CodecError::UnknownTag),
         };

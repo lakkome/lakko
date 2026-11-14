@@ -811,7 +811,8 @@ final class MultiJoinerCall {
             // GROUP JOURNAL (opened in `ContactsRepository`), never the SFU
             // signal-relay. Out of place here — drop.
             break
-        case .channelReadKey, .channelEpochSeeds, .channelRotateRequest:
+        case .channelReadKey, .channelEpochSeeds, .channelRotateRequest,
+             .publisherDeviceRequest, .channelAdmissionMark:
             // ADR-0087 sections 6, 7 and 15 — a channel read key, a new
             // publisher's earlier epoch seeds and a co-publisher's rotate
             // request ride a PublisherGroup journal, never the SFU

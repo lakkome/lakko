@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "Bu kanalda, kanalı oluşturduğunuz cihazdan paylaşım yaparsınız.",
+      "text": "Lakko diğer cihazınızda açıldığında burada paylaşım yapabilirsiniz.",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "Bu kanalda, yayıncı olduğunuz cihazdan paylaşım yaparsınız.",
+      "text": "Lakko diğer cihazınızda ve sahibin cihazında açıldığında burada paylaşım yapabilirsiniz.",
       "status": "machine"
     },
     "channels.rotation.desc": {

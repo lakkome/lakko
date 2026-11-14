@@ -793,6 +793,10 @@ class MultiJoinerCall private constructor(
             // the PublisherGroup journal, never the SFU signal-relay. Dropped.
             FfiIncomingEnvelopeKind.CHANNEL_EPOCH_SEEDS,
             FfiIncomingEnvelopeKind.CHANNEL_ROTATE_REQUEST,
+            // ADR-0090 - a publisher's device request and the admission mark
+            // ride the PublisherGroup journal too. Dropped.
+            FfiIncomingEnvelopeKind.PUBLISHER_DEVICE_REQUEST,
+            FfiIncomingEnvelopeKind.CHANNEL_ADMISSION_MARK,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.

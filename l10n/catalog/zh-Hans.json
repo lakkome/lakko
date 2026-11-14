@@ -2074,11 +2074,11 @@
       "status": "machine"
     },
     "channels.reader_device.owner": {
-      "text": "你只能在创建此频道的设备上发帖。",
+      "text": "在你的另一台设备上打开 Lakko 后，你就可以在这里发帖。",
       "status": "machine"
     },
     "channels.reader_device.publisher": {
-      "text": "你只能在成为发布者的那台设备上在此频道发帖。",
+      "text": "在你的另一台设备和所有者的设备上打开 Lakko 后，你就可以在这里发帖。",
       "status": "machine"
     },
     "channels.rotation.desc": {

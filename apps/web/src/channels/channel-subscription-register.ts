@@ -39,6 +39,10 @@ export interface ChannelSubscriptionView {
   readonly readKey: Uint8Array;
   /** 64 lower-case hex characters for a co-publisher, else empty. */
   readonly publisherGroupIdHex: string;
+  /** ADR-0090: a co-publisher's record of the channel owner's 32-byte
+   *  account key (the `/g/` capability's issuer the joining device
+   *  verified); empty for an Owner or a subscriber. */
+  readonly ownerAccountKey: Uint8Array;
   readonly name: string;
   /** The `@name` without the `@`, or empty. */
   readonly handle: string;
@@ -50,6 +54,8 @@ export interface ChannelSubscriptionValue {
   readonly subscriberSecret: Uint8Array;
   readonly readKey: Uint8Array;
   readonly publisherGroupIdHex: string;
+  /** ADR-0090: 32 bytes for a co-publisher (required there), else empty. */
+  readonly ownerAccountKey: Uint8Array;
   readonly name: string;
   readonly handle: string;
 }

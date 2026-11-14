@@ -1110,7 +1110,7 @@ export async function deliverEnvelope(
  *  publisher posts to `POST /v1/channels/:id/rotate`. */
 export interface RotateBatchEntry {
   /** Hex-encoded subscriber public key. */
-  readonly subscriber_pubkey_hex: string;
+  readonly subscriber_id: string;
   /** Base64-encoded `EXPECTED_ENVELOPE_LEN`-byte sealed
    *  HPKE envelope carrying the new content seed under the
    *  subscriber's HPKE public key. */
