@@ -143,7 +143,17 @@ enum TranslationSessionFactory {
 final class AppleTranslationEngine: MessageTranslationEngine {
 
     let runner = TranslationTaskRunner()
-    private let availability = LanguageAvailability()
+    /// Asked with the strategy the sessions use (`lowLatency` on iOS 26.4+).
+    /// A plain `LanguageAvailability()` answered `installed` for pairs whose
+    /// `lowLatency` model was not on the device, so the session then threw
+    /// `notInstalled` and every such message ended in "Couldn't translate"
+    /// instead of offering the pack (seen on an iPhone, iOS 27.2, 2026-11-15).
+    private let availability: LanguageAvailability = {
+        if #available(iOS 26.4, *) {
+            return LanguageAvailability(preferredStrategy: .lowLatency)
+        }
+        return LanguageAvailability()
+    }()
 
     var isSupported: Bool { true }
 

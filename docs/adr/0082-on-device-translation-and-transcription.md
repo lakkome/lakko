@@ -398,6 +398,21 @@ which it rarely was. iOS uses `NLLanguageRecognizer` and is unchanged.
     es it de uk nl fr into en and ru and fails on `unsupported`; it skips
     where even en>es is unsupported, so it says something only when run on a
     device.
+  - **Correction (later the same day, on the iPhone, iOS 27.2).** The
+    "names without `Translate`" were a reading error: the screen-reading
+    script dropped repeated labels, so every `Translate` after the first was
+    missing from its output; the raw tree had one under each message. The
+    real iOS defect was behind the button: every `Translate` ended in
+    "Couldn't translate". `LanguageAvailability()` (default strategy)
+    answered `installed` for it/de/es/nl into en, while the session, built
+    with the `lowLatency` strategy, threw `TranslationError.notInstalled`;
+    a session with the default strategy translated. So the availability is
+    now asked with `LanguageAvailability(preferredStrategy: .lowLatency)` on
+    iOS 26.4+, the strategy the sessions use: the pair then reads as a pack
+    to download. Seen on the iPhone: `Translate` on an Italian message
+    offered "Download Italian"; Apple's sheet downloaded Italian and English
+    (US); the message was translated. `lowLatency` is kept on purpose (the
+    traditional on-device model, never the Apple Intelligence path).
 
   Built on the core, both FFI surfaces, web, iOS and Android; unit-tested
   only, not walked.
