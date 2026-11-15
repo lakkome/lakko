@@ -2786,6 +2786,13 @@ public class DeviceGroupSyncRepository(
             try {
                 val outcome = rejoinOnce(ports, first)
                 first = false
+                if (outcome == RejoinPass.NO_LOGIN_HANDLE) {
+                    // Another device of the account is listed: never found
+                    // here. Look for the login handle again after a while.
+                    Log.i(LOG_TAG, "DeviceGroup rejoin: no login handle to knock with; waiting, not founding")
+                    delay(NO_LOGIN_HANDLE_RETRY_MS)
+                    continue
+                }
                 if (outcome == RejoinPass.JOINED) break
                 if (outcome == RejoinPass.FOUND) {
                     // ADR-0081 third amendment, point 4 — no device answered:

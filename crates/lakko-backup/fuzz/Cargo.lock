@@ -480,6 +480,7 @@ name = "lakko-sync"
 version = "0.0.0"
 dependencies = [
  "lakko-contacts",
+ "lakko-crypto",
  "serde",
  "thiserror",
 ]

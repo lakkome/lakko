@@ -396,10 +396,20 @@ describe("the rejoining device's run", () => {
     expect(unanswered.log).toEqual(["watch", "save", "watch", "knock", "found", "clear"]);
   });
 
-  it("an account with no name a sibling could match: founds without knocking", async () => {
+  it("an account with no name a sibling could match: neither knocks nor founds, and knocks once a name is known", async () => {
+    // 2026-11-15, seen on an iPhone: a device with no login handle while
+    // another device of the account was listed founded a second DeviceGroup.
     const p = ports([], { noUsername: true });
-    expect(await rejoinOnce(p, true)).toBe("founded");
-    expect(p.log).toEqual(["drop", "directory-kp", "found", "clear"]);
+    expect(await rejoinOnce(p, true)).toBe("no-handle");
+    expect(p.log).toEqual(["drop", "directory-kp"]);
+    expect(await rejoinOnce(p, false)).toBe("no-handle");
+    expect(p.log).toEqual(["drop", "directory-kp"]);
+    expect(p.log).not.toContain("found");
+    // The name became known (a register arrived): the next pass knocks.
+    p.prepareKnock = ports([]).prepareKnock;
+    p.script = [{ afterMs: 50, answer: WELCOME }];
+    expect(await rejoinOnce(p, false)).toBe("joined");
+    expect(p.log).toEqual(["drop", "directory-kp", "save", "watch", "knock", "join", "clear"]);
   });
 
   it("a Welcome it cannot join from clears the knock, so the next pass knocks afresh", async () => {

@@ -810,6 +810,23 @@ answers, the new device founds the DeviceGroup itself and works.
    decision 4 and rejoins by knocking; the founder, now running, answers and
    admits it. The account does not split: there is one DeviceGroup, and the
    returning device's chats keep their leaves (ADR-0050).
+6. **A device that knows no login handle neither knocks nor founds**
+   (correction of 2026-11-15, found on an iPhone; built on web, iOS and
+   Android, host-tested only). The three clients founded at once when the
+   device knew no username of the account (no session name, no own-username
+   register), on the ground that nobody could match its knock. That breaks
+   point 5: a rejoin runs only while another device is listed, and a
+   founder that knows no handle cannot admit the returning device's knock,
+   so the returning device founds again in turn and each founding resets
+   the journal under the other. Seen after a passkey sign-in with no name
+   typed whose backup did not open (so no register): the iPhone founded a
+   second DeviceGroup while the account's web device was running. Now the
+   pass ends without a knock and without a founding, and the device looks
+   for the handle again every 30 s (the session's name, the stored session
+   record on iOS, the own-username register); it knocks once one is known.
+   Unbuilt: a way for the person to give the name when none of these ever
+   holds it; until then such a device stays outside the DeviceGroup (its
+   chats are unaffected).
 
 Costs, stated. A device that was merely asleep or in the background at the
 moment of the restore is cut off from the DeviceGroup until it next runs,

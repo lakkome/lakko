@@ -87,6 +87,8 @@ describe("the rejoin answer", () => {
     expect(answerForRejoinOutcome("joined")).toBe("answered");
     expect(answerForRejoinOutcome("waiting")).toBe("answered");
     expect(answerForRejoinOutcome("founded")).toBe("founded");
+    // No knock was made: nothing was answered and nothing founded.
+    expect(answerForRejoinOutcome("no-handle")).toBeNull();
   });
 });
 

@@ -47,6 +47,14 @@ import Foundation
 ///    window means every listed device is offline: FOUND the DeviceGroup
 ///    (``PassOutcome/found``); the caller founds and starts at once.
 ///
+/// A device that knows no login handle for the account cannot knock (no
+/// sibling could match the knock), and it does not found either: another
+/// device of the account is listed, and a founding there splits the account
+/// into two DeviceGroups that cannot admit each other (each founding resets
+/// the journal under the other). It waits and looks for the handle again
+/// (``PassOutcome/noLoginHandle``, found 2026-11-15 on an iPhone after a
+/// passkey sign-in with no name typed whose backup did not open).
+///
 /// ## A sibling's side
 ///
 /// A device holding the DeviceGroup keeps a long poll on its knocks while it
@@ -80,6 +88,12 @@ public enum DeviceGroupRejoin {
     /// How long a rejoining device waits for a Welcome before knocking again
     /// with a fresh KeyPackage. Chosen, not measured.
     public static let reknockAfterMs: Int64 = 30 * 60_000
+
+    /// How long a rejoining device that knows no login handle waits before
+    /// looking for one again (the session's name, the stored session record,
+    /// the own-username register a backup restore wrote). Chosen, not
+    /// measured; the same on every client.
+    public static let noLoginHandleRetryMs: Int64 = 30_000
 
     /// The server-side wait of one long poll on the knocks (the DS wakes it
     /// when a knock is posted). Chosen, not measured.
@@ -399,7 +413,9 @@ public struct DeviceGroupRejoinPorts {
     /// Make sure this device's directory KeyPackage is published.
     public var publishDirectoryKeyPackage: () async throws -> Void
     /// Whether a knock can name the account (its login handle is known). A
-    /// knock that names nothing no sibling can admit, so the device founds.
+    /// knock that names nothing no sibling can admit; the device does not
+    /// knock and does not found, it waits until the handle is known
+    /// (``DeviceGroupRejoin/PassOutcome/noLoginHandle``).
     public var canKnock: () -> Bool
     public var loadState: () -> DeviceGroupRejoinState?
     public var saveState: (DeviceGroupRejoinState) throws -> Void
@@ -462,6 +478,12 @@ extension DeviceGroupRejoin {
         case joined
         /// The caller should call again.
         case waiting
+        /// This device knows no login handle for the account, so no knock
+        /// can name it, while another device of the account is listed (a
+        /// rejoin runs only then). Founding here would split the account
+        /// into two DeviceGroups; the caller waits
+        /// (``DeviceGroupRejoin/noLoginHandleRetryMs``) and calls again.
+        case noLoginHandle
         /// No device of the account answered: the caller founds the
         /// DeviceGroup (third amendment, point 4).
         case found
@@ -479,8 +501,8 @@ extension DeviceGroupRejoin {
             try await ports.publishDirectoryKeyPackage()
         }
         guard ports.canKnock() else {
-            ports.log("DeviceGroupSync rejoin: no login handle to knock with; founding")
-            return .found
+            ports.log("DeviceGroupSync rejoin: no login handle to knock with; waiting, not founding")
+            return .noLoginHandle
         }
         let kept = ports.loadState()
         if !DeviceGroupRejoinState.shouldKnockAgain(kept, nowMs: ports.now()), let kept {

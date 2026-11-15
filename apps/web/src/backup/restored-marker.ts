@@ -124,8 +124,10 @@ export function clearRestoreMarker(
 export type RestoreAnswer = "answered" | "founded";
 
 /** The answer a rejoin pass that ended in `outcome` gives. `waiting` means a
- *  device answered and its Welcome has not come yet. */
-export function answerForRejoinOutcome(outcome: RejoinOutcome): RestoreAnswer {
+ *  device answered and its Welcome has not come yet; `no-handle` (no knock
+ *  was made) answers nothing. */
+export function answerForRejoinOutcome(outcome: RejoinOutcome): RestoreAnswer | null {
+  if (outcome === "no-handle") return null;
   return outcome === "founded" ? "founded" : "answered";
 }
 

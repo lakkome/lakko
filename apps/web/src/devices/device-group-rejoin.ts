@@ -43,7 +43,13 @@
  *    the journal it is claimed under) and starts at once.
  *
  * An account with no username this device knows has no login handle a
- * sibling could match, so nobody can answer its knock: it founds at once.
+ * sibling could match, so it does not knock. It does not found either: a
+ * rejoin runs only while another device of the account is listed, and a
+ * founding there splits the account into two DeviceGroups that cannot admit
+ * each other (each founding resets the journal under the other; seen
+ * 2026-11-15 on an iPhone after a passkey sign-in with no name typed whose
+ * backup did not open). The pass ends `"no-handle"` and the caller looks for
+ * the handle again after {@link NO_HANDLE_RETRY_MS}.
  *
  * ## A sibling's side
  *
@@ -77,6 +83,11 @@
 /** How long a rejoining device waits for a Welcome before knocking again
  *  with a fresh KeyPackage. Chosen, not measured. */
 export const REKNOCK_AFTER_MS = 30 * 60_000;
+
+/** How long a rejoining device that knows no login handle waits before
+ *  looking for one again (the session's name, the own-username register a
+ *  restore stored). Chosen, not measured; the same on every client. */
+export const NO_HANDLE_RETRY_MS = 30_000;
 
 /** The shortest answer window ({@link answerWindowMs}). Chosen, not
  *  measured (ADR-0081 third amendment). */
@@ -361,7 +372,8 @@ export interface RejoinPorts {
   saveState(state: RejoinState): Promise<void>;
   /** Build a fresh joiner (DeviceGroup KeyPackage from the device identity)
    *  and the knock payload. `null` when this device knows no username of
-   *  the account, so no sibling could match a knock. */
+   *  the account, so no sibling could match a knock (the pass then ends
+   *  `"no-handle"`). */
   prepareKnock(nowMs: number): Promise<PreparedKnock | null>;
   /** Open the long poll on `state`'s rendezvous. */
   watch(state: RejoinState): AnswerWatch;
@@ -386,7 +398,10 @@ export type RejoinOutcome =
   /** Nobody answered: this device founded the DeviceGroup (on disk). */
   | "founded"
   /** Answered, no Welcome before the re-knock time: call again. */
-  | "waiting";
+  | "waiting"
+  /** No login handle is known, so no knock was made and nothing was
+   *  founded: call again after {@link NO_HANDLE_RETRY_MS}. */
+  | "no-handle";
 
 /**
  * One pass of the device side (see the module doc): drop the state (first
@@ -412,7 +427,8 @@ export async function rejoinOnce(ports: RejoinPorts, firstPass: boolean): Promis
     }
   }
   const knock = await ports.prepareKnock(ports.now());
-  if (knock === null) return foundAlone(ports);
+  // Never found here: another device of the account is listed.
+  if (knock === null) return "no-handle";
   await ports.saveState(knock.state);
   const watch = ports.watch(knock.state);
   try {

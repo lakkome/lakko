@@ -100,6 +100,7 @@ import {
   journalResetUnder,
   knockScreen,
   newAdmissionRecord,
+  NO_HANDLE_RETRY_MS,
   noteAdded,
   noteHandled,
   rejoinFailureCode,
@@ -2981,9 +2982,18 @@ export function DeviceGroupSyncProvider(props: {
         try {
           const outcome = await rejoinOnce(ports, first);
           first = false;
+          if (outcome === "no-handle") {
+            // Another device of the account is listed: never found here.
+            // Look for the login handle again after a while.
+            // eslint-disable-next-line no-console
+            console.info("DeviceGroup rejoin: no login handle to knock with; waiting, not founding");
+            await sleepCancellable(NO_HANDLE_RETRY_MS, abort.signal);
+            continue;
+          }
           // docs/ux/identity-recovery.md 7.2: whether another device answered
           // the knock decides whether the restored chat list shows its card.
-          recordRestoreAnswer(account, answerForRejoinOutcome(outcome));
+          const answer = answerForRejoinOutcome(outcome);
+          if (answer !== null) recordRestoreAnswer(account, answer);
           if (outcome === "founded") markFoundedAlone(account);
           if (outcome === "joined" || outcome === "founded") {
             // eslint-disable-next-line no-console

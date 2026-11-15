@@ -45,8 +45,14 @@ import kotlinx.serialization.json.Json
  * for the Welcome with no deadline, knocking again after [REKNOCK_AFTER_MS].
  * No presence note and no Welcome in the window means every listed device is
  * offline: the device founds the DeviceGroup itself ([RejoinPass.FOUND]).
- * A device that knows no username for its account at all founds at once:
- * no running device could match its knock.
+ * A device that knows no username for its account at all does not knock (no
+ * running device could match its knock) and does not found either: a rejoin
+ * runs only while another device of the account is listed, and a founding
+ * there splits the account into two DeviceGroups that cannot admit each other
+ * (each founding resets the journal under the other; seen 2026-11-15 on an
+ * iPhone after a passkey sign-in with no name typed whose backup did not
+ * open). It waits ([RejoinPass.NO_LOGIN_HANDLE]) and looks for the handle
+ * again after [NO_LOGIN_HANDLE_RETRY_MS].
  *
  * A sibling's side: while in the foreground it keeps a long poll on the
  * DeviceGroup's knocks; on a knock naming this account's login handle it
@@ -77,6 +83,11 @@ import kotlinx.serialization.json.Json
 /** How long a rejoining device waits for a Welcome before knocking again.
  *  Chosen, not measured. */
 public const val REKNOCK_AFTER_MS: Long = 30L * 60_000L
+
+/** How long a rejoining device that knows no login handle waits before
+ *  looking for one again (the session's name, the own-username register a
+ *  restore stored). Chosen, not measured; the same on every client. */
+public const val NO_LOGIN_HANDLE_RETRY_MS: Long = 30_000L
 
 /** The shortest answer window, whatever the knock's round trip. Chosen, not
  *  measured (ADR-0081 third amendment). */
@@ -342,6 +353,10 @@ public enum class RejoinPass {
     WAITING,
     /** Nobody answered the knock: found the DeviceGroup on this device. */
     FOUND,
+    /** No login handle is known: no knock was made and nothing may be
+     *  founded (another device of the account is listed). Call again after
+     *  [NO_LOGIN_HANDLE_RETRY_MS]. */
+    NO_LOGIN_HANDLE,
 }
 
 /**
@@ -356,13 +371,11 @@ public suspend fun rejoinOnce(ports: RejoinPorts, firstPass: Boolean): RejoinPas
     }
     var state = ports.loadState()
     if (RejoinState.shouldKnockAgain(state, ports.now())) {
-        // No username anywhere: no running device could match a knock, so
-        // nobody can answer one. Found at once (a live device then finds its
-        // journal reset under it and rejoins, third amendment point 5).
-        if (!ports.hasLoginHandle()) {
-            ports.clearState()
-            return RejoinPass.FOUND
-        }
+        // No username anywhere: no running device could match a knock. Never
+        // found here: another device of the account is listed, and a founding
+        // would reset the journal under it while this device, knowing no
+        // handle, could not admit that device's knock back (a split account).
+        if (!ports.hasLoginHandle()) return RejoinPass.NO_LOGIN_HANDLE
         val knocked = ports.knockAndListen(ports.now())
         when (val answer = knocked.answer) {
             null -> {

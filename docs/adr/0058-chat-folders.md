@@ -247,6 +247,20 @@ Two routes, both required, because either alone leaves a case with no state:
    by stamp as usual. The backup stays the phrase-sealed opaque blob of
    ADR-0037; storage learns nothing new.
 
+   **Amended 2026-11-15 (maintainer's decision):** a backup whose synced
+   state carries a version byte this build does not read restores everything
+   else, and the synced state alone is dropped (read as "none held", never
+   partially applied). Until then any version but the current one refused the
+   whole payload, so every bump of the persisted state version (13 -> 15 in
+   the ADR-0090 change) lost every older backup in full, contacts, username,
+   profiles, group ids and the own predecessors included; seen live on a
+   restore that day. Only the leading version byte is forgiven: a state that
+   carries the current version and fails to parse (truncated, an unknown
+   entry tag, an entry out of bounds, trailing bytes) still refuses the
+   payload, and the encoder still refuses to write any state the fold cannot
+   read. `lakko-backup` `readable_synced_state`; the payload wire version is
+   unchanged.
+
 A device never receives its own DeviceGroup messages, so a client folds every
 local write into its own state as it publishes it.
 

@@ -394,8 +394,29 @@ final class DeviceGroupRejoinTests: XCTestCase {
         let noHandle = RunModel()
         noHandle.canKnock = false
         let noHandleOutcome = try await DeviceGroupRejoin.rejoinOnce(ports: noHandle.ports, firstPass: true)
-        XCTAssertEqual(noHandleOutcome, .found)
+        XCTAssertEqual(noHandleOutcome, .noLoginHandle)
         XCTAssertEqual(noHandle.answeredNotes, 0)
+    }
+
+    /// 2026-11-15, seen on an iPhone: a device with no login handle while
+    /// another device of the account is listed founded a second DeviceGroup.
+    /// It must neither knock nor found; it waits, and knocks once a handle is
+    /// known.
+    func testNoLoginHandleNeitherKnocksNorFoundsAndKnocksOnceTheHandleIsKnown() async throws {
+        let m = RunModel()
+        m.canKnock = false
+        let first = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+        XCTAssertEqual(first, .noLoginHandle)
+        XCTAssertEqual(m.log, ["drop", "directory-kp"], "no knock is prepared or posted")
+        XCTAssertTrue(m.lines.contains { $0.contains("not founding") })
+        let again = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: false)
+        XCTAssertEqual(again, .noLoginHandle)
+        XCTAssertEqual(m.log, ["drop", "directory-kp"])
+        m.canKnock = true
+        m.answer = [(10, .welcome(Data([7])))]
+        let joined = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: false)
+        XCTAssertEqual(joined, .joined)
+        XCTAssertEqual(m.log, ["drop", "directory-kp", "prepare", "watch", "knock", "join", "clear"])
     }
 
     func testARestartWithAnAnsweredKnockNotesItAgainAndAnUnansweredOneDoesNot() async throws {
@@ -410,11 +431,11 @@ final class DeviceGroupRejoinTests: XCTestCase {
         XCTAssertEqual(unanswered.answeredNotes, 0)
     }
 
-    func testNoLoginHandleFoundsWithoutKnocking() async throws {
+    func testNoLoginHandleNeitherKnocksNorFoundsOnTheFirstPass() async throws {
         let m = RunModel()
         m.canKnock = false
         let outcome = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
-        XCTAssertEqual(outcome, .found)
+        XCTAssertEqual(outcome, .noLoginHandle)
         XCTAssertEqual(m.log, ["drop", "directory-kp"])
     }
 

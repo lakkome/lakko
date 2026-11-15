@@ -121,7 +121,7 @@ class DeviceGroupRejoinTest {
         /** What each knock's answer window brings, in order (the last one
          *  repeats); a Welcome in the window is `welcome`. */
         private val windows: List<String> = listOf("present"),
-        private val loginHandleKnown: Boolean = true,
+        var loginHandleKnown: Boolean = true,
     ) : RejoinPorts {
         var now = 1_000L
         var attempts = 0
@@ -234,12 +234,19 @@ class DeviceGroupRejoinTest {
     }
 
     @Test
-    fun `a device that knows no username founds at once instead of knocking forever`() = runTest {
-        val m = RunModel(welcomeAfter = null, loginHandleKnown = false)
-        assertEquals(RejoinPass.FOUND, rejoinOnce(m, firstPass = true))
-        assertEquals(listOf("drop", "directory-kp", "clear"), m.log)
+    fun `a device that knows no username neither knocks nor founds, and knocks once a name is known`() = runTest {
+        // 2026-11-15, seen on an iPhone: a device with no login handle while
+        // another device of the account was listed founded a second
+        // DeviceGroup, splitting the account.
+        val m = RunModel(welcomeAfter = null, windows = listOf("welcome"), loginHandleKnown = false)
+        assertEquals(RejoinPass.NO_LOGIN_HANDLE, rejoinOnce(m, firstPass = true))
+        assertEquals(RejoinPass.NO_LOGIN_HANDLE, rejoinOnce(m, firstPass = false))
+        assertEquals(listOf("drop", "directory-kp"), m.log)
         assertEquals("no knock without a handle", 0, m.knocks)
         assertEquals(0, m.attempts)
+        m.loginHandleKnown = true
+        assertEquals(RejoinPass.JOINED, rejoinOnce(m, firstPass = false))
+        assertEquals(listOf("drop", "directory-kp", "knock", "join", "clear"), m.log)
     }
 
     @Test
@@ -274,7 +281,7 @@ class DeviceGroupRejoinTest {
         assertEquals(RejoinPass.FOUND, rejoinOnce(silence, firstPass = true))
         assertEquals(0, silence.answeredRecorded)
         val noHandle = RunModel(welcomeAfter = null, loginHandleKnown = false)
-        assertEquals(RejoinPass.FOUND, rejoinOnce(noHandle, firstPass = true))
+        assertEquals(RejoinPass.NO_LOGIN_HANDLE, rejoinOnce(noHandle, firstPass = true))
         assertEquals(0, noHandle.answeredRecorded)
     }
 

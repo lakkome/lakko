@@ -180,6 +180,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// names it; a sibling admits only a knock naming it). Wired by the
     /// composition root; `nil` for a guest, who has no other device.
     var loginHandleProvider: @MainActor () -> Data? = { nil }
+
+    /// This device's stored session record (``SessionStore``): the account
+    /// and the username it last signed in with. Injectable for tests.
+    var storedSessionRecord: @MainActor () -> PersistedSession? = { SessionStore().load() }
     /// ADR-0081 decision 4 — publish this device's directory KeyPackage (a
     /// rejoining device's first step: its signed device binding is what a
     /// sibling checks). Wired by the composition root.
@@ -1724,6 +1728,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 outcome = try await DeviceGroupRejoin.rejoinOnce(ports: ports, firstPass: first)
                 first = false
                 backoffSecs = 5
+                if outcome == .noLoginHandle {
+                    // Another device of the account is listed: never found
+                    // here. Look for the handle again after a while.
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(DeviceGroupRejoin.noLoginHandleRetryMs) * 1_000_000)
+                    continue
+                }
                 if outcome != .waiting { break }
             } catch {
                 NSLog("DeviceGroupSync rejoin attempt failed; trying again in %llu s (%@)",
@@ -1787,11 +1798,16 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
-    /// The login handle a knock names: the session's, else (a passkey
-    /// sign-in with no name typed lands with none) the username the
-    /// backup's synced state carries.
+    /// The login handle a knock names: the session's, else the username of
+    /// this account's stored session record, else (a passkey sign-in with no
+    /// name typed lands with none) the username the backup's synced state
+    /// carries.
     private func currentLoginHandle(accountIdB64: String) -> Data? {
         if let handle = loginHandleProvider() { return handle }
+        if let record = storedSessionRecord(), record.accountIdB64 == accountIdB64,
+           let handle = ownLoginHandle(username: record.username) {
+            return handle
+        }
         let state = ready ? syncedState : SyncedStateStore.load(accountIdB64: accountIdB64)
         guard let name = (try? state.ownUsername()).flatMap({ $0 }) else { return nil }
         return ownLoginHandle(username: name)
