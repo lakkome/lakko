@@ -5601,6 +5601,62 @@
       "text": "Este nombre no se puede usar",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "Donar",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Copiado",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Copiar",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Copiar dirección",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Red: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Envía a esta dirección solo {coin} en la red {network}. Cualquier otra cosa se perderá.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "No se pudieron cargar las formas de donar. Comprueba tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "Para personas en Rusia.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Lakko lo crea y mantiene una sola persona. Las donaciones pagan los servidores y permiten seguir trabajando.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Ahora mismo no hay ninguna forma de donar disponible en tu país.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "No se pudo mostrar el número. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Mostrar",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Apoya a Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "Desde cualquier lugar.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "Revisa la fecha y la hora de este dispositivo.",
       "status": "machine"
@@ -8495,6 +8551,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "Atajos de teclado",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Apoya a Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {

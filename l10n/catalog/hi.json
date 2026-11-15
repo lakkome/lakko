@@ -5601,6 +5601,62 @@
       "text": "यह नाम इस्तेमाल नहीं किया जा सकता",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "दान करें",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "कॉपी हो गया",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "कॉपी करें",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "पता कॉपी करें",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "नेटवर्क: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "इस पते पर केवल {network} नेटवर्क पर {coin} भेजें। बाकी कुछ भी खो जाएगा।",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "दान के तरीके लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "रूस में रहने वालों के लिए।",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Lakko को एक ही व्यक्ति बनाता और चलाता है। दान से सर्वरों का खर्च चलता है और काम जारी रहता है।",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "अभी आपके देश में दान करने का कोई तरीका उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "नंबर नहीं दिखाया जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "दिखाएँ",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Lakko का समर्थन करें",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "कहीं से भी।",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "इस डिवाइस की तारीख और समय जाँचें।",
       "status": "machine"
@@ -8495,6 +8551,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "कीबोर्ड शॉर्टकट",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Lakko का समर्थन करें",
       "status": "machine"
     },
     "settings.about.translations_updated": {

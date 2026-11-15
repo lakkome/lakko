@@ -559,6 +559,17 @@ function AboutSection(): JSX.Element {
         </div>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
+            <Icon name="heart" size={20} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">{t("settings.about.support")}</span>
+          </div>
+          <A href={paths.donations} class="lk-card-row-action">
+            {t("common.open")}
+          </A>
+        </div>
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
             <Icon name="doc-text" size={20} />
           </span>
           <div class="lk-card-row-body">

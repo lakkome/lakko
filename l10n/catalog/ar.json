@@ -5601,6 +5601,62 @@
       "text": "لا يمكن استخدام هذا الاسم",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "تبرّع",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "تم النسخ",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "نسخ",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "نسخ العنوان",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "الشبكة: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "أرسل إلى هذا العنوان {coin} فقط على شبكة {network}. أي شيء آخر سيضيع.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "تعذّر تحميل طرق التبرع. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "للأشخاص في روسيا.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "يبني Lakko ويديره شخص واحد. التبرعات تغطي تكلفة الخوادم وتساعد على استمرار العمل.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "لا توجد حاليًا طريقة للتبرع متاحة في بلدك.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "تعذّر إظهار الرقم. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "إظهار",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "ادعم Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "من أي مكان.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "تحقّق من تاريخ هذا الجهاز ووقته.",
       "status": "machine"
@@ -8495,6 +8551,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "اختصارات لوحة المفاتيح",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "ادعم Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {
