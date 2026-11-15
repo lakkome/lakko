@@ -983,7 +983,20 @@ public final class ChatRepository: ObservableObject {
             return
         }
         // ADR-0050 — the chats run on the DEVICE identity.
-        let device = deviceIdentityInstaller(newAccountIdB64, account)
+        // G-56 — a binding that must wait for the account's earlier keys
+        // starts nothing: no chats, no KeyPackage, no fallback to the account
+        // identity. The session root parks the device.
+        let device: Identity?
+        do {
+            device = try deviceIdentityInstaller(newAccountIdB64, account)
+        } catch is EarlierKeysMissing {
+            currentAccountId = nil
+            currentSessionToken = nil
+            onEarlierKeysMissing?(newAccountIdB64)
+            return
+        } catch {
+            device = nil
+        }
         let identity = device ?? account
         // ADR-0074 Stage A — a binding kept under the account's own old key.
         let predecessor = Self.boundPredecessor(
@@ -1193,10 +1206,16 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 — how ``bootstrap(secrets:)`` obtains the device identity.
     /// Production is ``installDeviceIdentity(accountIdB64:account:)``; a test
     /// that seeds a snapshot under the account identity sets a closure that
-    /// returns `nil`, which keeps the chats on the account identity.
-    var deviceIdentityInstaller: @MainActor (_ accountIdB64: String, _ account: Identity) -> Identity? = {
-        ChatRepository.installDeviceIdentity(accountIdB64: $0, account: $1)
+    /// returns `nil`, which keeps the chats on the account identity. Throws
+    /// ``EarlierKeysMissing`` when the binding must wait (G-56).
+    var deviceIdentityInstaller: @MainActor (_ accountIdB64: String, _ account: Identity) throws -> Identity? = {
+        try ChatRepository.installDeviceIdentity(accountIdB64: $0, account: $1)
     }
+
+    /// G-56 — the bootstrap refused because the account's earlier keys have
+    /// not reached this device. The composition root parks the session
+    /// (``AuthRepository/parkForEarlierKeys(accountIdB64:)``).
+    var onEarlierKeysMissing: (@MainActor (_ accountIdB64: String) -> Void)?
 
     /// ADR-0050 — build this device's bound DEVICE identity: the per-install
     /// seed from ``DeviceIdentityStore`` plus the persisted binding, or a fresh
@@ -1205,62 +1224,88 @@ public final class ChatRepository: ObservableObject {
     /// the device seed cannot be read or written, in which case the caller
     /// falls back to the account identity for the chats (the pre-ADR-0050
     /// behaviour).
-    static func installDeviceIdentity(accountIdB64: String, account: Identity) -> Identity? {
-        installDeviceIdentity(
+    ///
+    /// G-56 — throws ``EarlierKeysMissing`` instead when the verdict is
+    /// `wait`: nothing is minted or stored, and the caller must not fall back
+    /// to the account identity (that is a binding under the current key by
+    /// another name).
+    static func installDeviceIdentity(accountIdB64: String, account: Identity) throws -> Identity? {
+        try installDeviceIdentity(
             accountIdB64: accountIdB64, account: account,
             predecessorSeeds: KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64),
-            holdsConversations: !KnownGroupsStore().load(accountIdB64: accountIdB64).isEmpty)
+            holdsConversations: !KnownGroupsStore().load(accountIdB64: accountIdB64).isEmpty,
+            link: EarlierKeysGate.linkFromRecord(
+                KeychainOwnConversationKeyStore().load(accountIdB64: accountIdB64)))
     }
 
     /// The rule of ``installDeviceIdentity(accountIdB64:account:)`` over the
-    /// account's own predecessor seeds (oldest first) and whether this device
-    /// is in any conversation.
+    /// account's own predecessor seeds (oldest first), whether this device
+    /// is in any conversation, and the account's own conversation link as
+    /// this device last read it.
     ///
     /// ADR-0074 section 3.1 (Stage A) — after a rotation of the account keys
-    /// a device does NOT re-bind: its leaves stay under the old key, and a
-    /// binding minted under the new key would make this device a different
-    /// account to every gate, and misjudge its own standing. A binding under
-    /// one of the account's OWN predecessor keys is kept. (A reset keeps no
-    /// predecessor, so it still re-mints.)
+    /// a device does NOT re-bind: its leaves stay under the old key. A
+    /// binding under one of the account's OWN predecessor keys is kept.
     ///
-    /// ADR-0074 part 3 — a device paired AFTER a rotation gets the
-    /// predecessor seeds from the pairing state bundle and mints its binding
-    /// under the conversation key (the oldest predecessor), the key the
-    /// account's other devices are bound to. A binding minted under the
-    /// current key before the bundle arrived is minted again while this
-    /// device holds no conversation (``OwnAccountKeys/bindingVerdict``).
+    /// ADR-0074 "Joining after a rotation" — the verdict is the core's
+    /// (`ownBindingVerdict`): mint under the conversation key `C` when the
+    /// link names one and its seed is held, else under the oldest held
+    /// predecessor, else the current key; `wait` when the target's seed is
+    /// not held.
     static func installDeviceIdentity(
-        accountIdB64: String, account: Identity, predecessorSeeds: [Data], holdsConversations: Bool
-    ) -> Identity? {
-        do {
-            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
-            var stored: Identity?
-            if let binding = DeviceIdentityStore.getDeviceBinding(accountIdB64: accountIdB64) {
-                stored = try? Identity.fromSeedWithBinding(seed: seed, binding: binding)
-                if stored == nil { NSLog("ChatRepository: stored device binding rejected; re-minting") }
-            }
-            let predecessors = predecessorSeeds.compactMap { try? Identity.fromSeed(seed: $0) }
-            switch OwnAccountKeys.bindingVerdict(
+        accountIdB64: String, account: Identity, predecessorSeeds: [Data], holdsConversations: Bool,
+        link: FfiOwnLink = .absent
+    ) throws -> Identity? {
+        // The verdict comes first: a device that must wait stores nothing,
+        // not even a fresh device seed.
+        let existingSeed = (try? DeviceIdentityStore.getDeviceIdentitySeed(accountIdB64: accountIdB64)) ?? nil
+        var stored: Identity?
+        if let existingSeed, let binding = DeviceIdentityStore.getDeviceBinding(accountIdB64: accountIdB64) {
+            stored = try? Identity.fromSeedWithBinding(seed: existingSeed, binding: binding)
+            if stored == nil { NSLog("ChatRepository: stored device binding rejected; re-minting") }
+        }
+        let currentKey = account.signaturePublicKey()
+        let predecessors = predecessorSeeds.compactMap { try? Identity.fromSeed(seed: $0) }
+            .filter { $0.signaturePublicKey() != currentKey }
+        let verdict = EarlierKeysGate.verdict(
+            EarlierKeysGate.Inputs(
                 boundKey: stored?.accountPublicKey(),
-                currentKey: account.signaturePublicKey(),
+                currentKey: currentKey,
                 predecessorKeys: predecessors.map { $0.signaturePublicKey() },
-                holdsConversations: holdsConversations) {
-            case .keep:
-                if let stored { return stored }
-            case .keepUnderCurrentKey:
-                NSLog("ADR-0074: the device binding names the current account key and this device holds conversations; kept")
-                if let stored { return stored }
-            case .remint:
-                NSLog("ADR-0074: the device binding is minted again under the conversation key")
-            case .mint:
-                if stored != nil {
-                    NSLog("ChatRepository: stored device binding names another account key; re-minting")
-                }
+                holdsConversations: holdsConversations),
+            link: link)
+        let mintUnder: Identity
+        switch verdict {
+        case .keep:
+            if let stored { return stored }
+            mintUnder = predecessors.first ?? account
+        case .keepUnderCurrentKey:
+            NSLog("ADR-0074: the device binding names the current account key and this device holds conversations; kept")
+            if let stored { return stored }
+            mintUnder = account
+        case .wait:
+            NSLog("[g56] the account's earlier keys are not on this device; no device binding is minted")
+            throw EarlierKeysMissing(accountIdB64: accountIdB64)
+        case .mint(let key):
+            if stored != nil {
+                NSLog("ChatRepository: the device binding is minted again under the conversation key")
             }
-            let conversation = predecessors.first ?? account
+            guard let target = ([account] + predecessors).first(where: { $0.signaturePublicKey() == key }) else {
+                throw EarlierKeysMissing(accountIdB64: accountIdB64)
+            }
+            mintUnder = target
+        }
+        let seed: Data
+        do {
+            seed = try existingSeed ?? DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+        } catch {
+            NSLog("ChatRepository: device identity install failed; chats fall back to the account identity: \(error)")
+            return nil
+        }
+        do {
             let bound = try Identity.fromSeedBound(
                 seed: seed,
-                accountSeed: conversation.ed25519Seed(),
+                accountSeed: mintUnder.ed25519Seed(),
                 issuedAtUnixSecs: UInt64(max(0, Date().timeIntervalSince1970))
             )
             if let binding = bound.deviceBinding() {
@@ -1283,7 +1328,7 @@ public final class ChatRepository: ObservableObject {
     func rebindAfterStateBundle(accountIdB64: String) -> Bool {
         guard currentAccountIdB64 == accountIdB64, let account = accountIdentity,
               let before = canonicalIdentity, groups.isEmpty else { return false }
-        guard let device = deviceIdentityInstaller(accountIdB64, account),
+        guard let device = (try? deviceIdentityInstaller(accountIdB64, account)) ?? nil,
               let boundKey = device.accountPublicKey(), boundKey != before.accountPublicKey() else {
             return false
         }

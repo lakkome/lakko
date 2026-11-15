@@ -158,6 +158,61 @@ describe("the Translate row (UX 3.1, shared rule)", () => {
     expect(f.translateCalls).toEqual([]);
   });
 
+  it("translates from an unsure guess at once, and Not X? corrects it", async () => {
+    f.detections.set("goedemorgen", { tag: "nl", permille: 400 });
+    f.translationState.set("nl>en", "ready");
+    f.translationState.set("af>en", "ready");
+    const c = controller();
+    c.translate("text", ref(6), "goedemorgen");
+    await flush();
+    expect(c.pickerRequest()).toBeNull();
+    expect(f.translateCalls).toEqual([{ source: "nl", target: "en", text: "goedemorgen" }]);
+    expect(c.textView("text", ref(6))).toEqual({ phase: "translated", source: "nl", text: "hello friends" });
+    // `Not Dutch?` opens the picker on the guess; a pick translates again.
+    c.openSourcePicker("text", ref(6), "goedemorgen");
+    expect(c.pickerRequest()?.current).toBe("nl");
+    c.pickerRequest()?.choose("af");
+    await flush();
+    expect(f.translateCalls.at(-1)?.source).toBe("af");
+    expect(c.textView("text", ref(6))).toMatchObject({ phase: "translated", source: "af" });
+  });
+
+  it("an unsure guess yields to the language chosen for the conversation", async () => {
+    f.detections.set("goedemorgen", { tag: "nl", permille: 400 });
+    f.detections.set("goedenavond", { tag: "af", permille: 300 });
+    f.translationState.set("nl>en", "ready");
+    f.translationState.set("af>en", "ready");
+    const c = controller();
+    c.translate("text", ref(6), "goedemorgen");
+    await flush();
+    c.openSourcePicker("text", ref(6), "goedemorgen");
+    c.pickerRequest()?.choose("nl");
+    await flush();
+    c.translate("text", ref(7), "goedenavond");
+    await flush();
+    expect(f.translateCalls.at(-1)).toEqual({ source: "nl", target: "en", text: "goedenavond" });
+  });
+
+  it("opens the picker on a guess the device cannot translate from", async () => {
+    f.detections.set("sugeng enjing", { tag: "jv", permille: 300 });
+    f.translationState.set("de>en", "needs-pack");
+    const c = controller();
+    c.translate("text", ref(8), "sugeng enjing");
+    await flush();
+    expect(c.pickerRequest()?.current).toBe("jv");
+    expect(f.translateCalls).toEqual([]);
+    expect(c.textView("text", ref(8)).phase).toBe("none");
+  });
+
+  it("opens the picker on an unsure guess in the language translated into", async () => {
+    f.detections.set("ok sure", { tag: "en", permille: 300 });
+    const c = controller();
+    c.translate("text", ref(9), "ok sure");
+    await flush();
+    expect(c.pickerRequest()?.current).toBe("en");
+    expect(c.textView("text", ref(9)).phase).toBe("none");
+  });
+
   it("offers nothing at all on a browser without a translator", async () => {
     f.engines = { ...f.engines, translation: { ...f.engines.translation, present: false } };
     const c = controller();

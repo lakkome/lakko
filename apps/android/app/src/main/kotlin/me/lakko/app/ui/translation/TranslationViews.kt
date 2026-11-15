@@ -250,6 +250,7 @@ public fun TranslationDialogs(hub: me.lakko.app.media.ChatMediaHub?) {
             options = p.options,
             onPick = { TranslationCenter.choosePicked(it, hub) },
             onDismiss = TranslationCenter::dismissPicker,
+            selected = p.marked,
         )
     }
 }

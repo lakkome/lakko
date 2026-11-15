@@ -51,7 +51,13 @@
 import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import { getAccountIdentitySeed } from "../auth/account-identity-seed-store";
-import { conversationSeed, getKeyRotationState } from "../auth/key-rotation-store";
+import { base64Encode } from "../auth/account-id";
+import {
+  conversationSeed,
+  getKeyRotationState,
+  predecessorSeeds,
+  type KeyRotationState,
+} from "../auth/key-rotation-store";
 import { DsClient } from "../ds/client";
 import { dsAccess, takeSigner } from "../ds/access";
 import { claimOrReset, releaseAuthority } from "../ds/ownership";
@@ -113,20 +119,44 @@ export class DeviceGroupNotJoinedError extends Error {
  * without it the device's stored account seed is read. `null` when the
  * device holds no account seed at all (a device still waiting for its
  * recovery phrase): it cannot name its DeviceGroup yet.
+ *
+ * ADR-0074 "Joining after a rotation" (the lineage guard): when this device
+ * recorded that the account's own conversation link names a key `C`
+ * (`auth/own-conversation-key-store.ts`), the lineage is the held seed that
+ * derives `C`, and `null` when none does: falling back to the current seed
+ * would open, found or knock another journal than the account's other
+ * devices. Every caller treats `null` as "do not open, found or knock".
+ * With no record (never read, or no link) the fallback is unchanged.
  */
 export async function deviceGroupLineageSeed(
   accountIdB64: string,
   deviceKey: DeviceCipher,
   explicit?: Uint8Array,
 ): Promise<Uint8Array | null> {
+  let state: KeyRotationState | null = null;
   try {
-    const predecessor = conversationSeed(await getKeyRotationState(accountIdB64, deviceKey));
-    if (predecessor !== null) return predecessor;
+    state = await getKeyRotationState(accountIdB64, deviceKey);
   } catch (err) {
     // An unreadable rotation row (a device key that changed, no IndexedDB)
     // reads as "never rotated": the account seed is used.
     console.warn("key-rotation state unreadable; the DeviceGroup id is derived from the account seed", err);
   }
+  const recorded = state?.ownLink?.conversationKeyB64 ?? null;
+  if (state !== null && recorded !== null) {
+    const current = explicit ?? (await getAccountIdentitySeed(accountIdB64, deviceKey));
+    const held = [...predecessorSeeds(state), ...(current !== null ? [current] : [])];
+    const wasm = await loadWasm();
+    for (const seed of held) {
+      const identity = wasm.Identity.fromSeed(seed);
+      const keyB64 = base64Encode(identity.signaturePublicKey);
+      identity.free();
+      if (keyB64 === recorded) return seed;
+    }
+    console.warn("the DeviceGroup waits for the account's earlier keys; nothing is opened, founded or knocked");
+    return null;
+  }
+  const predecessor = state === null ? null : conversationSeed(state);
+  if (predecessor !== null) return predecessor;
   if (explicit !== undefined) return explicit;
   return getAccountIdentitySeed(accountIdB64, deviceKey);
 }

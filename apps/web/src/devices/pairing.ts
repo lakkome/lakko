@@ -50,6 +50,15 @@ export interface PairingCore {
     rendezvousPseudonym: Uint8Array,
     deviceCardEnvelope?: Uint8Array | null,
   ): Uint8Array;
+  /** G-56 — the payload carrying the joining device's self-removal proof.
+   *  Optional so a codec test that never builds one need not provide it. */
+  encodePairingQrWithSelfRemovalProof?(
+    loginHandle: Uint8Array,
+    keyPackage: Uint8Array,
+    rendezvousPseudonym: Uint8Array,
+    selfRemovalProof: Uint8Array,
+    deviceCardEnvelope?: Uint8Array | null,
+  ): Uint8Array;
   decodePairingQr(
     bytes: Uint8Array,
     expectedLoginHandle: Uint8Array,
@@ -102,6 +111,7 @@ export function buildPairingQrPayloadWith(
   keyPackage: Uint8Array,
   rendezvousPseudonym: Uint8Array,
   deviceCardEnvelope: Uint8Array | null = null,
+  selfRemovalProof: Uint8Array | null = null,
 ): Uint8Array {
   if (loginHandle.length !== LOGIN_HANDLE_LEN) {
     throw new Error(`loginHandle must be ${LOGIN_HANDLE_LEN} bytes (got ${loginHandle.length})`);
@@ -111,6 +121,22 @@ export function buildPairingQrPayloadWith(
       `rendezvousPseudonym must be ${RENDEZVOUS_PSEUDONYM_LEN} bytes ` +
         `(got ${rendezvousPseudonym.length})`,
     );
+  }
+  if (selfRemovalProof !== null && selfRemovalProof.length > 0) {
+    // G-56 — a device already in the DeviceGroup pairing again: the
+    // confirming device replaces its leaf in one commit.
+    if (core.encodePairingQrWithSelfRemovalProof === undefined) {
+      throw new Error("this pairing codec cannot carry a self-removal proof");
+    }
+    return deviceCardEnvelope === null
+      ? core.encodePairingQrWithSelfRemovalProof(loginHandle, keyPackage, rendezvousPseudonym, selfRemovalProof)
+      : core.encodePairingQrWithSelfRemovalProof(
+          loginHandle,
+          keyPackage,
+          rendezvousPseudonym,
+          selfRemovalProof,
+          deviceCardEnvelope,
+        );
   }
   return deviceCardEnvelope === null
     ? core.encodePairingQr(loginHandle, keyPackage, rendezvousPseudonym)
@@ -126,7 +152,10 @@ export function buildPairingQrPayloadWith(
  * is the 32-byte slot from [`generateRendezvousPseudonym`].
  * `deviceCardEnvelope` (docs/ux/second-device.md section 2.1) is this
  * device's own device-card envelope, so the signed-in device can name it;
- * `null` builds a payload without one.
+ * `null` builds a payload without one. `selfRemovalProof` (G-56) is the
+ * 137-byte proof a device already in the DeviceGroup signs when it pairs
+ * again under the same device identity; `null` (or empty) builds the plain
+ * payload.
  *
  * Throws on wrong-length inputs — caller bugs surface synchronously, not
  * deep inside the QR-render call.
@@ -136,9 +165,17 @@ export async function buildPairingQrPayload(
   keyPackage: Uint8Array,
   rendezvousPseudonym: Uint8Array,
   deviceCardEnvelope: Uint8Array | null = null,
+  selfRemovalProof: Uint8Array | null = null,
 ): Promise<Uint8Array> {
   const wasm = await loadWasm();
-  return buildPairingQrPayloadWith(wasm, loginHandle, keyPackage, rendezvousPseudonym, deviceCardEnvelope);
+  return buildPairingQrPayloadWith(
+    wasm,
+    loginHandle,
+    keyPackage,
+    rendezvousPseudonym,
+    deviceCardEnvelope,
+    selfRemovalProof,
+  );
 }
 
 /** Result of [`parsePairingQrPayload`]. */

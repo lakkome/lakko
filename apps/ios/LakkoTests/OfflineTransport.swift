@@ -163,6 +163,7 @@ extension AuthRepository {
             persistence: persistence,
             nowMs: nowMs,
             accountDirectory: OfflineAccountDirectory(),
-            restoreDirectory: OfflineRestoreDirectory())
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate)
     }
 }

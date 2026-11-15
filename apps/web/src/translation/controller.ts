@@ -345,31 +345,49 @@ export class TranslationController {
 
   /**
    * Translate one message. `source` is a language the person chose in the
-   * picker; without it the detected language is used, and when there is none
-   * the picker opens first (UX 3.1, `TranslateAskLanguage`).
+   * picker; without it the detected language is used, even a guess below the
+   * confidence line (the quiet line then offers `Not Spanish?`), and the
+   * picker opens first only when there is no usable guess (UX 3.1 / 3.4).
    */
   translate(slot: TextSlot, ref: MessageRef, text: string, source?: string): void {
     const key = messageKey(slot, ref.conversation, ref.messageId);
     this.explicitOriginal.delete(key);
     void (async () => {
-      const from = source ?? (await this.sourceFor(ref, text));
-      if (from === null) {
-        this.openSourcePicker(slot, ref, text);
+      const from = source !== undefined ? { tag: source, guess: null } : await this.sourceFor(ref, text);
+      if (from.tag === null) {
+        this.openSourcePicker(slot, ref, text, from.guess);
         return;
       }
-      await this.run(slot, ref, text, from, key);
+      await this.run(slot, ref, text, from.tag, key);
     })();
   }
 
-  /** The source a translation starts from: a confident detection, else the
-   *  conversation's last choice, else nothing (the picker decides). */
-  private async sourceFor(ref: MessageRef, text: string): Promise<string | null> {
+  /**
+   * The source a translation starts from, in this order: a confident
+   * detection; the language the person chose for this conversation; the
+   * detector's best guess even when unsure. A guess the device cannot
+   * translate from, or one in the language translated into, is not used:
+   * neither line would let the person correct it, so the picker opens with
+   * the guess marked instead.
+   */
+  private async sourceFor(
+    ref: MessageRef,
+    text: string,
+  ): Promise<{ readonly tag: string | null; readonly guess: string | null }> {
     const d = await this.detect(ref, text);
     const r = this.deps.rules();
-    // A guess is not a source: below the shared confidence line the picker decides.
-    if (d !== null && r !== null && d.permille >= r.translationDetectionConfidentPermille()) return d.tag;
-    const prefs = this.prefsNow(ref.conversation);
-    return prefs.translationSource;
+    if (d !== null && r !== null && d.permille >= r.translationDetectionConfidentPermille()) {
+      return { tag: d.tag, guess: null };
+    }
+    const chosen = this.prefsNow(ref.conversation).translationSource;
+    if (chosen !== null) return { tag: chosen, guess: null };
+    if (d === null || r === null) return { tag: null, guess: null };
+    const target = this.target();
+    if (r.sameLanguage(d.tag, target)) return { tag: null, guess: d.tag };
+    const state = await this.deps.engines.translation.state(d.tag, target);
+    this.engineStates.set(`t:${d.tag}>${target}`, state);
+    if (state === "unavailable") return { tag: null, guess: d.tag };
+    return { tag: d.tag, guess: null };
   }
 
   private async run(slot: TextSlot, ref: MessageRef, text: string, source: string, key: string): Promise<void> {
@@ -473,10 +491,11 @@ export class TranslationController {
     this.setView(key, { phase: "none" });
   }
 
-  /** `Not Spanish?`, or a message whose language nothing could tell. */
-  openSourcePicker(slot: TextSlot, ref: MessageRef, text: string): void {
+  /** `Not Spanish?`, or a message whose language nothing could tell.
+   *  `guess` marks a detector's unusable guess in the list. */
+  openSourcePicker(slot: TextSlot, ref: MessageRef, text: string, guess: string | null = null): void {
     const view = this.views.get(messageKey(slot, ref.conversation, ref.messageId));
-    const current = view !== undefined && "source" in view ? view.source : null;
+    const current = view !== undefined && "source" in view ? view.source : guess;
     this.pickerSignal[1]({
       use: "translation",
       current,

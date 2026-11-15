@@ -6,10 +6,14 @@
 //! Mirror of `lakko-ffi-uniffi/src/translation.rs` over
 //! [`lakko_ui_rules::translation`] (ADR-0082 section 6). Lists of detections
 //! cross as two parallel arrays (tags and confidences), the shape the other
-//! rules here use for flat data. Nothing here takes message text.
+//! rules here use for flat data. Only [`detect_text_language`] takes message
+//! text: the on-device detector of [`lakko_ui_rules::language_detect`], for a
+//! browser whose own `LanguageDetector` is absent or has no model on the
+//! device.
 
 use wasm_bindgen::prelude::*;
 
+use lakko_ui_rules::language_detect::detect_text_language as rust_detect_text_language;
 use lakko_ui_rules::translation::{
     canonical_language_tag as rust_canonical_language_tag,
     conversation_bar_language as rust_conversation_bar_language,
@@ -154,6 +158,50 @@ pub fn stored_result_is_current(
     )
 }
 
+/// A language detected in some text: the tag and the confidence in
+/// thousandths, on the scale `translationDetectionConfidentPermille()` reads.
+#[wasm_bindgen(js_name = DetectedTextLanguage)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetectedTextLanguage {
+    tag: String,
+    confidence_permille: u16,
+}
+
+#[wasm_bindgen(js_class = DetectedTextLanguage)]
+impl DetectedTextLanguage {
+    /// The BCP 47 tag (`nl`, `ru`, `pt`, `zh`, ...), never with a region.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tag(&self) -> String {
+        self.tag.clone()
+    }
+
+    /// Confidence 0..=1000; below `translationDetectionConfidentPermille()` it
+    /// is a guess and the translation opens with the language picker.
+    #[wasm_bindgen(getter, js_name = confidencePermille)]
+    #[must_use]
+    // wasm_bindgen cannot export a `const fn`.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn confidence_permille(&self) -> u16 {
+        self.confidence_permille
+    }
+}
+
+/// The language a message's text is in, detected on this device, or
+/// `undefined` when the text has no letters or the language has no tag.
+///
+/// For a browser whose own `LanguageDetector` is absent or has no model on the
+/// device (ADR-0082 note of 2026-11-15). The text is read here and nowhere
+/// else; nothing is stored or logged.
+#[wasm_bindgen(js_name = detectTextLanguage)]
+#[must_use]
+pub fn detect_text_language(text: &str) -> Option<DetectedTextLanguage> {
+    rust_detect_text_language(text).map(|d| DetectedTextLanguage {
+        tag: d.tag,
+        confidence_permille: d.confidence_permille,
+    })
+}
+
 /// The stored form of a language tag, or `undefined` for a tag that names no
 /// language.
 #[wasm_bindgen(js_name = canonicalLanguageTag)]
@@ -242,5 +290,18 @@ mod tests {
             Some("de")
         );
         assert!(stored_result_is_current(3, 3, "en", "en-GB"));
+    }
+
+    #[test]
+    fn detection_crosses_the_surface() {
+        let d = detect_text_language(
+            "Ik ga morgen naar de markt om groenten te kopen. Wil je met me mee, of heb je het te druk?",
+        );
+        assert_eq!(
+            d.as_ref().map(DetectedTextLanguage::tag).as_deref(),
+            Some("nl")
+        );
+        assert!(d.is_some_and(|d| d.confidence_permille() >= DETECTION_CONFIDENT_PERMILLE));
+        assert_eq!(detect_text_language("  !! 42"), None);
     }
 }

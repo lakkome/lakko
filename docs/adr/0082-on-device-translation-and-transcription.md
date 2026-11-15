@@ -12,7 +12,10 @@
   on-device translation service, and through ML Kit Translate only where it
   has none, accepting that ML Kit reports the chosen languages to Google
   (section 1,
-  "As built").
+  "As built"). **Amended 2026-11-15:** text language detection comes from the
+  Rust core where the platform has none Lakko can use (Android always; the web
+  when the browser's `LanguageDetector` is absent or its model is not on the
+  device); iOS keeps `NLLanguageRecognizer` (note of 2026-11-15).
 - **Date:** 2026-10-25
 - **Context:** media messages (ADR-0047), message actions (ADR-0052), interface
   localization (ADR-0061), store gate (ADR-0077), anti-censorship transport
@@ -49,8 +52,8 @@ Nothing in the wire format changes.**
 | | Transcription | Translation | Language detection |
 |---|---|---|---|
 | iOS / iPadOS / macOS | `SpeechAnalyzer` + `SpeechTranscriber` (iOS 26+; models managed through `AssetInventory`). Below iOS 26: `SFSpeechRecognizer` with `requiresOnDeviceRecognition = true`, never without it | `TranslationSession` (iOS 18+), which Apple documents as processing on the device | `NLLanguageRecognizer` (NaturalLanguage framework; not re-checked for this ADR) |
-| Android | `SpeechRecognizer.createOnDeviceSpeechRecognizer` (API 31+), only after `isOnDeviceRecognitionAvailable` returns true. `createSpeechRecognizer` is never used: its documentation says the implementation is likely to stream audio to remote servers | The system `android.view.translation.TranslationManager` (API 31+), only `createOnDeviceTranslator` and `getOnDeviceTranslationCapabilities`, never the deprecated `createTranslator`; on a device whose system reports no on-device translation capability (or below API 31), ML Kit Translate, whose data disclosure says it reports the configured source and target languages to Google (amended 2026-10-27; the choice is per device, not per language pair; never while anti-censorship is on) | none: `TextClassifier` may run in an OEM process and ML Kit Language Identification reports the identified languages |
-| Web | `SpeechRecognition` only with `processLocally = true`, which the draft specification defines as "must be done locally"; with it absent or unsupported, the feature is absent. Experimental; which browsers honour it is not established | `Translator` API (Chrome 138+, desktop only per Chrome's documentation; Firefox and Safari not supported) | `LanguageDetector` API (same availability) |
+| Android | `SpeechRecognizer.createOnDeviceSpeechRecognizer` (API 31+), only after `isOnDeviceRecognitionAvailable` returns true. `createSpeechRecognizer` is never used: its documentation says the implementation is likely to stream audio to remote servers | The system `android.view.translation.TranslationManager` (API 31+), only `createOnDeviceTranslator` and `getOnDeviceTranslationCapabilities`, never the deprecated `createTranslator`; on a device whose system reports no on-device translation capability (or below API 31), ML Kit Translate, whose data disclosure says it reports the configured source and target languages to Google (amended 2026-10-27; the choice is per device, not per language pair; never while anti-censorship is on) | No platform detector: `TextClassifier` may run in an OEM process and ML Kit Language Identification reports the identified languages. Since 2026-11-15 the core detector `detectTextLanguage` (note of that date) |
+| Web | `SpeechRecognition` only with `processLocally = true`, which the draft specification defines as "must be done locally"; with it absent or unsupported, the feature is absent. Experimental; which browsers honour it is not established | `Translator` API (Chrome 138+, desktop only per Chrome's documentation; Firefox and Safari not supported) | `LanguageDetector` API (same availability), only with its model already on the device; otherwise, since 2026-11-15, the core detector `detectTextLanguage` (note of that date) |
 | watchOS | none in v1 | none in v1 | none |
 
 A platform capability probe on each client answers, per language, `ready`,
@@ -208,14 +211,74 @@ engine has run on any device, simulator, emulator or browser, nothing walked.
   not known: where `getOnDeviceTranslationCapabilities` reports nothing, the
   controls are absent. Whether creating an on-device translator for a pair
   that is available to download starts the download is not documented and
-  not yet seen on a device. **No language detection:** `TextClassifier` may run in an
-  OEM-provided process, so locality cannot be confirmed; Translate always
-  opens with the language picker and the conversation bar never appears.
+  not yet seen on a device. **No platform language detection:** `TextClassifier` may run in an
+  OEM-provided process, so locality cannot be confirmed; until 2026-11-15
+  Translate always opened with the language picker and the conversation bar
+  never appeared (since then the core detector, note of 2026-11-15).
 - **Shared.** 73 new catalog keys with machine translations in the ten
   languages; security-critical ones ship in English until reviewed.
 - **Not yet done:** results are not removed when a group is left or closed
   (the history stays readable there); rows of folded older history segments
   get no translation on Android; `lakko-security` not run.
+
+## Note of 2026-11-15: text language detection from the core
+
+Seen by the maintainer: with no detector, Translate opened the language
+picker every time, and a person may not know what language a message is in.
+Android had no detector by decision (section 1), and the web used the
+browser's `LanguageDetector` only when its model was already on the device,
+which it rarely was. iOS uses `NLLanguageRecognizer` and is unchanged.
+
+- **Detector.** `lakko_ui_rules::language_detect::detect_text_language`, on
+  the `whatlang` crate (=0.18.0, MIT, default features off; trigram profiles
+  compiled into the binary, 70 languages, no network or file access, no
+  `unsafe` in its source). On UniFFI as `detectTextLanguage(text:) ->
+  DetectedLanguage?` (the record `translationOffered` already takes) and on
+  wasm as `detectTextLanguage(text) -> DetectedTextLanguage | undefined`
+  (`tag`, `confidencePermille`). The text is read on the device and is not
+  stored or logged; the answer is the tag and confidence the rules of section
+  6 already take, so this changes no rule.
+- **Tags.** The ISO 639-1 code of each `whatlang` language, never a region;
+  Iranian Persian is `fa`, Norwegian Bokmal `nb`, Tagalog `tl`, Mandarin
+  `zh`. The match is exhaustive, so a new `whatlang` language fails the build
+  until it is given a tag.
+- **Confidence, measured.** `whatlang`'s confidence is not a probability (a
+  correct one-sentence message often scores 0.1 to 0.4), so it is mapped onto
+  the clients' scale: at and above a cut-off of 0.3 an answer lands at or
+  above `DETECTION_CONFIDENT_PERMILLE` (700), below it under 700. Measured on
+  two corpora: 534 short chat messages (28 each in nl de en es pt fr it ru uk
+  pl tr ar fa he hi, 12 to 18 each in af da nb sv bg ca cs; written by the
+  agent that built the module, not collected from people) and the 26 183
+  interface strings of `l10n/catalog/` in 11 languages. `whatlang` picks the
+  wrong language for many short messages whatever its confidence (on the
+  chat corpus Italian 18 of 28 right, Spanish 19, English 21, Russian 20), so
+  no cut-off makes most one-sentence messages both confident and right.
+  Confident answers for the 15 major languages of the chat corpus, and wrong
+  confident answers (chat / UI corpus): 0.5: 44%, 0 / 6; **0.3: 57%, 2 / 44**;
+  0.2: 66%, 5 / 184; 0.15: 72%, 13 / 335. At 0.3 per language: pl 26 of 28,
+  de 23, uk 22, he 22, ar 20, fa 18, fr 18, tr 18, hi 14, en 13, ru 11, es 10,
+  pt 9, it 9, nl 8 (2 wrong). The cut-off is a product choice between those
+  rows.
+- **Rules that lower an answer below 700.** Fewer than 8 letters in a script
+  several languages share; less than 80% of the letters in the detected
+  language's script (mixed-script text); Chinese (Simplified and Traditional
+  cannot be told apart, and a bare `zh` reads as Simplified); and letters that
+  contradict the answer, each a fact about an alphabet added for a confusion a
+  corpus showed: Portuguese without `ã õ ç`, Catalan without `à è ò ï ç`,
+  Bulgarian without `ъ` or with `ы э ё`, Ukrainian without `і ї є ґ` or with
+  `ы э ё ъ`, Belarusian without `ў`, Serbian and Macedonian without their own
+  letters, Azerbaijani without `ə`, `ı` in anything but Turkish or
+  Azerbaijani, Romanian without `ă â î ș ț`, Spanish with `ã õ ç`, Russian
+  with `і ї є ґ ў`. Only letters reach the detector (a lone `·` read as
+  Catalan at 1.0). Short messages ("ok", "hola") stay unsure and open the
+  picker.
+- **Cost.** A confident wrong answer translates from the wrong language,
+  corrected with `Not Spanish?` (UX 3.4); the conversation bar can now appear
+  on Android and on such a browser. A better detector on short text (for
+  example `lingua`, Apache-2.0, whose per-language model crates are about
+  2.5 to 3.3 MB each compressed on crates.io) was not evaluated.
+- **Not done.** The clients are not wired yet; the binary-size cost of the
+  profiles in the Android library and the web wasm is not measured.
 
 ## Alternatives
 

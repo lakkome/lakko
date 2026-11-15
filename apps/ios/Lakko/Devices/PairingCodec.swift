@@ -53,16 +53,30 @@ public enum PairingCodec {
     /// joining device's own ADR-0080 card envelope (UX section 2.1,
     /// ``DeviceCardCenter/pairingCardEnvelope(nowMs:)``), display only on the
     /// confirming device; `nil` puts no card in the payload.
+    ///
+    /// G-56 — `selfRemovalProof` (empty for none): a device already in the
+    /// account's DeviceGroup pairing again carries its self-removal proof for
+    /// `keyPackage` (`buildPairingQrWithSelfRemovalProof`).
     public static func buildPairingQrPayload(
         loginHandle: Data,
         keyPackage: Data,
         rendezvousPseudonym: Data,
-        deviceCardEnvelope: Data? = nil
+        deviceCardEnvelope: Data? = nil,
+        selfRemovalProof: Data = Data()
     ) throws -> Data {
-        return try buildPairingQr(
+        guard !selfRemovalProof.isEmpty else {
+            return try buildPairingQr(
+                loginHandle: loginHandle,
+                keyPackage: keyPackage,
+                rendezvousPseudonym: rendezvousPseudonym,
+                deviceCardEnvelope: deviceCardEnvelope
+            )
+        }
+        return try buildPairingQrWithSelfRemovalProof(
             loginHandle: loginHandle,
             keyPackage: keyPackage,
             rendezvousPseudonym: rendezvousPseudonym,
+            selfRemovalProof: selfRemovalProof,
             deviceCardEnvelope: deviceCardEnvelope
         )
     }

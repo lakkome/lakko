@@ -29,15 +29,36 @@ public enum DeviceGroupLifecycle {
     /// OLDEST own predecessor after a proven rotation (a rotation keeps the
     /// DeviceGroup, so its id must not move), else `currentSeed` when given,
     /// else the device's stored account seed. `nil` when none is held.
+    ///
+    /// G-56 (ADR-0074 "Joining after a rotation", contract 2.4) — when this
+    /// device recorded that its account's chats use a conversation key `C`
+    /// and no seed it holds derives `C`, the answer is `nil`: the fallback to
+    /// the current seed would name another journal than the siblings', and
+    /// every caller treats `nil` as "do not open, found or knock". With no
+    /// record (never read, or no link) the fallback is unchanged.
+    /// `conversationKeys` `nil` skips the guard (the local wipe, which must
+    /// name what it deletes).
     public static func lineageSeed(
         accountIdB64: String,
         currentSeed: Data? = nil,
-        predecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+        predecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
+        conversationKeys: OwnConversationKeyStoring? = KeychainOwnConversationKeyStore()
     ) -> Data? {
         let held = predecessors.load(accountIdB64: accountIdB64)
-        if let oldest = held.first { return oldest }
-        if let currentSeed { return currentSeed }
-        return try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64)
+        let current = currentSeed
+            ?? ((try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64)) ?? nil)
+        let lineage = held.first ?? current
+        guard let conversationKey = conversationKeys?.load(accountIdB64: accountIdB64)?.conversationKey else {
+            return lineage
+        }
+        let holdsIt = (held + [current].compactMap { $0 }).contains {
+            (try? Identity.fromSeed(seed: $0).signaturePublicKey()) == conversationKey
+        }
+        guard holdsIt else {
+            NSLog("[g56] the DeviceGroup lineage key is not on this device; no DeviceGroup is opened")
+            return nil
+        }
+        return lineage
     }
 
     /// The account's DeviceGroup journal id ([`lineageSeed`]); `nil` when

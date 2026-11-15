@@ -65,7 +65,23 @@ read (after Copy). It is offered when all of these hold:
   language (section 7).
 
 When the device could not tell the language, the row is still offered if it can
-translate at all, and the translation opens with the language picker of 3.4.
+translate at all. Choosing it translates at once from the detector's best
+guess, even an unsure one, and the quiet line carries `Not Dutch?` (3.4) to
+correct it. The language picker of 3.4 opens first only when there is no
+guess at all (no letters), or when the guess is a language this device cannot
+translate from or the language translated into: neither line could be
+corrected from there, so the picker opens with the guess marked. A language
+the person chose for this conversation (3.4) is used before an unsure guess.
+Built on web, iOS and Android (2026-11-15), host-tested only.
+
+Every client detects the language on the device: iOS with the system detector,
+Android and a browser without its own detector model with Lakko's own (ADR-0082
+note of 2026-11-15; until then Android always opened the picker). On Android
+and the web about half of one-sentence messages get a sure answer (more for
+Polish or German, fewer for Dutch or Italian, as measured in the ADR); the
+rest, and short ones ("ok", "hola"), stay unsure and are translated from the
+guess as above. Chinese stays unsure there too: Lakko's detector cannot tell
+Simplified from Traditional.
 
 Choosing it replaces the text in the bubble with the translation (3.2). On a
 message already showing a translation the row reads `Show original`.

@@ -1409,7 +1409,7 @@ function ScanView(props: {
         setState({ kind: "error", message: noDeviceKey });
         return;
       }
-      // ADR-0018 factor (a), recovery payload v2: hand the new device a
+      // ADR-0018 factor (a), recovery payload v3: hand the new device a
       // session grant and the recovery phrase this device holds (as its
       // entropy). `runScanFlow` treats it strictly best-effort (a failure
       // there never breaks the pairing) and consumes the entropy. A device

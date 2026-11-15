@@ -864,6 +864,17 @@ private fun AppRoot(
                 account = current.account,
             )
         }
+        // G-56 (UX section 8a): signed in with the account's current keys,
+        // but not the earlier keys its chats use. The app shell does not
+        // start; the screen offers another device and the reset, and the
+        // device looks for the keys by itself.
+        is AuthState.NeedsEarlierKeys -> InsetRoot {
+            RestoreIdentityRoot(
+                repository = authRepository,
+                account = current.account,
+                earlierKeysMissing = true,
+            )
+        }
         // ADR-0017 lost-everything fallback: the user minted a brand-new
         // identity (already published, no proof); show the new recovery
         // phrase for them to save before the session lands.
@@ -1221,7 +1232,28 @@ private fun SessionViewModels(accountIdB64: String, content: @Composable () -> U
 private fun RestoreIdentityRoot(
     repository: AuthRepository,
     account: SessionAccount,
+    /** G-56: the variant of UX section 8a (the earlier keys are missing). */
+    earlierKeysMissing: Boolean = false,
 ) {
+    if (earlierKeysMissing) {
+        // UX 8a: the device looks for the earlier keys by itself at entry
+        // (every start comes back here) and every few minutes while the
+        // screen is in the foreground. A failed look is not shown.
+        val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(account.accountIdB64, lifecycle) {
+            lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+                while (true) {
+                    try {
+                        repository.lookForEarlierKeysNow()
+                    } catch (cause: Throwable) {
+                        if (cause is kotlinx.coroutines.CancellationException) throw cause
+                        android.util.Log.w("lakko-auth", "G-56: look for the earlier keys failed (${cause.javaClass.simpleName})")
+                    }
+                    kotlinx.coroutines.delay(me.lakko.app.auth.EARLIER_KEYS_RETRY_MS)
+                }
+            }
+        }
+    }
     // Keyed on the account: the model holds what was typed for it, and this
     // root's store lives as long as the Activity.
     val vm: me.lakko.app.ui.auth.RestoreIdentityPromptViewModel = viewModel(
@@ -1236,7 +1268,8 @@ private fun RestoreIdentityRoot(
         username = account.username,
         accountIdB64 = account.accountIdB64,
         onSignOut = { repository.logout() },
-        restoreNotice = restoreNotice,
+        restoreNotice = if (earlierKeysMissing) null else restoreNotice,
+        earlierKeysMissing = earlierKeysMissing,
     )
 }
 
@@ -1342,7 +1375,14 @@ private fun SessionRoot(
         // then resumes from the saved cursor. Idempotent when the repository
         // already bound this account at construction.
         contactsRepository.bindAccount(secrets.accountId)
-        chatRepository.bootstrap(secrets)
+        try {
+            chatRepository.bootstrap(secrets)
+        } catch (missing: me.lakko.app.auth.EarlierKeysMissing) {
+            // G-56 defence in depth: the chat layer minted nothing for a
+            // device whose account's earlier keys are not here; park it.
+            authRepository.parkAfterChatRefusal(me.lakko.app.auth.base64Encode(secrets.accountId))
+            return@LaunchedEffect
+        }
         // ADR-0048 — make sure this account's own profile exists and states
         // its current username (normalised; `null` for a guest). Republished
         // into every group only when that actually changed.

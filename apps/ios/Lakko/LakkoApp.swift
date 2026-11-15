@@ -383,6 +383,11 @@ struct LakkoApp: App {
         auth.onProtectionChanged = {
             Task { await accountProtection.refresh() }
         }
+        // G-56 — the chat layer refused to bind a device whose account's
+        // earlier keys have not reached it: the session parks.
+        chat.onEarlierKeysMissing = { [weak auth] accountIdB64 in
+            auth?.parkForEarlierKeys(accountIdB64: accountIdB64)
+        }
         // A guest chose a username: the profile directory learns it, the
         // username certificate is fetched, and the profile (username +
         // certificate) goes out through the existing publishers.
@@ -1182,6 +1187,27 @@ struct AppRoot: View, Equatable {
             .onAppear {
                 // Same defensive teardown as the anon branch — no live
                 // session runtime should linger while the keys are missing.
+                services.deviceGroupSync.clear()
+            }
+        case .needsEarlierKeys(let account):
+            // G-56 (UX identity-recovery section 8a) — signed in, keys here,
+            // but not the account's earlier keys: the variant of the restore
+            // prompt (another device, or a reset). The device looks for the
+            // keys itself and the state flips to `.session` when they come.
+            RestoreIdentityPromptScreen(
+                authRepository: authRepository,
+                viewModel: RestoreIdentityPromptViewModel(
+                    repository: authRepository,
+                    username: account.username,
+                    accountIdB64: account.accountIdB64,
+                    earlierKeys: true,
+                    noteOwnAction: { [center = services.accountProtection] in center.noteOwnAction($0) },
+                    keepAddress: { [center = services.accountProtection] in center.keepAddress($0) }
+                )
+            )
+            .id("earlier-keys-" + account.accountIdB64)
+            .onAppear {
+                // No session runtime runs while parked.
                 services.deviceGroupSync.clear()
             }
         case .saveFreshPhrase(let account):
@@ -2086,6 +2112,10 @@ private struct SessionRoot: View, Equatable {
                 // filing before the first one ends.
                 CallHistoryStore.shared.bind(accountIdB64: account.accountIdB64)
                 chatRepository.bootstrap(secrets: secrets)
+                // G-56 — the bootstrap refused (the account's earlier keys
+                // are missing here) and the session parked: nothing below
+                // runs (no mailbox claim, no KeyPackage).
+                guard chatRepository.currentAccountIdB64 == account.accountIdB64 else { return }
                 // A backup keeps received names in recent-use order after
                 // contacts (`OwnBackupEnvelopes.receivedProfileRecords`).
                 BackupPeopleOrder.source = { [weak chatRepository] in

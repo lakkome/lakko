@@ -8177,6 +8177,14 @@
       "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Lakko'yu oturumu hâlâ açık olan bir cihazda açın.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "{username} olarak giriş yaptınız, ancak bu cihazda sohbetlerinizin kullandığı anahtarlar henüz yok. Onları oturumu hâlâ açık olan başka bir cihazdan getirin.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "Bu cihazda kayıtlı hesapta bir sorun var. Çıkış yapıp yeniden giriş yapın veya kurtarma ifadenizi kullanın.",
       "status": "machine"

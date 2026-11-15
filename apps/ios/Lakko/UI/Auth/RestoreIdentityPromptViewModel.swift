@@ -80,6 +80,12 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// Base64 account id for the restore-via-device panel.
     public let accountIdB64: String
 
+    /// G-56 (UX identity-recovery section 8a) — the variant for a device that
+    /// holds the keys but not the account's EARLIER keys
+    /// (``AuthState/needsEarlierKeys(_:)``): only "Another device" and the
+    /// reset; the passkey, phrase and email rows bring keys this device has.
+    public let earlierKeys: Bool
+
     /// Raw 16-byte account id decoded from ``accountIdB64``; `nil`
     /// only on a malformed stored marker.
     public var accountIdBytes: Data? {
@@ -93,12 +99,14 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         repository: AuthRepository,
         username: String,
         accountIdB64: String,
+        earlierKeys: Bool = false,
         noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void = { _ in },
         keepAddress: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         self.repository = repository
         self.username = username
         self.accountIdB64 = accountIdB64
+        self.earlierKeys = earlierKeys
         self.resetProof = FreshAuthProofModel(surface: .reset, repository: repository)
         self.email = EmailRecoverModel(
             ports: .live(repository: repository, noteOwnAction: noteOwnAction, keepAddress: keepAddress),
@@ -115,6 +123,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// supported on every iOS version this app runs on, so the passkey row
     /// depends only on whether the account has a passkey that carries keys.
     public var methods: [Method] {
+        if earlierKeys { return [.device] }
         let rows = RestoreKeysRows.decide(protection)
         return Method.allCases.filter { method in
             switch method {
@@ -134,14 +143,27 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// The email-code route, with the username pre-filled.
     let email: EmailRecoverModel
 
+    /// G-56 contract 4.2 — while the parked screen is in the foreground the
+    /// device looks for the earlier keys every 5 minutes (chosen, not
+    /// measured). No progress, no counter.
+    public static let earlierKeysRetryInterval: UInt64 = 5 * 60 * 1_000_000_000
+
+    /// One look for the earlier keys (the backup, the account's own link).
+    public func retryEarlierKeys() async {
+        guard earlierKeys else { return }
+        await repository.retryEarlierKeys()
+    }
+
     /// Read the account's protection with the parked session.
     public func loadProtection() async {
+        guard !earlierKeys else { return }
         if let status = await repository.protectionForPendingRestore() { protection = status }
     }
 
     /// Ask which of the account's passkeys carry keys (with the parked
     /// session token).
     public func loadPasskeysWithKeys() async {
+        guard !earlierKeys else { return }
         passkeysWithKeys = await repository.passkeysWithKeysForPendingRestore()
     }
 
@@ -181,7 +203,8 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         defer { outcome.wipeEntropy() }
         try await repository.completeFromPairing(
             phraseEntropy: outcome.phraseEntropy,
-            session: outcome.session
+            session: outcome.session,
+            predecessors: outcome.predecessors
         )
     }
 

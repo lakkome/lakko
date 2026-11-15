@@ -123,7 +123,7 @@ enum AccountLocalDataWipe {
         // derived from the account seed (the conversation seed), not from any
         // id, so they are read here, before the steps below delete the seeds,
         // for the founding marks of steps 3 and 6.
-        let lineageAccount = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64)
+        let lineageAccount = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64, conversationKeys: nil)
             .flatMap { try? Identity.fromSeed(seed: $0) }
         let deviceGroupJournalHex = lineageAccount.map {
             DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: $0))
@@ -179,6 +179,9 @@ enum AccountLocalDataWipe {
         step("key-rotation-owed") { KeyRotationStore().clear(accountIdB64: accountIdB64) }
         step("key-rotation-pending") { KeychainKeyRotationPendingStore().clear(accountIdB64: accountIdB64) }
         step("own-predecessor-seed") { KeychainOwnPredecessorStore().clear(accountIdB64: accountIdB64) }
+        // G-56 — the recorded own conversation key goes with the seeds.
+        step("own-conversation-key") { KeychainOwnConversationKeyStore().clear(accountIdB64: accountIdB64) }
+        step("joined-device-group-id") { JoinedDeviceGroupIdStore().clear(accountIdB64: accountIdB64) }
         step("keys-rotated-notice") { KeysRotatedNoticeStore().clear(accountIdB64: accountIdB64) }
         step("profile-resend-owed") { ProfileResendOwed.Store().clear(accountIdB64: accountIdB64) }
         step("predecessor-inbox-cursor") {

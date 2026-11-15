@@ -229,6 +229,66 @@ final class MessageTranslationTests: XCTestCase {
     }
 }
 
+// MARK: - An unsure guess that cannot end on a correctable line
+
+extension MessageTranslationTests {
+
+    private func guess(_ tag: String, _ permille: UInt16) -> (String) -> DetectedLanguage? {
+        { _ in DetectedLanguage(tag: tag, confidencePermille: permille) }
+    }
+
+    func testAnUnsureGuessOfTheTargetLanguageOpensThePickerWithItMarked() async {
+        let engine = FakeTranslationEngine()
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("en", 100)
+        center.translate(conversation: conversation, message: message(10, "ok"), askLanguage: true)
+        await eventually { center.pickerRequest != nil }
+        XCTAssertEqual(center.pickerRequest?.marked, "en")
+        XCTAssertTrue(center.pickerRequest?.languages.contains("en") ?? false, "the guess is listed to be seen")
+        XCTAssertNil(center.phase(conversation: conversation, messageId: 10), "no 'already in' line")
+        XCTAssertEqual(engine.translateCalls, 0)
+    }
+
+    func testAnUnsureGuessTheEngineCannotTranslateFromOpensThePickerWithItMarked() async {
+        let engine = FakeTranslationEngine(state: .unavailable)
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("es", 100)
+        center.translate(conversation: conversation, message: message(10, "hola"))
+        await eventually { center.pickerRequest != nil }
+        XCTAssertEqual(center.pickerRequest?.marked, "es")
+        XCTAssertNil(center.phase(conversation: conversation, messageId: 10), "no 'Can't translate from' line")
+    }
+
+    func testAnUnsureGuessTheEngineCanDoTranslatesAtOnce() async {
+        let engine = FakeTranslationEngine()
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("es", 100)
+        center.translate(conversation: conversation, message: message(10, "hola"), askLanguage: true)
+        await eventually {
+            if case .translated(_, let source) = center.phase(conversation: conversation, messageId: 10) {
+                return source == "es"
+            }
+            return false
+        }
+        XCTAssertNil(center.pickerRequest)
+    }
+
+    func testAConfidentSourceKeepsTheExistingLines() async {
+        let sameEngine = FakeTranslationEngine()
+        let (same, _) = makeCenter(translation: sameEngine)
+        same.detect = guess("en", 990)
+        same.translate(conversation: conversation, message: message(10, "hello there"))
+        await eventually { same.phase(conversation: conversation, messageId: 10) == .sameLanguage("en") }
+        XCTAssertNil(same.pickerRequest)
+
+        let (cannot, _) = makeCenter(translation: FakeTranslationEngine(state: .unavailable))
+        cannot.detect = guess("es", 990)
+        cannot.translate(conversation: conversation, message: message(11, "hola"))
+        await eventually { cannot.phase(conversation: conversation, messageId: 11) == .unsupported("es") }
+        XCTAssertNil(cannot.pickerRequest)
+    }
+}
+
 // MARK: - Fakes
 
 @MainActor

@@ -98,6 +98,43 @@ pub fn build_pairing_qr(
     )?)
 }
 
+/// G-56 — the pairing payload of [`build_pairing_qr`] carrying this device's
+/// self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137 bytes) for
+/// `key_package`; an empty proof is the plain payload. Used by a device that
+/// is already in the account's DeviceGroup and pairs again under the same
+/// device identity: the confirming device replaces its leaf in one commit
+/// (`replaceDeviceAt`) once `deviceGroupSelfRemovalCovers` holds. Not sealed,
+/// like every pairing payload.
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] on a wrong-length handle, rendezvous pseudonym or
+/// proof, or a `device_card_envelope` longer than 270 bytes.
+#[uniffi::export(default(device_card_envelope = None))]
+pub fn build_pairing_qr_with_self_removal_proof(
+    login_handle: Vec<u8>,
+    key_package: Vec<u8>,
+    rendezvous_pseudonym: Vec<u8>,
+    self_removal_proof: Vec<u8>,
+    device_card_envelope: Option<Vec<u8>>,
+) -> Result<Vec<u8>, FfiError> {
+    let handle = handle_array(&login_handle, "login_handle")?;
+    let rendezvous: inner::RendezvousPseudonym =
+        rendezvous_pseudonym.as_slice().try_into().map_err(|_| {
+            FfiError::Codec(format!(
+                "rendezvous_pseudonym must be {} bytes",
+                inner::RENDEZVOUS_PSEUDONYM_LEN,
+            ))
+        })?;
+    Ok(inner::encode_with_self_removal_proof(
+        &handle,
+        &key_package,
+        &rendezvous,
+        device_card_envelope.as_deref().unwrap_or_default(),
+        &self_removal_proof,
+    )?)
+}
+
 /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus,
 /// when the journal names an epoch, the device's self-removal proof
 /// (`signDeviceGroupSelfRemoval`, exactly 137 bytes) for `key_package`; an
@@ -219,6 +256,32 @@ mod tests {
         let got = parse_pairing_qr(wire, handle).unwrap();
         assert_eq!(got.key_package, vec![7u8; 64]);
         assert_eq!(got.rendezvous_pseudonym, vec![9u8; 32]);
+    }
+
+    /// G-56 — the plain payload with a self-removal proof parses back with
+    /// it; a proof of the wrong length is refused.
+    #[test]
+    fn a_payload_with_a_self_removal_proof_round_trips() {
+        let handle = vec![0x11u8; 32];
+        let proof = vec![0x5au8; lakko_mls::SELF_REMOVAL_PROOF_LEN];
+        let wire = build_pairing_qr_with_self_removal_proof(
+            handle.clone(),
+            vec![7u8; 64],
+            vec![9u8; 32],
+            proof.clone(),
+            None,
+        )
+        .unwrap();
+        let got = parse_pairing_qr(wire, handle.clone()).unwrap();
+        assert_eq!(got.self_removal_proof, Some(proof));
+        assert!(build_pairing_qr_with_self_removal_proof(
+            handle,
+            vec![7u8; 64],
+            vec![9u8; 32],
+            vec![0u8; 3],
+            None,
+        )
+        .is_err());
     }
 
     fn card() -> crate::device_card::FfiDeviceCard {

@@ -187,6 +187,7 @@ public class RestoreIdentityPromptViewModel(
             phraseEntropy = outcome.phraseEntropy,
             session = outcome.session,
             flowWipes = outcome.wipes,
+            predecessors = outcome.predecessors,
         )
     }
 

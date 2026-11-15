@@ -323,22 +323,10 @@ final class PairedAfterRotationTests: XCTestCase {
 
     // MARK: - The conversation binding
 
-    func testTheBindingVerdictTable() {
-        let current = Data(repeating: 3, count: 32)
-        let old = [Data(repeating: 1, count: 32), Data(repeating: 2, count: 32)]
-        func verdict(_ bound: Data?, _ predecessors: [Data], holds: Bool = false) -> OwnAccountKeys.BindingVerdict {
-            OwnAccountKeys.bindingVerdict(
-                boundKey: bound, currentKey: current, predecessorKeys: predecessors, holdsConversations: holds)
-        }
-        XCTAssertEqual(verdict(nil, []), .mint)
-        XCTAssertEqual(verdict(nil, old), .mint)
-        XCTAssertEqual(verdict(current, []), .keep, "an account that never rotated")
-        XCTAssertEqual(verdict(old[0], old), .keep, "a kept device stays under the old key")
-        XCTAssertEqual(verdict(old[1], old, holds: true), .keep)
-        XCTAssertEqual(verdict(current, old), .remint, "minted before the bundle arrived, no conversation yet")
-        XCTAssertEqual(verdict(current, old, holds: true), .keepUnderCurrentKey)
-        XCTAssertEqual(verdict(Data(repeating: 9, count: 32), old), .mint, "another account's key (a reset)")
+    // The binding verdict table moved to ``EarlierKeysGateTests`` (G-56: the
+    // core's `ownBindingVerdict`, the shared 17 vectors).
 
+    func testTheConversationSeedIsTheOldestPredecessor() {
         XCTAssertEqual(
             OwnAccountKeys.conversationSeed(currentSeed: seed(3), predecessorSeeds: [seed(1), seed(2)]), seed(1))
         XCTAssertEqual(OwnAccountKeys.conversationSeed(currentSeed: seed(3), predecessorSeeds: []), seed(3))

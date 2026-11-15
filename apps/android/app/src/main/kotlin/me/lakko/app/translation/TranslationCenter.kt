@@ -23,7 +23,6 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.ConversationBarInput
 import uniffi.lakko_ffi_uniffi.DetectedLanguage
 import uniffi.lakko_ffi_uniffi.TranslateOffer
-import uniffi.lakko_ffi_uniffi.TranslateOfferInput
 import uniffi.lakko_ffi_uniffi.TranslationEngineState
 import uniffi.lakko_ffi_uniffi.canonicalLanguageTag
 import uniffi.lakko_ffi_uniffi.conversationBarLanguage
@@ -93,6 +92,8 @@ public data class PackPrompt(
 public data class PickerPrompt(
     val kind: PackKind,
     val options: List<String>,
+    /** Checked in the list: the language shown now, or the detector's guess. */
+    val marked: String? = null,
     internal val messageKey: String,
     internal val conversation: String,
     internal val opId: Long,
@@ -160,9 +161,9 @@ public object TranslationCenter {
     private val mutablePicker = MutableStateFlow<PickerPrompt?>(null)
     public val picker: StateFlow<PickerPrompt?> = mutablePicker.asStateFlow()
 
-    /** Detections by message key (empty while there is no detector). */
-    private val mutableDetections = MutableStateFlow<Map<String, DetectedLanguage>>(emptyMap())
-    public val detections: StateFlow<Map<String, DetectedLanguage>> = mutableDetections.asStateFlow()
+    /** Detections by message key, one per message version (UX 3.1, 3.6). */
+    private val messageDetections = MessageDetections()
+    public val detections: StateFlow<Map<String, DetectedLanguage>> = messageDetections.detections
 
     private val jobs = HashMap<String, Job>()
 
@@ -173,6 +174,7 @@ public object TranslationCenter {
         if (appContext != null) return
         appContext = ctx
         settingsStore = TranslationSettingsStore(ctx).also { mutableSettings.value = it.load() }
+        detector = CoreLanguageDetector
         translation = translationEngineFor(ctx) { antiCensorshipArmed() }
         transcription = transcriptionEngineFor(ctx)
         onUnmeteredNetwork = { unmetered(ctx) }
@@ -185,7 +187,7 @@ public object TranslationCenter {
         if (this.accountIdB64 == accountIdB64) return
         this.accountIdB64 = accountIdB64
         mutableUi.value = emptyMap()
-        mutableDetections.value = emptyMap()
+        messageDetections.clear()
         scope.launch {
             val loaded = SealedTranslationStore.load(context, accountIdB64)
             storeLock.withLock { if (this@TranslationCenter.accountIdB64 == accountIdB64) mutableStore.value = loaded }
@@ -201,7 +203,7 @@ public object TranslationCenter {
         }
         mutableStore.value = TranslationStoreState()
         mutableUi.value = emptyMap()
-        mutableDetections.value = emptyMap()
+        messageDetections.clear()
         mutablePack.value = null
         mutablePicker.value = null
     }
@@ -273,12 +275,12 @@ public object TranslationCenter {
      * detection, else the language chosen for this conversation (UX 3.4:
      * "remembered for the conversation"), else nothing.
      */
-    private fun knownSource(conversation: String, key: String): DetectedLanguage? {
-        val d = mutableDetections.value[key]
-        if (d != null && d.confidencePermille >= translationDetectionConfidentPermille()) return d
-        val chosen = choices(conversation).translationSource ?: return d
-        return DetectedLanguage(chosen, 1000.toUShort())
-    }
+    private fun knownSource(conversation: String, key: String): DetectedLanguage? =
+        SourceRules.known(
+            detections.value[key],
+            choices(conversation).translationSource,
+            translationDetectionConfidentPermille().toInt(),
+        )
 
     /** UX 3.1 — whether the menu offers `Translate` for this message. */
     public fun translateOffer(conversation: String, messageId: Long, text: String, isOwn: Boolean): TranslateOffer {
@@ -291,14 +293,7 @@ public object TranslationCenter {
             scope.launch { pairState(canonicalLanguageTag(detected.tag) ?: detected.tag, target) }
         }
         return translationOffered(
-            TranslateOfferInput(
-                enabled = settings.value.showTranslate,
-                hasText = text.isNotBlank(),
-                isOwn = isOwn,
-                detected = detected,
-                engineForDetected = pair ?: TranslationEngineState.UNAVAILABLE,
-                anyEngine = cap.translation,
-            ),
+            SourceRules.offerInput(settings.value.showTranslate, text, isOwn, detected, pair, cap.translation),
             reading(),
         )
     }
@@ -320,7 +315,7 @@ public object TranslationCenter {
 
     /** UX 3.6 — the language the bar names, or `null`. */
     public fun barLanguage(conversation: String, recentIncomingKeys: List<String>): String? {
-        val det = mutableDetections.value
+        val det = detections.value
         val recent = recentIncomingKeys.mapNotNull { det[it] }
         val c = choices(conversation)
         val lang = conversationBarLanguage(
@@ -340,15 +335,15 @@ public object TranslationCenter {
         return if (st == TranslationEngineState.UNAVAILABLE) null else lang
     }
 
-    /** Run the detector on a message once (a no-op without a detector). */
+    /**
+     * Run the detector on a shown message, once per version: again only when
+     * its text changed (a no-op without a detector).
+     */
     public fun detect(conversation: String, messageId: Long, text: String) {
-        if (detector === NoLanguageDetector || text.isBlank()) return
+        val d = detector
+        if (d === NoLanguageDetector || text.isBlank()) return
         val key = TranslationStoreState.messageKey(conversation, messageId)
-        if (mutableDetections.value.containsKey(key)) return
-        scope.launch {
-            val d = detector.detect(text) ?: return@launch
-            mutableDetections.update { it + (key to d) }
-        }
+        scope.launch { messageDetections.detect(key, text, d) }
     }
 
     // ---------------------------------------------------------------------
@@ -381,11 +376,17 @@ public object TranslationCenter {
         val target = target()
         val source = explicitSource
             ?: knownSource(conversation, key)?.tag?.let { canonicalLanguageTag(it) ?: it }
-        if (source == null) {
-            openPicker(PackKind.TRANSLATION, conversation, key, opId, text, null)
+        val guess = explicitSource == null && SourceRules.isUnsureGuess(
+            detections.value[key],
+            choices(conversation).translationSource,
+            translationDetectionConfidentPermille().toInt(),
+        )
+        val first = SourceRules.tap(source, guess, source != null && sameLanguage(source, target), null)
+        if (first is TapAction.Picker) {
+            openPicker(PackKind.TRANSLATION, conversation, key, opId, text, null, first.marked)
             return
         }
-        if (sameLanguage(source, target)) {
+        if (first is TapAction.AlreadyIn) {
             setLine(key, opId, TranslateLine.SameLanguage(target))
             scope.launch {
                 delay(SAME_LANGUAGE_MS)
@@ -396,6 +397,7 @@ public object TranslationCenter {
             }
             return
         }
+        if (source == null) return // unreachable: no source is a Picker
         val stored = storedTranslation(conversation, messageId, opId)
         if (stored != null && sameLanguage(stored.source, source)) {
             setLine(key, opId, TranslateLine.Shown(stored.source, stored.text))
@@ -403,19 +405,26 @@ public object TranslationCenter {
         }
         launchFor("t:$key") {
             setLine(key, opId, TranslateLine.Translating(source))
-            when (pairState(source, target)) {
+            val state = pairState(source, target)
+            val then = SourceRules.tap(source, guess, false, state)
+            if (then is TapAction.Picker) {
+                setLine(key, opId, null)
+                openPicker(PackKind.TRANSLATION, conversation, key, opId, text, null, then.marked)
+                return@launchFor
+            }
+            when (state) {
                 TranslationEngineState.UNAVAILABLE -> setLine(key, opId, TranslateLine.Unsupported(source))
                 TranslationEngineState.NEEDS_PACK -> {
                     setLine(key, opId, null)
                     textFor[key] = text
                     promptPack(PackKind.TRANSLATION, source, key, opId) { translation.packSize(source, target) }
                 }
-                TranslationEngineState.READY -> runTranslation(conversation, key, opId, text, source, target)
+                TranslationEngineState.READY -> runTranslation(key, opId, text, source, target)
             }
         }
     }
 
-    private suspend fun runTranslation(conversation: String, key: String, opId: Long, text: String, source: String, target: String) {
+    private suspend fun runTranslation(key: String, opId: Long, text: String, source: String, target: String) {
         val out = translation.translate(text, source, target)
         if (out == null) {
             Log.w(TAG, "translation failed code=engine")
@@ -424,10 +433,9 @@ public object TranslationCenter {
         }
         setLine(key, opId, TranslateLine.Shown(source, out))
         mutateStore { it.withTranslation(key, StoredTranslation(opId, source, target, out)) }
-        // UX 3.4 — a picked source is remembered for the conversation.
-        if (choices(conversation).translationSource == null) {
-            setChoices(conversation) { it.copy(translationSource = source) }
-        }
+        // UX 3.4 — only a source picked in the picker is remembered for the
+        // conversation (`choosePicked`); a detected one is not, or a guess
+        // would decide the next message's language.
     }
 
     /** UX 3.7 — translate as shown, when the source is known and ready. */
@@ -446,7 +454,7 @@ public object TranslationCenter {
         launchFor("t:$key") {
             if (pairState(source, target()) != TranslationEngineState.READY) return@launchFor
             setLine(key, opId, TranslateLine.Translating(source))
-            runTranslation(conversation, key, opId, text, source, target())
+            runTranslation(key, opId, text, source, target())
         }
     }
 
@@ -462,16 +470,39 @@ public object TranslationCenter {
 
     /** `Not Spanish?` */
     public fun pickSource(conversation: String, messageId: Long, opId: Long, text: String, ref: AttachmentRef?, kind: PackKind) {
-        openPicker(kind, conversation, TranslationStoreState.messageKey(conversation, messageId), opId, text, ref)
+        val key = TranslationStoreState.messageKey(conversation, messageId)
+        // `Not Spanish?`: the language shown now is the checked row.
+        val shown = when (val line = mutableUi.value[key]?.takeIf { it.opId == opId }?.translation) {
+            is TranslateLine.Shown -> line.source
+            else -> null
+        }
+        openPicker(kind, conversation, key, opId, text, ref, if (kind == PackKind.TRANSLATION) shown else null)
     }
 
-    private fun openPicker(kind: PackKind, conversation: String, key: String, opId: Long, text: String, ref: AttachmentRef?) {
+    private fun openPicker(
+        kind: PackKind,
+        conversation: String,
+        key: String,
+        opId: Long,
+        text: String,
+        ref: AttachmentRef?,
+        marked: String? = null,
+    ) {
         scope.launch {
             val options = when (kind) {
                 PackKind.TRANSLATION -> translation.sources(target())
                 PackKind.TRANSCRIPTION -> transcription.languages()
             }.mapNotNull { canonicalLanguageTag(it) }.distinct()
-            mutablePicker.value = PickerPrompt(kind, options, key, conversation, opId, text, ref)
+            mutablePicker.value = PickerPrompt(
+                kind,
+                options,
+                marked?.let { canonicalLanguageTag(it) ?: it },
+                key,
+                conversation,
+                opId,
+                text,
+                ref,
+            )
         }
     }
 

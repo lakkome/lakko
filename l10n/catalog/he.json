@@ -8177,6 +8177,14 @@
       "text": "מכשיר שעדיין מחובר מציג קוד בן שש ספרות; הקלידו אותו כאן. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "פתחו את Lakko במכשיר שעדיין מחובר.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "התחברתם בתור {username}, אבל במכשיר הזה עדיין אין את המפתחות שהשיחות שלכם משתמשות בהם. העבירו אותם ממכשיר אחר שעדיין מחובר.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "יש בעיה בחשבון שנשמר במכשיר הזה. התנתקו והתחברו שוב, או השתמשו בביטוי השחזור.",
       "status": "machine"

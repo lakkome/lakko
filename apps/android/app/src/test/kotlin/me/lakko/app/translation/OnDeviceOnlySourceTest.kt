@@ -77,6 +77,14 @@ class OnDeviceOnlySourceTest {
     }
 
     @Test
+    fun `no source reaches the platform text classifier's language detection`() {
+        // ADR-0082 section 1: `TextClassifier` may run in an OEM process. The
+        // language of a message comes from the shared core (CoreLanguageDetector).
+        val bad = Regex("""TextClassificationManager|TextClassifier|(?<![A-Za-z])TextLanguage\b|\.detectLanguage\s*\(""")
+        assertEquals(emptyList<String>(), offenders { bad.containsMatchIn(it) })
+    }
+
+    @Test
     fun `the fallback engine is silent while anti-censorship is on`() {
         val engine = sources.single { it.name == "MlKitTranslationEngine.kt" }
         val code = codeLines(engine).joinToString("\n")

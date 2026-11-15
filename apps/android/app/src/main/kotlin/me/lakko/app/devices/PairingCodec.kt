@@ -66,12 +66,26 @@ public object PairingCodec {
         keyPackage: ByteArray,
         rendezvousPseudonym: ByteArray,
         deviceCardEnvelope: ByteArray? = null,
-    ): ByteArray = buildPairingQr(
-        loginHandle = loginHandle,
-        keyPackage = keyPackage,
-        rendezvousPseudonym = rendezvousPseudonym,
-        deviceCardEnvelope = deviceCardEnvelope,
-    )
+        /** G-56 — a device already in the account's DeviceGroup pairing
+         *  again carries its self-removal proof for `keyPackage`; `null` or
+         *  empty for none. */
+        selfRemovalProof: ByteArray? = null,
+    ): ByteArray = if (selfRemovalProof == null || selfRemovalProof.isEmpty()) {
+        buildPairingQr(
+            loginHandle = loginHandle,
+            keyPackage = keyPackage,
+            rendezvousPseudonym = rendezvousPseudonym,
+            deviceCardEnvelope = deviceCardEnvelope,
+        )
+    } else {
+        uniffi.lakko_ffi_uniffi.buildPairingQrWithSelfRemovalProof(
+            loginHandle = loginHandle,
+            keyPackage = keyPackage,
+            rendezvousPseudonym = rendezvousPseudonym,
+            selfRemovalProof = selfRemovalProof,
+            deviceCardEnvelope = deviceCardEnvelope,
+        )
+    }
 
     /**
      * ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload

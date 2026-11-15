@@ -923,6 +923,25 @@ public class ChatRepository(
         return current to rows.map { it.signaturePubkey.copyOf() }.also { rows.forEach { row -> row.zero() } }
     }
 
+    /** The seed of this account's own identity whose key is [key] (an own
+     *  predecessor, or the current one), a fresh copy; `null` when neither. */
+    private fun ownSeedNamed(accountIdB64: String, currentSeed: ByteArray, key: ByteArray): ByteArray? {
+        val rows = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        try {
+            rows.firstOrNull { it.signaturePubkey.contentEquals(key) }?.let { return it.phraseSeed.copyOf() }
+        } finally {
+            rows.forEach { it.zero() }
+        }
+        return me.lakko.app.auth.SessionSecretWipe.use(currentSeed) { seed ->
+            val matches = Identity.fromSeed(seed).use { it.signaturePublicKey().contentEquals(key) }
+            if (matches) seed.copyOf() else null
+        }
+    }
+
     /** The identity of this account whose key is [key]: an own predecessor,
      *  or the current one. `null` when it is neither. */
     private fun ownIdentityNamed(accountIdB64: String, currentSeed: ByteArray, key: ByteArray): Identity? {
@@ -1002,14 +1021,33 @@ public class ChatRepository(
         // the account key. A missing device seed falls back to a second unbound
         // instance of the account identity (the pre-ADR-0050 behaviour).
         val ownKeys = ownBindingKeys(newAccountIdB64, secrets.accountIdentitySeed)
-        val identity = me.lakko.app.auth.SessionIdentities.deviceIdentity(
-            applicationContext,
-            newAccountIdB64,
-            conversationIdentity,
-            currentKey = ownKeys.first,
-            predecessorKeys = ownKeys.second,
-            holdsConversations = knownGroupsStore.load(newAccountIdB64).isNotEmpty(),
-        ) ?: me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { current ->
+        // G-56: the account's own conversation link as the auth gate last read
+        // it. A `wait` throws [me.lakko.app.auth.EarlierKeysMissing] before
+        // anything is minted, stored or published (the gate parks the device
+        // first; this is defence in depth).
+        val recordedLink = me.lakko.app.auth.linkOfRecord(
+            try {
+                me.lakko.app.auth.OwnConversationKeyStore.onDevice(applicationContext).load(newAccountIdB64)
+            } catch (_: Throwable) {
+                null
+            },
+        )
+        val identity = try {
+            me.lakko.app.auth.SessionIdentities.deviceIdentity(
+                applicationContext,
+                newAccountIdB64,
+                conversationIdentity,
+                currentKey = ownKeys.first,
+                predecessorKeys = ownKeys.second,
+                holdsConversations = knownGroupsStore.load(newAccountIdB64).isNotEmpty(),
+                link = recordedLink,
+                seedOfKey = { key -> ownSeedNamed(newAccountIdB64, secrets.accountIdentitySeed, key) },
+            )
+        } catch (missing: me.lakko.app.auth.EarlierKeysMissing) {
+            keyPackageAccount.compareAndSet(publishAccount, null)
+            conversationIdentity.close()
+            throw missing
+        } ?: me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { current ->
             me.lakko.app.auth.conversationAccountSeedOf(applicationContext, newAccountIdB64, current)
         }.let { seed ->
             try {

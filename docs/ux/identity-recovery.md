@@ -421,6 +421,64 @@ Log out
 - **Log out** leaves the screen without changing anything.
 - States per route: the shared table of section 2.
 
+## 8a. Restore your keys: the earlier keys are missing (2026-11-15)
+
+ADR-0074, "Joining after a rotation". After the account's keys were changed,
+its chats keep using the keys from before the change. A device that signs in
+or is restored after that, and does not yet hold those earlier keys, does
+not open the app: it would join chats under the wrong keys and never reach
+the account's existing ones. It shows a variant of the section-8 screen
+instead, on every route (sign-in, the phrase, an email code, a passkey,
+another device).
+
+```
+Restore your keys
+
+You are logged in as @name, but this device does not have the
+keys your chats use yet. Bring them from another device that is
+still logged in.
+
+  [devices]  Another device                 >
+             Open Lakko on a device that is still logged in.
+
+  I have none of these  v
+
+Log out
+```
+
+- **Another device** is the section-3 flow without the username field, as
+  on the section-8 screen. The keys come with it; when it succeeds the app
+  opens.
+- **Passkey and Recovery phrase are not on this screen.** Both bring the
+  keys this device already has.
+- **No progress, no counter, no time limit.** The device also looks for the
+  earlier keys by itself (its saved copy, at start and every few minutes
+  while the screen is open); when it finds them the screen gives way to the
+  app with no message. A failed look is not shown.
+- **I have none of these** expands to the same **Reset account keys** panel
+  as section 8 (warning of section 15.1, typed confirmation, then 9.1).
+- **Log out** as in section 8.
+- Relaunching the app on this device returns to this screen until the keys
+  arrive.
+
+Copy (new catalog keys; `security_critical` like the section-8 lede):
+
+| Key | English |
+|---|---|
+| `restore_identity.earlier_keys.lede` | "You are logged in as {username}, but this device does not have the keys your chats use yet. Bring them from another device that is still logged in." |
+| `restore_identity.earlier_keys.another_device.sub` | "Open Lakko on a device that is still logged in." |
+
+The title, the row title, "I have none of these" and "Log out" reuse the
+section-8 keys.
+
+Data the UI needs: the parked reason (earlier keys missing, as opposed to no
+keys at all), the username. Nothing about the keys themselves is shown.
+
+Cross-platform shape: one parked state on all three, rendered by the existing
+restore-prompt screen (web `auth/RestoreIdentityPrompt.tsx`, iOS
+`UI/Auth/RestoreIdentityPromptScreen.swift`, Android
+`ui/auth/RestoreIdentityPrompt.kt`) with the rows of this section.
+
 ## 9. The phrase at signup
 
 Up to three steps after the account form, the same on all three clients,

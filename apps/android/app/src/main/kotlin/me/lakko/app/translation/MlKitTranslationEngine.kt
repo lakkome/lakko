@@ -42,10 +42,11 @@ internal class MlKitTranslationEngine(
 
     /** ML Kit's code for a tag, or `null` when it has no model for it. */
     private fun code(tag: String): String? {
-        val canonical = canonicalLanguageTag(tag) ?: return null
+        val canonical = canonicalLanguageTag(PlatformLanguageTags.fromPlatform(tag)) ?: return null
         // ML Kit's Chinese is Simplified; it has no Traditional model.
         if (canonical.endsWith("-Hant")) return null
-        return TranslateLanguage.fromLanguageTag(canonical.substringBefore('-'))
+        // The core's `nb` is ML Kit's `no` (PlatformLanguageTags).
+        return TranslateLanguage.fromLanguageTag(PlatformLanguageTags.toMlKit(canonical))
     }
 
     private suspend fun downloaded(): Set<String> =
@@ -76,7 +77,7 @@ internal class MlKitTranslationEngine(
     override suspend fun sources(target: String): List<String> {
         if (antiCensorshipArmed()) return emptyList()
         val t = code(target) ?: return emptyList()
-        return TranslateLanguage.getAllLanguages().filter { it != t }
+        return TranslateLanguage.getAllLanguages().filter { it != t }.map { PlatformLanguageTags.fromPlatform(it) }
     }
 
     override suspend fun translate(text: String, source: String, target: String): String? {
@@ -130,7 +131,7 @@ internal class MlKitTranslationEngine(
 
     override suspend fun installedPacks(): List<PackInfo> =
         downloaded().map {
-            PackInfo(it, null, forTranslation = true, forTranscription = false, managedBySystem = false)
+            PackInfo(PlatformLanguageTags.fromPlatform(it), null, forTranslation = true, forTranscription = false, managedBySystem = false)
         }
 
     override suspend fun removePack(language: String): Boolean {

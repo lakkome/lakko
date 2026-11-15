@@ -67,11 +67,18 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
     override suspend fun available(): Boolean =
         capabilities().any { stateOf(it) != TranslationEngineState.UNAVAILABLE }
 
+    /** A locale the service reported, in the tag form the core uses. */
+    private fun tagOf(locale: ULocale): String = PlatformLanguageTags.fromPlatform(locale.toLanguageTag())
+
+    /** The service's capabilities for a pair, whatever it calls the languages. */
+    private fun matching(all: Set<TranslationCapability>, source: String, target: String): List<TranslationCapability> {
+        val s = PlatformLanguageTags.fromPlatform(source)
+        val t = PlatformLanguageTags.fromPlatform(target)
+        return all.filter { sameLanguage(tagOf(it.sourceSpec.locale), s) && sameLanguage(tagOf(it.targetSpec.locale), t) }
+    }
+
     override suspend fun state(source: String, target: String): TranslationEngineState {
-        val match = capabilities().filter {
-            sameLanguage(it.sourceSpec.locale.toLanguageTag(), source) &&
-                sameLanguage(it.targetSpec.locale.toLanguageTag(), target)
-        }
+        val match = matching(capabilities(), source, target)
         return when {
             match.any { stateOf(it) == TranslationEngineState.READY } -> TranslationEngineState.READY
             match.any { stateOf(it) == TranslationEngineState.NEEDS_PACK } -> TranslationEngineState.NEEDS_PACK
@@ -81,15 +88,23 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
 
     override suspend fun sources(target: String): List<String> =
         capabilities()
-            .filter { sameLanguage(it.targetSpec.locale.toLanguageTag(), target) && stateOf(it) != TranslationEngineState.UNAVAILABLE }
-            .map { it.sourceSpec.locale.toLanguageTag() }
+            .filter {
+                sameLanguage(tagOf(it.targetSpec.locale), PlatformLanguageTags.fromPlatform(target)) &&
+                    stateOf(it) != TranslationEngineState.UNAVAILABLE
+            }
+            .map { tagOf(it.sourceSpec.locale) }
             .distinct()
 
     private suspend fun translator(source: String, target: String): android.view.translation.Translator? {
         val m = manager() ?: return null
+        // The locales as the service itself names them (`nb` may be `no`,
+        // `tl` may be `fil` there), else the tags as given.
+        val match = matching(capabilities(), source, target).firstOrNull()
+        val sourceLocale = match?.sourceSpec?.locale ?: ULocale.forLanguageTag(source)
+        val targetLocale = match?.targetSpec?.locale ?: ULocale.forLanguageTag(target)
         val ctx = TranslationContext.Builder(
-            TranslationSpec(ULocale.forLanguageTag(source), TranslationSpec.DATA_FORMAT_TEXT),
-            TranslationSpec(ULocale.forLanguageTag(target), TranslationSpec.DATA_FORMAT_TEXT),
+            TranslationSpec(sourceLocale, TranslationSpec.DATA_FORMAT_TEXT),
+            TranslationSpec(targetLocale, TranslationSpec.DATA_FORMAT_TEXT),
         ).build()
         return withTimeoutOrNull(TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
@@ -165,7 +180,7 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
     override suspend fun installedPacks(): List<PackInfo> =
         capabilities()
             .filter { it.state == TranslationCapability.STATE_ON_DEVICE }
-            .map { it.sourceSpec.locale.toLanguageTag() }
+            .map { tagOf(it.sourceSpec.locale) }
             .distinct()
             .map { PackInfo(it, null, forTranslation = true, forTranscription = false, managedBySystem = true) }
 

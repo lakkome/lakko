@@ -3,7 +3,8 @@
 
 import SwiftUI
 
-/// "Restore your keys" (``AuthState/needsRecoveryPhrase(_:)``): the person
+/// "Restore your keys" (``AuthState/needsRecoveryPhrase(_:)``, and its
+/// G-56 variant ``AuthState/needsEarlierKeys(_:)``, UX section 8a): the person
 /// is signed in on a device that does not hold the account's keys, so the
 /// messages cannot be read yet. A list of routes (another device, a passkey
 /// that carries keys, the recovery phrase), each opening its form, and one
@@ -23,6 +24,7 @@ public struct RestoreIdentityPromptScreen: View {
     /// The confirmation-word field has the cursor.
     @FocusState private var resetWordFocused: Bool
     @ObservedObject private var l10n = Localization.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     /// The id the scroll view brings into view above the keyboard.
     private static let resetButtonId = "restore-identity.reset-button"
@@ -110,6 +112,23 @@ public struct RestoreIdentityPromptScreen: View {
         }
         .task { await viewModel.loadPasskeysWithKeys() }
         .task { await viewModel.loadProtection() }
+        .task {
+            // G-56 (UX 8a) — every 5 minutes while this screen is in the
+            // foreground the device looks for the earlier keys itself (the
+            // look at entry and at every start runs in the repository).
+            guard viewModel.earlierKeys else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: RestoreIdentityPromptViewModel.earlierKeysRetryInterval)
+                if Task.isCancelled { return }
+                if scenePhase == .active { await viewModel.retryEarlierKeys() }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Back in the foreground: one look at once.
+            if phase == .active, viewModel.earlierKeys {
+                Task { await viewModel.retryEarlierKeys() }
+            }
+        }
         .onChange(of: method) { _, _ in
             // A stale error from another method should not linger.
             viewModel.clearError()
@@ -150,7 +169,9 @@ public struct RestoreIdentityPromptScreen: View {
             )
         }
 
-        Text(l10n.t("restore_identity.lede", texts: ["username": displayedAccount]))
+        Text(l10n.t(
+            viewModel.earlierKeys ? "restore_identity.earlier_keys.lede" : "restore_identity.lede",
+            texts: ["username": displayedAccount]))
             .font(.subheadline)
             .foregroundStyle(Color.lakkoTextMuted)
 
@@ -179,7 +200,9 @@ public struct RestoreIdentityPromptScreen: View {
                 id: method.rawValue,
                 icon: .smartphoneWaves,
                 title: l10n.t("recovery.method.device.title"),
-                detail: l10n.t("recovery.method.device.sub"))
+                detail: l10n.t(viewModel.earlierKeys
+                    ? "restore_identity.earlier_keys.another_device.sub"
+                    : "recovery.method.device.sub"))
         case .passkey:
             return RecoveryMethodRow(
                 id: method.rawValue,
@@ -277,6 +300,7 @@ public struct RestoreIdentityPromptScreen: View {
                     accountIdB64: viewModel.accountIdB64,
                     loginHandle: handle
                 ),
+                rejoinsHeldLeaf: viewModel.earlierKeys,
                 onRecovered: { outcome in
                     try await viewModel.completeFromPairing(outcome: outcome)
                 }

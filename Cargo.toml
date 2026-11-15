@@ -157,6 +157,14 @@ unicode-segmentation = "1.13"
 # lakko-l10n already uses; Unicode-3.0. Default features keep the compiled
 # data.
 icu_properties = "2"
+# ADR-0082 note of 2026-11-15: on-device text language detection for the
+# clients that have no usable platform detector (Android always; the web when
+# the browser's LanguageDetector is absent or its model is not on the device).
+# Trigram profiles compiled into the crate: no network, no file or other I/O,
+# no unsafe in its source. MIT. Its only non-optional dependency is hashbrown
+# 0.15, already in the lock. Pinned exactly; the optional serde, enum-map and
+# arbitrary features stay off.
+whatlang = { version = "=0.18.0", default-features = false }
 # ADR-0088 noise suppression: the Rust port of xiph's RNNoise, BSD-3-Clause.
 # Pinned exactly; default features (a CLI: clap, hound, dasp) off.
 nnnoiseless = { version = "=0.5.2", default-features = false }

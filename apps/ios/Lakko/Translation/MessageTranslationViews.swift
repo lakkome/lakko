@@ -223,7 +223,7 @@ struct TranslationOverlays: ViewModifier {
                 title: l10n.t("translate.picker.title")
             ) {
                 guard let request = center.pickerRequest else { return [] }
-                return TranslationLanguageChoices.rows(request.languages, checked: nil) { tag in
+                return TranslationLanguageChoices.rows(request.languages, checked: request.marked) { tag in
                     request.choose(tag)
                 }
             }

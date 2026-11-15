@@ -867,7 +867,8 @@ final class DeviceRevocationRepositoryTests: XCTestCase {
             recallOperations: .unreachable,
             ownDeviceId: { _ in device },
             identityKeyMarks: marks,
-            logoutOwed: owed
+            logoutOwed: owed,
+            earlierKeysInputs: skipEarlierKeysGate
         )
         // The launch refresh is not what these tests are about.
         tokens.refresher = { _ in throw URLError(.notConnectedToInternet) }

@@ -75,6 +75,10 @@ final class MessageTranslationCenter: ObservableObject {
         let id = UUID()
         let kind: Kind
         let languages: [String]
+        /// The language shown checked: the detector's unsure guess when the
+        /// picker opened in its place (it was the target language, or the
+        /// engine cannot translate from it).
+        var marked: String? = nil
         let choose: (String) -> Void
     }
 
@@ -210,9 +214,12 @@ final class MessageTranslationCenter: ObservableObject {
 
     // MARK: - Detection
 
+    /// The detector (``MessageLanguageDetector``); a test sets its own.
+    var detect: (String) -> DetectedLanguage? = { MessageLanguageDetector.detect($0) }
+
     private func detection(key: String, text: String) -> DetectedLanguage? {
         if let cached = detections[key], cached.text == text { return cached.detected }
-        let detected = MessageLanguageDetector.detect(text)
+        let detected = detect(text)
         detections[key] = (text, detected)
         return detected
     }
@@ -362,22 +369,79 @@ final class MessageTranslationCenter: ObservableObject {
     }
 
     /// The menu's `Translate`.
+    ///
+    /// The source language, in this order: the language chosen for this
+    /// message, a confident detection, the language last chosen in this
+    /// conversation, then the detector's best guess however unsure. Any of
+    /// them translates at once, and the result line says which language it
+    /// was taken for ("Translated from X · Not X?"). The picker opens when
+    /// there is none of them, not even a guess, and also when the only source
+    /// is an UNSURE guess that is the target language or that the engine
+    /// cannot translate from: those would end on a line with no "Not X?" to
+    /// correct it ("already in ..." / "Can't translate from ..."), so the
+    /// picker opens with the guess marked instead. A confident or chosen
+    /// source keeps those lines. `askLanguage` (the row offered for a guess)
+    /// no longer forces the picker.
     func translate(conversation: String, message: ChatMessage, askLanguage: Bool = false) {
         let (key, text, transcript) = source(conversation: conversation, message: message)
         guard let text, let account else { return }
         let prefs = store.prefs(accountIdB64: account, conversation: conversation)
-        let chosen = prefs.messageSources[String(message.messageId)] ?? prefs.translationSource
         let detected = detection(key: key, text: text)
-        let confident = detected.map { $0.confidencePermille >= translationDetectionConfidentPermille() } ?? false
-        let source: String? = prefs.messageSources[String(message.messageId)]
-            ?? (confident ? detected?.tag : nil)
-            ?? chosen
-        guard !askLanguage, let source else {
+        guard let source = Self.translationSource(
+            messageChoice: prefs.messageSources[String(message.messageId)],
+            detected: detected,
+            conversationChoice: prefs.translationSource) else {
             openPicker(conversation: conversation, message: message)
             return
         }
-        run(key: key, conversation: conversation, messageId: message.messageId, opId: Self.opId(message),
-            text: text, source: source, transcript: transcript)
+        let start = { [weak self] in
+            self?.run(key: key, conversation: conversation, messageId: message.messageId, opId: Self.opId(message),
+                      text: text, source: source.tag, transcript: transcript)
+        }
+        guard source.isUnsureGuess else {
+            start()
+            return
+        }
+        if Self.unsureGuessOpensPicker(guess: source.tag, target: target, engine: nil) {
+            openPicker(conversation: conversation, message: message, marked: source.tag)
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let engine = await self.loadTranslationState(source: source.tag)
+            if Self.unsureGuessOpensPicker(guess: source.tag, target: self.target, engine: engine) {
+                self.openPicker(conversation: conversation, message: message, marked: source.tag)
+            } else {
+                start()
+            }
+        }
+    }
+
+    /// Where `Translate` takes its source from.
+    struct TranslationSource: Equatable {
+        let tag: String
+        /// Only the detector's guess below the confident threshold named it.
+        let isUnsureGuess: Bool
+    }
+
+    /// The source language `Translate` uses (see
+    /// ``translate(conversation:message:askLanguage:)``); `nil` opens the
+    /// picker.
+    static func translationSource(
+        messageChoice: String?, detected: DetectedLanguage?, conversationChoice: String?
+    ) -> TranslationSource? {
+        let confident = detected.map { $0.confidencePermille >= translationDetectionConfidentPermille() } ?? false
+        if let tag = messageChoice ?? (confident ? detected?.tag : nil) ?? conversationChoice {
+            return TranslationSource(tag: tag, isUnsureGuess: false)
+        }
+        return detected.map { TranslationSource(tag: $0.tag, isUnsureGuess: true) }
+    }
+
+    /// Whether an UNSURE guess opens the picker (marked) instead of being
+    /// translated from: it is the target language, or the engine answered
+    /// that it cannot translate from it (`engine` `nil`: not asked yet).
+    static func unsureGuessOpensPicker(guess: String, target: String, engine: TranslationEngineState?) -> Bool {
+        sameLanguage(a: guess, b: target) || engine == .unavailable
     }
 
     /// `Show original`.
@@ -392,11 +456,17 @@ final class MessageTranslationCenter: ObservableObject {
     }
 
     /// `Not Spanish?` — the picker of the languages this device translates from.
-    func openPicker(conversation: String, message: ChatMessage) {
+    /// `marked`: the unsure guess shown checked (listed even when it is the
+    /// target language or one the engine cannot translate from, so the
+    /// person sees what was guessed).
+    func openPicker(conversation: String, message: ChatMessage, marked: String? = nil) {
         Task {
-            let languages = await translationEngine.sourceLanguages()
+            var languages = await translationEngine.sourceLanguages()
                 .filter { !sameLanguage(a: $0, b: target) }
-            pickerRequest = PickerRequest(kind: .translation, languages: languages) { [weak self] tag in
+            if let marked, !languages.contains(where: { sameLanguage(a: $0, b: marked) }) {
+                languages.append(marked)
+            }
+            pickerRequest = PickerRequest(kind: .translation, languages: languages, marked: marked) { [weak self] tag in
                 self?.chooseSource(conversation: conversation, message: message, tag: tag)
             }
         }

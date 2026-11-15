@@ -9,11 +9,13 @@
  *   model in the browser (Chrome 138+ desktop, Edge 148; not Firefox, not
  *   Safari, not mobile, not in workers - developer.chrome.com, checked
  *   2026-10-25).
- * - **Detection**: the `LanguageDetector` API, same availability. Used only
+ * - **Detection**: the `LanguageDetector` API, same availability, used only
  *   when its model is already on the device: detection runs on every
  *   incoming message as it is shown, and nothing is downloaded without the
- *   person choosing to (UX 3.5), so a detector that would need a download is
- *   treated as absent and the menu row falls back to the language picker.
+ *   person choosing to (UX 3.5). Otherwise, which in practice is most of the
+ *   time, the core detector `detectTextLanguage` (wasm,
+ *   `lakko_ui_rules::language_detect`; ADR-0082 note of 2026-11-15) answers.
+ *   It runs in this page on text already decrypted here and sends nothing.
  * - **Transcription**: `SpeechRecognition` with `processLocally = true`, fed
  *   the decoded recording through a Web Audio `MediaStreamTrack`
  *   (`start(audioTrack)`). The draft specification defines `processLocally`
@@ -45,6 +47,7 @@
  * transcription off on this device for good.
  */
 
+import { loadWasm } from "../wasm";
 import {
   engineStateOf,
   permilleOf,
@@ -140,6 +143,21 @@ function globalOf<T>(name: string): T | null {
 
 // ----- translation ----------------------------------------------------------
 
+/**
+ * The tag Chrome's `Translator` takes for a language Lakko names otherwise.
+ *
+ * Chrome's documented list (developer.chrome.com/docs/ai/translator-api,
+ * read 2026-11-15) names Norwegian `no`; the core detector answers `nb`
+ * (Norwegian Bokmal, ADR-0082), so `nb` is asked as `no`. The same list has
+ * neither `tl` nor `fil`, so Tagalog is passed through unchanged and the
+ * browser answers for it whatever it answers. Every other tag is unchanged.
+ */
+export function translatorTag(tag: string): string {
+  const lower = tag.toLowerCase();
+  if (lower === "nb" || lower.startsWith("nb-")) return "no";
+  return tag;
+}
+
 /** The browser `Translator` API, or an engine that offers nothing. */
 export function browserTranslation(api: TranslatorStatic | null = globalOf("Translator")): TranslationEngine {
   if (api === null || typeof api.availability !== "function" || typeof api.create !== "function") {
@@ -154,12 +172,16 @@ export function browserTranslation(api: TranslatorStatic | null = globalOf("Tran
     present: true,
     async state(source, target): Promise<EngineState> {
       try {
-        return engineStateOf(await api.availability({ sourceLanguage: source, targetLanguage: target }));
+        return engineStateOf(
+          await api.availability({ sourceLanguage: translatorTag(source), targetLanguage: translatorTag(target) }),
+        );
       } catch {
         return "unavailable";
       }
     },
-    async translate(source, target, text, options = {}): Promise<string> {
+    async translate(sourceTag, targetTag, text, options = {}): Promise<string> {
+      const source = translatorTag(sourceTag);
+      const target = translatorTag(targetTag);
       const key = `${source}>${target}`;
       let pending = translators.get(key);
       if (pending === undefined) {
@@ -225,6 +247,61 @@ export function browserDetection(api: DetectorStatic | null = globalOf("Language
       } catch {
         return null;
       }
+    },
+  };
+}
+
+/** The part of the wasm namespace the core detector needs. */
+export interface CoreLanguageDetector {
+  detectTextLanguage(text: string): { readonly tag: string; readonly confidencePermille: number; free(): void } | undefined;
+}
+
+/**
+ * The core detector over wasm (`lakko_ui_rules::language_detect`). It reads
+ * at most the first 2048 characters, offline; the controller asks it once per
+ * message version. `null` when wasm did not load or the text has no letters.
+ */
+export function coreDetection(
+  load: () => Promise<CoreLanguageDetector | null> = loadWasm,
+): DetectionEngine {
+  let core: Promise<CoreLanguageDetector | null> | null = null;
+  return {
+    present: true,
+    async detect(text): Promise<Detection | null> {
+      core ??= load().catch(() => null);
+      const wasm = await core;
+      if (wasm === null) {
+        core = null;
+        return null;
+      }
+      try {
+        const found = wasm.detectTextLanguage(text);
+        if (found === undefined) return null;
+        try {
+          return { tag: found.tag, permille: Math.max(0, Math.min(1000, found.confidencePermille)) };
+        } finally {
+          found.free();
+        }
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/** The browser's detector when it has an answer, else the core one. */
+export function layeredDetection(
+  browser: DetectionEngine = browserDetection(),
+  core: DetectionEngine = coreDetection(),
+): DetectionEngine {
+  return {
+    present: true,
+    async detect(text): Promise<Detection | null> {
+      if (browser.present) {
+        const d = await browser.detect(text).catch(() => null);
+        if (d !== null) return d;
+      }
+      return core.detect(text);
     },
   };
 }
@@ -397,7 +474,7 @@ export function browserTranscription(
 export function browserEngines(): Engines {
   return {
     translation: browserTranslation(),
-    detection: browserDetection(),
+    detection: layeredDetection(),
     transcription: browserTranscription(),
   };
 }

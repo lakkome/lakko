@@ -100,6 +100,36 @@ enum PhraseRestoreBackup {
     /// first binding is minted from the slot. One that runs after it (a
     /// retried restore) re-mints as the bundle path does
     /// (``ChatRepository/rebindAfterStateBundle(accountIdB64:)``).
+    /// The own predecessors of a backup alone (the first step of
+    /// ``apply(_:accountIdB64:context:defaults:ownPredecessors:)``): what a
+    /// device parked for the account's earlier keys (G-56) takes from a
+    /// backup it already applied once. Returns how many seeds are held after
+    /// (`0` when the backup carries none or the slot could not be written).
+    @discardableResult
+    static func applyOwnPredecessors(
+        _ parsed: ParsedBackupPayload,
+        accountIdB64: String,
+        context: String,
+        defaults: UserDefaults = .standard,
+        ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+    ) -> Int {
+        guard !parsed.ownPredecessors.isEmpty else { return 0 }
+        do {
+            return try StateBundle.storeOwnPredecessors(
+                parsed.ownPredecessors.map {
+                    StateBundle.OwnPredecessor(
+                        seedB64: $0.seed.base64EncodedString(),
+                        adoptedAtMs: Int64(clamping: $0.adoptedAtMs))
+                },
+                accountIdB64: accountIdB64,
+                store: ownPredecessors,
+                adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults))
+        } catch {
+            NSLog("backup restore (\(context)): the account's own predecessors were not stored")
+            return 0
+        }
+    }
+
     @discardableResult
     static func apply(
         _ parsed: ParsedBackupPayload,
@@ -110,21 +140,9 @@ enum PhraseRestoreBackup {
     ) -> AppliedBackup {
         var applied = AppliedBackup()
 
-        if !parsed.ownPredecessors.isEmpty {
-            do {
-                applied.ownPredecessors = try StateBundle.storeOwnPredecessors(
-                    parsed.ownPredecessors.map {
-                        StateBundle.OwnPredecessor(
-                            seedB64: $0.seed.base64EncodedString(),
-                            adoptedAtMs: Int64(clamping: $0.adoptedAtMs))
-                    },
-                    accountIdB64: accountIdB64,
-                    store: ownPredecessors,
-                    adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults))
-            } catch {
-                NSLog("backup restore (\(context)): the account's own predecessors were not stored")
-            }
-        }
+        applied.ownPredecessors = applyOwnPredecessors(
+            parsed, accountIdB64: accountIdB64, context: context, defaults: defaults,
+            ownPredecessors: ownPredecessors)
 
         // The backup does not carry the inbox metadata, so the reconstructed
         // request holds sentinels (ADR-0021): a negative messageId, a zero

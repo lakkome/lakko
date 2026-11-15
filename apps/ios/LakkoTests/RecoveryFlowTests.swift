@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import LakkoCore
 import XCTest
 
@@ -36,11 +37,15 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
     /// The generation the published identity reads (ADR-0073 section 4.1).
     var publishedGeneration: UInt64 = 1
 
+    /// G-56 — the account's own conversation link the bundle serves.
+    var conversationLink: Data?
+
     func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
         events.append("identity")
         guard let publishedKey else { return nil }
         return IdentityFetchResponse(
-            signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "", keyGeneration: publishedGeneration)
+            signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "", keyGeneration: publishedGeneration,
+            conversationLink: conversationLink?.base64EncodedString())
     }
 
     func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data? {
@@ -203,6 +208,9 @@ final class RecoveryFlowTests: XCTestCase {
             SessionTokenStore.deleteSessionToken(accountIdB64: b64)
             try? PhraseStore().deletePhrase(accountIdB64: b64)
             ThreeWordsBudgetStore().clearAll(accountIdB64: b64)
+            KeychainOwnPredecessorStore().clear(accountIdB64: b64)
+            KeychainOwnConversationKeyStore().clear(accountIdB64: b64)
+            BackupRestoreRetryStore.clear(accountIdB64: b64)
         }
         accountIdsToClean = []
         for suite in suites { UserDefaults().removePersistentDomain(forName: suite) }
@@ -267,6 +275,8 @@ final class RecoveryFlowTests: XCTestCase {
         marker: PersistedSession? = nil,
         persistence: ScriptedPersistence = ScriptedPersistence(),
         markers: RecoveryMarkers? = nil,
+        backup: BackupRestoreSource? = nil,
+        earlierKeysGate: Bool = false,
         routes: @escaping (_ path: String, _ json: [String: Any]) -> (Int, String)? = { _, _ in nil }
     ) -> Harness {
         let host = NameRouteStub.scope { _, path, json in routes(path, json) ?? (503, "") }
@@ -279,6 +289,11 @@ final class RecoveryFlowTests: XCTestCase {
         let tokens = SessionTokenProvider()
         let wiped = WipeLog()
         let clock = Clock()
+        // G-56: the gate reads this device's binding; these tests model
+        // devices that never bootstrapped a chat (no binding), so only the
+        // G-56 tests read the real inputs.
+        let noGate: @MainActor (String, Data) -> EarlierKeysGate.Inputs? = { _, _ in nil }
+        let gateInputs: (@MainActor (String, Data) -> EarlierKeysGate.Inputs?)? = earlierKeysGate ? nil : noGate
         let repository = AuthRepository(
             sessionStore: store,
             authClientFactory: { NameRouteStub.client(host) },
@@ -297,7 +312,9 @@ final class RecoveryFlowTests: XCTestCase {
             keyResetHooks: reset.hooks,
             wipeAfterKeyReset: { wiped.note($0) },
             recallRecords: InMemoryRecallRecordStore(),
-            recallOperations: .unreachable
+            recallOperations: .unreachable,
+            backupRestoreSource: backup ?? LiveBackupRestoreSource(),
+            earlierKeysInputs: gateInputs
         )
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,
@@ -2404,5 +2421,229 @@ final class DevicePhraseTests: XCTestCase {
         // Something that is not a phrase is never written over a good one.
         DevicePhrase.store("not a recovery phrase", accountIdB64: accountIdB64, context: "test", since: nil)
         XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase())
+    }
+}
+
+// MARK: - G-56: a device waits for the account's earlier keys
+
+/// The backup source, scripted: the queued outcomes in order, then none.
+private final class ScriptedEarlierKeysBackup: BackupRestoreSource {
+    var outcomes: [RestoreOutcome] = []
+    private(set) var calls = 0
+    func restore(sessionToken: String, phraseBytes: Data, gate: RestoreGateContext) async -> RestoreOutcome {
+        calls += 1
+        return outcomes.isEmpty ? .noBackup : outcomes.removeFirst()
+    }
+}
+
+extension RecoveryFlowTests {
+
+    /// The current phrase and an earlier one; the link the rotation uploaded.
+    private struct Rotated {
+        let current: RecoveryMnemonic
+        let oldSeed: Data
+        let link: Data
+        var oldKey: Data { try! Identity.fromSeed(seed: oldSeed).signaturePublicKey() }
+    }
+
+    private func rotated() throws -> Rotated {
+        let current = RecoveryMnemonic.generate()
+        let oldSeed = RecoveryMnemonic.generate().toSeed()
+        let link = try XCTUnwrap(OwnAccountKeys.conversationLink(
+            currentSeed: current.toSeed(), predecessorSeeds: [oldSeed], issuedAtUnixSecs: 1_700_000_000))
+        return Rotated(current: current, oldSeed: oldSeed, link: link)
+    }
+
+    private func isParkedForEarlierKeys(_ repository: AuthRepository) -> Bool {
+        if case .needsEarlierKeys = repository.state { return true }
+        return false
+    }
+
+    private func backupCarrying(_ account: Data, oldSeed: Data) throws -> ParsedBackupPayload {
+        try parseBackupPayload(wire: try BackupClient.composePayload(
+            accountId: account,
+            createdAtMs: 1_700_000_000_000,
+            ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [],
+            knownGroupIdsHex: [],
+            syncedState: nil,
+            ownPredecessors: [BackupOwnPredecessor(seed: oldSeed, adoptedAtMs: 1_700_000_000_000)]))
+    }
+
+    func testAPhraseRestoreWhoseChatsUseAnEarlierKeyParksAndBindsNothing() async throws {
+        let account = newAccount()
+        let backup = ScriptedEarlierKeysBackup()
+        let h = harness(backup: backup, earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        var states: [AuthState] = []
+        let sink = h.repository.$state.sink { states.append($0) }
+        defer { sink.cancel() }
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: r.current.phrase())
+
+        XCTAssertTrue(isParkedForEarlierKeys(h.repository), "\(h.repository.state)")
+        // The shell's `.task` runs on `.session` only: it never ran.
+        XCTAssertFalse(states.contains { if case .session = $0 { return true } else { return false } })
+        XCTAssertNil(h.repository.identitySecrets)
+        XCTAssertNil(DeviceIdentityStore.getDeviceBinding(accountIdB64: account.b64), "no binding minted")
+        XCTAssertEqual(KeychainOwnConversationKeyStore().load(accountIdB64: account.b64)?.conversationKey, r.oldKey)
+        // The keys this device holds stayed (the phrase and its seed).
+        XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64), r.current.toSeed())
+        // The session pair is persisted: a relaunch returns here.
+        XCTAssertNotNil(h.persistence.sessionToken(accountIdB64: account.b64))
+    }
+
+    func testTheParkedDeviceLandsOnceTheBackupBringsTheEarlierKey() async throws {
+        let account = newAccount()
+        let backup = ScriptedEarlierKeysBackup()
+        let h = harness(backup: backup, earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        // The route's own restore finds no backup; the next look finds one
+        // a sibling uploaded, carrying the earlier key.
+        backup.outcomes = [.noBackup, .restored(try backupCarrying(account.bytes, oldSeed: r.oldSeed))]
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: r.current.phrase())
+
+        let landed = await waitUntil { self.isSession(h.repository) }
+        XCTAssertTrue(landed, "\(h.repository.state)")
+        XCTAssertEqual(KeychainOwnPredecessorStore().load(accountIdB64: account.b64), [r.oldSeed])
+        // The chat layer now mints under the conversation key.
+        let inputs = try XCTUnwrap(EarlierKeysGate.readInputs(
+            accountIdB64: account.b64, accountSeed: r.current.toSeed(), holdsConversations: false))
+        XCTAssertEqual(EarlierKeysGate.verdict(inputs, link: .key(key: r.oldKey)), .mint(key: r.oldKey))
+    }
+
+    func testThePairedRowStoresTheEarlierKeysBeforeTheSessionLands() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        var heldAtLanding: [Data]?
+        let sink = h.repository.$state.sink { state in
+            if case .session = state, heldAtLanding == nil {
+                heldAtLanding = KeychainOwnPredecessorStore().load(accountIdB64: account.b64)
+            }
+        }
+        defer { sink.cancel() }
+
+        try await h.repository.completeFromPairing(
+            phraseEntropy: r.current.toEntropy(),
+            session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000),
+            predecessors: [FfiRecoveryPredecessor(seed: r.oldSeed, adoptedAtMs: 1_700_000_000_000)])
+
+        XCTAssertTrue(isSession(h.repository), "\(h.repository.state)")
+        XCTAssertEqual(heldAtLanding, [r.oldSeed], "the earlier key was held when the session landed")
+    }
+
+    func testAPairedRowWithoutTheEarlierKeyParks() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+
+        try await h.repository.completeFromPairing(
+            phraseEntropy: r.current.toEntropy(),
+            session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000))
+
+        XCTAssertTrue(isParkedForEarlierKeys(h.repository), "\(h.repository.state)")
+        XCTAssertNil(DeviceIdentityStore.getDeviceBinding(accountIdB64: account.b64))
+    }
+
+    func testAnAccountThatNeverRotatedLandsAsBefore() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let mine = RecoveryMnemonic.generate()
+        h.directory.publishedKey = try identityKey(of: mine)
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: mine.phrase())
+
+        XCTAssertTrue(isSession(h.repository))
+        XCTAssertEqual(KeychainOwnConversationKeyStore().load(accountIdB64: account.b64)?.conversationKey, nil)
+    }
+
+    func testTwoConcurrentLandingsWhileParkedRunOnce() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: r.current.phrase())
+        XCTAssertTrue(isParkedForEarlierKeys(h.repository))
+
+        var landings = 0
+        let sink = h.repository.$state.sink { if case .session = $0 { landings += 1 } }
+        defer { sink.cancel() }
+        // The earlier key arrives; the device's own look and a pairing the
+        // person started now both could land.
+        try KeychainOwnPredecessorStore().replace([r.oldSeed], accountIdB64: account.b64)
+        let repository = h.repository
+        let entropy = r.current.toEntropy()
+        let oldSeed = r.oldSeed
+        async let look: Void = repository.retryEarlierKeys()
+        async let pairing: Void = {
+            try? await repository.completeFromPairing(
+                phraseEntropy: entropy,
+                session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000),
+                predecessors: [FfiRecoveryPredecessor(seed: oldSeed, adoptedAtMs: 1_700_000_000_000)])
+        }()
+        _ = await (look, pairing)
+        _ = await waitUntil { self.isSession(h.repository) }
+
+        XCTAssertTrue(isSession(h.repository), "\(h.repository.state)")
+        XCTAssertEqual(landings, 1, "one landing, not two")
+        XCTAssertFalse(h.repository.parkedLanding.busy, "the guard is free again")
+    }
+
+    func testTheGuardSkipsALookAndQueuesACompletion() async {
+        let guardian = ParkedLandingGuard()
+        XCTAssertTrue(guardian.tryEnter())
+        XCTAssertFalse(guardian.tryEnter(), "a look skips while a landing runs")
+        var order: [String] = []
+        let waiting = Task { @MainActor in
+            await guardian.enter()
+            order.append("completion")
+            guardian.leave()
+        }
+        await Task.yield()
+        order.append("first left")
+        guardian.leave()
+        await waiting.value
+        XCTAssertEqual(order, ["first left", "completion"])
+        XCTAssertFalse(guardian.busy)
+    }
+
+    func testTheRelaunchStepReadsOnlyWhatIsRecorded() throws {
+        let account = newAccount()
+        let h = harness()
+        let current = Data(repeating: 0xCC, count: 32), old = Data(repeating: 0xA0, count: 32)
+        var inputs = EarlierKeysGate.Inputs(
+            boundKey: nil, currentKey: current, predecessorKeys: [], holdsConversations: false)
+        h.repository.earlierKeysInputs = { _, _ in inputs }
+        let seed = Data(count: 64)
+        // A binding would be minted and nothing is recorded: read.
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .read)
+        // Recorded: the chats use a key this device lacks.
+        KeychainOwnConversationKeyStore().save(
+            OwnConversationKeyRecord(conversationKey: old, readAtMs: 1), accountIdB64: account.b64)
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .park)
+        // Held now: the binding is minted under it, no request.
+        inputs.predecessorKeys = [old]
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .land)
+        // A kept binding lands whatever is recorded.
+        inputs = EarlierKeysGate.Inputs(
+            boundKey: old, currentKey: current, predecessorKeys: [old], holdsConversations: true)
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .land)
     }
 }

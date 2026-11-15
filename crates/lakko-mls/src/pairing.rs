@@ -153,6 +153,52 @@ pub fn encode(
     )
 }
 
+/// G-56 (ADR-0074 "Joining after a rotation") — the plain pairing payload of
+/// [`encode`], carrying the joining device's self-removal proof
+/// ([`crate::sign_self_removal`], exactly [`crate::SELF_REMOVAL_PROOF_LEN`]
+/// bytes) for `key_package_bytes`, or none when `self_removal_proof` is
+/// empty. A device that is already in the account's DeviceGroup (it came in
+/// by pairing and is parked for the account's earlier keys) pairs again
+/// under the same device identity: the confirming device cannot add a second
+/// leaf under that key, and replaces the old one in one commit, which peers
+/// accept under the removal policy on this proof (ADR-0081 amendment). The
+/// payload is not sealed: it travels on the QR shown on screen or inside the
+/// ADR-0049 code exchange, as every pairing payload does.
+///
+/// # Errors
+///
+/// [`Error::Codec`] when `self_removal_proof` is neither empty nor exactly
+/// [`crate::SELF_REMOVAL_PROOF_LEN`] bytes, when `device_card` is longer than
+/// [`PAIRING_DEVICE_CARD_MAX_LEN`], or on the unlikely prost-encode failure.
+pub fn encode_with_self_removal_proof(
+    login_handle: &LoginHandle,
+    key_package_bytes: &[u8],
+    rendezvous_pseudonym: &RendezvousPseudonym,
+    device_card: &[u8],
+    self_removal_proof: &[u8],
+) -> Result<Vec<u8>> {
+    if !self_removal_proof.is_empty() && self_removal_proof.len() != crate::SELF_REMOVAL_PROOF_LEN {
+        return Err(Error::Codec(format!(
+            "pairing payload: a self-removal proof is {} bytes, got {}",
+            crate::SELF_REMOVAL_PROOF_LEN,
+            self_removal_proof.len()
+        )));
+    }
+    if device_card.len() > PAIRING_DEVICE_CARD_MAX_LEN {
+        return Err(Error::Codec(format!(
+            "pairing payload: a device card is at most {PAIRING_DEVICE_CARD_MAX_LEN} bytes, got {}",
+            device_card.len()
+        )));
+    }
+    encode_payload(
+        login_handle,
+        key_package_bytes,
+        rendezvous_pseudonym,
+        self_removal_proof.to_vec(),
+        device_card.to_vec(),
+    )
+}
+
 /// BLAKE3 derive-key context of the rejoin-knock seal key (G-55). Frozen.
 pub const REJOIN_KNOCK_KEY_CONTEXT: &str = "lakko/device-group/knock-wrap/v1";
 
@@ -886,6 +932,57 @@ mod tests {
                 prop_assert_eq!(p.len(), usize::try_from(len).unwrap());
             }
         }
+    }
+
+    #[test]
+    fn a_plain_payload_carries_a_self_removal_proof_through_decode() {
+        let handle = [3u8; 32];
+        let proof = vec![0x5a; crate::SELF_REMOVAL_PROOF_LEN];
+        let card = vec![0x42; 12];
+        let wire =
+            encode_with_self_removal_proof(&handle, &[7u8; 64], &[9u8; 32], &card, &proof).unwrap();
+        let decoded = decode(&wire, &handle).unwrap();
+        assert_eq!(decoded.self_removal_proof, Some(proof));
+        assert_eq!(decoded.key_package, vec![7u8; 64]);
+        assert_eq!(decoded.device_card, card);
+        // An empty proof is the plain payload of `encode`.
+        let none =
+            encode_with_self_removal_proof(&handle, &[7u8; 64], &[9u8; 32], &card, &[]).unwrap();
+        assert_eq!(
+            none,
+            encode(&handle, &[7u8; 64], &[9u8; 32], &card).unwrap()
+        );
+        assert_eq!(decode(&none, &handle).unwrap().self_removal_proof, None);
+    }
+
+    #[test]
+    fn a_plain_payload_refuses_a_proof_of_the_wrong_length() {
+        let handle = [3u8; 32];
+        for len in [
+            1,
+            crate::SELF_REMOVAL_PROOF_LEN - 1,
+            crate::SELF_REMOVAL_PROOF_LEN + 1,
+        ] {
+            assert!(
+                encode_with_self_removal_proof(
+                    &handle,
+                    &[7u8; 64],
+                    &[9u8; 32],
+                    &[],
+                    &vec![0u8; len]
+                )
+                .is_err(),
+                "{len} bytes"
+            );
+        }
+        assert!(encode_with_self_removal_proof(
+            &handle,
+            &[7u8; 64],
+            &[9u8; 32],
+            &vec![0u8; PAIRING_DEVICE_CARD_MAX_LEN + 1],
+            &[0u8; crate::SELF_REMOVAL_PROOF_LEN],
+        )
+        .is_err());
     }
 
     #[test]

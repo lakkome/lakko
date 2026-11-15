@@ -61,7 +61,10 @@ internal fun rememberBubbleTranslation(msg: ChatMessage, isOwn: Boolean): Bubble
     // The text a translation works on: the caption, else an open transcript.
     val readable = msg.text.ifEmpty { transcript.orEmpty() }
     val shown = (line as? TranslateLine.Shown)?.text
-    val offer = remember(conversation, readable, isOwn, settings, cap, store) {
+    val detections by TranslationCenter.detections.collectAsStateWithLifecycle()
+    // The menu's answer changes when this message's detection arrives.
+    val detected = conversation?.let { detections[TranslationStoreState.messageKey(it, msg.messageId)] }
+    val offer = remember(conversation, readable, isOwn, settings, cap, store, detected) {
         if (conversation == null) {
             TranslateOffer.NONE
         } else {

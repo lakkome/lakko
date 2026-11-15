@@ -8177,6 +8177,14 @@
       "text": "Um dispositivo que ainda esteja conectado mostra um código de seis dígitos; digite-o aqui. Não precisa de câmera; se preferir, há um QR code.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Abra o Lakko em um dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "Você entrou como {username}, mas este dispositivo ainda não tem as chaves que suas conversas usam. Traga-as de outro dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "Há um problema com a conta salva neste dispositivo. Saia e entre novamente, ou use sua frase de recuperação.",
       "status": "machine"

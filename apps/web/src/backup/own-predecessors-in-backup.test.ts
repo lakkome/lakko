@@ -23,7 +23,7 @@ import {
   EMPTY_KEY_ROTATION_STATE,
 } from "../auth/key-rotation-store";
 import { readPredecessorAdoptedAtMs } from "../contacts/address-resolver";
-import { bindingVerdict } from "../devices/own-conversation-key";
+import { OWN_LINK_ABSENT, bindingVerdict } from "../devices/own-conversation-key";
 import {
   accountKeyHexOfSeed,
   applyOwnPredecessors,
@@ -121,26 +121,27 @@ describe("a device restored from the newest phrase", () => {
     const conversation = conversationSeed(state);
     expect(conversation).not.toBeNull();
 
-    // The binding the landing would have kept under the current key is not.
-    const predecessorKeysB64 = predecessorSeeds(state).map((s) =>
-      base64Encode(wasm.Identity.fromSeed(s).signaturePublicKey),
-    );
-    expect(
-      bindingVerdict({
-        boundKeyB64: base64Encode(current.signaturePublicKey),
-        currentKeyB64: base64Encode(current.signaturePublicKey),
-        predecessorKeysB64,
-        holdsConversations: false,
-      }),
-    ).toBe("remint");
-    expect(
-      bindingVerdict({
-        boundKeyB64: null,
-        currentKeyB64: base64Encode(current.signaturePublicKey),
-        predecessorKeysB64,
-        holdsConversations: false,
-      }),
-    ).toBe("mint");
+    // The binding the landing would have kept under the current key is not:
+    // it is minted again under the oldest one.
+    const predecessorKeys = predecessorSeeds(state).map((s) => wasm.Identity.fromSeed(s).signaturePublicKey);
+    const remint = bindingVerdict(wasm, {
+      boundKey: current.signaturePublicKey,
+      currentKey: current.signaturePublicKey,
+      predecessorKeys,
+      link: OWN_LINK_ABSENT,
+      holdsConversations: false,
+    });
+    expect(remint.kind).toBe("mint");
+    expect(base64Encode(remint.mintKey as Uint8Array)).toBe(base64Encode(oldest.signaturePublicKey));
+    const fresh = bindingVerdict(wasm, {
+      boundKey: null,
+      currentKey: current.signaturePublicKey,
+      predecessorKeys,
+      link: { kind: "key", key: oldest.signaturePublicKey },
+      holdsConversations: false,
+    });
+    expect(fresh.kind).toBe("mint");
+    expect(base64Encode(fresh.mintKey as Uint8Array)).toBe(base64Encode(oldest.signaturePublicKey));
 
     // And what is minted names the key the conversations are under.
     const bound = wasm.Identity.fromSeed(conversation as Uint8Array);

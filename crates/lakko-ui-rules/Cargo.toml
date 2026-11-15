@@ -25,6 +25,9 @@ lakko-contacts.workspace = true
 # workspace declaration.
 unicode-segmentation.workspace = true
 icu_properties.workspace = true
+# On-device text language detection (`language_detect`, ADR-0082 note of
+# 2026-11-15). Pure Rust, compiled-in trigram profiles, no I/O.
+whatlang.workspace = true
 
 [dev-dependencies]
 # Only to pin that the folder bitfield constants equal the wire ones.

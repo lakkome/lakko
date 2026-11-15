@@ -625,7 +625,8 @@ final class PhraseRouteBackupTests: XCTestCase {
             pushBinding: PushAccountBindingStore(defaults: defaults),
             removeDeliveredNotifications: {},
             backupRestoreSource: source,
-            backupDefaults: defaults
+            backupDefaults: defaults,
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 
@@ -1378,7 +1379,8 @@ final class RestoredKnownGroupsLifecycleTests: XCTestCase {
             pushBinding: PushAccountBindingStore(defaults: defaults),
             removeDeliveredNotifications: {},
             backupRestoreSource: ScriptedBackupSource(),
-            backupDefaults: defaults
+            backupDefaults: defaults,
+            earlierKeysInputs: skipEarlierKeysGate
         )
         XCTAssertNotNil(repo.identitySecrets, "the fixture restores a session")
         repo.logout()

@@ -46,6 +46,7 @@ import { AuthLayout } from "../ui/AuthLayout";
 import { MethodHead, MethodList } from "../ui/MethodList";
 import { PhraseInput } from "../ui/PhraseInput";
 import {
+  earlierKeysRestoreMethods,
   restoreIdentityMethods,
   restoreMethod,
   type RecoverMethod,
@@ -114,12 +115,18 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       ? { username: s.account.username, accountIdB64: s.account.accountId }
       : null;
   };
+  // UX 8a: the device holds the account's current keys, only the earlier
+  // keys its chats use are missing. Another device (and the reset) only.
+  const earlierKeys = (): boolean => {
+    const s = auth.state();
+    return s.kind === "needs-recovery-phrase" && s.missing === "earlier-keys";
+  };
 
   // How many of the account's passkeys carry keys (the device is signed
   // in, so it may ask). `null` while unknown or when the server cannot say,
   // which keeps the passkey row.
   const [passkeysWithKeys] = createResource(
-    () => account()?.accountIdB64 ?? null,
+    () => (earlierKeys() ? null : (account()?.accountIdB64 ?? null)),
     async (): Promise<number | null> => {
       const token = auth.pendingSessionToken();
       if (token === null) return null;
@@ -135,14 +142,16 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   // and keeps the device's "phrase-protected" flag in step, which is what
   // decides whether new words are shown should the keys be reset from here.
   const [protection] = createResource(
-    () => account()?.accountIdB64 ?? null,
+    () => (earlierKeys() ? null : (account()?.accountIdB64 ?? null)),
     async (accountIdB64) => {
       const token = auth.pendingSessionToken();
       return token === null ? null : refreshProtection(accountIdB64, token);
     },
   );
   const methods = (): readonly RecoverMethod[] =>
-    restoreIdentityMethods({
+    earlierKeys()
+      ? earlierKeysRestoreMethods()
+      : restoreIdentityMethods({
       passkeysSupported: WebauthnClient.isWebauthnAvailable(),
       passkeysWithKeys: passkeysWithKeys() ?? null,
       protection: protection() ?? null,
@@ -244,6 +253,11 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       deviceKey,
       loginHandle,
       place,
+      // G-56 — parked for the account's earlier keys after joining the
+      // DeviceGroup by pairing: this device pairs again with a self-removal
+      // proof, so the other device replaces its leaf instead of refusing a
+      // second one under the same key.
+      rejoinsHeldLeaf: earlierKeys(),
     });
     return {
       qrPayload: session.qrPayload,
@@ -267,7 +281,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         fallback={
           <>
             <h1>{t("restore_identity.title")}</h1>
-            <Show when={auth.restoreNotice()}>
+            <Show when={earlierKeys() ? null : auth.restoreNotice()}>
               {(notice) => (
                 <div class="lk-alert info" role="status">
                   {t(NOTICE_KEYS[notice()])}
@@ -275,7 +289,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
               )}
             </Show>
             <p class="lk-auth-lede">
-              {tRich("restore_identity.lede", {
+              {tRich(earlierKeys() ? "restore_identity.earlier_keys.lede" : "restore_identity.lede", {
                 username: <strong>@{account()?.username ?? ""}</strong>,
               })}
             </p>
@@ -330,6 +344,9 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                         // ADR-0074: the state bundle's earlier account keys
                         // are stored before the session's identities exist.
                         persistAnonymousJoin ?? undefined,
+                        // Recovery payload v3: the earlier keys the row
+                        // carried, stored first of all.
+                        outcome.predecessors,
                       );
                     }}
                     disabled={busy()}

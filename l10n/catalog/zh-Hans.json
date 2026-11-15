@@ -8177,6 +8177,14 @@
       "text": "仍处于登录状态的设备会显示一个六位数代码；请在这里输入。传输采用端到端加密，Lakko 的服务器无法读取。无需摄像头；如果你愿意，也可以使用二维码。",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "在一台仍处于登录状态的设备上打开 Lakko。",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "你已以 {username} 身份登录，但此设备还没有你的聊天所使用的密钥。请从另一台仍处于登录状态的设备上转移过来。",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "此设备上保存的账号出现问题。请退出登录后重新登录，或使用恢复短语。",
       "status": "machine"

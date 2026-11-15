@@ -73,6 +73,47 @@ pub fn encode_pairing_qr(
     .map_err(|e| JsError::new(&e))
 }
 
+/// G-56 — the pairing payload of [`encode_pairing_qr`] carrying this
+/// device's self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137
+/// bytes) for `key_package`; an empty proof is the plain payload. Used by a
+/// device already in the account's DeviceGroup that pairs again under the
+/// same device identity: the confirming device replaces its leaf in one
+/// commit (`replaceDeviceAt`) once `deviceGroupSelfRemovalCovers` holds.
+///
+/// # Errors
+///
+/// `JsError` on a wrong-length handle, rendezvous pseudonym or proof, or a
+/// `device_card_envelope` longer than 270 bytes.
+#[wasm_bindgen(js_name = encodePairingQrWithSelfRemovalProof)]
+pub fn encode_pairing_qr_with_self_removal_proof(
+    login_handle: &[u8],
+    key_package: &[u8],
+    rendezvous_pseudonym: &[u8],
+    self_removal_proof: &[u8],
+    device_card_envelope: Option<Vec<u8>>,
+) -> Result<Vec<u8>, JsError> {
+    let handle: inner::LoginHandle = login_handle.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "login_handle must be {} bytes",
+            inner::LOGIN_HANDLE_LEN
+        ))
+    })?;
+    let rendezvous: inner::RendezvousPseudonym = rendezvous_pseudonym.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "rendezvous_pseudonym must be {} bytes",
+            inner::RENDEZVOUS_PSEUDONYM_LEN
+        ))
+    })?;
+    inner::encode_with_self_removal_proof(
+        &handle,
+        key_package,
+        &rendezvous,
+        device_card_envelope.as_deref().unwrap_or_default(),
+        self_removal_proof,
+    )
+    .map_err(|e| JsError::new(&e.to_string()))
+}
+
 /// Confirming side: parse the wire bytes, verify the embedded login
 /// handle matches `expected_login_handle` (the handle of the local
 /// account's own username), return a structured [`DecodedPairingQr`]
@@ -250,6 +291,19 @@ pub fn open_rejoin_knock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-56 — the plain payload with a self-removal proof decodes with it.
+    #[test]
+    fn a_payload_with_a_self_removal_proof_round_trips() {
+        let handle = [0x11u8; 32];
+        let proof = vec![0x5au8; lakko_mls::SELF_REMOVAL_PROOF_LEN];
+        let wire = encode_pairing_qr_with_self_removal_proof(
+            &handle, &[7u8; 64], &[9u8; 32], &proof, None,
+        )
+        .unwrap();
+        let got = decode_pairing_qr(&wire, &handle).unwrap();
+        assert_eq!(got.self_removal_proof(), Some(proof));
+    }
 
     /// G-55: a knock built here opens under the same lineage identity and
     /// carries no login handle in the clear. (A refusal builds a JS error,

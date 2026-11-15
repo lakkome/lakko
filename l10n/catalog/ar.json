@@ -8177,6 +8177,14 @@
       "text": "يعرض جهاز لا يزال مسجّل الدخول رمزًا من ستة أرقام؛ اكتبه هنا. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن كنت تفضّله.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "افتح Lakko على جهاز لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "أنت مسجّل الدخول باسم {username}، لكن هذا الجهاز لا يحمل بعد المفاتيح التي تستخدمها محادثاتك. انقلها من جهاز آخر لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "هناك مشكلة في الحساب المحفوظ على هذا الجهاز. سجّل الخروج ثم سجّل الدخول مجددًا، أو استخدم عبارة الاسترداد.",
       "status": "machine"

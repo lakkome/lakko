@@ -150,6 +150,7 @@ pub mod link_refusal;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
+pub mod own_binding;
 pub mod pin;
 pub mod profile;
 pub mod profile_request;

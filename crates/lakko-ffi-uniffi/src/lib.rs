@@ -77,6 +77,7 @@ pub mod pow;
 pub mod publisher_devices;
 pub mod push_wake;
 pub mod reaction_rules;
+pub mod recovery_payload;
 pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
@@ -793,6 +794,22 @@ pub enum FfiError {
     /// know which journal to read. Nothing else is ever in it.
     #[error("{0}")]
     MembershipGroupStillActive(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0074 "Joining after a rotation" (G-56): the recovery payload v3
+    // and the own binding verdict. APPENDED last: a `flat_error` lowers by
+    // ordinal.
+    // ------------------------------------------------------------------
+    /// A recovery payload, row or binding input was refused
+    /// (`recovery_payload.rs`). The message is `"<code>: <reason>"` with the
+    /// frozen codes of `lakko_mnemonic::recovery_payload::RecoveryPayloadError`
+    /// (`bad-grant-length`, `bad-entropy-length`, `too-many-predecessors`,
+    /// `bad-length`, `duplicate-predecessor`, `current-key-predecessor`,
+    /// `unsupported-row`) or `bad-seed-length` / `bad-key-length` for an
+    /// argument of the wrong length. Any refusal of a received payload or row
+    /// means the keys were not handed over.
+    #[error("{0}")]
+    RecoveryPayload(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

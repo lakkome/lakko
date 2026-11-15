@@ -352,7 +352,8 @@ final class KeptDeviceAdoptionTests: XCTestCase {
             rotationStore: rotations,
             sessionUpgradeOperation: { refreshToken, accountId, seed in
                 try upgrades.run(refreshToken, accountId, seed)
-            }
+            },
+            earlierKeysInputs: skipEarlierKeysGate
         )
         repository.readDeviceGroupJournalToHead = { _ in
             log.noteJournalRead()

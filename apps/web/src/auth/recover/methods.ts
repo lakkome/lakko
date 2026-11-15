@@ -161,6 +161,23 @@ export const RESTORE_IDENTITY_METHODS: readonly RecoverMethod[] = [
   method("phrase", "key", "recovery.method.phrase.title", "recovery.method.phrase.restore_sub"),
 ];
 
+/**
+ * UX `identity-recovery.md` 8a (ADR-0074, "Joining after a rotation"): the
+ * restore prompt of a device that holds the account's current keys but not
+ * the earlier keys its chats use. Another device alone: a passkey and the
+ * phrase bring only the keys this device already has.
+ */
+export function earlierKeysRestoreMethods(): readonly RecoverMethod[] {
+  return [EARLIER_KEYS_DEVICE];
+}
+
+const EARLIER_KEYS_DEVICE = method(
+  "device",
+  "smartphone-waves",
+  "recovery.method.device.title",
+  "restore_identity.earlier_keys.another_device.sub",
+);
+
 /** The restore prompt's email row (ADR-0075, alignment J). */
 const RESTORE_EMAIL = EMAIL_GROUP.methods[0] as RecoverMethod;
 

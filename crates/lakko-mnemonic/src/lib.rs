@@ -37,6 +37,10 @@
 //!     under a passkey's WebAuthn PRF output (ADR-0072 decision 6); and the
 //!     email vault: the same entropy sealed under a key stretched from the
 //!     login handle and the recovery email address (ADR-0075 section 2).
+//!   * [`recovery_payload`] — the another-device recovery payload v3
+//!     (ADR-0018 Path B, ADR-0074 "Joining after a rotation"): the grant,
+//!     the phrase entropy and the account's own predecessor seeds a
+//!     confirming device hands a joining one, plus the mailbox row tag.
 //!   * [`recovery_email`] — the one rule for what a recovery email address
 //!     is and how it is normalised (ADR-0075 section 4), shared with
 //!     `services/auth`.
@@ -76,6 +80,7 @@
 mod error;
 mod mnemonic;
 pub mod recovery_email;
+pub mod recovery_payload;
 mod secret;
 pub mod vault;
 pub mod word_check;
@@ -137,5 +142,27 @@ pub mod fuzz_api {
             })
         });
         (opened, stable)
+    }
+
+    /// Drive the recovery-payload v3 decoder and the row tag on
+    /// attacker-chosen bytes (ADR-0074, "Joining after a rotation").
+    ///
+    /// The plaintext is what a joining device opens from the rendezvous
+    /// mailbox, sealed by a device of the account; the row prefix is read
+    /// before any key is involved, so whoever writes to that mailbox chooses
+    /// it. Returns `None` when the payload was refused, `Some(same)` when it
+    /// decoded, `same` telling whether it re-composed to the identical bytes;
+    /// it never panics. The harness asserts `same`.
+    #[must_use]
+    pub fn decode_recovery_payload(bytes: &[u8]) -> Option<bool> {
+        let _ = crate::recovery_payload::unwrap_recovery_row(bytes);
+        let payload = crate::recovery_payload::decode_recovery_payload(bytes).ok()?;
+        let again = crate::recovery_payload::compose_recovery_payload(
+            &payload.grant,
+            &payload.phrase_entropy,
+            &payload.predecessors,
+        )
+        .ok()?;
+        Some(again.as_slice() == bytes)
     }
 }

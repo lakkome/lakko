@@ -8177,6 +8177,14 @@
       "text": "Un dispositivo que sigue con la sesión iniciada muestra un código de seis dígitos; escríbelo aquí. No hace falta cámara; si lo prefieres, hay un código QR.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Abre Lakko en un dispositivo que siga con la sesión iniciada.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "Has iniciado sesión como {username}, pero este dispositivo todavía no tiene las claves que usan tus chats. Tráelas desde otro dispositivo que siga con la sesión iniciada.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "Hay un problema con la cuenta guardada en este dispositivo. Cierra sesión y vuelve a iniciarla, o usa tu frase de recuperación.",
       "status": "machine"

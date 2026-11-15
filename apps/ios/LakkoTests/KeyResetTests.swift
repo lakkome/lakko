@@ -552,7 +552,8 @@ final class KeysSignOutTests: XCTestCase {
             tokenProvider: tokens,
             wipeAfterKeyReset: { account in wiped.note(account) },
             recallRecords: recalls,
-            recallOperations: .unreachable
+            recallOperations: .unreachable,
+            earlierKeysInputs: skipEarlierKeysGate
         )
         if let refresh {
             tokens.refresher = { _ in try refresh.get() }

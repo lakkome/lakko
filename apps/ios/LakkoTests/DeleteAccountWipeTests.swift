@@ -222,7 +222,8 @@ final class DeleteAccountWipeTests: XCTestCase {
                     freshGrant: FreshAuthGrant(grant: "grant-1", expiresAtMs: 1_600_000))
             },
             passkeyPresence: { _ in false },
-            grantNowMs: { 1_000_000 }
+            grantNowMs: { 1_000_000 },
+            earlierKeysInputs: skipEarlierKeysGate
         )
         XCTAssertNotNil(auth.identitySecrets, "the fixture restores a session")
         let configuration = URLSessionConfiguration.ephemeral

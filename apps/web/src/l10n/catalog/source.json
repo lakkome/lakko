@@ -8779,6 +8779,16 @@
       "comment": "Line on the restore-identity screen when Another device is chosen: the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Open Lakko on a device that is still logged in.",
+      "comment": "Detail under 'Another device' on the 'Restore your keys' screen of a device that holds the keys but not the earlier keys the account's chats use (after the account's keys were changed).",
+      "security_critical": true
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "You are logged in as {username}, but this device does not have the keys your chats use yet. Bring them from another device that is still logged in.",
+      "comment": "First line of the 'Restore your keys' screen when this device holds the account's keys but not the earlier keys its chats still use (after a key change); {username} is the account (@name, shown bold).",
+      "security_critical": true
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "Something is wrong with the account saved on this device. Log out and log in again, or use your recovery phrase.",
       "comment": "The account saved on this device cannot be read, so restoring from another device cannot start."

@@ -325,7 +325,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "device-removals-owed", run: () => clearRemovals(storage, accountIdB64) },
     // ADR-0074 part 3: a key rotation this device was finishing, the "keys
     // were changed on another device" line, and the sealed row holding the
-    // predecessor seeds, the pending envelopes and a prepared rotation.
+    // predecessor seeds, the pending envelopes, a prepared rotation and (G-56)
+    // the id of the DeviceGroup this device joined by pairing.
     { name: "key-rotation-owed", run: () => clearRotation(storage, accountIdB64) },
     { name: "key-rotation-notice", run: () => clearRotatedNotice(storage, accountIdB64) },
     { name: "key-rotation-state", run: () => deleteKeyRotationState(accountIdB64) },

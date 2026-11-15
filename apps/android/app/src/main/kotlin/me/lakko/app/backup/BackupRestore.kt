@@ -269,6 +269,31 @@ internal suspend fun restoreBackupAndApply(
     return BackupRestoreOutcome.APPLIED
 }
 
+/**
+ * G-56 (contract section 4.2, source 1): the backup fetched and opened only
+ * for the account's own predecessors, by a device parked in "earlier keys
+ * missing". Nothing else of it is applied here (the pending-restore flag and
+ * the landing's own restore decide that, unchanged), the flag is not touched,
+ * and a stale head is never accepted. `true` when predecessors were stored.
+ */
+internal suspend fun fetchOwnPredecessorsOnly(ports: BackupRestorePorts): Boolean {
+    val fetched = try {
+        ports.fetch { false }
+    } catch (cancel: CancellationException) {
+        throw cancel
+    } catch (cause: Throwable) {
+        GatedRestoreOutcome.TransportFailed(cause)
+    }
+    val parsed = (fetched as? GatedRestoreOutcome.Restored)?.payload ?: return false
+    return try {
+        applyOwnPredecessors("earlier-keys", ports, parsed.ownPredecessors).let {
+            it == OwnPredecessorStep.STORED || it == OwnPredecessorStep.KEY_MOVED
+        }
+    } finally {
+        parsed.ownPredecessors.forEach { it.seed.fill(0) }
+    }
+}
+
 private enum class OwnPredecessorStep { NOTHING, STORED, KEY_MOVED, NOT_STORED }
 
 private fun applyOwnPredecessors(

@@ -6,9 +6,12 @@
 //! Mirror of `lakko-ffi-wasm/src/translation.rs` over
 //! [`lakko_ui_rules::translation`] (ADR-0082 section 6). The engines are
 //! platform code; these are only the decisions about them, so the three
-//! clients offer the same controls for the same message. Nothing here takes
-//! message text: a client passes the tag its own detector produced.
+//! clients offer the same controls for the same message. Only
+//! [`detect_text_language`] takes message text: the on-device detector of
+//! [`lakko_ui_rules::language_detect`] for a client with no usable platform
+//! detector (Android). Every other function takes the tag a detector produced.
 
+use lakko_ui_rules::language_detect::detect_text_language as rust_detect_text_language;
 use lakko_ui_rules::translation::{
     canonical_language_tag as rust_canonical_language_tag,
     conversation_bar_language as rust_conversation_bar_language,
@@ -175,6 +178,23 @@ pub fn stored_result_is_current(
     )
 }
 
+/// The language a message's text is in, detected on this device, or `nil`
+/// when the text has no letters or the language has no tag.
+///
+/// For a client without a usable platform detector (Android; ADR-0082 note of
+/// 2026-11-15). The answer feeds `TranslateOfferInput.detected` and the bar's
+/// detections unchanged: below `translationDetectionConfidentPermille()` it is
+/// a guess and the translation opens with the language picker. The text is
+/// read here and nowhere else; nothing is stored or logged.
+#[uniffi::export]
+#[must_use]
+pub fn detect_text_language(text: String) -> Option<DetectedLanguage> {
+    rust_detect_text_language(&text).map(|d| DetectedLanguage {
+        tag: d.tag,
+        confidence_permille: d.confidence_permille,
+    })
+}
+
 /// The stored form of a language tag (`pt-BR` -> `pt`, `zh-TW` -> `zh-Hant`),
 /// or `nil` for a tag that names no language.
 #[uniffi::export]
@@ -264,5 +284,26 @@ mod tests {
             canonical_language_tag("zh-TW".into()).as_deref(),
             Some("zh-Hant")
         );
+    }
+
+    #[test]
+    fn detection_crosses_the_surface_and_feeds_the_offer() {
+        let detected = detect_text_language(
+            "Ich gehe morgen auf den Markt, um Gemüse zu kaufen. Willst du mitkommen?".into(),
+        );
+        assert_eq!(detected.as_ref().map(|d| d.tag.as_str()), Some("de"));
+        let input = TranslateOfferInput {
+            enabled: true,
+            has_text: true,
+            is_own: false,
+            detected,
+            engine_for_detected: TranslationEngineState::Ready,
+            any_engine: true,
+        };
+        assert_eq!(
+            translation_offered(input, vec!["en".into()]),
+            TranslateOffer::Translate
+        );
+        assert_eq!(detect_text_language("12345".into()), None);
     }
 }

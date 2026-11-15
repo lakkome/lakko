@@ -68,11 +68,19 @@ public struct RestoreViaDevicePanel: View {
         case error(UiText)
     }
 
+    /// G-56 — the parked screen of a device waiting for the account's
+    /// earlier keys: a device already in the DeviceGroup pairs again with a
+    /// self-removal proof
+    /// (``PairingOrchestrator/prepareRejoinPairingFlow(loginHandle:accountIdBytes:accountIdB64:deviceCardEnvelope:snapshotStore:joinedGroupIds:latestEpoch:redeem:)``).
+    public let rejoinsHeldLeaf: Bool
+
     public init(
         target: Target,
+        rejoinsHeldLeaf: Bool = false,
         onRecovered: @escaping (PairingOrchestrator.JoinRecoveryOutcome) async throws -> Void
     ) {
         self.target = target
+        self.rejoinsHeldLeaf = rejoinsHeldLeaf
         self.onRecovered = onRecovered
     }
 
@@ -151,9 +159,14 @@ public struct RestoreViaDevicePanel: View {
         typedCode = ""
         ui = .preparing
         let place = pairingPlace()
+        linkTask = Task { @MainActor in await startCode(place: place) }
+    }
+
+    private func startCode(place: PairingPlace) async {
         do {
-            let s = try prepareSession(
+            let s = try await prepareSession(
                 deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope(place: place))
+            guard !Task.isCancelled else { return }
             session = s
             // UX section 2.1 — the payload is sealed when the code is typed,
             // with the city if it has arrived by then (no wait past the bound
@@ -240,9 +253,16 @@ public struct RestoreViaDevicePanel: View {
         }
     }
 
-    private func prepareSession(deviceCardEnvelope: Data?) throws -> PairingOrchestrator.JoinSession {
+    private func prepareSession(deviceCardEnvelope: Data?) async throws -> PairingOrchestrator.JoinSession {
         switch target {
         case .account(let accountIdBytes, let accountIdB64, let loginHandle):
+            if rejoinsHeldLeaf {
+                return try await PairingOrchestrator.prepareRejoinPairingFlow(
+                    loginHandle: loginHandle,
+                    accountIdBytes: accountIdBytes,
+                    accountIdB64: accountIdB64,
+                    deviceCardEnvelope: deviceCardEnvelope)
+            }
             return try PairingOrchestrator.prepareJoinFlow(
                 loginHandle: loginHandle,
                 accountIdBytes: accountIdBytes,
@@ -298,13 +318,14 @@ public struct RestoreViaDevicePanel: View {
             // panel opening; a QR once shown is never rebuilt.
             let card = await DeviceCardCenter.shared.pairingCardEnvelope(waitingFor: place)
             guard !Task.isCancelled, ui == .preparing else { return }
-            showQr(deviceCardEnvelope: card)
+            await showQr(deviceCardEnvelope: card)
         }
     }
 
-    private func showQr(deviceCardEnvelope: Data?) {
+    private func showQr(deviceCardEnvelope: Data?) async {
         do {
-            let s = try prepareSession(deviceCardEnvelope: deviceCardEnvelope)
+            let s = try await prepareSession(deviceCardEnvelope: deviceCardEnvelope)
+            guard !Task.isCancelled else { return }
             session = s
             ui = .waiting(qrPayload: s.qrPayload)
             pollTask = Task { @MainActor in

@@ -256,7 +256,7 @@ public object WelcomeCourier {
                 // bundle). It is NOT the history bundle — skip it and
                 // keep polling. Mirror of the web's
                 // `welcome-courier.ts` skip.
-                if (RecoveryPayload.isRecoveryPayloadRow(first.payload) ||
+                if (RecoveryRow.isRecoveryRow(first.payload) ||
                     StateBundle.isStateRow(first.payload)
                 ) {
                     cursor = first.id

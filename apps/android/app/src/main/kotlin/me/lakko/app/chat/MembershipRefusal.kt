@@ -547,6 +547,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0078 section 3 - a push wake or subscription that could
                 // not be sealed; not a membership refusal.
                 is FfiException.PushWake,
+                // G-56 - a recovery payload v3 or row the core refused; not a
+                // membership refusal.
+                is FfiException.RecoveryPayload,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
