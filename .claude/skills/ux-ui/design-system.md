@@ -275,6 +275,9 @@ Settings sections:
 - **Data**: encrypted backup, export my data, storage usage.
 - **About**: version, licences, privacy, "How Lakko protects you" (the one
   place the crypto is explained, in plain words).
+  Also "Support Lakko", the donations page (`docs/ux/donations.md`):
+  inside the app on web and desktop, in the system browser on iOS and
+  Android.
 - **Account (danger zone)**: at the bottom of Settings, visually
   separated: "Log out", "Forget this device" (with one sentence on what
   it does), "Delete account" (behind a typed confirmation).

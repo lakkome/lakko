@@ -5565,6 +5565,62 @@
       "text": "Це ім’я не можна використати",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "Пожертвувати",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Скопійовано",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Копіювати",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Копіювати адресу",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Мережа: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Надсилайте на цю адресу лише {coin} у мережі {network}. Усе інше буде втрачено.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Не вдалося завантажити способи пожертви. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "Для людей у Росії.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Lakko створює і підтримує одна людина. Пожертви оплачують сервери й допомагають продовжувати роботу.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Зараз у вашій країні немає доступного способу зробити пожертву.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Не вдалося показати номер. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Показати",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Підтримати Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "З будь-якої країни.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "Перевірте дату й час на цьому пристрої.",
       "status": "machine"
@@ -8459,6 +8515,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "Комбінації клавіш",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Підтримати Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {

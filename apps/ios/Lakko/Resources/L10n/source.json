@@ -5935,6 +5935,62 @@
       "text": "This name can't be used",
       "comment": "Shown under a name field for any other refusal."
     },
+    "donate.button": {
+      "text": "Donate",
+      "comment": "Button on a payment card that opens the payment page outside Lakko."
+    },
+    "donate.copied": {
+      "text": "Copied",
+      "comment": "Shown on a copy button for two seconds after the text was copied."
+    },
+    "donate.copy": {
+      "text": "Copy",
+      "comment": "Button that copies a phone number on the donations page."
+    },
+    "donate.crypto_copy": {
+      "text": "Copy address",
+      "comment": "Button that copies a crypto wallet address."
+    },
+    "donate.crypto_network": {
+      "text": "Network: {network}",
+      "comment": "Line under a crypto coin name on the donations page; network is a blockchain name such as TRON (TRC-20)."
+    },
+    "donate.crypto_warning": {
+      "text": "Send only {coin} on the {network} network to this address. Anything else is lost.",
+      "comment": "Warning under a crypto wallet address. coin is e.g. USDT, network e.g. TRON (TRC-20)."
+    },
+    "donate.error": {
+      "text": "Couldn't load the ways to donate. Check your connection and try again.",
+      "comment": "Donations page when the list could not be loaded."
+    },
+    "donate.for_russia": {
+      "text": "For people in Russia.",
+      "comment": "Line under a payment method that works only from Russia (SBP)."
+    },
+    "donate.lede": {
+      "text": "Lakko is built and run by one person. Donations pay for the servers and keep the work going.",
+      "comment": "Paragraph under the heading of the donations page."
+    },
+    "donate.none": {
+      "text": "No way to donate is available in your country right now.",
+      "comment": "Donations page when no payment method is offered in the visitor's country."
+    },
+    "donate.phone_error": {
+      "text": "Couldn't show the number. Try again.",
+      "comment": "Under a hidden phone number when showing it failed."
+    },
+    "donate.phone_show": {
+      "text": "Show",
+      "comment": "Button next to a hidden phone number on the donations page; shows the number."
+    },
+    "donate.title": {
+      "text": "Support Lakko",
+      "comment": "Heading of the donations page."
+    },
+    "donate.worldwide": {
+      "text": "From anywhere.",
+      "comment": "Line under a payment method that works from any country."
+    },
     "ds.clock_skew": {
       "text": "Check this device's date and time.",
       "comment": "Shown when the server refused a request because this device's clock is wrong."
@@ -9140,6 +9196,10 @@
     "settings.about.shortcuts.title": {
       "text": "Keyboard shortcuts",
       "comment": "Card title in Settings > About, desktop app."
+    },
+    "settings.about.support": {
+      "text": "Support Lakko",
+      "comment": "Settings > About row that opens the donations page."
     },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",

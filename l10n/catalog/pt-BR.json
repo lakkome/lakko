@@ -5565,6 +5565,62 @@
       "text": "Este nome não pode ser usado",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "Doar",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Copiado",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Copiar",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Copiar endereço",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Rede: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Envie para este endereço apenas {coin} na rede {network}. Qualquer outra coisa será perdida.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Não foi possível carregar as formas de doar. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "Para pessoas na Rússia.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "O Lakko é feito e mantido por uma só pessoa. As doações pagam os servidores e mantêm o trabalho.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "No momento não há forma de doar disponível no seu país.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Não foi possível mostrar o número. Tente de novo.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Mostrar",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Apoie o Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "De qualquer lugar.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "Verifique a data e a hora deste dispositivo.",
       "status": "machine"
@@ -8459,6 +8515,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "Atalhos de teclado",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Apoie o Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {

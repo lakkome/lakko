@@ -9475,3 +9475,71 @@ button.lk-card-row-button {
   gap: 12px;
   color: var(--surface-muted);
 }
+
+/* docs/ux/donations.md: the donations page. */
+.lk-donate-back {
+  align-self: flex-start;
+}
+.lk-donate-lede {
+  margin: 0;
+  color: var(--surface-muted);
+}
+.lk-donate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px;
+}
+.lk-donate-card h2 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 22px;
+}
+.lk-donate-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-donate-qr {
+  display: block;
+  margin: 4px auto;
+  width: 200px;
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
+  background: #fff;
+}
+.lk-donate-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  user-select: all;
+}
+.lk-donate-address {
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-hover);
+}
+.lk-donate-card > button.ghost {
+  align-self: flex-start;
+}
+.lk-donate-phone-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.lk-donate-warning,
+.lk-donate-error {
+  margin: 0;
+  font-size: 13px;
+}
+.lk-donate-error {
+  color: var(--danger);
+}
+.lk-donate-placeholder {
+  height: 120px;
+  border-radius: 16px;
+  background: var(--surface-hover);
+}

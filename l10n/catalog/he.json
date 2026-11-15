@@ -5565,6 +5565,62 @@
       "text": "לא ניתן להשתמש בשם הזה",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "תרומה",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "הועתק",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "העתק",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "העתקת הכתובת",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "רשת: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "שלחו לכתובת הזו רק {coin} ברשת {network}. כל דבר אחר יאבד.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "לא ניתן לטעון את דרכי התרומה. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "לאנשים ברוסיה.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "את Lakko בונה ומפעיל אדם אחד. התרומות משלמות על השרתים ומאפשרות להמשיך בעבודה.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "כרגע אין דרך לתרום שזמינה במדינה שלך.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "לא ניתן להציג את המספר. נסו שוב.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "הצג",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "תמכו ב-Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "מכל מקום.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "בדקו את התאריך והשעה במכשיר הזה.",
       "status": "machine"
@@ -8459,6 +8515,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "קיצורי מקלדת",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "תמכו ב-Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {

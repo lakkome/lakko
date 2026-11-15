@@ -5685,6 +5685,62 @@
       "text": "Это имя нельзя использовать",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "Пожертвовать",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Скопировано",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Копировать",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Копировать адрес",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Сеть: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Отправляйте на этот адрес только {coin} в сети {network}. Всё остальное будет потеряно.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Не удалось загрузить способы пожертвования. Проверьте подключение и попробуйте снова.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "Для жителей России.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Lakko создаёт и поддерживает один человек. Пожертвования оплачивают серверы и помогают продолжать работу.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Сейчас в вашей стране нет доступного способа пожертвовать.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Не удалось показать номер. Попробуйте снова.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Показать",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Поддержать Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "Из любой страны.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "Проверьте дату и время на этом устройстве.",
       "status": "machine"
@@ -8739,6 +8795,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "Сочетания клавиш",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Поддержать Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {

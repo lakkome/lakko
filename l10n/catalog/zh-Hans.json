@@ -5565,6 +5565,62 @@
       "text": "无法使用这个名字",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "捐款",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "已复制",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "复制",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "复制地址",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "网络：{network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "请只向此地址发送 {network} 网络上的 {coin}。发送其他任何内容都会丢失。",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "无法加载捐款方式。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "适用于俄罗斯用户。",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Lakko 由一个人开发和运营。捐款用于支付服务器费用，让这项工作继续下去。",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "目前你所在的国家没有可用的捐款方式。",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "无法显示号码。请重试。",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "显示",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "支持 Lakko",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "适用于任何地区。",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "请检查此设备的日期和时间。",
       "status": "machine"
@@ -8459,6 +8515,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "键盘快捷键",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "支持 Lakko",
       "status": "machine"
     },
     "settings.about.translations_updated": {

@@ -5565,6 +5565,62 @@
       "text": "Bu ad kullanılamaz",
       "status": "machine"
     },
+    "donate.button": {
+      "text": "Bağış yap",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Kopyalandı",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Kopyala",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Adresi kopyala",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Ağ: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Bu adrese yalnızca {network} ağında {coin} gönderin. Başka her şey kaybolur.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Bağış yolları yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "donate.for_russia": {
+      "text": "Rusya'dakiler için.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Lakko'yu tek bir kişi geliştiriyor ve işletiyor. Bağışlar sunucuların masrafını karşılar ve çalışmanın sürmesini sağlar.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Şu anda ülkenizde kullanılabilen bir bağış yolu yok.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Numara gösterilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Göster",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Lakko'yu destekle",
+      "status": "machine"
+    },
+    "donate.worldwide": {
+      "text": "Her yerden.",
+      "status": "machine"
+    },
     "ds.clock_skew": {
       "text": "Bu cihazın tarih ve saatini kontrol edin.",
       "status": "machine"
@@ -8459,6 +8515,10 @@
     },
     "settings.about.shortcuts.title": {
       "text": "Klavye kısayolları",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Lakko'yu destekle",
       "status": "machine"
     },
     "settings.about.translations_updated": {

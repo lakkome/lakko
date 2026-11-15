@@ -50,6 +50,7 @@ import Invite from "./Invite";
 import JoinGroup from "./JoinGroup";
 import JoinCall from "./JoinCall";
 import NotFound from "./NotFound";
+import Donations from "./Donations";
 import {
   callJoinRoutePattern,
   callRoutePattern,
@@ -112,6 +113,9 @@ export const routes: RouteDefinition[] = [
   // the visitor is the owner, the host) flow, prompting anon visitors to log
   // in first.
   { path: callJoinRoutePattern, component: JoinCall },
+
+  // docs/ux/donations.md: the ways to donate. Public, signed in or not.
+  { path: paths.donations, component: Donations },
 
   // Protected pages — every child renders inside <AppShell />.
   {
