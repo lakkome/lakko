@@ -245,6 +245,42 @@
       "text": "Имя пользователя",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "Продолжить",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Не удалось проверить имя пользователя. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Это не имя пользователя этого аккаунта.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Слишком много попыток. Попробуйте позже.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Имя пользователя",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Не помню",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Его можно посмотреть в Настройках на другом устройстве. До тех пор это устройство не синхронизируется с ними.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Это устройство ещё не знает имя пользователя вашего аккаунта. Введите его, чтобы синхронизироваться с другими устройствами.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Какое у вас имя пользователя?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "Сервер вернул изменённую или устаревшую резервную копию. Ваш аккаунт в безопасности: мы продолжили, не восстанавливая старые данные.",
       "status": "machine"

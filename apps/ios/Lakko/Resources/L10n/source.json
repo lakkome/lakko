@@ -256,6 +256,42 @@
       "text": "Username",
       "comment": "Label of the username field on the sign-in, sign-up and recovery forms."
     },
+    "auth.username_prompt.continue": {
+      "text": "Continue",
+      "comment": "Button that checks the typed username against this account."
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Couldn't check the username. Check your connection and try again.",
+      "comment": "The check request failed (no network or a server error)."
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "That is not the username of this account.",
+      "comment": "The typed username is valid but belongs to no account or to another account; never say which."
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Too many tries. Try again later.",
+      "comment": "The server refused the check because of too many attempts."
+    },
+    "auth.username_prompt.field": {
+      "text": "Username",
+      "comment": "Label of the text field where the person types their own username."
+    },
+    "auth.username_prompt.forgot": {
+      "text": "I don't remember",
+      "comment": "Button that closes the username prompt without a name; the app asks again at the next start."
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "You can see it in Settings on your other device. Until then this device does not sync with them.",
+      "comment": "Shown after the person said they do not remember their username."
+    },
+    "auth.username_prompt.lede": {
+      "text": "This device does not know your account's username yet. Enter it to sync with your other devices.",
+      "comment": "Explanation under the title of the username prompt. Shown once the session has landed; the app works behind it."
+    },
+    "auth.username_prompt.title": {
+      "text": "What is your username?",
+      "comment": "Title of the prompt shown after a passkey sign-in on a device that does not know the account's username yet."
+    },
     "backup.rollback_refused.body": {
       "text": "The server returned an altered or outdated backup. Your account is safe; we continued without restoring the older data.",
       "comment": "Body of the alert shown when a restore refused a backup the server returned rolled back or altered (ADR-0037). Nothing older was loaded.",

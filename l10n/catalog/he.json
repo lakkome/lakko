@@ -245,6 +245,42 @@
       "text": "שם משתמש",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "המשך",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "לא ניתן היה לבדוק את שם המשתמש. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "זה לא שם המשתמש של החשבון הזה.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "יותר מדי ניסיונות. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "שם משתמש",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "אני לא זוכר",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "אפשר לראות אותו בהגדרות במכשיר האחר שלכם. עד אז המכשיר הזה לא מסתנכרן איתם.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "המכשיר הזה עדיין לא יודע את שם המשתמש של החשבון שלך. הזינו אותו כדי לסנכרן עם המכשירים האחרים שלכם.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "מה שם המשתמש שלך?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "השרת החזיר גיבוי ששונה או שאינו עדכני. החשבון שלכם בטוח; המשכנו בלי לשחזר את הנתונים הישנים.",
       "status": "machine"

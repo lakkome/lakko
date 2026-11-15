@@ -245,6 +245,42 @@
       "text": "用户名",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "继续",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "无法检查用户名。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "这不是此账户的用户名。",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "尝试次数过多。请稍后再试。",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "用户名",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "我不记得了",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "你可以在另一台设备的设置中查看。在那之前，此设备不会与它们同步。",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "此设备还不知道你账户的用户名。输入用户名以便与你的其他设备同步。",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "你的用户名是什么？",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "服务器返回了被篡改或过期的备份。你的账号是安全的；我们没有恢复旧数据，直接继续了。",
       "status": "machine"

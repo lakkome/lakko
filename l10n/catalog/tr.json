@@ -245,6 +245,42 @@
       "text": "Kullanıcı adı",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "Devam",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Kullanıcı adı kontrol edilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Bu, bu hesabın kullanıcı adı değil.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Çok fazla deneme. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Kullanıcı adı",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Hatırlamıyorum",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Diğer cihazınızda Ayarlar'da görebilirsiniz. O zamana kadar bu cihaz onlarla eşitlenmez.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Bu cihaz hesabınızın kullanıcı adını henüz bilmiyor. Diğer cihazlarınızla eşitlemek için girin.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Kullanıcı adınız nedir?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "Sunucu değiştirilmiş veya eskimiş bir yedek döndürdü. Hesabınız güvende; eski verileri geri yüklemeden devam ettik.",
       "status": "machine"

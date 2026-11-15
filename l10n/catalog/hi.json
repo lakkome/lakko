@@ -245,6 +245,42 @@
       "text": "यूज़रनेम",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "जारी रखें",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "यूज़रनेम जाँचा नहीं जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "यह इस खाते का यूज़रनेम नहीं है।",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "बहुत अधिक प्रयास। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "यूज़रनेम",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "मुझे याद नहीं",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "आप इसे अपने दूसरे डिवाइस पर सेटिंग में देख सकते हैं। तब तक यह डिवाइस उनके साथ सिंक नहीं होता।",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "यह डिवाइस अभी आपके खाते का यूज़रनेम नहीं जानता। अपने दूसरे डिवाइस के साथ सिंक करने के लिए इसे दर्ज करें।",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "आपका यूज़रनेम क्या है?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "सर्वर ने बदला हुआ या पुराना बैकअप लौटाया। आपका खाता सुरक्षित है; हमने पुराना डेटा रीस्टोर किए बिना आगे बढ़ना जारी रखा।",
       "status": "machine"

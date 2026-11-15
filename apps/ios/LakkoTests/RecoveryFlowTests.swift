@@ -2647,3 +2647,215 @@ extension RecoveryFlowTests {
         XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .land)
     }
 }
+
+// MARK: - The username of a sign-in that named none
+
+/// Auth's answers to `POST /auth/login-handle/check`, per handle, mutable
+/// between steps.
+private final class HandleAnswers {
+    var byHandle: [String: (Int, String)] = [:]
+    var fallback: (Int, String) = (200, #"{"state":"other"}"#)
+
+    func set(_ username: String, _ answer: (Int, String)) throws {
+        byHandle[base64UrlEncodeNoPad(try loginHandle(username: username))] = answer
+    }
+
+    func answer(_ json: [String: Any]) -> (Int, String) {
+        (json["handle"] as? String).flatMap { byHandle[$0] } ?? fallback
+    }
+}
+
+extension RecoveryFlowTests {
+
+    private static let same = (200, #"{"state":"same"}"#)
+    private static let other = (200, #"{"state":"other"}"#)
+    private static let none = (200, #"{"state":"none"}"#)
+
+    private func checks(_ h: Harness) -> [RecordedAuthRequest] {
+        NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle/check" }
+    }
+
+    private func checkedHandle(_ request: RecordedAuthRequest) -> String? { request.json["handle"] as? String }
+
+    private func wire(_ username: String) throws -> String { base64UrlEncodeNoPad(try loginHandle(username: username)) }
+
+    /// A backup whose own profile envelope names `username`.
+    private func backupNaming(_ account: Data, profileUsername: String) throws -> ParsedBackupPayload {
+        let envelope = try composeProfileEnvelope(profile: FfiProfile(
+            displayName: "Alice", username: profileUsername, updatedAtMs: 1_700_000_000_000,
+            accountId: account, usernameCertificate: nil, grants: []))
+        return try parseBackupPayload(wire: try BackupClient.composePayload(
+            accountId: account,
+            createdAtMs: 1_700_000_000_000,
+            ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [],
+            knownGroupIdsHex: [],
+            syncedState: nil,
+            own: OwnBackupEnvelopes(ownProfile: envelope)))
+    }
+
+    /// A passkey sign-in that named no username, then the phrase: the
+    /// session lands with an empty username.
+    private func landWithoutAName(
+        _ h: Harness, _ account: (bytes: Data, b64: String), register: String? = nil
+    ) async throws {
+        h.repository.storedOwnUsernameRegister = { _ in register }
+        try await parkWithoutKeysOrName(h, account.bytes)
+        let mine = RecoveryMnemonic.generate()
+        h.directory.publishedKey = try identityKey(of: mine)
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: mine.phrase())
+        XCTAssertTrue(isSession(h.repository), "\(h.repository.state)")
+    }
+
+    func testANameTheBackupGivesIsCheckedAndAdoptedWithoutAPrompt() async throws {
+        let account = newAccount()
+        let answers = HandleAnswers()
+        try answers.set("alice", Self.same)
+        let backup = ScriptedEarlierKeysBackup()
+        backup.outcomes = [.restored(try backupNaming(account.bytes, profileUsername: "alice"))]
+        let h = harness(backup: backup, routes: { path, json in
+            path == "/auth/login-handle/check" ? answers.answer(json) : nil
+        })
+        var learned: [String] = []
+        h.repository.onUsernameLearned = { learned.append($0) }
+
+        try await landWithoutAName(h, account)
+
+        let named = SessionAccount(accountIdB64: account.b64, username: "alice")
+        let adopted = await waitUntil { h.repository.state == .session(named) }
+        XCTAssertTrue(adopted, "\(h.repository.state)")
+        XCTAssertEqual(h.store.load(), PersistedSession(accountIdB64: account.b64, username: "alice"))
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64, "no prompt")
+        XCTAssertEqual(learned, [account.b64], "the rejoin is woken")
+        XCTAssertEqual(checks(h).map(checkedHandle), [try wire("alice")])
+        XCTAssertEqual(checks(h).first?.authorization, "Bearer tok-passkey")
+        // The rejoin's handle source now names the account's handle.
+        XCTAssertEqual(DeviceSession.current(h.repository)?.loginHandle, try loginHandle(username: "alice"))
+        // Learned once: no second check for the session.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(checks(h).count, 1)
+    }
+
+    func testABackupNameOfAnotherAccountIsSkippedAndTheRegisterIsTried() async throws {
+        let account = newAccount()
+        let answers = HandleAnswers()
+        try answers.set("bob", Self.other)
+        try answers.set("alice", Self.same)
+        let backup = ScriptedEarlierKeysBackup()
+        backup.outcomes = [.restored(try backupNaming(account.bytes, profileUsername: "bob"))]
+        let h = harness(backup: backup, routes: { path, json in
+            path == "/auth/login-handle/check" ? answers.answer(json) : nil
+        })
+
+        try await landWithoutAName(h, account, register: "alice")
+
+        let adopted = await waitUntil { h.store.load()?.username == "alice" }
+        XCTAssertTrue(adopted)
+        XCTAssertEqual(checks(h).map(checkedHandle), [try wire("bob"), try wire("alice")])
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64)
+    }
+
+    func testWithNoNameFromTheBackupThePersonIsAskedAndNothingIsSent() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), routes: { path, _ in
+            path == "/auth/login-handle/check" ? Self.same : nil
+        })
+
+        try await landWithoutAName(h, account)
+
+        let asked = await waitUntil { h.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(asked)
+        XCTAssertTrue(checks(h).isEmpty, "nothing to check before the person types")
+        XCTAssertEqual(h.store.load()?.username, "")
+    }
+
+    func testThePromptsAnswersSameOtherNone429AndNetwork() async throws {
+        let account = newAccount()
+        let answers = HandleAnswers()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), routes: { path, json in
+            path == "/auth/login-handle/check" ? answers.answer(json) : nil
+        })
+        var learned: [String] = []
+        h.repository.onUsernameLearned = { learned.append($0) }
+        try await landWithoutAName(h, account)
+        let asked = await waitUntil { h.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(asked)
+
+        // The username rule refuses before any request.
+        let rule = await h.repository.submitPromptedUsername("no")
+        XCTAssertEqual(rule, .rule(.tooShort))
+        let empty = await h.repository.submitPromptedUsername("   ")
+        XCTAssertEqual(empty, .empty)
+        XCTAssertTrue(checks(h).isEmpty)
+
+        try answers.set("bob", Self.other)
+        let other = await h.repository.submitPromptedUsername("bob")
+        XCTAssertEqual(other, .notThisAccount)
+        try answers.set("carol", (429, #"{"error":"too-many-attempts"}"#))
+        let limited = await h.repository.submitPromptedUsername("carol")
+        XCTAssertEqual(limited, .tooMany)
+        try answers.set("dave", (503, ""))
+        let failed = await h.repository.submitPromptedUsername("dave")
+        XCTAssertEqual(failed, .network)
+        XCTAssertEqual(h.repository.usernamePromptAccountIdB64, account.b64, "the prompt stays up")
+        XCTAssertEqual(h.store.load()?.username, "")
+        XCTAssertTrue(learned.isEmpty)
+
+        try answers.set("alice", Self.same)
+        let same = await h.repository.submitPromptedUsername(" @Alice ")
+        XCTAssertEqual(same, .adopted("alice"))
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64, "closed")
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: account.b64, username: "alice")))
+        XCTAssertEqual(h.store.load()?.username, "alice")
+        XCTAssertEqual(learned, [account.b64])
+        XCTAssertEqual(checks(h).map(checkedHandle),
+                       [try wire("bob"), try wire("carol"), try wire("dave"), try wire("alice")])
+    }
+
+    func testAnAccountWithNoUsernameClosesThePromptAndChangesNothing() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), routes: { path, _ in
+            path == "/auth/login-handle/check" ? Self.none : nil
+        })
+        var learned: [String] = []
+        h.repository.onUsernameLearned = { learned.append($0) }
+        try await landWithoutAName(h, account)
+        _ = await waitUntil { h.repository.usernamePromptAccountIdB64 == account.b64 }
+
+        let outcome = await h.repository.submitPromptedUsername("alice")
+
+        XCTAssertEqual(outcome, .accountHasNone)
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64)
+        XCTAssertEqual(h.store.load()?.username, "")
+        XCTAssertTrue(learned.isEmpty)
+    }
+
+    /// "I don't remember" closes the prompt for this run of the app; the
+    /// next start (a new repository over the same stores) asks again while
+    /// the username is still empty.
+    func testIDontRememberAsksAgainAtTheNextStart() async throws {
+        let account = newAccount()
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = RecoveryMnemonic.generate().toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(access: "tok-nameless")), accountIdB64: account.b64)
+        let marker = PersistedSession(accountIdB64: account.b64, username: "")
+        let routes: (String, [String: Any]) -> (Int, String)? = { path, _ in
+            path == "/auth/login-handle/check" ? Self.other : nil
+        }
+
+        let first = harness(marker: marker, persistence: persistence, routes: routes)
+        XCTAssertTrue(isSession(first.repository))
+        let asked = await waitUntil { first.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(asked, "a relaunch with no username asks")
+        first.repository.dismissUsernamePrompt()
+        XCTAssertNil(first.repository.usernamePromptAccountIdB64)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(first.repository.usernamePromptAccountIdB64, "not again in this run")
+
+        let next = harness(marker: marker, persistence: persistence, routes: routes)
+        let askedAgain = await waitUntil { next.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(askedAgain, "the next start asks again")
+    }
+}

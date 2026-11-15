@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -147,6 +148,79 @@ public class AuthRepository(
                 }
             },
         )
+
+    /**
+     * A session that landed with no username (a passkey sign-in on a new
+     * device, `UsernamePrompt.kt`): the backup's name is adopted when auth
+     * confirms it, else the prompt asks for it.
+     */
+    private val usernamePromptController: UsernamePromptController =
+        UsernamePromptController(
+            ports = object : UsernamePromptPorts {
+                override fun session(): UsernamePromptSession? {
+                    val session = mutableState.value as? AuthState.Session ?: return null
+                    val accountIdB64 = session.account.accountIdB64
+                    if (!secretsAreFor(accountIdB64)) return null
+                    // A guest account has no username and no other device.
+                    if (guestSessionOf(session, mutableGuest.value) != null) return null
+                    if (guestAccountState(guestMarkers, accountIdB64) != null) return null
+                    return UsernamePromptSession(accountIdB64, session.account.username)
+                }
+
+                override fun backupCandidates(accountIdB64: String): List<String> {
+                    val accountId = mutableIdentitySecrets.value?.accountId ?: return emptyList()
+                    val fromProfile = me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.username
+                    val live = ownUsernamePort?.state()?.takeIf { it.ready }?.username
+                    val stored = me.lakko.app.devices.sync.DeviceGroupSyncRepository
+                        .storedOwnUsername(applicationContext, accountIdB64)
+                    return listOfNotNull(fromProfile, live, stored)
+                }
+
+                override fun handleFor(username: String): NamedHandle =
+                    namedHandleOrRefuse(loginHandleSource, username)
+
+                override suspend fun check(handle: ByteArray): LoginHandleState {
+                    val token = sessionTokenProvider.current() ?: throw AuthClientArgError("not signed in")
+                    return authClientFactory().use { it.checkLoginHandle(token, handle) }
+                }
+
+                override fun adopt(accountIdB64: String, username: String) {
+                    adoptUsername(accountIdB64, username, renamedElsewhere = true)
+                }
+            },
+            log = { message -> Log.i("lakko-auth", message) },
+        )
+
+    /** The username prompt (`UsernamePrompt.kt`), or `null` when closed. */
+    public val usernamePrompt: StateFlow<UsernamePromptState?> get() = usernamePromptController.state
+
+    /** The prompt's "Continue". */
+    public suspend fun submitUsernamePrompt(typed: String) {
+        usernamePromptController.submit(typed)
+    }
+
+    /** The prompt's "I don't remember". */
+    public suspend fun forgotUsernamePrompt() {
+        usernamePromptController.forgot()
+    }
+
+    /** The prompt's note was read. */
+    public fun closeUsernamePromptNote() {
+        usernamePromptController.closeNote()
+    }
+
+    /** Look at the session's username again (a session landed, a restore or
+     *  the own-username register gave this device something). */
+    private fun scheduleUsernamePrompt() {
+        pushScope.launch {
+            try {
+                usernamePromptController.evaluate()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "username prompt not evaluated: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
 
     private val mutableState: MutableStateFlow<AuthState> =
         MutableStateFlow(AuthState.Loading)
@@ -641,6 +715,23 @@ public class AuthRepository(
         pushScope.launch {
             combine(state, identitySecrets, ::loginHandleBindTarget).collect { target ->
                 if (target != null) loginHandleRebinder.onSessionAvailable(target)
+            }
+        }
+        // A session that lands with no username learns it from the backup
+        // or asks for it (`UsernamePrompt.kt`); a username that arrives, a
+        // sign-out or another account closes the prompt.
+        pushScope.launch {
+            combine(state, identitySecrets, guestAccount) { current, secrets, guest ->
+                val session = current as? AuthState.Session
+                Triple(session?.account?.accountIdB64, session?.account?.username, secrets != null && guest == null)
+            }.distinctUntilChanged().collect { (accountIdB64, username, eligible) ->
+                if (accountIdB64 == null || !eligible) {
+                    usernamePromptController.close()
+                } else if (username.isNullOrBlank()) {
+                    scheduleUsernamePrompt()
+                } else {
+                    usernamePromptController.close()
+                }
             }
         }
         // ADR-0054 S3 - the anonymous-token pool draws its batches WITH this
@@ -3657,6 +3748,9 @@ public class AuthRepository(
             is OwnUsernameSync.Seed -> writeOwnUsername(accountIdB64, action.username)
             is OwnUsernameSync.Adopt -> adoptUsername(accountIdB64, action.username, renamedElsewhere = true)
         }
+        // A register that just became readable may name an account that
+        // landed with no username (`UsernamePrompt.kt`).
+        if (session.account.username.isBlank()) scheduleUsernamePrompt()
     }
 
     /** The marker and the live session take [username]; the handle is known
@@ -3667,6 +3761,8 @@ public class AuthRepository(
         sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = username))
         sessionTokenProvider.peek()?.let { loginHandleRebinder.markBound(it.accessToken, username) }
         landedState = AuthState.Session(session.account.copy(username = username))
+        // A rejoin waiting for a login handle knocks now, not at its next pass.
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.wakeForLoginHandle()
         try {
             onUsernameChanged?.invoke(username, renamedElsewhere)
         } catch (cause: Throwable) {
@@ -8503,6 +8599,8 @@ public class AuthRepository(
         } else {
             restoredProfileOwed.set(accountIdB64)
         }
+        // The restored profile may name the account (`UsernamePrompt.kt`).
+        scheduleUsernamePrompt()
     }
 
     /** Whether a restore that ran before this session landed changed the own
@@ -8601,6 +8699,8 @@ public class AuthRepository(
                 accountIdB64 = accountIdB64,
                 bytes = bytes,
             )
+            // The own-username register may name the account (`UsernamePrompt.kt`).
+            scheduleUsernamePrompt()
         }
 
         override fun rememberRestoredGroups(groupIdsHex: List<String>) {

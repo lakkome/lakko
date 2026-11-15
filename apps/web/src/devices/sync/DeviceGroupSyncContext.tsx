@@ -61,6 +61,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
 import { loadSyncState, saveSyncState, syncStateGeneration } from "./sync-state-idb";
+import { storedOwnUsername } from "./stored-own-username";
 import { SyncStatePersister, type CapturedSyncState, type SyncStateCapture } from "./sync-state-persister";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
 import { dsAccess, takeSigner } from "../../ds/access";
@@ -101,6 +102,7 @@ import {
   knockScreen,
   newAdmissionRecord,
   NO_HANDLE_RETRY_MS,
+  createNoHandleWaker,
   noteAdded,
   noteHandled,
   rejoinFailureCode,
@@ -639,6 +641,13 @@ export function DeviceGroupSyncProvider(props: {
   }
   /** ADR-0081 decision 4 - the rejoin in progress, if any. */
   let rejoinAbort: AbortController | null = null;
+  /** Cuts a rejoin's `"no-handle"` wait short once the session has a name
+   *  (`docs/ux/identity-recovery.md` section 8b). */
+  const noHandleWaker = createNoHandleWaker();
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind === "session" && s.account.username.trim().length > 0) noHandleWaker.wake();
+  });
   /** The sibling's admission record (`device-group-rejoin.ts`), loaded with
    *  the handle. */
   let admissions: AdmissionRecord | null = null;
@@ -2904,16 +2913,7 @@ export function DeviceGroupSyncProvider(props: {
       if (held !== undefined && held.trim().length > 0) return held;
     }
     try {
-      const stored = await loadSyncState(account, deviceKey);
-      if (stored === null || stored.synced.length === 0) return "";
-      const wasm = await loadWasm();
-      const fold = openPersistedFold(wasm, stored.synced, "stored");
-      if (fold === null) return "";
-      try {
-        return fold.ownUsername() ?? "";
-      } finally {
-        fold.free();
-      }
+      return await storedOwnUsername(account, deviceKey);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("stored synced state unreadable for the rejoin knock", rejoinFailureCode(err));
@@ -2987,7 +2987,7 @@ export function DeviceGroupSyncProvider(props: {
             // Look for the login handle again after a while.
             // eslint-disable-next-line no-console
             console.info("DeviceGroup rejoin: no login handle to knock with; waiting, not founding");
-            await sleepCancellable(NO_HANDLE_RETRY_MS, abort.signal);
+            await noHandleWaker.sleep(NO_HANDLE_RETRY_MS, abort.signal);
             continue;
           }
           // docs/ux/identity-recovery.md 7.2: whether another device answered

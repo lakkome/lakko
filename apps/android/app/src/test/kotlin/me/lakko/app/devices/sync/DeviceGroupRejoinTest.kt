@@ -3,6 +3,7 @@
 
 package me.lakko.app.devices.sync
 
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.devices.DeviceGroupSnapshotStore
 import me.lakko.app.devices.SnapshotGenerations
@@ -365,5 +366,50 @@ class DeviceGroupRejoinTest {
             SnapshotGenerations.write(key, before) { throw IllegalStateException("disk") }
         }
         assertEquals(before, SnapshotGenerations.current(key))
+    }
+
+    @Test
+    fun `a rejoin waiting for a login handle wakes when the username is learned`() = runTest {
+        // 2026-11-15 - a passkey sign-in learns the name from its prompt: the
+        // waiting rejoin knocks at once instead of at its next pass.
+        val revision = kotlinx.coroutines.flow.MutableStateFlow(4L)
+        val seen = revision.value
+        val waiter = async { awaitLoginHandleOrRetry(revision, seen) }
+        testScheduler.advanceTimeBy(1_000L)
+        assertFalse(waiter.isCompleted)
+        revision.value = seen + 1
+        assertTrue("woken by the learned name", waiter.await())
+        assertTrue("well before the retry interval", testScheduler.currentTime < NO_LOGIN_HANDLE_RETRY_MS)
+    }
+
+    @Test
+    fun `a name learned during the pass that found none is not missed`() = runTest {
+        val revision = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        val seen = revision.value
+        // Learned while the pass was running, before the wait started.
+        revision.value = 1L
+        assertTrue(awaitLoginHandleOrRetry(revision, seen))
+        assertEquals(0L, testScheduler.currentTime)
+    }
+
+    @Test
+    fun `with no name learned the wait ends at the retry interval`() = runTest {
+        val revision = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        assertFalse(awaitLoginHandleOrRetry(revision, revision.value))
+        assertEquals(NO_LOGIN_HANDLE_RETRY_MS, testScheduler.currentTime)
+    }
+
+    @Test
+    fun `a rejoin with no handle knocks on the pass after the name was adopted`() = runTest {
+        val m = RunModel(welcomeAfter = null, windows = listOf("welcome"), loginHandleKnown = false)
+        val revision = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        val seen = revision.value
+        assertEquals(RejoinPass.NO_LOGIN_HANDLE, rejoinOnce(m, firstPass = true))
+        // The prompt's name is adopted: the provider now answers, the wait wakes.
+        m.loginHandleKnown = true
+        revision.value = 1L
+        assertTrue(awaitLoginHandleOrRetry(revision, seen))
+        assertEquals(RejoinPass.JOINED, rejoinOnce(m, firstPass = false))
+        assertEquals(1, m.knocks)
     }
 }

@@ -479,6 +479,80 @@ restore-prompt screen (web `auth/RestoreIdentityPrompt.tsx`, iOS
 `UI/Auth/RestoreIdentityPromptScreen.swift`, Android
 `ui/auth/RestoreIdentityPrompt.kt`) with the rows of this section.
 
+## 8b. The username after a passkey sign-in (2026-11-15)
+
+A passkey sign-in on a new device needs no name typed, so the session lands
+with no username. Without it the device has no login handle: it cannot ask
+the account's other devices to let it in (ADR-0081, it waits and retries)
+and Settings shows no name. Seen live on an iPhone the same day: it waited
+forever. The device learns the name like this, the same on every client.
+
+1. **From the backup first.** The username the backup's own profile names,
+   then the account's username as the restored synced state holds it. Each
+   is checked (step 3); the first the account holds is taken with no screen.
+2. **Else ask**, once the session has landed. The prompt is a sheet over the
+   app, which stays usable behind it; it is never a step of the sign-in.
+
+```
+What is your username?
+
+This device does not know your account's username yet. Enter it
+to sync with your other devices.
+
+  Username
+  [                    ]
+
+  [ Continue ]   I don't remember
+```
+
+3. **Continue** first applies the username rule (a name it refuses shows the
+   rule's usual line and sends nothing), then asks auth whether this account
+   holds that name. Auth compares with this account only and never says
+   whether the name belongs to someone else.
+   - **It is this account's name:** the name is kept as after a sign-in by
+     name (shown in Settings, used to sync); the sheet closes; the device
+     asks its other devices to let it in at once, not at its next retry.
+   - **Another name:** "That is not the username of this account." The
+     field keeps what was typed.
+   - **The account has no username:** the sheet closes; nothing else.
+   - **Too many tries:** "Too many tries. Try again later."
+   - **No answer:** "Couldn't check the username. Check your connection and
+     try again."
+4. **I don't remember** shows "You can see it in Settings on your other
+   device. Until then this device does not sync with them." with OK, then
+   closes. The next start of the app asks again while the name is still
+   unknown. Closing the sheet (Esc, the close button, the backdrop) is the
+   same, without the note.
+
+States: hidden; asking (idle, checking with the button disabled, each error
+line); the forgot note. A guest account (ADR-0032) has no username by
+design and is never asked. Neither the name nor its handle is logged.
+
+Copy (catalog keys, not security-critical):
+
+| Key | English |
+|---|---|
+| `auth.username_prompt.title` | "What is your username?" |
+| `auth.username_prompt.lede` | "This device does not know your account's username yet. Enter it to sync with your other devices." |
+| `auth.username_prompt.field` | "Username" |
+| `auth.username_prompt.continue` | "Continue" |
+| `auth.username_prompt.forgot` | "I don't remember" |
+| `auth.username_prompt.forgot_note` | "You can see it in Settings on your other device. Until then this device does not sync with them." |
+| `auth.username_prompt.error.not_this` | "That is not the username of this account." |
+| `auth.username_prompt.error.too_many` | "Too many tries. Try again later." |
+| `auth.username_prompt.error.network` | "Couldn't check the username. Check your connection and try again." |
+
+Data the UI needs: the session's username; the username the restored own
+profile names; the stored own-username register (ADR-0076); whether the
+landing's backup step has finished; the answer of `POST
+/auth/login-handle/check` (`same` / `other` / `none`, `429`).
+
+Cross-platform shape: one rule and one sheet on all three. Web: the rules in
+`auth/username-prompt.ts`, the sheet `auth/UsernamePrompt.tsx` (a
+`ModalLayer`, mounted in `App.tsx`), the rejoin wait cut short in
+`DeviceGroupSyncContext`. iOS and Android: the platform's existing sheet
+style.
+
 ## 9. The phrase at signup
 
 Up to three steps after the account form, the same on all three clients,

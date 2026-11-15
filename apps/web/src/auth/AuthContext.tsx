@@ -765,6 +765,14 @@ export interface AuthApi {
    *  marked known for this session, and the own-username register, which
    *  carries the name to the account's other devices. */
   applyRenamedUsername(username: string): Promise<void>;
+  /** The username of this account, learned after the session landed with
+   *  none (a passkey sign-in on a new device, `docs/ux/identity-recovery.md`
+   *  section 8b) and confirmed by auth (`POST /auth/login-handle/check`
+   *  answered `same` for its handle): kept exactly as a sign-in by name
+   *  keeps it - the local marker, the live session, the handle marked known,
+   *  and the own-username register seeded when it is empty. The caller
+   *  checked the name first; this checks nothing. */
+  adoptVerifiedUsername(username: string): Promise<void>;
   /** Whether the signed-in account's FIRST password is still owed (a guest
    *  whose name was saved and whose password step did not finish). */
   firstPasswordOwed(): boolean;
@@ -6124,6 +6132,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       rememberUsername(accountIdB64, reg.normalisedUsername);
       setState({ kind: "session", account: { accountId: accountIdB64, username: reg.normalisedUsername } });
       return { username: reg.normalisedUsername, certificate: reg.usernameCertificate };
+    },
+    async adoptVerifiedUsername(username) {
+      const s = state();
+      if (s.kind !== "session") throw new KeyedError("common.error.session_not_ready");
+      // No register write here: `applyOwnUsername` marks the name confirmed,
+      // and the register effect seeds an empty register from it, as after a
+      // sign-in by name. A register that already names it changes nothing.
+      await applyOwnUsername(s.account.accountId, username);
     },
     async applyRenamedUsername(username) {
       const s = state();

@@ -3,6 +3,7 @@
 
 package me.lakko.app.devices.sync
 
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -88,6 +89,22 @@ public const val REKNOCK_AFTER_MS: Long = 30L * 60_000L
  *  looking for one again (the session's name, the own-username register a
  *  restore stored). Chosen, not measured; the same on every client. */
 public const val NO_LOGIN_HANDLE_RETRY_MS: Long = 30_000L
+
+/**
+ * The wait of a rejoin that knew no login handle: until [revision] moves past
+ * [seen] (the account's username was learned, `auth/UsernamePrompt.kt`) or
+ * [timeoutMs] passes. `true` when it was woken. [seen] is read BEFORE the
+ * pass that found no handle, so a name learned during that pass is not missed.
+ */
+public suspend fun awaitLoginHandleOrRetry(
+    revision: kotlinx.coroutines.flow.StateFlow<Long>,
+    seen: Long,
+    timeoutMs: Long = NO_LOGIN_HANDLE_RETRY_MS,
+): Boolean =
+    kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        revision.first { it != seen }
+        true
+    } ?: false
 
 /** The shortest answer window, whatever the knock's round trip. Chosen, not
  *  measured (ADR-0081 third amendment). */

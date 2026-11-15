@@ -75,6 +75,7 @@ import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { UsernamePrompt } from "./auth/UsernamePrompt";
 
 /**
  * Router-level layout (G-36). Renders the active route unchanged and
@@ -253,6 +254,12 @@ const App: Component = () => (
           <ChannelPublisherLoops />
           {/* UX section 9: the short notice of an end, anywhere in the app. */}
           <MembershipEndToast />
+          {/*
+           * docs/ux/identity-recovery.md section 8b: a session that landed
+           * with no username (a passkey sign-in on a new device) learns it
+           * from the backup, or asks once.
+           */}
+          <UsernamePrompt />
           {/* ADR-0087 section 13a: kept ban lists and waiting reactions. */}
           <ChannelFeedbackRuntime />
           {/*

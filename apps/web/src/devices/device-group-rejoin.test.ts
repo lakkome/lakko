@@ -21,6 +21,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ANSWER_WINDOW_MIN_MS,
+  NO_HANDLE_RETRY_MS,
+  createNoHandleWaker,
   REKNOCK_AFTER_MS,
   RESET_REFUSALS_BEFORE_REJOIN,
   STALE_KNOCK_AT_LISTEN_START_MS,
@@ -410,6 +412,68 @@ describe("the rejoining device's run", () => {
     p.script = [{ afterMs: 50, answer: WELCOME }];
     expect(await rejoinOnce(p, false)).toBe("joined");
     expect(p.log).toEqual(["drop", "directory-kp", "save", "watch", "knock", "join", "clear"]);
+  });
+
+  it("a name learned while it waits (the person typed it) wakes the loop: the next pass knocks at once", async () => {
+    // docs/ux/identity-recovery.md section 8b: the loop is the one
+    // `DeviceGroupSyncContext` runs, its wait a `NoHandleWaker` the session's
+    // name ends; the name is read afresh on every pass.
+    let username = "";
+    const p = ports([], { noUsername: true });
+    const withoutName = p.prepareKnock;
+    const withName = ports([]).prepareKnock;
+    p.prepareKnock = (nowMs) => (username === "" ? withoutName(nowMs) : withName(nowMs));
+    p.script = [{ afterMs: 50, answer: WELCOME }];
+    const waker = createNoHandleWaker();
+    const abort = new AbortController();
+    const outcomes: string[] = [];
+    const loop = (async (): Promise<void> => {
+      let first = true;
+      for (;;) {
+        const outcome = await rejoinOnce(p, first);
+        first = false;
+        outcomes.push(outcome);
+        if (outcome !== "no-handle") return;
+        await waker.sleep(NO_HANDLE_RETRY_MS, abort.signal);
+      }
+    })();
+    for (let i = 0; i < 50 && outcomes.length === 0; i++) await Promise.resolve();
+    expect(outcomes).toEqual(["no-handle"]);
+    username = "anna";
+    waker.wake();
+    // Well before NO_HANDLE_RETRY_MS: the wait ended on the wake.
+    const raced = await Promise.race([
+      loop.then(() => "done"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("still waiting"), 2_000)),
+    ]);
+    abort.abort();
+    expect(raced).toBe("done");
+    expect(outcomes).toEqual(["no-handle", "joined"]);
+    expect(p.log).toContain("knock");
+    expect(p.log).not.toContain("found");
+  });
+
+  it("the no-handle wait ends on a wake, on an abort, or after its time, and a wake with nobody waiting is not kept", async () => {
+    const waker = createNoHandleWaker();
+    waker.wake();
+    const abort = new AbortController();
+    let ended = false;
+    const waiting = waker.sleep(60_000, abort.signal).then(() => {
+      ended = true;
+    });
+    await Promise.resolve();
+    expect(ended).toBe(false);
+    waker.wake();
+    await waiting;
+    expect(ended).toBe(true);
+
+    const aborted = new AbortController();
+    const second = waker.sleep(60_000, aborted.signal);
+    aborted.abort();
+    await second;
+
+    const timed = waker.sleep(5, new AbortController().signal);
+    await timed;
   });
 
   it("a Welcome it cannot join from clears the knock, so the next pass knocks afresh", async () => {

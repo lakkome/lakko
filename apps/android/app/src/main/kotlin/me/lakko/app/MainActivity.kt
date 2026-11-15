@@ -993,6 +993,9 @@ private fun AppRoot(
         } else {
             // UX 19.2 / 19.5 / 19.6 - what happened to the account elsewhere.
             me.lakko.app.ui.auth.AccountNoticeHost(repository = authRepository, chatRepository = chatRepository)
+            // A session that landed with no username and whose backup named
+            // none asks for it (`auth/UsernamePrompt.kt`).
+            me.lakko.app.ui.auth.UsernamePromptHost(repository = authRepository)
         }
     }
 

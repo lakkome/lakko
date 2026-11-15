@@ -827,6 +827,17 @@ answers, the new device founds the DeviceGroup itself and works.
    Unbuilt: a way for the person to give the name when none of these ever
    holds it; until then such a device stays outside the DeviceGroup (its
    chats are unaffected).
+   **Closed 2026-11-15 (maintainer):** the person gives the name. When a
+   session lands with no username, the device first takes the name the
+   backup's own profile or the stored own-username register names, if auth
+   confirms it is this account's (`POST /auth/login-handle/check` answers
+   `same`); otherwise it asks once with a username prompt over the app
+   (`docs/ux/identity-recovery.md` section 8b), checks the typed name the
+   same way, and keeps it as after a sign-in by name. The waiting rejoin is
+   woken and knocks at once. "I don't remember" leaves the device waiting
+   as above, and the next start asks again. Built on web 2026-11-15
+   (`auth/username-prompt.ts`, `auth/UsernamePrompt.tsx`), host-tested only;
+   iOS and Android in the same change.
 
 Costs, stated. A device that was merely asleep or in the background at the
 moment of the restore is cut off from the DeviceGroup until it next runs,

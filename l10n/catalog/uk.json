@@ -245,6 +245,42 @@
       "text": "Ім’я користувача",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "Продовжити",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Не вдалося перевірити ім'я користувача. Перевірте з'єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Це не ім'я користувача цього облікового запису.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Забагато спроб. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Ім'я користувача",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Не пам'ятаю",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Його можна побачити в Налаштуваннях на іншому пристрої. Доти цей пристрій не синхронізується з ними.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Цей пристрій ще не знає ім'я користувача вашого облікового запису. Введіть його, щоб синхронізуватися з іншими пристроями.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Яке у вас ім'я користувача?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "Сервер повернув змінену або застарілу резервну копію. Ваш обліковий запис у безпеці: ми продовжили, не відновлюючи старих даних.",
       "status": "machine"

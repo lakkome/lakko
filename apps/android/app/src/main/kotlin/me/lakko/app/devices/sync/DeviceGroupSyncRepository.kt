@@ -2784,13 +2784,15 @@ public class DeviceGroupSyncRepository(
         var first = true
         while (currentCoroutineContextActive() && bound.isCurrent) {
             try {
+                val seenHandleRevision = loginHandleRevision.value
                 val outcome = rejoinOnce(ports, first)
                 first = false
                 if (outcome == RejoinPass.NO_LOGIN_HANDLE) {
                     // Another device of the account is listed: never found
-                    // here. Look for the login handle again after a while.
+                    // here. Look for the login handle again after a while,
+                    // or at once when the account's username is learned.
                     Log.i(LOG_TAG, "DeviceGroup rejoin: no login handle to knock with; waiting, not founding")
-                    delay(NO_LOGIN_HANDLE_RETRY_MS)
+                    awaitLoginHandleOrRetry(loginHandleRevision, seenHandleRevision)
                     continue
                 }
                 if (outcome == RejoinPass.JOINED) break
@@ -3241,6 +3243,11 @@ public class DeviceGroupSyncRepository(
      * with no username in the session, and the register the backup restored
      * goes live only once this runtime runs).
      */
+    /** The register's name in the live synced state, or `null`. */
+    private fun liveOwnUsername(): String? =
+        synchronized(stateLock) { runCatching { syncedState?.ownUsername() }.getOrNull() }
+            ?.trim()?.takeIf { it.isNotEmpty() }
+
     private fun knockLoginHandle(accountIdB64: String): ByteArray? {
         loginHandleProvider?.invoke()?.let { return it }
         val name = synchronized(stateLock) { runCatching { syncedState?.ownUsername() }.getOrNull() }
@@ -3827,6 +3834,35 @@ public class DeviceGroupSyncRepository(
                 Log.w(LOG_TAG, "synced state not readable for the backup (${cause.javaClass.simpleName})")
                 null
             }
+        }
+
+        /** Moves when this account's username is learned on this device, so a
+         *  rejoin waiting for a login handle knocks at once. */
+        private val loginHandleRevision: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+        /** The account's username was learned (a passkey sign-in's prompt, or
+         *  the backup's name confirmed by auth): wake a waiting rejoin. */
+        public fun wakeForLoginHandle() {
+            loginHandleRevision.value = loginHandleRevision.value + 1
+        }
+
+        /**
+         * The own-username register as the stored synced state holds it (a
+         * backup restore seeds that file before the sync runtime runs), or
+         * `null`. Not checked here: `auth/UsernamePrompt.kt` asks auth first.
+         */
+        public fun storedOwnUsername(context: Context, accountIdB64: String): String? {
+            val live = active
+            if (live != null && live.activeAccountIdB64.get() == accountIdB64) {
+                live.liveOwnUsername()?.let { return it }
+            }
+            return runCatching {
+                DeviceGroupSnapshotStore.getSnapshot(
+                    context = context,
+                    accountIdB64 = accountIdB64,
+                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                )?.let { bytes -> SyncedState.fromBytes(bytes).use { it.ownUsername() } }
+            }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
         }
 
         /**

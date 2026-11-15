@@ -1730,9 +1730,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 backoffSecs = 5
                 if outcome == .noLoginHandle {
                     // Another device of the account is listed: never found
-                    // here. Look for the handle again after a while.
-                    try? await Task.sleep(
-                        nanoseconds: UInt64(DeviceGroupRejoin.noLoginHandleRetryMs) * 1_000_000)
+                    // here. Look for the handle again after a while, or as
+                    // soon as the session learned its username
+                    // (``loginHandleArrived()``).
+                    await sleepUntilLoginHandleOrRetry()
                     continue
                 }
                 if outcome != .waiting { break }
@@ -1762,6 +1763,33 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         } catch {
             NSLog("DeviceGroupSync: the joined DeviceGroup did not load (%@)", DeviceGroupRejoin.errorLabel(error))
         }
+    }
+
+    /// Set by ``loginHandleArrived()``; read and cleared by the rejoin wait.
+    private var loginHandleNudged = false
+
+    /// The session learned its username (a passkey sign-in named none and
+    /// the backup or the username prompt gave it): a rejoin waiting for a
+    /// login handle knocks now instead of at its next 30 s pass.
+    public func loginHandleArrived() {
+        loginHandleNudged = true
+    }
+
+    /// The wait of a rejoin pass that found no login handle: up to
+    /// ``DeviceGroupRejoin/noLoginHandleRetryMs``, ended early by
+    /// ``loginHandleArrived()``.
+    func sleepUntilLoginHandleOrRetry() async {
+        let sliceMs: Int64 = 500
+        var waitedMs: Int64 = 0
+        while waitedMs < DeviceGroupRejoin.noLoginHandleRetryMs, !Task.isCancelled {
+            if loginHandleNudged {
+                loginHandleNudged = false
+                return
+            }
+            try? await Task.sleep(nanoseconds: UInt64(sliceMs) * 1_000_000)
+            waitedMs += sliceMs
+        }
+        loginHandleNudged = false
     }
 
     /// The rejoin decided whether another device of the account answered
@@ -1802,7 +1830,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// this account's stored session record, else (a passkey sign-in with no
     /// name typed lands with none) the username the backup's synced state
     /// carries.
-    private func currentLoginHandle(accountIdB64: String) -> Data? {
+    func currentLoginHandle(accountIdB64: String) -> Data? {
         if let handle = loginHandleProvider() { return handle }
         if let record = storedSessionRecord(), record.accountIdB64 == accountIdB64,
            let handle = ownLoginHandle(username: record.username) {

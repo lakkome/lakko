@@ -437,6 +437,9 @@ struct LakkoApp: App {
             Task { await auth?.ownUsernameRegisterChanged(sync?.ownUsername) }
         }
         auth.storeOwnUsername = { [weak sync] name in await sync?.setOwnUsername(name) ?? false }
+        // A session that landed with no username learned it (the backup, or
+        // the username prompt): a rejoin waiting for a login handle knocks now.
+        auth.onUsernameLearned = { [weak sync] _ in sync?.loginHandleArrived() }
         // Reactions-and-emoji spec section 6 (D3) — the quick reaction is the
         // account's, written through its synced state.
         QuickReactionSetting.shared.onChoose = { [weak sync] emoji in
@@ -1166,6 +1169,17 @@ struct AppRoot: View, Equatable {
                 link: services.linkCallHost,
                 inviteIntake: inviteIntake
             )
+            // A sign-in that named no username (a passkey on a new device),
+            // and the backup gave none of this account's: ask for it. A sheet
+            // over the app, never a blocking step; closing it asks again at
+            // the next app start.
+            .sheet(isPresented: Binding(
+                get: { authRepository.usernamePromptAccountIdB64 == account.accountIdB64 },
+                set: { if !$0 { authRepository.dismissUsernamePrompt() } }
+            )) {
+                UsernamePromptSheet(authRepository: authRepository)
+                    .presentationDetents([.medium, .large])
+            }
 
         case .needsRecoveryPhrase(let account):
             // Signed in, keys not here: the canonical identity cannot be

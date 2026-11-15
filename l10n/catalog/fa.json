@@ -245,6 +245,42 @@
       "text": "نام کاربری",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "ادامه",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "بررسی نام کاربری ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "این نام کاربری این حساب نیست.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "تلاش‌های بیش از حد. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "نام کاربری",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "یادم نیست",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "می‌توانید آن را در تنظیمات دستگاه دیگرتان ببینید. تا آن زمان این دستگاه با آن‌ها همگام نمی‌شود.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "این دستگاه هنوز نام کاربری حساب شما را نمی‌داند. آن را وارد کنید تا با دستگاه‌های دیگرتان همگام شود.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "نام کاربری شما چیست؟",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "سرور یک نسخه پشتیبان تغییریافته یا قدیمی برگرداند. حساب شما امن است؛ بدون بازیابی داده‌های قدیمی‌تر ادامه دادیم.",
       "status": "machine"

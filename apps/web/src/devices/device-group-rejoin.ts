@@ -89,6 +89,48 @@ export const REKNOCK_AFTER_MS = 30 * 60_000;
  *  restore stored). Chosen, not measured; the same on every client. */
 export const NO_HANDLE_RETRY_MS = 30_000;
 
+/**
+ * The wait between two `"no-handle"` passes, cut short when the device
+ * learns its username (`docs/ux/identity-recovery.md` section 8b: the person
+ * typed it, or the landing adopted the backup's): the next pass knocks at
+ * once instead of up to {@link NO_HANDLE_RETRY_MS} later.
+ */
+export interface NoHandleWaker {
+  /** Resolves after `ms`, on {@link wake}, or when `signal` aborts. */
+  sleep(ms: number, signal: AbortSignal): Promise<void>;
+  /** End every wait in progress. A wake with nobody waiting is not kept. */
+  wake(): void;
+}
+
+export function createNoHandleWaker(): NoHandleWaker {
+  const waiting = new Set<() => void>();
+  return {
+    sleep(ms, signal) {
+      return new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          waiting.delete(finish);
+          signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, ms);
+        waiting.add(finish);
+        signal.addEventListener("abort", finish, { once: true });
+      });
+    },
+    wake() {
+      for (const finish of [...waiting]) finish();
+    },
+  };
+}
+
 /** The shortest answer window ({@link answerWindowMs}). Chosen, not
  *  measured (ADR-0081 third amendment). */
 export const ANSWER_WINDOW_MIN_MS = 1_000;

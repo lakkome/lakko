@@ -245,6 +245,42 @@
       "text": "اسم المستخدم",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "متابعة",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "تعذّر التحقق من اسم المستخدم. تحقق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "هذا ليس اسم المستخدم لهذا الحساب.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "محاولات كثيرة جدًا. حاول مرة أخرى لاحقًا.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "اسم المستخدم",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "لا أتذكر",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "يمكنك رؤيته في الإعدادات على جهازك الآخر. حتى ذلك الحين لا يُزامن هذا الجهاز معها.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "لا يعرف هذا الجهاز اسم المستخدم لحسابك بعد. أدخله للمزامنة مع أجهزتك الأخرى.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "ما اسم المستخدم الخاص بك؟",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "أعاد الخادم نسخة احتياطية معدّلة أو قديمة. حسابك آمن؛ تابعنا دون استعادة البيانات الأقدم.",
       "status": "machine"

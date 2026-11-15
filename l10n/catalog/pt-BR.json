@@ -245,6 +245,42 @@
       "text": "Nome de usuário",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "Continuar",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Não foi possível verificar o nome de usuário. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Esse não é o nome de usuário desta conta.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Tentativas demais. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Nome de usuário",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Não lembro",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Você pode vê-lo em Configurações no seu outro dispositivo. Até lá, este dispositivo não sincroniza com eles.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Este dispositivo ainda não sabe o nome de usuário da sua conta. Digite-o para sincronizar com seus outros dispositivos.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Qual é o seu nome de usuário?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "O servidor devolveu um backup alterado ou desatualizado. Sua conta está segura; continuamos sem restaurar os dados antigos.",
       "status": "machine"

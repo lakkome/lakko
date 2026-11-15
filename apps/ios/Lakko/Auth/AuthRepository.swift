@@ -87,6 +87,20 @@ public final class AuthRepository: ObservableObject {
             // every change of it.
             refreshGuestAccount()
             if case .anon = state {} else if guestAccountDeleted { guestAccountDeleted = false }
+            // The username prompt belongs to a signed-in account with no
+            // username; a sign-out ends it, and a sign-in looks again.
+            switch state {
+            case .session(let account):
+                if usernamePromptAccountIdB64 != nil,
+                   usernamePromptAccountIdB64 != account.accountIdB64 || !account.username.isEmpty {
+                    usernamePromptAccountIdB64 = nil
+                }
+            case .anon:
+                usernamePromptAccountIdB64 = nil
+                usernameLearnStarted = []
+            default:
+                break
+            }
         }
     }
 
@@ -338,6 +352,33 @@ public final class AuthRepository: ObservableObject {
     /// Write the own-username register (the synced state). `false` when the
     /// state is not loaded yet. Wired by the composition root.
     var storeOwnUsername: (@MainActor (_ username: String) async -> Bool)?
+
+    /// The username prompt (``UsernamePrompt``): the account whose landed
+    /// session has no username and for which nothing the backup gave was
+    /// this account's, or `nil`. The app shell shows the prompt as a sheet
+    /// while this names the signed-in account.
+    @Published public private(set) var usernamePromptAccountIdB64: String?
+
+    /// The accounts whose username was looked for in this process (learned,
+    /// asked, or the person chose "I don't remember"). In memory only: the
+    /// next app start looks again while the username is still empty.
+    private var usernameLearnStarted: Set<String> = []
+
+    /// The username the restored backup's own profile envelope carried, per
+    /// account, until the landing looked at it. In memory only.
+    private var restoredProfileUsername: [String: String] = [:]
+
+    /// The own-username register as stored for an account (the backup's
+    /// synced state merged into the store), for the username learning step.
+    /// Injectable for tests.
+    var storedOwnUsernameRegister: @MainActor (_ accountIdB64: String) -> String? = { accountIdB64 in
+        (try? SyncedStateStore.load(accountIdB64: accountIdB64).ownUsername()).flatMap { $0 }
+    }
+
+    /// The username of a session that landed without one was learned and
+    /// adopted: the composition root wakes the DeviceGroup rejoin, which
+    /// waits for a login handle.
+    var onUsernameLearned: (@MainActor (_ accountIdB64: String) -> Void)?
 
     /// The recovery address this account's devices keep, or `nil`. Wired by
     /// the composition root.
@@ -2642,6 +2683,118 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
+    // MARK: - Learning the username after a sign-in that named none
+
+    /// A session landed with no username (``UsernamePrompt``): try the names
+    /// the restored backup carried (the own profile envelope's username,
+    /// then the own-username register), each checked with auth; the first
+    /// one auth calls this account's is adopted silently. When none is, the
+    /// person is asked (``usernamePromptAccountIdB64``). An account auth
+    /// says has no username is left as it is.
+    ///
+    /// `askIfNoneAdopted` is `false` for a backup applied after the landing
+    /// (the prompt, up or dismissed, is left as it is).
+    func learnUsernameAfterLanding(accountIdB64: String, askIfNoneAdopted: Bool = true) async {
+        let candidates = UsernamePrompt.backupCandidates(
+            profileUsername: restoredProfileUsername.removeValue(forKey: accountIdB64),
+            register: storedOwnUsernameRegister(accountIdB64))
+        candidates: for name in candidates {
+            switch await checkUsernameCandidate(name, accountIdB64: accountIdB64) {
+            case .adopted, .accountHasNone:
+                return
+            case .notThisAccount, .rule, .empty:
+                continue candidates
+            case .tooMany, .network:
+                // Not an answer about the name: the person is asked, and
+                // the prompt's Continue checks again.
+                break candidates
+            }
+        }
+        guard askIfNoneAdopted, case .session(let account) = state, account.accountIdB64 == accountIdB64,
+              account.username.isEmpty, !isGuest else { return }
+        NSLog("[auth] the session has no username and the backup gave none of this account's; asking")
+        usernamePromptAccountIdB64 = accountIdB64
+    }
+
+    /// The prompt's Continue: check `typed` with auth. `.adopted` and
+    /// `.accountHasNone` close the prompt; every other outcome leaves it up
+    /// with its line (``UsernamePrompt/errorKey(_:)``).
+    func submitPromptedUsername(_ typed: String) async -> UsernamePrompt.Outcome {
+        guard let accountIdB64 = usernamePromptAccountIdB64 else { return .network }
+        let outcome = await checkUsernameCandidate(typed, accountIdB64: accountIdB64)
+        if UsernamePrompt.closesPrompt(outcome), usernamePromptAccountIdB64 == accountIdB64 {
+            usernamePromptAccountIdB64 = nil
+        }
+        return outcome
+    }
+
+    /// The prompt was closed ("I don't remember", or swiped away): not asked
+    /// again in this process; the next app start asks again while the
+    /// username is still empty.
+    public func dismissUsernamePrompt() {
+        usernamePromptAccountIdB64 = nil
+    }
+
+    /// Check one candidate name for the signed-in `accountIdB64`: the
+    /// username rule, its login handle, `POST /auth/login-handle/check`.
+    /// `same` adopts it (``adoptLearnedUsername(_:accountIdB64:sessionToken:)``).
+    /// Never logs the name or the handle.
+    private func checkUsernameCandidate(_ typed: String, accountIdB64: String) async -> UsernamePrompt.Outcome {
+        let name: LoginName
+        do {
+            name = try LoginName.make(typed, emptyError: UsernamePromptEmpty())
+        } catch let violation as UsernameRuleViolation {
+            return .rule(violation.reason)
+        } catch is UsernamePromptEmpty {
+            return .empty
+        } catch {
+            return .rule(.invalidCharacters)
+        }
+        guard case .session(let account) = state, account.accountIdB64 == accountIdB64,
+              let token = identitySecrets?.sessionToken else { return .network }
+        let outcome: UsernamePrompt.Outcome
+        do {
+            let answer = try await authClientFactory().checkLoginHandle(handle: name.handle, sessionToken: token)
+            outcome = UsernamePrompt.outcome(of: answer, canonical: name.canonical)
+        } catch {
+            outcome = UsernamePrompt.outcome(of: error)
+            NSLog("[auth] checking a username for this account failed (\(outcome == .tooMany ? "limited" : "no answer"))")
+        }
+        if case .adopted(let canonical) = outcome {
+            await adoptLearnedUsername(canonical, accountIdB64: accountIdB64, sessionToken: token)
+        }
+        return outcome
+    }
+
+    /// Auth answered `same` for `canonical`: store it exactly as a sign-in
+    /// by name does (the session record, the live session, the handle known
+    /// for this session so the own-username register is seeded once the
+    /// synced state is read), re-publish what carries the name, and wake
+    /// the DeviceGroup rejoin, which waits for a login handle.
+    private func adoptLearnedUsername(_ canonical: String, accountIdB64: String, sessionToken: String) async {
+        guard case .session(let account) = state, account.accountIdB64 == accountIdB64,
+              account.username.isEmpty else { return }
+        NSLog("[auth] the account's username was learned and adopted")
+        _ = loginHandleBinds.claim(sessionToken: sessionToken, canonical: canonical)
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: canonical))
+        let named = SessionAccount(accountIdB64: accountIdB64, username: canonical)
+        state = .session(named)
+        await handleConfirmed(canonical: canonical, sessionToken: sessionToken)
+        onUsernameRenamed?(named, nil)
+        onUsernameLearned?(accountIdB64)
+    }
+
+    /// The username the restored backup's own profile envelope carries for
+    /// `accountIdB64`, kept for the landing (``learnUsernameAfterLanding(accountIdB64:)``).
+    /// An envelope that does not decode, names another account or carries
+    /// no username is nothing.
+    private func noteRestoredProfileUsername(_ envelope: Data, accountIdB64: String) {
+        guard !envelope.isEmpty, let profile = try? decodeProfileEnvelope(plaintext: envelope),
+              let username = profile.username, !username.isEmpty else { return }
+        if let claimed = profile.accountId, claimed != Data(base64Encoded: accountIdB64) { return }
+        restoredProfileUsername[accountIdB64] = username
+    }
+
     // MARK: - ADR-0076: changing the username
 
     /// The `recovery_email` part of a handle change towards `handle`: the
@@ -4015,6 +4168,13 @@ public final class AuthRepository: ObservableObject {
         // run: the call needs a session that names this device.
         let guest = guestMarker.state(accountIdB64: accountIdB64) != nil
         if case .session = state, !guest { onProtectedSessionLanded?(accountIdB64) }
+        // A session with no username (a passkey sign-in names none): learn
+        // it from the backup, else ask. Once per account per process.
+        if case .session(let account) = state,
+           UsernamePrompt.shouldLearn(username: account.username, isGuest: guest),
+           usernameLearnStarted.insert(accountIdB64).inserted {
+            Task { [weak self] in await self?.learnUsernameAfterLanding(accountIdB64: accountIdB64) }
+        }
         // ADR-0076 — a rename this device started and did not finish.
         if case .session = state, !guest,
            protectionStore.renameOwed(accountIdB64: accountIdB64) != nil, !renameResumeInFlight {
@@ -6706,6 +6866,15 @@ public final class AuthRepository: ObservableObject {
             PhraseRestoreBackup.applyOwnState(
                 ownProfile: parsed.ownProfile, visibility: parsed.visibility,
                 accountIdB64: accountIdB64, context: context)
+            noteRestoredProfileUsername(parsed.ownProfile, accountIdB64: accountIdB64)
+            // A restore that arrives after the session landed with no
+            // username (a retried fetch): what it gave is tried too.
+            if case .session(let landed) = state, landed.accountIdB64 == accountIdB64,
+               landed.username.isEmpty, usernameLearnStarted.contains(accountIdB64) {
+                Task { [weak self] in
+                    await self?.learnUsernameAfterLanding(accountIdB64: accountIdB64, askIfNoneAdopted: false)
+                }
+            }
             PhraseRestoreBackup.applyReceivedProfiles(
                 parsed.receivedProfiles, accountIdB64: accountIdB64, context: context)
             RestoredDeviceStore.noteRestored(
