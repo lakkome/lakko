@@ -21,6 +21,9 @@ export type EngineState = "ready" | "needs-pack" | "unavailable";
 export interface Detection {
   readonly tag: string;
   readonly permille: number;
+  /** The other languages the detection was a near tie with, nearest first
+   *  (ADR-0082 note of 2026-11-15); absent or empty when confident. */
+  readonly alternatives?: readonly string[];
 }
 
 /** Progress of a pack download, 0..1. */
@@ -48,7 +51,8 @@ export interface TranslationEngine {
 export interface DetectionEngine {
   /** Whether a detector is usable now, without a download. */
   readonly present: boolean;
-  /** The most likely language, or `null` when there is none or no detector. */
+  /** The most likely language, with its close candidates, or `null` when
+   *  there is none or no detector. */
   detect(text: string): Promise<Detection | null>;
 }
 

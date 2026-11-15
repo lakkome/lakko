@@ -12,7 +12,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.DetectedLanguage
+import uniffi.lakko_ffi_uniffi.LanguageCandidates
+import uniffi.lakko_ffi_uniffi.TranslateOffer
 import uniffi.lakko_ffi_uniffi.TranslationEngineState
+import uniffi.lakko_ffi_uniffi.TranslationSourceResolution
 
 /**
  * ADR-0082 note of 2026-11-15 on Android: the language of a message comes from
@@ -43,7 +46,7 @@ class LanguageDetectionTest {
         val detector = FakeDetector(mapOf("Hoe gaat het met je vandaag" to lang("nl", 930)))
         detections.detect("c/7", "Hoe gaat het met je vandaag", detector)
 
-        val known = SourceRules.known(detections.detections.value["c/7"], chosen = null, confident)
+        val known = SourceRules.known(detections.detections.value["c/7"]?.detected, chosen = null, confident)
         val input = SourceRules.offerInput(
             enabled = true,
             text = "Hoe gaat het met je vandaag",
@@ -80,7 +83,7 @@ class LanguageDetectionTest {
         detections.detect("c/1", "one", detector)
         detections.detect("c/2", "two", detector)
         detections.detect("c/3", "three", detector)
-        val recent = listOf("c/1", "c/2", "c/3").mapNotNull { detections.detections.value[it] }
+        val recent = listOf("c/1", "c/2", "c/3").mapNotNull { detections.detections.value[it]?.detected }
         assertEquals(listOf(lang("es", 900), lang("es", 880)), recent)
     }
 
@@ -96,7 +99,7 @@ class LanguageDetectionTest {
 
         detections.detect("c/5", "hej med dig min ven", detector)
         assertEquals(2, detector.calls.size)
-        assertEquals(lang("da", 900), detections.detections.value["c/5"])
+        assertEquals(lang("da", 900), detections.detections.value["c/5"]?.detected)
     }
 
     @Test
@@ -123,7 +126,7 @@ class LanguageDetectionTest {
         detections.detect("c/9", "new", slow)
         gate.complete(Unit)
         first.join()
-        assertEquals(lang("de", 900), detections.detections.value["c/9"])
+        assertEquals(lang("de", 900), detections.detections.value["c/9"]?.detected)
     }
 
     @Test
@@ -156,9 +159,25 @@ class LanguageDetectionTest {
     }
 
     @Test
-    fun `a language picked for the conversation beats an unsure guess`() {
-        val known = SourceRules.known(lang("nl", 410), chosen = "af", confident)
-        assertEquals("af", known?.tag)
+    fun `an unsure guess beats the language picked for the conversation`() {
+        // Found live 2026-11-15: a remembered Dutch pick read a Ukrainian
+        // message (uk at 670, under the confident line) from Dutch.
+        val known = SourceRules.known(lang("uk", 670), chosen = "nl", confident)
+        assertEquals("uk", known?.tag)
+    }
+
+    @Test
+    fun `an unusable guess yields to the language picked for the conversation`() {
+        // The guess is the language translated into: the conversation's
+        // language is used, not the picker.
+        val known = SourceRules.known(lang("en", 300), chosen = "nl", confident, guessUnusable = true)
+        assertEquals("nl", known?.tag)
+    }
+
+    @Test
+    fun `an unusable guess with no conversation pick stays marked for the picker`() {
+        val known = SourceRules.known(lang("en", 300), chosen = null, confident, guessUnusable = true)
+        assertEquals("en", known?.tag)
     }
 
     @Test
@@ -169,6 +188,7 @@ class LanguageDetectionTest {
     @Test
     fun `with no guess the conversation's picked language is used`() {
         assertEquals("es", SourceRules.known(null, chosen = "es", confident)?.tag)
+        assertEquals("nl", SourceRules.known(null, chosen = "nl", confident)?.tag)
     }
 
     @Test
@@ -179,55 +199,111 @@ class LanguageDetectionTest {
         assertTrue(answer == null || answer.tag == "nl")
     }
 
-    // ----- an unusable guess opens the picker with the guess marked ----------
+    // ----- the language line up front (UX 3.2) ---------------------------------
 
     @Test
-    fun `only an unsure detection with no conversation pick is a guess`() {
-        assertTrue(SourceRules.isUnsureGuess(lang("nl", 410), chosen = null, confident))
-        assertFalse(SourceRules.isUnsureGuess(lang("nl", 930), chosen = null, confident))
-        assertFalse(SourceRules.isUnsureGuess(lang("nl", 410), chosen = "af", confident))
-        assertFalse(SourceRules.isUnsureGuess(null, chosen = null, confident))
+    fun `the language line asks the menu row's rule with the engine set to can translate`() {
+        val input = SourceRules.languageLineInput(enabled = true, text = "hola", isOwn = false, detected = lang("es", 410))
+        assertEquals(TranslationEngineState.READY, input.engineForDetected)
+        assertTrue(input.anyEngine)
+        assertEquals(lang("es", 410), input.detected)
+        assertTrue(input.hasText)
+        assertFalse(input.isOwn)
+        // Own messages, empty text and the setting are the rule's to refuse.
+        assertTrue(SourceRules.languageLineInput(true, "hola", isOwn = true, detected = lang("es", 900)).isOwn)
+        assertFalse(SourceRules.languageLineInput(true, "  ", isOwn = false, detected = lang("es", 900)).hasText)
+        assertFalse(SourceRules.languageLineInput(false, "hola", isOwn = false, detected = lang("es", 900)).enabled)
+    }
+
+    private fun resolution(
+        line: String?,
+        canTranslate: Boolean,
+        source: String? = line,
+        guess: String? = null,
+        permille: Int = 200,
+    ) = TranslationSourceResolution(line, permille.toUShort(), canTranslate, source, guess)
+
+    @Test
+    fun `the language line is not shown when the rule offers nothing`() {
+        // Own, no text, setting off, a reading language or an unsure guess
+        // that is one: the shared offer rule answers NONE.
+        assertNull(SourceRules.languageLine(TranslateOffer.NONE, resolution("en", true)))
+        // The source rule named no language: no line.
+        assertNull(SourceRules.languageLine(TranslateOffer.TRANSLATE, resolution(null, false, guess = "tk")))
+        assertNull(SourceRules.languageLine(TranslateOffer.TRANSLATE, null))
     }
 
     @Test
-    fun `a guess the engine can translate from is translated from`() {
-        assertEquals(TapAction.Translate("nl"), SourceRules.tap("nl", isGuess = true, sameAsTarget = false, engine = null))
+    fun `the language line names what the source rule names`() {
         assertEquals(
-            TapAction.Translate("nl"),
-            SourceRules.tap("nl", isGuess = true, sameAsTarget = false, engine = TranslationEngineState.READY),
+            TranslateLine.Detected("es", canTranslate = true),
+            SourceRules.languageLine(TranslateOffer.TRANSLATE, resolution("es", true)),
         )
+        // A confident language the device cannot translate from: the name alone.
         assertEquals(
-            TapAction.Translate("nl"),
-            SourceRules.tap("nl", isGuess = true, sameAsTarget = false, engine = TranslationEngineState.NEEDS_PACK),
+            TranslateLine.Detected("tk", canTranslate = false),
+            SourceRules.languageLine(TranslateOffer.TRANSLATE_ASK_LANGUAGE, resolution("tk", false, permille = 950)),
         )
     }
 
     @Test
-    fun `a guess that is the target language opens the picker with the guess marked`() {
-        assertEquals(TapAction.Picker("en"), SourceRules.tap("en", isGuess = true, sameAsTarget = true, engine = null))
-    }
-
-    @Test
-    fun `a guess the engine cannot translate from opens the picker with the guess marked`() {
-        assertEquals(
-            TapAction.Picker("tl"),
-            SourceRules.tap("tl", isGuess = true, sameAsTarget = false, engine = TranslationEngineState.UNAVAILABLE),
+    fun `the hola case names Spanish and translates from Spanish`() {
+        // Seen on a Pixel: "hola, qué tal?" an unsure Catalan with es fr it
+        // close, no Catalan on the device. The engine answers become the
+        // rule's translatable list; the rule itself (resolveTranslationSource)
+        // is asserted in Rust with this case, since the host JVM has no core.
+        val states = mapOf(
+            "ca" to TranslationEngineState.UNAVAILABLE,
+            "es" to TranslationEngineState.READY,
+            "fr" to TranslationEngineState.NEEDS_PACK,
+            "it" to TranslationEngineState.READY,
         )
+        assertEquals(listOf("es", "fr", "it"), SourceRules.translatable(listOf("ca", "es", "fr", "it")) { states[it] })
+        // The rule's answer for that input: Spanish for both.
+        val r = resolution("es", true, permille = 180)
+        assertEquals(TranslateLine.Detected("es", canTranslate = true), SourceRules.languageLine(TranslateOffer.TRANSLATE, r))
+        assertEquals(TapAction.Translate("es"), SourceRules.tapSource(r))
     }
 
     @Test
-    fun `a confident or picked source keeps its lines`() {
-        // Not a guess: "already in English" and "Can't translate from" stay.
-        assertEquals(TapAction.AlreadyIn("en"), SourceRules.tap("en", isGuess = false, sameAsTarget = true, engine = null))
-        assertEquals(
-            TapAction.Translate("tl"),
-            SourceRules.tap("tl", isGuess = false, sameAsTarget = false, engine = TranslationEngineState.UNAVAILABLE),
-        )
+    fun `no source opens the picker with the guess marked`() {
+        assertEquals(TapAction.Picker("tk"), SourceRules.tapSource(resolution(null, false, source = null, guess = "tk")))
     }
 
     @Test
-    fun `no source opens the picker with nothing marked`() {
-        assertEquals(TapAction.Picker(null), SourceRules.tap(null, isGuess = false, sameAsTarget = false, engine = null))
+    fun `a detection carries its close candidates and a plain detector none`() = runTest {
+        val near = LanguageCandidates(lang("ca", 180), listOf("es", "fr"))
+        val ranked = object : LanguageDetector {
+            override suspend fun detect(text: String): DetectedLanguage? = near.detected
+
+            override suspend fun detectCandidates(text: String): LanguageCandidates? = near
+        }
+        val detections = MessageDetections()
+        detections.detect("c/1", "hola, qué tal?", ranked)
+        assertEquals(near, detections.detections.value["c/1"])
+        // Seen on a Pixel: Catalan first, then the Spanish the tap uses.
+        assertEquals(listOf("ca", "es", "fr"), SourceRules.candidateTags(detections.detections.value["c/1"]))
+        // A detector with no ranked list: the detection alone.
+        val plain = object : LanguageDetector {
+            override suspend fun detect(text: String): DetectedLanguage? = lang("tk", 200)
+        }
+        assertEquals(LanguageCandidates(lang("tk", 200), emptyList()), plain.detectCandidates("goedendag"))
+        assertEquals(emptyList<String>(), SourceRules.candidateTags(null))
+    }
+
+    @Test
+    fun `no language line until the engine has answered`() {
+        val states = mapOf("es" to TranslationEngineState.READY)
+        assertNull(SourceRules.translatable(listOf("ca", "es")) { states[it] })
+    }
+
+    @Test
+    fun `a shown translation's line replaces the language line`() {
+        val upFront = TranslateLine.Detected("es", true)
+        assertEquals(upFront, me.lakko.app.ui.chat.bubbleCaptionLine("hola", null, upFront))
+        val shown = TranslateLine.Shown("es", "hello")
+        assertEquals(shown, me.lakko.app.ui.chat.bubbleCaptionLine("hola", shown, upFront))
+        assertNull(me.lakko.app.ui.chat.bubbleCaptionLine("", null, upFront))
     }
 
     // ----- tags as the engines name them -------------------------------------

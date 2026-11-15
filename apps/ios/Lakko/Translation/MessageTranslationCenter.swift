@@ -33,6 +33,12 @@ final class MessageTranslationCenter: ObservableObject {
         case translated(text: String, source: String)
         /// `Show original` was chosen: the line reads `Spanish · Translate`.
         case original(source: String)
+        /// Before any translation (UX 3.2): the detected language of a
+        /// message not in a reading language, `Spanish · Translate`, the
+        /// name alone when this device cannot translate from it. Never
+        /// stored in ``phases``; ``quietLine(conversation:message:)`` derives
+        /// it. Its `Translate` does what the menu row does.
+        case detected(source: String, canTranslate: Bool)
         case failed
         /// Shown for a few seconds, then cleared.
         case sameLanguage(String)
@@ -79,6 +85,9 @@ final class MessageTranslationCenter: ObservableObject {
         /// picker opened in its place (it was the target language, or the
         /// engine cannot translate from it).
         var marked: String? = nil
+        /// The message's close candidates (detection first), listed before
+        /// the others (`Not X?`, UX 3.4).
+        var candidates: [String] = []
         let choose: (String) -> Void
     }
 
@@ -104,7 +113,7 @@ final class MessageTranslationCenter: ObservableObject {
     private var translationStates: [String: TranslationEngineState] = [:]
     private var transcriptionStates: [String: TranslationEngineState] = [:]
     private var anyTranslation: Bool?
-    private var detections: [String: (text: String, detected: DetectedLanguage?)] = [:]
+    private var detections: [String: (text: String, detected: LanguageCandidates?)] = [:]
     private var tasks: [String: Task<Void, Never>] = [:]
     private var waitingForWifi: [String: () -> Void] = [:]
     /// Messages automatic translation already tried, so a timeline refresh
@@ -214,14 +223,34 @@ final class MessageTranslationCenter: ObservableObject {
 
     // MARK: - Detection
 
-    /// The detector (``MessageLanguageDetector``); a test sets its own.
-    var detect: (String) -> DetectedLanguage? = { MessageLanguageDetector.detect($0) }
+    /// The detector (``MessageLanguageDetector``): a detection with its
+    /// close candidates. A test sets its own.
+    var detect: (String) -> LanguageCandidates? = { MessageLanguageDetector.candidates($0) }
 
-    private func detection(key: String, text: String) -> DetectedLanguage? {
+    private func detection(key: String, text: String) -> LanguageCandidates? {
         if let cached = detections[key], cached.text == text { return cached.detected }
         let detected = detect(text)
         detections[key] = (text, detected)
         return detected
+    }
+
+    /// The language a message is taken to be in (ADR-0082 note of
+    /// 2026-11-15): its detection, unless that is unsure and the
+    /// conversation's languages name one of its close candidates (a picked
+    /// one, else the most detected one; shared rule `conversationDetection`,
+    /// independent of the order messages were detected in).
+    private func effectiveDetection(conversation: String, key: String, text: String) -> DetectedLanguage? {
+        let raw = detection(key: key, text: text)
+        let languages = account.map {
+            store.prefs(accountIdB64: $0, conversation: conversation).languages.ffi
+        } ?? ConversationLanguages(picks: [], detections: [])
+        return conversationDetection(candidates: raw, languages: languages)
+    }
+
+    /// The candidate tags of a message: the detected language, then the others.
+    static func candidateTags(_ candidates: LanguageCandidates?) -> [String] {
+        guard let candidates else { return [] }
+        return [candidates.detected.tag] + candidates.alternatives
     }
 
     // MARK: - The conversation
@@ -231,8 +260,9 @@ final class MessageTranslationCenter: ObservableObject {
     /// everyone. Called by the conversation screen.
     func observe(conversation: String, messages: [ChatMessage]) {
         guard let account else { return }
-        let prefs = store.prefs(accountIdB64: account, conversation: conversation)
+        var prefs = store.prefs(accountIdB64: account, conversation: conversation)
         var recent: [DetectedLanguage] = []
+        var languages = prefs.languages.ffi
         let window = Int(translationBarWindow())
         for message in messages.reversed() {
             if message.deleted {
@@ -244,13 +274,24 @@ final class MessageTranslationCenter: ObservableObject {
             }
             guard message.direction == .incoming, !message.text.isEmpty, message.messageId > 0 else { continue }
             let key = Self.key(conversation, message.messageId)
-            let detected = detection(key: key, text: message.text)
+            let detected = detection(key: key, text: message.text)?.detected
             if recent.count < window, let detected { recent.append(detected) }
+            if let detected, detected.confidencePermille >= translationDetectionConfidentPermille() {
+                languages = conversationLanguagesWithDetection(
+                    languages: languages, messageId: message.messageId, tag: detected.tag)
+            }
             if prefs.autoTranslate, phases[key] == nil, !autoAttempted.contains(key),
                wantsAutoTranslation(detected) {
                 autoAttempted.insert(key)
                 translate(conversation: conversation, message: message)
             }
+        }
+        // Every confident detection is recorded once per message id (with
+        // `Not X?` corrections and picker picks, the conversation's languages).
+        let stored = MessageTranslationStore.StoredLanguages(languages)
+        if stored != prefs.languages {
+            prefs.languages = stored
+            store.setPrefs(accountIdB64: account, conversation: conversation, prefs: prefs)
         }
         updateBar(conversation: conversation, recent: recent, prefs: prefs)
         Task { _ = await loadAnyTranslation() }
@@ -323,13 +364,137 @@ final class MessageTranslationCenter: ObservableObject {
         }
     }
 
+    // MARK: - The quiet line
+
+    /// The quiet line under a message's text: the translation's own line
+    /// when there is one (manual or automatic), else the language line up
+    /// front (UX 3.2). Reads the detection the menu row uses; never detects
+    /// a message version twice.
+    func quietLine(conversation: String, message: ChatMessage) -> Phase? {
+        if let phase = phase(conversation: conversation, messageId: message.messageId) { return phase }
+        guard !message.deleted, !message.text.isEmpty, message.messageId > 0 else { return nil }
+        let key = Self.key(conversation, message.messageId)
+        guard let resolution = resolution(
+            conversation: conversation, messageId: message.messageId, key: key, text: message.text)
+        else { return nil }
+        return Self.languageLine(
+            resolution: resolution, isOwn: message.direction == .outgoing, enabled: settings.showTranslate,
+            readingLanguages: settings.readingLanguages)
+    }
+
+    /// The language line names the language `Translate` would start from
+    /// (``resolve(messageChoice:candidates:languages:target:translatable:)``,
+    /// the same rule `Translate` reads), so "hola, qué tal?" read as an unsure
+    /// Catalan on a device that translates Spanish shows `Spanish ·
+    /// Translate`. The menu row's shared rule (`translationOffered`), asked
+    /// with the engine set to "can translate", then decides whether that
+    /// language is one to name (not own, has text, setting on, not a reading
+    /// language). No line when the rule names none: no detection, or an
+    /// unsure one with no candidate the device can translate from.
+    static func languageLine(
+        resolution: TranslationSourceResolution, isOwn: Bool, enabled: Bool, readingLanguages: [String]
+    ) -> Phase? {
+        guard let tag = resolution.lineTag else { return nil }
+        let input = TranslateOfferInput(
+            enabled: enabled, hasText: true, isOwn: isOwn,
+            detected: DetectedLanguage(tag: tag, confidencePermille: resolution.lineConfidencePermille),
+            engineForDetected: .ready, anyEngine: true)
+        guard translationOffered(input: input, readingLanguages: readingLanguages) != TranslateOffer.none
+        else { return nil }
+        return .detected(source: tag, canTranslate: resolution.lineCanTranslate)
+    }
+
+    /// The line's language and `Translate`'s source, from one rule: a
+    /// language chosen for this message, then the shared core rule
+    /// `resolveTranslationSource` (a confident detection; the conversation's
+    /// language among the close candidates; the guess when usable; the first
+    /// other candidate the device can translate from; for `Translate` only
+    /// the conversation's usual language; otherwise the picker with the guess marked).
+    /// `translatable`: the languages the engine answered it can translate
+    /// from into `target`.
+    static func resolve(
+        messageChoice: String?, candidates: LanguageCandidates?, languages: ConversationLanguages,
+        target: String, translatable: [String]
+    ) -> TranslationSourceResolution {
+        if let messageChoice {
+            let can = !sameLanguage(a: messageChoice, b: target)
+                && translatable.contains { sameLanguage(a: $0, b: messageChoice) }
+            return TranslationSourceResolution(
+                lineTag: messageChoice, lineConfidencePermille: 1000, lineCanTranslate: can,
+                translateSource: messageChoice, guess: nil)
+        }
+        return resolveTranslationSource(
+            candidates: candidates, languages: languages, target: target, translatable: translatable)
+    }
+
+    /// The tags whose engine answer the rule needs: the message's choice,
+    /// every candidate and the conversation's usual language, less the target.
+    private func askedTags(candidates: LanguageCandidates?, usual: String?, messageChoice: String?) -> [String] {
+        var out: [String] = []
+        let all = [messageChoice].compactMap { $0 } + Self.candidateTags(candidates) + [usual].compactMap { $0 }
+        for tag in all where !sameLanguage(a: tag, b: target) && !out.contains(where: { sameLanguage(a: $0, b: tag) }) {
+            out.append(tag)
+        }
+        return out
+    }
+
+    private func choices(conversation: String, messageId: Int64) -> (languages: ConversationLanguages, message: String?) {
+        guard let account else { return (ConversationLanguages(picks: [], detections: []), nil) }
+        let prefs = store.prefs(accountIdB64: account, conversation: conversation)
+        return (prefs.languages.ffi, prefs.messageSources[String(messageId)])
+    }
+
+    /// The resolution from the engine answers already in, or `nil` while any
+    /// is outstanding (asked now; the line would otherwise change a moment
+    /// later).
+    private func resolution(conversation: String, messageId: Int64, key: String, text: String)
+        -> TranslationSourceResolution? {
+        let raw = detection(key: key, text: text)
+        let (languages, choice) = choices(conversation: conversation, messageId: messageId)
+        guard raw != nil || choice != nil else { return nil }
+        let tags = askedTags(
+            candidates: raw, usual: conversationLanguagesUsual(languages: languages), messageChoice: choice)
+        var translatable: [String] = []
+        var pending: [String] = []
+        for tag in tags {
+            switch translationState(source: tag) {
+            case nil: pending.append(tag)
+            case .unavailable?: break
+            case _?: translatable.append(tag)
+            }
+        }
+        if !pending.isEmpty {
+            Task { for tag in pending { _ = await loadTranslationState(source: tag) } }
+            return nil
+        }
+        return Self.resolve(
+            messageChoice: choice, candidates: raw, languages: languages, target: target,
+            translatable: translatable)
+    }
+
+    /// The resolution with every engine answer asked now.
+    private func loadResolution(conversation: String, messageId: Int64, key: String, text: String) async
+        -> TranslationSourceResolution {
+        let raw = detection(key: key, text: text)
+        let (languages, choice) = choices(conversation: conversation, messageId: messageId)
+        var translatable: [String] = []
+        for tag in askedTags(
+            candidates: raw, usual: conversationLanguagesUsual(languages: languages), messageChoice: choice)
+        where await loadTranslationState(source: tag) != .unavailable {
+            translatable.append(tag)
+        }
+        return Self.resolve(
+            messageChoice: choice, candidates: raw, languages: languages, target: target,
+            translatable: translatable)
+    }
+
     // MARK: - The menu row
 
     func menuState(conversation: String, message: ChatMessage) -> MenuState {
         let (key, text, _) = source(conversation: conversation, message: message)
         guard let text else { return .unavailable }
         if case .translated = phases[key] { return .showOriginal }
-        let detected = detection(key: key, text: text)
+        let detected = effectiveDetection(conversation: conversation, key: key, text: text)
         let engine: TranslationEngineState = detected.flatMap { translationState(source: $0.tag) } ?? .unavailable
         if let detected, translationState(source: detected.tag) == nil {
             Task { _ = await loadTranslationState(source: detected.tag) }
@@ -368,80 +533,26 @@ final class MessageTranslationCenter: ObservableObject {
         return text
     }
 
-    /// The menu's `Translate`.
-    ///
-    /// The source language, in this order: the language chosen for this
-    /// message, a confident detection, the language last chosen in this
-    /// conversation, then the detector's best guess however unsure. Any of
-    /// them translates at once, and the result line says which language it
-    /// was taken for ("Translated from X · Not X?"). The picker opens when
-    /// there is none of them, not even a guess, and also when the only source
-    /// is an UNSURE guess that is the target language or that the engine
-    /// cannot translate from: those would end on a line with no "Not X?" to
-    /// correct it ("already in ..." / "Can't translate from ..."), so the
-    /// picker opens with the guess marked instead. A confident or chosen
-    /// source keeps those lines. `askLanguage` (the row offered for a guess)
-    /// no longer forces the picker.
+    /// The menu's `Translate`: from the source the language line names
+    /// (``resolve(messageChoice:candidates:languages:target:translatable:)``),
+    /// asked with every engine answer in; the picker, with the guess marked,
+    /// when the rule names none. A confident or chosen source keeps the
+    /// "already in" and "Can't translate from" lines. `askLanguage` (the row
+    /// offered for a guess) no longer forces the picker.
     func translate(conversation: String, message: ChatMessage, askLanguage: Bool = false) {
         let (key, text, transcript) = source(conversation: conversation, message: message)
-        guard let text, let account else { return }
-        let prefs = store.prefs(accountIdB64: account, conversation: conversation)
-        let detected = detection(key: key, text: text)
-        guard let source = Self.translationSource(
-            messageChoice: prefs.messageSources[String(message.messageId)],
-            detected: detected,
-            conversationChoice: prefs.translationSource) else {
-            openPicker(conversation: conversation, message: message)
-            return
-        }
-        let start = { [weak self] in
-            self?.run(key: key, conversation: conversation, messageId: message.messageId, opId: Self.opId(message),
-                      text: text, source: source.tag, transcript: transcript)
-        }
-        guard source.isUnsureGuess else {
-            start()
-            return
-        }
-        if Self.unsureGuessOpensPicker(guess: source.tag, target: target, engine: nil) {
-            openPicker(conversation: conversation, message: message, marked: source.tag)
-            return
-        }
+        guard let text, account != nil else { return }
         Task { [weak self] in
             guard let self else { return }
-            let engine = await self.loadTranslationState(source: source.tag)
-            if Self.unsureGuessOpensPicker(guess: source.tag, target: self.target, engine: engine) {
-                self.openPicker(conversation: conversation, message: message, marked: source.tag)
-            } else {
-                start()
+            let resolution = await self.loadResolution(
+                conversation: conversation, messageId: message.messageId, key: key, text: text)
+            guard let tag = resolution.translateSource else {
+                self.openPicker(conversation: conversation, message: message, marked: resolution.guess)
+                return
             }
+            self.run(key: key, conversation: conversation, messageId: message.messageId, opId: Self.opId(message),
+                     text: text, source: tag, transcript: transcript)
         }
-    }
-
-    /// Where `Translate` takes its source from.
-    struct TranslationSource: Equatable {
-        let tag: String
-        /// Only the detector's guess below the confident threshold named it.
-        let isUnsureGuess: Bool
-    }
-
-    /// The source language `Translate` uses (see
-    /// ``translate(conversation:message:askLanguage:)``); `nil` opens the
-    /// picker.
-    static func translationSource(
-        messageChoice: String?, detected: DetectedLanguage?, conversationChoice: String?
-    ) -> TranslationSource? {
-        let confident = detected.map { $0.confidencePermille >= translationDetectionConfidentPermille() } ?? false
-        if let tag = messageChoice ?? (confident ? detected?.tag : nil) ?? conversationChoice {
-            return TranslationSource(tag: tag, isUnsureGuess: false)
-        }
-        return detected.map { TranslationSource(tag: $0.tag, isUnsureGuess: true) }
-    }
-
-    /// Whether an UNSURE guess opens the picker (marked) instead of being
-    /// translated from: it is the target language, or the engine answered
-    /// that it cannot translate from it (`engine` `nil`: not asked yet).
-    static func unsureGuessOpensPicker(guess: String, target: String, engine: TranslationEngineState?) -> Bool {
-        sameLanguage(a: guess, b: target) || engine == .unavailable
     }
 
     /// `Show original`.
@@ -466,7 +577,11 @@ final class MessageTranslationCenter: ObservableObject {
             if let marked, !languages.contains(where: { sameLanguage(a: $0, b: marked) }) {
                 languages.append(marked)
             }
-            pickerRequest = PickerRequest(kind: .translation, languages: languages, marked: marked) { [weak self] tag in
+            let (key, text, _) = source(conversation: conversation, message: message)
+            let candidates = text.map { Self.candidateTags(detection(key: key, text: $0)) } ?? []
+            pickerRequest = PickerRequest(
+                kind: .translation, languages: languages, marked: marked, candidates: candidates
+            ) { [weak self] tag in
                 self?.chooseSource(conversation: conversation, message: message, tag: tag)
             }
         }
@@ -478,7 +593,9 @@ final class MessageTranslationCenter: ObservableObject {
         guard let account, let canonical = canonicalLanguageTag(tag: tag) else { return }
         var prefs = store.prefs(accountIdB64: account, conversation: conversation)
         prefs.messageSources[String(message.messageId)] = canonical
-        prefs.translationSource = canonical
+        let now = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+        prefs.languages = MessageTranslationStore.StoredLanguages(
+            conversationLanguagesWithPick(languages: prefs.languages.ffi, tag: canonical, atMs: now))
         store.setPrefs(accountIdB64: account, conversation: conversation, prefs: prefs)
         let (key, text, transcript) = source(conversation: conversation, message: message)
         guard let text else { return }

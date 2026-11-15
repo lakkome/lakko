@@ -164,6 +164,40 @@ describe("the core detector and its place behind the browser's", () => {
     expect(coreCalls).toBe(1);
   });
 
+  it("carries the close candidates of a near tie (seen on a Pixel: Catalan, Turkmen)", async () => {
+    const c = core();
+    const hola = await c.detect("hola, qué tal?");
+    expect(hola?.tag).toBe("ca");
+    expect(hola?.alternatives).toContain("es");
+    const goed = await c.detect("goedendag");
+    expect(goed?.tag).toBe("tk");
+    expect(goed?.alternatives).toContain("nl");
+    // A confident answer has none.
+    const de = await c.detect("Ich gehe morgen auf den Markt, um Gemüse zu kaufen. Willst du mitkommen?");
+    expect(de?.alternatives ?? []).toEqual([]);
+  });
+
+  it("puts the browser's ranked list through the same rule", async () => {
+    const api = {
+      availability: () => Promise.resolve("available"),
+      create: () =>
+        Promise.resolve({
+          detect: () =>
+            Promise.resolve([
+              { detectedLanguage: "ca", confidence: 0.4 },
+              { detectedLanguage: "es", confidence: 0.35 },
+              { detectedLanguage: "und", confidence: 0.2 },
+              { detectedLanguage: "it", confidence: 0.1 },
+            ]),
+        }),
+    };
+    const c = coreDetection(() => Promise.resolve(wasm));
+    const d = layeredDetection(browserDetection(api as never, c.rank), c);
+    expect(await d.detect("hola, qué tal?")).toEqual({ tag: "ca", permille: 400, alternatives: ["es"] });
+    // Without a ranker the top hypothesis alone.
+    expect(await browserDetection(api as never).detect("x")).toEqual({ tag: "ca", permille: 400 });
+  });
+
   it("frees the wasm answer and survives a wasm that did not load", async () => {
     let freed = 0;
     const fake = {

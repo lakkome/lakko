@@ -4,6 +4,7 @@
 package me.lakko.app.translation
 
 import uniffi.lakko_ffi_uniffi.DetectedLanguage
+import uniffi.lakko_ffi_uniffi.LanguageCandidates
 import uniffi.lakko_ffi_uniffi.TranslationEngineState
 import java.io.File
 
@@ -108,6 +109,14 @@ public interface TranscriptionEngine {
 public interface LanguageDetector {
     /** `null` when it cannot tell, or when there is no detector. */
     public suspend fun detect(text: String): DetectedLanguage?
+
+    /**
+     * The detection with the languages it was a near tie with (ADR-0082 note
+     * of 2026-11-15). A detector that has no ranked list answers [detect]
+     * with no alternatives.
+     */
+    public suspend fun detectCandidates(text: String): LanguageCandidates? =
+        detect(text)?.let { LanguageCandidates(it, emptyList()) }
 }
 
 /** The translation engine of a device that has none it can trust to stay local. */

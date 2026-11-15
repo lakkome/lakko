@@ -154,6 +154,13 @@ public fun TranslateQuietLine(
                 Dot(quiet)
                 LineButton(t("translate.line.translate"), quiet, onTranslate)
             }
+            is TranslateLine.Detected -> {
+                label(langName(line.source))
+                if (line.canTranslate) {
+                    Dot(quiet)
+                    LineButton(t("translate.line.translate"), quiet, onTranslate)
+                }
+            }
             is TranslateLine.Failed -> {
                 label(t("translate.line.failed"))
                 Dot(quiet)

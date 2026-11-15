@@ -28,13 +28,13 @@ import kotlin.coroutines.resume
 
 /**
  * Translation through Android's on-device translation service
- * (`TranslationManager.createOnDeviceTranslator`, API 31), the Android engine
- * of ADR-0082 (amended 2026-10-27: ML Kit is not used, its data disclosure says
- * it reports the configured source and target languages to Google). Only the
- * `OnDevice` factory and the `OnDevice` capability query are called; the
- * deprecated `createTranslator` is never called (the fail-closed source test
- * refuses it). The service belongs to the system (on Pixel devices, Android
- * System Intelligence), so its packs are "Managed by Android".
+ * (`TranslationManager.createOnDeviceTranslator`, API 31), used for a pair
+ * whose pack the system already has (ADR-0082 notes of 2026-10-27 and
+ * 2026-11-15; every other pair goes to ML Kit, [SystemFirstTranslationEngine]).
+ * Only the `OnDevice` factory and the `OnDevice` capability query are called;
+ * the deprecated `createTranslator` is never called (the fail-closed source
+ * test refuses it). The service belongs to the system (on Pixel devices,
+ * Android System Intelligence), so its packs are "Managed by Android".
  */
 @RequiresApi(Build.VERSION_CODES.S)
 internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
@@ -152,30 +152,14 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
     }
 
     /**
-     * Creating an on-device translator for a pair that is available to
-     * download is how the platform is asked for the pack. Whether every
-     * implementation starts a download for it is not documented; the outcome
-     * is read back from the capability state, and a pair that does not reach
-     * the device in time reads as scheduled. Not run on a device.
+     * Lakko has no documented way to make the system download a pack:
+     * creating a translator for the pair did not (seen on a Pixel 9, API 35,
+     * 2026-11-15, the pack never arrived). A pair whose pack is not on the
+     * device goes to ML Kit instead ([SystemFirstTranslationEngine]), so this
+     * answers only what is already true.
      */
-    override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome {
-        progress(null)
-        val t = translator(source, target)
-        try {
-            t?.destroy()
-        } catch (_: Throwable) {
-            // nothing to release
-        }
-        val deadline = System.currentTimeMillis() + DOWNLOAD_WAIT_MS
-        while (System.currentTimeMillis() < deadline) {
-            when (state(source, target)) {
-                TranslationEngineState.READY -> return PackOutcome.DONE
-                TranslationEngineState.UNAVAILABLE -> return PackOutcome.FAILED
-                TranslationEngineState.NEEDS_PACK -> kotlinx.coroutines.delay(POLL_MS)
-            }
-        }
-        return PackOutcome.SCHEDULED
-    }
+    override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome =
+        if (state(source, target) == TranslationEngineState.READY) PackOutcome.DONE else PackOutcome.FAILED
 
     override suspend fun installedPacks(): List<PackInfo> =
         capabilities()
@@ -187,15 +171,13 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
     private companion object {
         const val TAG = "LakkoTranslation"
         const val TIMEOUT_MS = 20_000L
-        const val DOWNLOAD_WAIT_MS = 120_000L
-        const val POLL_MS = 2_000L
     }
 }
 
 /**
- * The translation engine for this device: the platform's on-device service
- * when the system has one (API 31+), ML Kit otherwise (ADR-0082 amended
- * 2026-10-27).
+ * The translation engine for this device: per language pair, the platform's
+ * on-device service (API 31+) where it has the pack, ML Kit otherwise
+ * (ADR-0082 notes of 2026-10-27 and 2026-11-15).
  */
 internal fun translationEngineFor(context: Context, antiCensorshipArmed: () -> Boolean): TranslationEngine =
     SystemFirstTranslationEngine(

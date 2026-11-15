@@ -31,6 +31,31 @@ class TranslationStoreTest {
     }
 
     @Test
+    fun `the conversation's languages round-trip through the store and the core form`() {
+        // G55 Two: one confident message each in es, it, uk, de, ru. The
+        // order-independent choice (Spanish for "hola, qué tal?") is the
+        // shared rule's, asserted in lakko-ui-rules and through the UniFFI
+        // surface these bindings call; the host JVM has no core. What is
+        // asserted here is that the record the rule returns is stored and
+        // handed back unchanged.
+        val record = StoredLanguages(
+            picks = listOf(StoredLanguagePick("nl", 1_700_000_000_000)),
+            detections = listOf(
+                StoredMessageLanguage(1, "es"),
+                StoredMessageLanguage(2, "it"),
+                StoredMessageLanguage(3, "uk"),
+                StoredMessageLanguage(4, "de"),
+                StoredMessageLanguage(5, "ru"),
+            ),
+        )
+        val s = TranslationStoreState().withChoices("ab01", ConversationChoices(languages = record))
+        val back = TranslationStoreState.decode(TranslationStoreState.encode(s))
+        assertEquals(record, back.conversations["ab01"]?.languages)
+        assertEquals(record, StoredLanguagesForm.fromCore(StoredLanguagesForm.toCore(record)))
+        assertFalse(ConversationChoices(languages = record).isDefault)
+    }
+
+    @Test
     fun `an unreadable file is an empty store`() {
         assertEquals(TranslationStoreState(), TranslationStoreState.decode("not json"))
         assertEquals(TranslationStoreState(), TranslationStoreState.decode(null))

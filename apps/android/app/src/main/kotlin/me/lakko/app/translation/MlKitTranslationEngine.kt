@@ -17,8 +17,9 @@ import uniffi.lakko_ffi_uniffi.canonicalLanguageTag
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Translation through ML Kit Translate, the fallback of ADR-0082 (amended
- * 2026-10-27) for a device whose system has no on-device translation service.
+ * Translation through ML Kit Translate (ADR-0082 notes of 2026-10-27 and
+ * 2026-11-15): for a device whose system has no on-device translation
+ * service, and for every pair whose pack the system does not already have.
  *
  * The text is translated on the device. What ML Kit sends Google, by its data
  * disclosure, is the configured source and target languages, for diagnostics
@@ -156,35 +157,64 @@ internal class MlKitTranslationEngine(
 }
 
 /**
- * The system's on-device service when this device has one, ML Kit otherwise
- * (ADR-0082 amended 2026-10-27, option "fallback only").
+ * The system's on-device service where it has the pack, ML Kit for every
+ * other pair (ADR-0082 notes of 2026-10-27 and 2026-11-15).
  *
- * The choice is per device, not per language pair: a device whose system
- * service exists but lacks a pair does not fall through to ML Kit for it.
- * Packs of both are listed, so ML Kit models left from before the system
- * service appeared can still be removed.
+ * The choice is per language pair. The system is used when it answers READY
+ * for the pair. When it answers NEEDS_PACK, Lakko has no documented way to
+ * make it download the pack (creating a translator does not: seen on a
+ * Pixel 9, API 35, the pack never came), so the pair goes to ML Kit: its
+ * state, its pack download and its translation. When the system answers
+ * UNAVAILABLE, ML Kit answers for the pair (Ukrainian on a system without
+ * it). A pair ML Kit cannot take, which includes every pair while
+ * anti-censorship is on, is UNAVAILABLE unless the system has it on the
+ * device. Packs of both are listed; only ML Kit's are Lakko's to remove.
  */
 internal class SystemFirstTranslationEngine(
     private val system: TranslationEngine?,
     private val fallback: TranslationEngine,
 ) : TranslationEngine {
-    private suspend fun active(): TranslationEngine =
-        if (system != null && system.available()) system else fallback
+    /** The engine that handles a pair and its state for it. */
+    private suspend fun route(source: String, target: String): Pair<TranslationEngine, TranslationEngineState> {
+        if (system != null && system.state(source, target) == TranslationEngineState.READY) {
+            return system to TranslationEngineState.READY
+        }
+        return fallback to fallback.state(source, target)
+    }
 
-    override suspend fun available(): Boolean = active().available()
+    override suspend fun available(): Boolean =
+        (system != null && system.available()) || fallback.available()
 
-    override suspend fun state(source: String, target: String): TranslationEngineState =
-        active().state(source, target)
+    override suspend fun state(source: String, target: String): TranslationEngineState = route(source, target).second
 
-    override suspend fun sources(target: String): List<String> = active().sources(target)
+    /**
+     * The languages ML Kit translates from, and those the system has on the
+     * device for [target] (a system language it would only have after a
+     * download Lakko cannot start is not listed unless ML Kit has it).
+     */
+    override suspend fun sources(target: String): List<String> {
+        val out = fallback.sources(target).toMutableList()
+        for (language in system?.sources(target).orEmpty()) {
+            if (language in out) continue
+            if (system?.state(language, target) == TranslationEngineState.READY) out += language
+        }
+        return out
+    }
 
     override suspend fun translate(text: String, source: String, target: String): String? =
-        active().translate(text, source, target)
+        route(source, target).first.translate(text, source, target)
 
-    override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome =
-        active().download(source, target, progress)
+    override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome {
+        val (engine, state) = route(source, target)
+        return when (state) {
+            TranslationEngineState.READY -> PackOutcome.DONE
+            TranslationEngineState.UNAVAILABLE -> PackOutcome.FAILED
+            TranslationEngineState.NEEDS_PACK -> engine.download(source, target, progress)
+        }
+    }
 
-    override suspend fun packSize(source: String, target: String): Long? = active().packSize(source, target)
+    override suspend fun packSize(source: String, target: String): Long? =
+        route(source, target).first.packSize(source, target)
 
     override suspend fun installedPacks(): List<PackInfo> =
         (system?.installedPacks().orEmpty()) + fallback.installedPacks()

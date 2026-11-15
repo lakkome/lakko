@@ -50,11 +50,35 @@ export interface StoredTranscript {
 
 export type StoredResult = StoredTranslation | StoredTranscript;
 
+/** A language picked for a conversation (`Not X?` or the picker), and when. */
+export interface LanguagePick {
+  readonly tag: string;
+  readonly atMs: number;
+}
+
+/** One message's confidently detected language. */
+export interface MessageLanguage {
+  readonly messageId: number;
+  readonly tag: string;
+}
+
+/**
+ * What this device knows of a conversation's languages (ADR-0082 note of
+ * 2026-11-15), in the canonical bounded form the shared rule
+ * (`ConversationLanguages`) keeps; changed only through it.
+ */
+export interface ConversationLanguagesRecord {
+  readonly picks: readonly LanguagePick[];
+  readonly detections: readonly MessageLanguage[];
+}
+
+export const NO_LANGUAGES: ConversationLanguagesRecord = { picks: [], detections: [] };
+
 /** The per-conversation choices (UX section 8). */
 export interface ConversationPrefs {
   readonly autoTranslate: boolean;
-  /** The source language last chosen in the picker for a translation. */
-  readonly translationSource: string | null;
+  /** The languages picked and confidently detected here. */
+  readonly languages: ConversationLanguagesRecord;
   /** The language last chosen for a transcript. */
   readonly transcriptionLanguage: string | null;
   /** Languages for which the conversation bar was dismissed. */
@@ -63,7 +87,7 @@ export interface ConversationPrefs {
 
 export const DEFAULT_PREFS: ConversationPrefs = {
   autoTranslate: false,
-  translationSource: null,
+  languages: NO_LANGUAGES,
   transcriptionLanguage: null,
   dismissed: [],
 };
@@ -127,13 +151,33 @@ export function decodeResult(bytes: Uint8Array): StoredResult | null {
   return null;
 }
 
+function decodeLanguages(v: unknown): ConversationLanguagesRecord {
+  if (typeof v !== "object" || v === null) return NO_LANGUAGES;
+  const o = v as Record<string, unknown>;
+  const picks = Array.isArray(o.picks)
+    ? o.picks.flatMap((p: unknown) => {
+        const q = p as Record<string, unknown> | null;
+        return q !== null && typeof q.tag === "string" && typeof q.atMs === "number" ? [{ tag: q.tag, atMs: q.atMs }] : [];
+      })
+    : [];
+  const detections = Array.isArray(o.detections)
+    ? o.detections.flatMap((d: unknown) => {
+        const q = d as Record<string, unknown> | null;
+        return q !== null && typeof q.tag === "string" && typeof q.messageId === "number"
+          ? [{ messageId: q.messageId, tag: q.tag }]
+          : [];
+      })
+    : [];
+  return { picks, detections };
+}
+
 /** Decode the per-conversation choices; unknown fields fall back to defaults. */
 export function decodePrefs(bytes: Uint8Array): ConversationPrefs {
   try {
     const o = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
     return {
       autoTranslate: o.autoTranslate === true,
-      translationSource: typeof o.translationSource === "string" ? o.translationSource : null,
+      languages: decodeLanguages(o.languages),
       transcriptionLanguage: typeof o.transcriptionLanguage === "string" ? o.transcriptionLanguage : null,
       dismissed: Array.isArray(o.dismissed) ? o.dismissed.filter((d): d is string => typeof d === "string") : [],
     };

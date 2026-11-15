@@ -25,7 +25,7 @@ import { TranslationController } from "./controller";
 import { languageName } from "./model";
 import { IdbResultBackend } from "./result-idb";
 import { ResultStore } from "./result-store";
-import { translationRules } from "./rules";
+import { orderPickerLanguagesFor, translationRules } from "./rules";
 import { translationSettings, updateTranslationSettings, withPack } from "./settings";
 
 export { useTranslation } from "./context";
@@ -115,11 +115,14 @@ function SourcePicker(props: { controller: TranslationController }): JSX.Element
     const r = request();
     if (r === null) return [];
     const ui = currentLanguage();
-    return props.controller
+    const sorted = props.controller
       .pickerLanguages(r.use)
       .map((code) => ({ code, name: languageName(code, ui) }))
       .sort((a, b) => a.name.localeCompare(b.name, ui))
       .map((x) => x.code);
+    // `Not Spanish?`: the message's other close candidates first (UX 3.4).
+    const rules = translationRules();
+    return rules === null ? sorted : orderPickerLanguagesFor(rules, sorted, r.candidates);
   };
   return (
     <ModalLayer open={request() !== null} title={t("translate.picker.title")} onClose={() => request()?.dismiss()}>

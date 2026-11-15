@@ -21,11 +21,20 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.ConversationBarInput
+import uniffi.lakko_ffi_uniffi.ConversationLanguages
 import uniffi.lakko_ffi_uniffi.DetectedLanguage
+import uniffi.lakko_ffi_uniffi.LanguageCandidates
 import uniffi.lakko_ffi_uniffi.TranslateOffer
 import uniffi.lakko_ffi_uniffi.TranslationEngineState
+import uniffi.lakko_ffi_uniffi.TranslationSourceResolution
 import uniffi.lakko_ffi_uniffi.canonicalLanguageTag
 import uniffi.lakko_ffi_uniffi.conversationBarLanguage
+import uniffi.lakko_ffi_uniffi.conversationDetection
+import uniffi.lakko_ffi_uniffi.conversationLanguagesUsual
+import uniffi.lakko_ffi_uniffi.conversationLanguagesWithDetection
+import uniffi.lakko_ffi_uniffi.conversationLanguagesWithPick
+import uniffi.lakko_ffi_uniffi.orderPickerLanguages
+import uniffi.lakko_ffi_uniffi.resolveTranslationSource
 import uniffi.lakko_ffi_uniffi.sameLanguage
 import uniffi.lakko_ffi_uniffi.storedResultIsCurrent
 import uniffi.lakko_ffi_uniffi.transcriptOffered
@@ -46,6 +55,13 @@ public sealed interface TranslateLine {
     public data class PackFailed(val source: String) : TranslateLine
     /** Reached from the picker: `Lakko can't translate from Tagalog on this device`. */
     public data class Unsupported(val source: String) : TranslateLine
+    /**
+     * UX 3.2 — before any translation: `Spanish · Translate`, the detected
+     * language of a message not in a reading language. Without
+     * [canTranslate] (the engine cannot translate from it) the name alone.
+     * `Translate` does what the menu row does.
+     */
+    public data class Detected(val source: String, val canTranslate: Boolean) : TranslateLine
 }
 
 /** The transcript of a voice or video message, UX 4.3. */
@@ -99,6 +115,8 @@ public data class PickerPrompt(
     internal val opId: Long,
     internal val text: String,
     internal val ref: AttachmentRef?,
+    /** The message's close candidates (detection first), listed first. */
+    val candidates: List<String> = emptyList(),
 )
 
 /** What the device can do, for Settings and for offering controls. */
@@ -163,7 +181,7 @@ public object TranslationCenter {
 
     /** Detections by message key, one per message version (UX 3.1, 3.6). */
     private val messageDetections = MessageDetections()
-    public val detections: StateFlow<Map<String, DetectedLanguage>> = messageDetections.detections
+    public val detections: StateFlow<Map<String, LanguageCandidates>> = messageDetections.detections
 
     private val jobs = HashMap<String, Job>()
 
@@ -242,7 +260,7 @@ public object TranslationCenter {
             }
             Log.i(TAG, "engines translation=${if (translationOk) "present" else "unavailable"} transcription=${def.name.lowercase()}")
             if (translationOk) {
-                val chosen = mutableStore.value.conversations.values.mapNotNull { it.translationSource }.distinct()
+                val chosen = mutableStore.value.conversations.values.flatMap { c -> c.languages.picks.map { it.tag } }.distinct()
                 for (src in chosen) pairState(src, target)
             }
         }
@@ -271,16 +289,62 @@ public object TranslationCenter {
         mutableStore.value.conversations[conversation] ?: ConversationChoices()
 
     /**
-     * The source the device would translate [key] from: a confident
-     * detection, else the language chosen for this conversation (UX 3.4:
-     * "remembered for the conversation"), else nothing.
+     * The source the device would translate [key] from (UX 3.1 / 3.4): a
+     * confident detection, else the detector's guess when usable, else the
+     * language chosen for this conversation, else the unusable guess or
+     * nothing ([SourceRules.known]).
      */
-    private fun knownSource(conversation: String, key: String): DetectedLanguage? =
-        SourceRules.known(
-            detections.value[key],
-            choices(conversation).translationSource,
+    private fun knownSource(conversation: String, key: String): DetectedLanguage? {
+        val detected = effectiveDetection(conversation, key)
+        return SourceRules.known(
+            detected,
+            usual(conversation),
             translationDetectionConfidentPermille().toInt(),
+            guessUnusable(detected),
         )
+    }
+
+    /**
+     * The language a message is taken to be in (ADR-0082 note of
+     * 2026-11-15): its detection, unless that is unsure and the
+     * conversation's languages name one of its close candidates (a picked
+     * one, else the most detected one; shared rule `conversationDetection`,
+     * independent of the order messages were detected in).
+     */
+    private fun effectiveDetection(conversation: String, key: String): DetectedLanguage? {
+        val candidates = detections.value[key] ?: return null
+        return try {
+            conversationDetection(candidates, languages(conversation))
+        } catch (_: Throwable) {
+            candidates.detected
+        }
+    }
+
+    /** The conversation's languages as the shared rule takes them. */
+    private fun languages(conversation: String): ConversationLanguages =
+        StoredLanguagesForm.toCore(choices(conversation).languages)
+
+    /** The conversation's usual language (the latest pick, else the most
+     *  detected one); `null` with neither or without the core. */
+    private fun usual(conversation: String): String? =
+        try {
+            conversationLanguagesUsual(languages(conversation))
+        } catch (_: Throwable) {
+            null
+        }
+
+    /**
+     * Whether a detector's guess cannot be translated from: it is the target
+     * language, or the engine has already said it cannot translate the pair.
+     * An engine that has not answered yet is asked again after the tap.
+     */
+    private fun guessUnusable(detected: DetectedLanguage?): Boolean {
+        val d = detected ?: return false
+        val tag = canonicalLanguageTag(d.tag) ?: d.tag
+        val target = target()
+        return sameLanguage(tag, target) ||
+            mutableCapability.value.pairs["$tag>$target"] == TranslationEngineState.UNAVAILABLE
+    }
 
     /** UX 3.1 — whether the menu offers `Translate` for this message. */
     public fun translateOffer(conversation: String, messageId: Long, text: String, isOwn: Boolean): TranslateOffer {
@@ -296,6 +360,85 @@ public object TranslationCenter {
             SourceRules.offerInput(settings.value.showTranslate, text, isOwn, detected, pair, cap.translation),
             reading(),
         )
+    }
+
+    /**
+     * UX 3.2 — the language line shown before any translation, or `null`. It
+     * names the language `Translate` would start from ([resolution], the
+     * shared rule `resolveTranslationSource`, the same answer [translate]
+     * reads), so the line and the tap never disagree; the menu row's shared
+     * rule then decides whether that language is one to name
+     * ([SourceRules.languageLineInput]). Reads the detection the menu row
+     * uses; never detects again.
+     */
+    public fun languageLine(conversation: String, messageId: Long, text: String, isOwn: Boolean): TranslateLine? {
+        val key = TranslationStoreState.messageKey(conversation, messageId)
+        val resolution = resolution(conversation, key) ?: return null
+        val tag = resolution.lineTag ?: return null
+        val offer = translationOffered(
+            SourceRules.languageLineInput(
+                settings.value.showTranslate, text, isOwn,
+                DetectedLanguage(tag, resolution.lineConfidencePermille),
+            ),
+            reading(),
+        )
+        return SourceRules.languageLine(offer, resolution)
+    }
+
+    /**
+     * The tags whose engine answer the shared source rule needs: every close
+     * candidate of [key] and the conversation's usual language, less the
+     * language translated into.
+     */
+    private fun askedTags(conversation: String, key: String, target: String): List<String> {
+        val out = mutableListOf<String>()
+        val all = SourceRules.candidateTags(detections.value[key]) + listOfNotNull(usual(conversation))
+        for (raw in all) {
+            val tag = canonicalLanguageTag(raw) ?: raw
+            if (sameLanguage(tag, target) || out.any { sameLanguage(it, tag) }) continue
+            out += tag
+        }
+        return out
+    }
+
+    /** The shared rule over the given engine answers; `null` only if the
+     *  core cannot be reached. */
+    private fun resolve(conversation: String, key: String, target: String, translatable: List<String>): TranslationSourceResolution? =
+        try {
+            resolveTranslationSource(detections.value[key], languages(conversation), target, translatable)
+        } catch (_: Throwable) {
+            null
+        }
+
+    /**
+     * The line's language and `Translate`'s source from the engine answers
+     * already in, or `null` while any is outstanding (asked now).
+     */
+    private fun resolution(conversation: String, key: String): TranslationSourceResolution? {
+        if (detections.value[key] == null) return null
+        val target = target()
+        val cap = mutableCapability.value
+        val tags = askedTags(conversation, key, target)
+        val translatable = if (!cap.translation) {
+            emptyList()
+        } else {
+            SourceRules.translatable(tags) { cap.pairs["$it>$target"] } ?: run {
+                scope.launch { for (tag in tags) pairState(tag, target) }
+                return null
+            }
+        }
+        return resolve(conversation, key, target, translatable)
+    }
+
+    /** The same resolution with every engine answer asked now. */
+    private suspend fun loadResolution(conversation: String, key: String): TranslationSourceResolution? {
+        val target = target()
+        val translatable = if (!mutableCapability.value.translation) {
+            emptyList()
+        } else {
+            askedTags(conversation, key, target).filter { pairState(it, target) != TranslationEngineState.UNAVAILABLE }
+        }
+        return resolve(conversation, key, target, translatable)
     }
 
     /** UX 4.1 — whether a voice / video message gets the `Aa` button. */
@@ -316,7 +459,7 @@ public object TranslationCenter {
     /** UX 3.6 — the language the bar names, or `null`. */
     public fun barLanguage(conversation: String, recentIncomingKeys: List<String>): String? {
         val det = detections.value
-        val recent = recentIncomingKeys.mapNotNull { det[it] }
+        val recent = recentIncomingKeys.mapNotNull { det[it]?.detected }
         val c = choices(conversation)
         val lang = conversationBarLanguage(
             ConversationBarInput(
@@ -343,7 +486,24 @@ public object TranslationCenter {
         val d = detector
         if (d === NoLanguageDetector || text.isBlank()) return
         val key = TranslationStoreState.messageKey(conversation, messageId)
-        scope.launch { messageDetections.detect(key, text, d) }
+        scope.launch {
+            messageDetections.detect(key, text, d)
+            rememberConfident(conversation, messageId, detections.value[key]?.detected)
+        }
+    }
+
+    /** A confident detection is recorded for its message, once per message
+     *  id (with `Not X?` corrections and picker picks, the conversation's
+     *  languages; ADR-0082 note of 2026-11-15). */
+    private fun rememberConfident(conversation: String, messageId: Long, detected: DetectedLanguage?) {
+        val d = detected ?: return
+        if (d.confidencePermille.toInt() < translationDetectionConfidentPermille().toInt()) return
+        val known = choices(conversation).languages.detections.firstOrNull { it.messageId == messageId }
+        if (known != null && sameLanguage(known.tag, d.tag)) return
+        setChoices(conversation) {
+            val next = conversationLanguagesWithDetection(StoredLanguagesForm.toCore(it.languages), messageId, d.tag)
+            it.copy(languages = StoredLanguagesForm.fromCore(next))
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -370,23 +530,35 @@ public object TranslationCenter {
         return s.takeIf { storedResultIsCurrent(it.lastOpId, opId, it.target, target()) }
     }
 
-    /** The menu's `Translate` (or the line's `Translate` / `Try again`). */
+    /**
+     * The menu's `Translate` (or the line's `Translate` / `Try again`): from
+     * [explicitSource] when given, else from the source the language line
+     * names ([loadResolution], the shared rule with every engine answer in);
+     * the picker, with the guess marked, when the rule names none.
+     */
     public fun translate(conversation: String, messageId: Long, opId: Long, text: String, explicitSource: String? = null) {
         val key = TranslationStoreState.messageKey(conversation, messageId)
-        val target = target()
-        val source = explicitSource
-            ?: knownSource(conversation, key)?.tag?.let { canonicalLanguageTag(it) ?: it }
-        val guess = explicitSource == null && SourceRules.isUnsureGuess(
-            detections.value[key],
-            choices(conversation).translationSource,
-            translationDetectionConfidentPermille().toInt(),
-        )
-        val first = SourceRules.tap(source, guess, source != null && sameLanguage(source, target), null)
-        if (first is TapAction.Picker) {
-            openPicker(PackKind.TRANSLATION, conversation, key, opId, text, null, first.marked)
+        if (explicitSource != null) {
+            translateFrom(conversation, messageId, opId, text, explicitSource)
             return
         }
-        if (first is TapAction.AlreadyIn) {
+        launchFor("s:$key") {
+            val chosen = usual(conversation)
+            val resolution = loadResolution(conversation, key)
+            val action = resolution?.let { SourceRules.tapSource(it) }
+                ?: chosen?.let { TapAction.Translate(it) }
+                ?: TapAction.Picker(marked = detections.value[key]?.detected?.tag)
+            when (action) {
+                is TapAction.Translate -> translateFrom(conversation, messageId, opId, text, action.source)
+                is TapAction.Picker -> openPicker(PackKind.TRANSLATION, conversation, key, opId, text, null, action.marked)
+            }
+        }
+    }
+
+    private fun translateFrom(conversation: String, messageId: Long, opId: Long, text: String, source: String) {
+        val key = TranslationStoreState.messageKey(conversation, messageId)
+        val target = target()
+        if (sameLanguage(source, target)) {
             setLine(key, opId, TranslateLine.SameLanguage(target))
             scope.launch {
                 delay(SAME_LANGUAGE_MS)
@@ -397,7 +569,6 @@ public object TranslationCenter {
             }
             return
         }
-        if (source == null) return // unreachable: no source is a Picker
         val stored = storedTranslation(conversation, messageId, opId)
         if (stored != null && sameLanguage(stored.source, source)) {
             setLine(key, opId, TranslateLine.Shown(stored.source, stored.text))
@@ -405,14 +576,7 @@ public object TranslationCenter {
         }
         launchFor("t:$key") {
             setLine(key, opId, TranslateLine.Translating(source))
-            val state = pairState(source, target)
-            val then = SourceRules.tap(source, guess, false, state)
-            if (then is TapAction.Picker) {
-                setLine(key, opId, null)
-                openPicker(PackKind.TRANSLATION, conversation, key, opId, text, null, then.marked)
-                return@launchFor
-            }
-            when (state) {
+            when (pairState(source, target)) {
                 TranslationEngineState.UNAVAILABLE -> setLine(key, opId, TranslateLine.Unsupported(source))
                 TranslationEngineState.NEEDS_PACK -> {
                     setLine(key, opId, null)
@@ -493,15 +657,34 @@ public object TranslationCenter {
                 PackKind.TRANSLATION -> translation.sources(target())
                 PackKind.TRANSCRIPTION -> transcription.languages()
             }.mapNotNull { canonicalLanguageTag(it) }.distinct()
+            // `Not Spanish?`: the message's close candidates first (UX 3.4).
+            val candidates = if (kind == PackKind.TRANSLATION) {
+                SourceRules.candidateTags(detections.value[key])
+            } else {
+                emptyList()
+            }
+            val ordered = if (candidates.isEmpty()) {
+                options
+            } else {
+                try {
+                    orderPickerLanguages(
+                        options,
+                        LanguageCandidates(DetectedLanguage(candidates.first(), 0.toUShort()), candidates.drop(1)),
+                    )
+                } catch (_: Throwable) {
+                    options
+                }
+            }
             mutablePicker.value = PickerPrompt(
                 kind,
-                options,
+                ordered,
                 marked?.let { canonicalLanguageTag(it) ?: it },
                 key,
                 conversation,
                 opId,
                 text,
                 ref,
+                candidates,
             )
         }
     }
@@ -518,7 +701,14 @@ public object TranslationCenter {
         val messageId = p.messageKey.substringAfterLast('/').toLongOrNull() ?: return
         when (p.kind) {
             PackKind.TRANSLATION -> {
-                setChoices(p.conversation) { it.copy(translationSource = language) }
+                setChoices(p.conversation) {
+                    val next = conversationLanguagesWithPick(
+                        StoredLanguagesForm.toCore(it.languages),
+                        language,
+                        System.currentTimeMillis().coerceAtLeast(0).toULong(),
+                    )
+                    it.copy(languages = StoredLanguagesForm.fromCore(next))
+                }
                 translate(p.conversation, messageId, p.opId, p.text, explicitSource = language)
             }
             PackKind.TRANSCRIPTION -> {
@@ -693,8 +883,8 @@ public object TranslationCenter {
                     transcriptionLanguages = it.transcriptionLanguages - p.language,
                 )
             }
-            when (outcome) {
-                PackOutcome.DONE -> when (p.kind) {
+            when (afterPack(outcome)) {
+                AfterPack.CONTINUE -> when (p.kind) {
                     PackKind.TRANSLATION -> {
                         val text = textFor[key]
                         setLine(key, p.opId, null)
@@ -707,11 +897,14 @@ public object TranslationCenter {
                         }
                     }
                 }
-                PackOutcome.SCHEDULED -> when (p.kind) {
-                    PackKind.TRANSLATION -> setLine(key, p.opId, TranslateLine.Downloading(p.language, null))
-                    PackKind.TRANSCRIPTION -> setTranscript(key, p.opId, TranscriptUi.Downloading(p.language, null), open = true)
+                AfterPack.BACK_TO_START -> when (p.kind) {
+                    PackKind.TRANSLATION -> setLine(key, p.opId, null)
+                    PackKind.TRANSCRIPTION -> {
+                        pendingTranscriptions.remove(key)
+                        setTranscript(key, p.opId, TranscriptUi.Idle, open = false)
+                    }
                 }
-                PackOutcome.FAILED -> when (p.kind) {
+                AfterPack.FAILED -> when (p.kind) {
                     PackKind.TRANSLATION -> setLine(key, p.opId, TranslateLine.PackFailed(p.language))
                     PackKind.TRANSCRIPTION -> setTranscript(key, p.opId, TranscriptUi.PackFailed(p.language), open = true)
                 }
@@ -859,4 +1052,27 @@ public object TranslationCenter {
     } catch (_: Throwable) {
         false
     }
+}
+
+/** What the line does once a pack download has an outcome. */
+internal enum class AfterPack {
+    /** The pack is here: translate (or transcribe) now. */
+    CONTINUE,
+
+    /**
+     * Back to the line the message had before (`Spanish · Translate`; the
+     * transcript closed). Nothing watches a download the platform only
+     * scheduled, so `Downloading…` would never end; a later tap asks the
+     * engine again (UX 3.5, ADR-0082 note of 2026-11-15).
+     */
+    BACK_TO_START,
+
+    /** `Couldn't download the Spanish pack`. */
+    FAILED,
+}
+
+internal fun afterPack(outcome: PackOutcome): AfterPack = when (outcome) {
+    PackOutcome.DONE -> AfterPack.CONTINUE
+    PackOutcome.SCHEDULED -> AfterPack.BACK_TO_START
+    PackOutcome.FAILED -> AfterPack.FAILED
 }

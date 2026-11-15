@@ -96,7 +96,7 @@ import { Icon } from "../ui/icons";
 import { joinList, t } from "../l10n";
 import { displayLocale } from "../l10n/display-locale";
 import { publicOrigin } from "../platform";
-import type { MessageRef, TextSlot } from "../translation/controller";
+import type { MessageRef, TextSlot, TextView } from "../translation/controller";
 import { useTranslation } from "../translation/context";
 import { TranslationLine } from "../translation/TranslationLine";
 import type { TranscriptHost } from "../translation/Transcript";
@@ -603,6 +603,14 @@ function ChatBubbleBody(
     return translation === undefined || ref === null || isEditing()
       ? ({ phase: "none" } as const)
       : translation.textView("text", ref);
+  };
+  /** UX 3.2 — the quiet line: the translation's line, or before any, the
+   *  message's language with `Translate` up front. */
+  const lineView = (): TextView => {
+    const v = textView();
+    const ref = messageRef();
+    if (translation === undefined || ref === null || isEditing() || isDeleted()) return v;
+    return translation.textLine(ref, displayText(), props.tone === "outgoing");
   };
   /** The text the bubble shows: the translation while it is shown. */
   const shownText = (): string => {
@@ -1140,7 +1148,7 @@ function ChatBubbleBody(
                         slot="text"
                         messageRef={ref()}
                         text={displayText()}
-                        view={textView()}
+                        view={lineView()}
                       />
                     )}
                   </Show>
