@@ -5999,12 +5999,8 @@
       "text": "Couldn't load the ways to donate. Check your connection and try again.",
       "comment": "Donations page when the list could not be loaded."
     },
-    "donate.for_russia": {
-      "text": "For people in Russia.",
-      "comment": "Line under a payment method that works only from Russia (SBP)."
-    },
     "donate.lede": {
-      "text": "Lakko is built and run by one person. Donations pay for the servers and keep the work going.",
+      "text": "Donations pay for the servers and keep the work going.",
       "comment": "Paragraph under the heading of the donations page."
     },
     "donate.none": {
@@ -6034,10 +6030,6 @@
     "donate.title": {
       "text": "Support Lakko",
       "comment": "Heading of the donations page."
-    },
-    "donate.worldwide": {
-      "text": "From anywhere.",
-      "comment": "Line under a payment method that works from any country."
     },
     "ds.clock_skew": {
       "text": "Check this device's date and time.",

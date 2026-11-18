@@ -165,7 +165,6 @@ function PaymentCard(props: { readonly method: DonateMethod }): JSX.Element {
     <article class="lk-card lk-donate-card">
       <div class="lk-donate-head">
         <h3>{name()}</h3>
-        <p class="lk-donate-sub">{m().kind === "sbp" ? t("donate.for_russia") : t("donate.worldwide")}</p>
       </div>
       <Show when={m().qrSha256}>
         {(sha) => <VerifiedQr id={m().id} sha256={sha()} />}

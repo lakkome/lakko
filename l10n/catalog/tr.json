@@ -5629,12 +5629,8 @@
       "text": "Bağış yolları yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "Rusya'dakiler için.",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "Lakko'yu tek bir kişi geliştiriyor ve işletiyor. Bağışlar sunucuların masrafını karşılar ve çalışmanın sürmesini sağlar.",
+      "text": "Bağışlar sunucuların masrafını karşılar ve çalışmanın sürmesini sağlar.",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "Lakko'yu destekle",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "Her yerden.",
       "status": "machine"
     },
     "ds.clock_skew": {

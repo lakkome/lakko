@@ -5629,12 +5629,8 @@
       "text": "दान के तरीके लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "रूस में रहने वालों के लिए।",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "Lakko को एक ही व्यक्ति बनाता और चलाता है। दान से सर्वरों का खर्च चलता है और काम जारी रहता है।",
+      "text": "दान से सर्वरों का खर्च चलता है और काम जारी रहता है।",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "Lakko का समर्थन करें",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "कहीं से भी।",
       "status": "machine"
     },
     "ds.clock_skew": {

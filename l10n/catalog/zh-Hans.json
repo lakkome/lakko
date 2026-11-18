@@ -5629,12 +5629,8 @@
       "text": "无法加载捐款方式。请检查网络连接后重试。",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "适用于俄罗斯用户。",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "Lakko 由一个人开发和运营。捐款用于支付服务器费用，让这项工作继续下去。",
+      "text": "捐款用于支付服务器费用，让这项工作继续下去。",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "支持 Lakko",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "适用于任何地区。",
       "status": "machine"
     },
     "ds.clock_skew": {

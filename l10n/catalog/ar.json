@@ -5629,12 +5629,8 @@
       "text": "تعذّر تحميل طرق التبرع. تحقّق من اتصالك وحاول مرة أخرى.",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "للأشخاص في روسيا.",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "يبني Lakko ويديره شخص واحد. التبرعات تغطي تكلفة الخوادم وتساعد على استمرار العمل.",
+      "text": "التبرعات تغطي تكلفة الخوادم وتساعد على استمرار العمل.",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "ادعم Lakko",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "من أي مكان.",
       "status": "machine"
     },
     "ds.clock_skew": {

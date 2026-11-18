@@ -5629,12 +5629,8 @@
       "text": "לא ניתן לטעון את דרכי התרומה. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "לאנשים ברוסיה.",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "את Lakko בונה ומפעיל אדם אחד. התרומות משלמות על השרתים ומאפשרות להמשיך בעבודה.",
+      "text": "התרומות משלמות על השרתים ומאפשרות להמשיך בעבודה.",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "תמכו ב-Lakko",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "מכל מקום.",
       "status": "machine"
     },
     "ds.clock_skew": {

@@ -57,8 +57,8 @@ From top to bottom:
 1. A back control (to Settings when opened from there, else to the home or
    the sign-in page).
 2. Heading **Support Lakko**, in the app's page-title size.
-3. One paragraph in the app's body size: "Lakko is built and run by one
-   person. Donations pay for the servers and keep the work going."
+3. One paragraph in the app's body size: "Donations pay for the servers
+   and keep the work going."
 4. The cards, in two groups when both exist, each under a small section
    heading: **Bank and card** (`donate.section_payment`: SBP, Revolut, Buy Me
    a Coffee) first, then **Crypto** (`donate.section_crypto`: the wallets).
@@ -75,8 +75,8 @@ Design system: `.claude/skills/ux-ui/design-system.md`.
 - The cards of a group in a responsive grid: one column on a phone, two from
   about 640 px of content width, three from about 960 px; the cards of one
   row have equal height.
-- A card, top to bottom: title row (service or coin name), the
-  who-it-is-for line or the network line, the QR at 200 px square, then the
+- A card, top to bottom: title row (service or coin name), for crypto
+  the network line, the QR at 200 px square, then the
   actions (**Donate** full width; the phone row; for crypto the address in
   monospace that wraps, **Copy address**, the warning line).
 - Body text in the app's body size, secondary text in its secondary size,
@@ -87,8 +87,9 @@ Design system: `.claude/skills/ux-ui/design-system.md`.
 
 - Title: the method's own name (`SBP`, `Revolut`, `Buy Me a Coffee`). Brand
   names are not translated.
-- One line under it: who it is for ("For people in Russia." /
-  "From anywhere.").
+- No line under the title: the server sends only the methods allowed for
+  the visitor's country, so a "who it is for" line would say nothing
+  (removed 2026-11-18, maintainer).
 - The QR code, when the server has one and its hash matches the signed one
   (scan with a banking app): the operator's PNG exactly as served, in colour,
   never recoloured, scaled to the card's QR size (section 2.4).
@@ -288,9 +289,7 @@ reflows the cards, and the address wraps instead of shrinking.
 | `donate.title` | Support Lakko |
 | `donate.section_payment` | Bank and card |
 | `donate.section_crypto` | Crypto |
-| `donate.lede` | Lakko is built and run by one person. Donations pay for the servers and keep the work going. |
-| `donate.for_russia` | For people in Russia. |
-| `donate.worldwide` | From anywhere. |
+| `donate.lede` | Donations pay for the servers and keep the work going. |
 | `donate.button` | Donate |
 | `donate.phone_show` | Show |
 | `donate.copy` | Copy |

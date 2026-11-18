@@ -226,9 +226,11 @@ private fun GroupHeading(text: String) {
 private fun Modifier.qrSquare(): Modifier = fillMaxWidth().aspectRatio(1f)
 
 @Composable
-private fun CardTitle(title: String, sub: String) {
+private fun CardTitle(title: String, sub: String? = null) {
     Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-    Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (sub != null) {
+        Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable
@@ -240,10 +242,7 @@ private fun PaymentCard(
 ) {
     val context = LocalContext.current
     DonateCard {
-        CardTitle(
-            methodName(method.kind),
-            if (method.kind == DonateKind.SBP) t("donate.for_russia") else t("donate.worldwide"),
-        )
+        CardTitle(methodName(method.kind))
         if (method.qrSha256 != null) {
             // The card is shown at once; the QR fills in only once its bytes
             // hash to the signed SHA-256 and decode as an image.

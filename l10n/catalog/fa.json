@@ -5629,12 +5629,8 @@
       "text": "بارگیری راه‌های کمک مالی ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "برای افراد ساکن روسیه.",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "Lakko را یک نفر می‌سازد و اداره می‌کند. کمک‌های مالی هزینهٔ سرورها را می‌پردازد و کار را ادامه می‌دهد.",
+      "text": "کمک‌های مالی هزینهٔ سرورها را می‌پردازد و کار را ادامه می‌دهد.",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "از Lakko حمایت کنید",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "از هر جا.",
       "status": "machine"
     },
     "ds.clock_skew": {

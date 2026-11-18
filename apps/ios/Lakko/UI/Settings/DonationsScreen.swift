@@ -179,7 +179,7 @@ private struct DonationCard<Content: View>: View {
 
 private struct CardTitle: View {
     let title: String
-    let subtitle: String
+    var subtitle: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -187,10 +187,12 @@ private struct CardTitle: View {
                 .font(.headline)
                 .foregroundStyle(Color.lakkoText)
                 .accessibilityAddTraits(.isHeader)
-            Text(subtitle)
-                .font(.footnote)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .fixedSize(horizontal: false, vertical: true)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -254,9 +256,7 @@ private struct PaymentDonationCard: View {
 
     var body: some View {
         DonationCard {
-            CardTitle(
-                title: name,
-                subtitle: method.kind == .sbp ? l10n.t("donate.for_russia") : l10n.t("donate.worldwide"))
+            CardTitle(title: name)
             if let qrImage {
                 PaymentQrImage(image: qrImage)
             }

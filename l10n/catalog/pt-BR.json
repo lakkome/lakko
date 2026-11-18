@@ -5629,12 +5629,8 @@
       "text": "Não foi possível carregar as formas de doar. Verifique sua conexão e tente de novo.",
       "status": "machine"
     },
-    "donate.for_russia": {
-      "text": "Para pessoas na Rússia.",
-      "status": "machine"
-    },
     "donate.lede": {
-      "text": "O Lakko é feito e mantido por uma só pessoa. As doações pagam os servidores e mantêm o trabalho.",
+      "text": "As doações pagam os servidores e mantêm o trabalho.",
       "status": "machine"
     },
     "donate.none": {
@@ -5663,10 +5659,6 @@
     },
     "donate.title": {
       "text": "Apoie o Lakko",
-      "status": "machine"
-    },
-    "donate.worldwide": {
-      "text": "De qualquer lugar.",
       "status": "machine"
     },
     "ds.clock_skew": {
