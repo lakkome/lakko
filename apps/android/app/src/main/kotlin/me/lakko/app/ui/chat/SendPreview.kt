@@ -61,15 +61,29 @@ public fun previewSendOrder(items: List<PreviewItem>, caption: String): List<Pai
  * Read [uris] into preview items: kind, strip thumbnail, the video track's
  * codec and the problem each has as it would be sent (UX 3-4). Runs the
  * readers and decoders off the main thread.
+ *
+ * [mimeHints], parallel to [uris] when given, names the type an item was
+ * taken under (a paste or a keyboard insertion, docs/ux/attachments.md 2.5);
+ * it is used only when the content provider reports none for the URI.
  */
 public suspend fun buildPreviewItems(
     context: android.content.Context,
     uris: List<android.net.Uri>,
     filesOnly: Boolean,
+    mimeHints: List<String?> = emptyList(),
     nextId: () -> Long,
 ): List<PreviewItem> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-    uris.map { uri ->
-        val read = me.lakko.app.media.readPickedUri(context, uri, PREVIEW_MAX_BYTES.toInt())
+    uris.mapIndexed { index, uri ->
+        val read = me.lakko.app.media.readPickedUri(context, uri, PREVIEW_MAX_BYTES.toInt()).let { r ->
+            val hint = mimeHints.getOrNull(index)
+            if (r is me.lakko.app.media.PickedRead.Ok && r.payload.mime == null && hint != null) {
+                me.lakko.app.media.PickedRead.Ok(
+                    me.lakko.app.media.PickedPayload(r.payload.bytes, hint, r.payload.name),
+                )
+            } else {
+                r
+            }
+        }
         val ok = read as? me.lakko.app.media.PickedRead.Ok
         if (ok == null) {
             val failed = read as? me.lakko.app.media.PickedRead.Failed

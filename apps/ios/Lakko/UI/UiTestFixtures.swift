@@ -68,6 +68,10 @@ enum UiTestFixture: String {
     /// `docs/ux/attachments.md` sections 8.1 and 7.1a — the checklist editor.
     case checklistEditor
 
+    /// `docs/ux/attachments.md` section 2.5 — the production composer field,
+    /// with a line saying what its last media paste carried.
+    case composerPaste
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -108,7 +112,45 @@ struct UiTestFixtureRoot: View {
             PollEditorScreen(anonymity: .switchDefaultOn, onCreate: { _ in }, onCancel: {})
         case .checklistEditor:
             ChecklistEditorScreen(initial: nil, onDone: { _ in }, onCancel: {})
+        case .composerPaste:
+            ComposerPasteFixture()
         }
+    }
+}
+
+/// The production composer field. A media paste reads what it carried through
+/// the production loader and names it in a line a test can find.
+private struct ComposerPasteFixture: View {
+    @State private var draft = ""
+    @State private var focused = false
+    @State private var pasted = "none"
+    @StateObject private var caret = ComposerCaret()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("UI test fixture")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("pasted: \(pasted)")
+                .accessibilityIdentifier("composer-paste-result")
+            Spacer()
+            ComposerTextField(
+                text: $draft, caret: caret, disabled: false, focus: $focused,
+                onPasteMedia: { providers in
+                    Task {
+                        let loaded = await PastedMedia.load(providers)
+                        pasted = loaded.map { item -> String in
+                            switch item {
+                            case .photo(let data): return "photo \(data.count)"
+                            case .video: return "video"
+                            case .failed: return "failed"
+                            }
+                        }.joined(separator: ", ")
+                    }
+                })
+                .accessibilityIdentifier("composer-field")
+        }
+        .padding(16)
     }
 }
 

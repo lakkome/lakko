@@ -30,36 +30,42 @@ class RegisteredCommitHoldTest {
     // 1. The verdict truth table
     // -----------------------------------------------------------------------
 
+    /** Row 7967 is the commit the DS registered as leaving epoch 6. */
+    private val registered: Map<ULong, Long> = mapOf(7uL to 7967L, 8uL to 8100L)
+
     @Test
-    fun `hold - a commit framed at the local epoch with the next epoch registered`() {
-        assertEquals(RegisteredCommitVerdict.HOLD, registeredCommitVerdict(false, 6uL, 7uL, 6uL, 7uL))
-        assertEquals(RegisteredCommitVerdict.HOLD, registeredCommitVerdict(false, 6uL, 7uL, 6uL, 16uL))
+    fun `hold - the commit the DS registered as leaving this device's epoch`() {
+        assertEquals(RegisteredCommitVerdict.HOLD, registeredCommitVerdict(false, 7967L, 6uL, registered))
+        assertEquals(RegisteredCommitVerdict.HOLD, registeredCommitVerdict(false, 8100L, 7uL, registered))
     }
 
     @Test
     fun `skip - every other case`() {
         val skip = RegisteredCommitVerdict.SKIP
-        // own echo
-        assertEquals(skip, registeredCommitVerdict(true, 6uL, 7uL, 6uL, 7uL))
-        // unknown epochs
-        assertEquals(skip, registeredCommitVerdict(false, null, 7uL, 6uL, 7uL))
-        assertEquals(skip, registeredCommitVerdict(false, 6uL, null, 6uL, 7uL))
-        assertEquals(skip, registeredCommitVerdict(false, 6uL, 7uL, null, 7uL))
-        // not a commit (an application message or a proposal)
-        assertEquals(skip, registeredCommitVerdict(false, 6uL, 6uL, 6uL, 7uL))
-        // sealed below local (a commit this device is past)
-        assertEquals(skip, registeredCommitVerdict(false, 5uL, 6uL, 6uL, 7uL))
-        // sealed above local (a commit of an epoch beyond the next)
-        assertEquals(skip, registeredCommitVerdict(false, 7uL, 8uL, 6uL, 8uL))
-        // latest unknown (unclaimed journal, or no latest_epoch on the read)
-        assertEquals(skip, registeredCommitVerdict(false, 6uL, 7uL, 6uL, null))
-        // latest == local: the DS registered no later epoch
-        assertEquals(skip, registeredCommitVerdict(false, 6uL, 7uL, 6uL, 6uL))
+        // an own echo
+        assertEquals(skip, registeredCommitVerdict(true, 7967L, 6uL, registered))
+        // no local epoch
+        assertEquals(skip, registeredCommitVerdict(false, 7967L, null, registered))
+        // a read that named no commits, or an empty list
+        assertEquals(skip, registeredCommitVerdict(false, 7967L, 6uL, null))
+        assertEquals(skip, registeredCommitVerdict(false, 7967L, 6uL, emptyMap()))
+        // another row at the same epoch (a commit-shaped row through the plain
+        // publish route)
+        assertEquals(skip, registeredCommitVerdict(false, 7966L, 6uL, registered))
+        // the commit of the epoch after the next
+        assertEquals(skip, registeredCommitVerdict(false, 8100L, 6uL, registered))
+        // a commit this device is already past
+        assertEquals(skip, registeredCommitVerdict(false, 7967L, 7uL, registered))
         // no next epoch exists
-        assertEquals(
-            skip,
-            registeredCommitVerdict(false, ULong.MAX_VALUE, 0uL, ULong.MAX_VALUE, ULong.MAX_VALUE),
-        )
+        assertEquals(skip, registeredCommitVerdict(false, 7967L, ULong.MAX_VALUE, registered))
+    }
+
+    @Test
+    fun `names the commit leaving an epoch`() {
+        assertEquals(7967L, registeredCommitLeaving(registered, 6uL))
+        assertNull(registeredCommitLeaving(registered, 8uL))
+        assertNull(registeredCommitLeaving(null, 6uL))
+        assertNull(registeredCommitLeaving(registered, null))
     }
 
     // -----------------------------------------------------------------------
@@ -76,7 +82,7 @@ class RegisteredCommitHoldTest {
         val holds = RegisteredCommitHoldTracker(clock::read)
         val expected = listOf(2L, 5L, 15L, 30L, 60L, 120L, 300L)
         for ((index, delaySecs) in expected.withIndex()) {
-            val decision = holds.recordFailure(GROUP, ROW, 6uL, 6uL)
+            val decision = holds.recordFailure(GROUP, ROW, 6uL)
             assertEquals(HoldDecision(attempt = index + 1, held = true), decision)
             assertEquals(delaySecs * 1_000L, holds.msUntilDue(GROUP))
             assertFalse(holds.isDue(GROUP))
@@ -86,7 +92,7 @@ class RegisteredCommitHoldTest {
             assertTrue(holds.isDue(GROUP))
             assertEquals(0L, holds.msUntilDue(GROUP))
         }
-        val last = holds.recordFailure(GROUP, ROW, 6uL, 6uL)
+        val last = holds.recordFailure(GROUP, ROW, 6uL)
         assertEquals(HoldDecision(attempt = REGISTERED_COMMIT_MAX_ATTEMPTS, held = false), last)
         assertNull("the hold is dropped", holds.hold(GROUP))
         assertEquals(BehindMark(epoch = 6uL, atMs = clock.now), holds.behindMark(GROUP))
@@ -98,10 +104,10 @@ class RegisteredCommitHoldTest {
     fun `a new row restarts the count, an applied row clears the hold`() {
         val clock = Clock()
         val holds = RegisteredCommitHoldTracker(clock::read)
-        holds.recordFailure(GROUP, ROW, 6uL, 6uL)
-        holds.recordFailure(GROUP, ROW, 6uL, 6uL)
+        holds.recordFailure(GROUP, ROW, 6uL)
+        holds.recordFailure(GROUP, ROW, 6uL)
         assertEquals(2, holds.hold(GROUP)?.attempts)
-        assertEquals(1, holds.recordFailure(GROUP, ROW + 1, 6uL, 6uL).attempt)
+        assertEquals(1, holds.recordFailure(GROUP, ROW + 1, 6uL).attempt)
         holds.release(GROUP, ROW)
         assertNotNull("another row's release does not drop it", holds.hold(GROUP))
         holds.release(GROUP, ROW + 1)
@@ -112,7 +118,7 @@ class RegisteredCommitHoldTest {
     @Test
     fun `the behind mark goes once the epoch moves above it, and blocks repair until then`() {
         val holds = RegisteredCommitHoldTracker { 0L }
-        repeat(REGISTERED_COMMIT_MAX_ATTEMPTS) { holds.recordFailure(GROUP, ROW, 6uL, 6uL) }
+        repeat(REGISTERED_COMMIT_MAX_ATTEMPTS) { holds.recordFailure(GROUP, ROW, 6uL) }
         assertTrue(holds.repairBlocked(GROUP, 6uL))
         assertTrue(holds.repairBlocked(GROUP, 5uL))
         assertFalse(holds.repairBlocked(GROUP, 7uL))
@@ -126,7 +132,7 @@ class RegisteredCommitHoldTest {
     @Test
     fun `groups are independent and the key is case-insensitive`() {
         val holds = RegisteredCommitHoldTracker { 0L }
-        holds.recordFailure(GROUP.uppercase(), ROW, 6uL, 6uL)
+        holds.recordFailure(GROUP.uppercase(), ROW, 6uL)
         assertNotNull(holds.hold(GROUP))
         assertNull(holds.hold(OTHER_GROUP))
         assertTrue(holds.repairBlocked(GROUP, 6uL))
@@ -161,7 +167,20 @@ class RegisteredCommitHoldTest {
     }
 
     private fun row(id: Long, sealed: Int, after: Int) =
-        MailboxMessage(id = id, payload = byteArrayOf(sealed.toByte(), after.toByte()), createdAt = "")
+        MailboxMessage(id = id, payload = byteArrayOf(sealed.toByte(), after.toByte(), id.toByte(), (id shr 8).toByte()), createdAt = "")
+
+    /** What the DS would name for [rows]: the first commit framed at each
+     *  epoch up to [latest] is registered (none without [latest]). */
+    private fun registeredOf(rows: List<MailboxMessage>, latest: ULong?): Map<ULong, Long>? {
+        if (latest == null) return null
+        val out = mutableMapOf<ULong, Long>()
+        for (r in rows) {
+            val sealed = r.payload[0].toULong()
+            val after = r.payload[1].toULong()
+            if (after > sealed && after <= latest && !out.containsKey(after)) out[after] = r.id
+        }
+        return out
+    }
 
     private fun apply(
         group: FakeGroup,
@@ -171,6 +190,8 @@ class RegisteredCommitHoldTest {
         holds: RegisteredCommitHoldTracker,
         lines: MutableList<String> = mutableListOf(),
         groupIdHex: String = GROUP,
+        commits: Map<ULong, Long>? = registeredOf(rows, latest),
+        readFrom: Long = after,
     ): JournalRowsApplied {
         val byPayload = rows.associateBy { it.payload.toList() }
         return applyJournalRowsHolding(
@@ -178,7 +199,9 @@ class RegisteredCommitHoldTest {
             rows = rows,
             after = after,
             latestEpoch = latest,
+            registeredCommits = commits,
             holds = holds,
+            readFrom = readFrom,
             isOwnEchoRow = { false },
             localEpoch = { group.epoch },
             process = { payload -> group.process(byPayload.getValue(payload.toList())) },
@@ -269,6 +292,7 @@ class RegisteredCommitHoldTest {
             rows = listOf(row(11L, 6, 7)),
             after = 10L,
             latestEpoch = 7uL,
+            registeredCommits = mapOf(7uL to 11L),
             holds = holds,
             isOwnEchoRow = { false },
             localEpoch = { 6uL },
@@ -297,6 +321,7 @@ class RegisteredCommitHoldTest {
             rows = listOf(row(11L, 6, 7)),
             after = 10L,
             latestEpoch = 7uL,
+            registeredCommits = mapOf(7uL to 11L),
             holds = holds,
             isOwnEchoRow = { false },
             localEpoch = { 6uL },
@@ -307,6 +332,43 @@ class RegisteredCommitHoldTest {
         ) { _, _: Unit -> }
         assertFalse(result.held)
         assertEquals(11L, result.cursor)
+    }
+
+    @Test
+    fun `a commit-shaped row the DS did not register is skipped at once, the registered one held`() {
+        val holds = RegisteredCommitHoldTracker { 0L }
+        val group = FakeGroup(epoch = 6uL)
+        group.failing[30L] = 100
+        group.failing[31L] = 1
+        // 30: garbage framed like the commit 6 -> 7; 31: the registered commit.
+        val rows = listOf(row(30L, 6, 7), row(31L, 6, 7))
+        val result = apply(group, rows, after = 29L, latest = 7uL, holds = holds, commits = mapOf(7uL to 31L))
+        assertTrue(result.held)
+        assertEquals("past the garbage, before the registered commit", 30L, result.cursor)
+        assertEquals(31L, holds.hold(GROUP)?.rowId)
+    }
+
+    @Test
+    fun `a rewound read starts below the cursor and never returns a cursor below it`() {
+        val holds = RegisteredCommitHoldTracker { 0L }
+        val group = FakeGroup(epoch = 6uL)
+        // The cursor is at 13; the snapshot went back to 6, so the read starts
+        // at 10, before the commit 11 that leaves 6.
+        val rows = listOf(row(11L, 6, 7), row(12L, 7, 7), row(13L, 7, 7))
+        val result = apply(group, rows, after = 13L, latest = 7uL, holds = holds, readFrom = 10L)
+        assertFalse(result.held)
+        assertEquals(13L, result.cursor)
+        assertEquals(listOf(11L, 12L, 13L), group.applied)
+        assertEquals(7uL, group.epoch)
+        // Held on the rewound commit: still never below the cursor, and the
+        // hold survives the next rewound read (the count goes on).
+        val stuck = FakeGroup(epoch = 6uL)
+        stuck.failing[11L] = 100
+        val held = apply(stuck, rows, after = 13L, latest = 7uL, holds = holds, readFrom = 10L)
+        assertTrue(held.held)
+        assertEquals(13L, held.cursor)
+        apply(stuck, rows, after = 13L, latest = 7uL, holds = holds, readFrom = 10L)
+        assertEquals(2, holds.hold(GROUP)?.attempts)
     }
 
     // -----------------------------------------------------------------------

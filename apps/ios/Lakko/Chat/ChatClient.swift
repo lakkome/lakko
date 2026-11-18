@@ -415,6 +415,31 @@ public final class ChatClient {
         }
     }
 
+    /// ADR-0091 phase 1b — the rows from `from` on, read page by page until a
+    /// page reaches past `after` or the journal ends (at most
+    /// ``CursorEpoch/maxPages`` pages), as one result. The last page's
+    /// `hasMore`, `latestEpoch` and `registeredCommits` stand for the whole.
+    public func fetchRewound(
+        groupId: Data,
+        from: Int64,
+        after: Int64,
+        auth: DsAuth? = nil
+    ) async throws -> FetchResult {
+        var page = try await fetchGroupJournal(groupId: groupId, after: from, waitSecs: 0, auth: auth)
+        var messages = page.messages
+        var pages = 1
+        while pages < CursorEpoch.maxPages, page.hasMore {
+            let last = messages.last?.id ?? from
+            if last >= after { break }
+            page = try await fetchGroupJournal(groupId: groupId, after: last, waitSecs: 0, auth: auth)
+            messages.append(contentsOf: page.messages)
+            pages += 1
+        }
+        return FetchResult(
+            messages: messages, hasMore: page.hasMore, latestEpoch: page.latestEpoch,
+            registeredCommits: page.registeredCommits)
+    }
+
     /// G-38 — the MLS half of
     /// ``pollMessages(identity:group:after:waitSecs:)``: apply an
     /// already-fetched batch.
@@ -463,10 +488,14 @@ public final class ChatClient {
         group: Group,
         groupIdHex: String,
         raw: FetchResult,
-        after: Int64 = 0
+        after: Int64 = 0,
+        readFrom: Int64? = nil
     ) -> PollMessagesResult {
         var events: [IncomingChatEvent] = []
-        var cursor = after
+        // `readFrom` is below `after` only on an ADR-0091 phase-1b rewind
+        // (`Chat/CursorEpoch.swift`); the cursor returned is never below
+        // `after`.
+        var cursor = readFrom ?? after
         var touchedMlsState = false
         var resendOrigins: [Int64: ResendMarker.Origin] = [:]
         var eventSenders: [MemberIdentity?] = []
@@ -531,7 +560,8 @@ public final class ChatClient {
                 // because skipping it strands the device below the group.
                 if failedRowIsHeld(
                     groupIdHex: groupIdHex, rowId: message.id, payload: message.payload,
-                    localEpoch: localEpoch, latestEpoch: raw.latestEpoch, error: error
+                    localEpoch: localEpoch, latestEpoch: raw.latestEpoch,
+                    registeredCommits: raw.registeredCommits, error: error
                 ) {
                     cursor = cursorBeforeRow
                     held = true
@@ -576,7 +606,7 @@ public final class ChatClient {
 
         return PollMessagesResult(
             events: events,
-            cursor: cursor,
+            cursor: max(cursor, after),
             // A held batch stopped early: the rows after the held one are read
             // again with it, at its next attempt, not at once.
             hasMore: held ? false : raw.hasMore,
@@ -597,16 +627,17 @@ public final class ChatClient {
         payload: Data,
         localEpoch: UInt64?,
         latestEpoch: UInt64?,
+        registeredCommits: [UInt64: Int64]?,
         error: Error
     ) -> Bool {
         let kind = FailedApplyKind.of(error)
+        // `sealed` / `after` / `latest` feed the log line only.
         let sealed = epochOfMessage(bytes: payload)
         let after = epochAfterMessage(bytes: payload)
         let verdict = RegisteredCommitVerdict.of(
             isOwnEcho: kind == FailedApplyKind.ownMessage,
-            sealedEpoch: sealed, epochAfter: after,
-            localEpoch: localEpoch, latestEpoch: latestEpoch)
-        guard verdict == .hold, let sealed, let localEpoch else {
+            rowId: rowId, localEpoch: localEpoch, registeredCommits: registeredCommits)
+        guard verdict == .hold, let localEpoch else {
             // Read again but no longer the registered commit (another path
             // moved the epoch): the hold on it goes.
             registeredCommitHold.recordSkipped(groupIdHex: groupIdHex, rowId: rowId)
@@ -616,7 +647,7 @@ public final class ChatClient {
             return false
         }
         let outcome = registeredCommitHold.recordFailure(
-            groupIdHex: groupIdHex, rowId: rowId, sealedEpoch: sealed, localEpoch: localEpoch)
+            groupIdHex: groupIdHex, rowId: rowId, sealedEpoch: localEpoch, localEpoch: localEpoch)
         let attempt: Int
         switch outcome {
         case .held(let k, _): attempt = k

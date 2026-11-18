@@ -148,6 +148,7 @@ describe("the list", () => {
       "last-observed-owner",
       "readmission-removed",
       "knock-cursor",
+      "cursor-epoch",
       "continuity",
       "member-baseline",
       "profile-request",

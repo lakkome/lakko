@@ -17,12 +17,16 @@ import me.lakko.app.ds.MailboxMessage
  * describes the same end state from the persist side).
  *
  * Since ADR-0081 an epoch is registered on the DS only together with the
- * commit row that reaches it, so a row framed at this device's epoch, which is
- * a commit, read from a journal whose registered head is above this device's
- * epoch, is the registered commit for the next epoch. Such a row is HELD: the
- * batch stops at it, the cursor stays before it, and it is retried on later
- * polls with a bounded backoff. Every other failed row is skipped as before,
- * so a row that can never apply still never wedges the poll.
+ * commit row that reaches it, and a signed journal read names, for every epoch
+ * above the one it was signed at, the row registered with it (`commits`, read
+ * as [me.lakko.app.ds.FetchResult.registeredCommits]). A failed row that is the
+ * registered commit leaving this device's epoch (`registeredCommits[local + 1]`
+ * is its id) is HELD: the batch stops at it, the cursor stays before it, and it
+ * is retried on later polls with a bounded backoff. Every other failed row is
+ * skipped as before, so a row that can never apply still never wedges the
+ * poll, and a commit-shaped row a member posted through the plain publish
+ * route is skipped at once (ADR-0091 open question 6, closed). The same rule
+ * and truth table as web (`chat/registered-commit-hold.ts`) and iOS.
  *
  * Everything here is pure Kotlin with the epochs passed in, so the host JVM
  * tests (which do not load the native core) can drive it.
@@ -38,33 +42,34 @@ internal enum class RegisteredCommitVerdict {
 }
 
 /**
- * The verdict for a conversation row that failed to apply.
+ * The id of the row the DS registered as the commit leaving [localEpoch], or
+ * `null` when the read named none (an unclaimed journal, a device at the head,
+ * a read signed above [localEpoch]).
+ */
+internal fun registeredCommitLeaving(registeredCommits: Map<ULong, Long>?, localEpoch: ULong?): Long? {
+    if (registeredCommits == null || localEpoch == null) return null
+    // No next epoch exists to hold for.
+    if (localEpoch == ULong.MAX_VALUE) return null
+    return registeredCommits[localEpoch + 1uL]
+}
+
+/**
+ * The verdict for a conversation row that failed to apply: HOLD exactly when
+ * it is the registered commit leaving this device's epoch.
  *
  * [isOwnEcho]: the failure was this device's own row (`CannotDecryptOwnMessage`).
- * [sealedEpoch] / [epochAfter]: `epochOfMessage` / `epochAfterMessage` of the
- * row's bytes, `null` when unknown. [localEpoch]: the group's epoch read just
- * before the row was processed. [latestEpoch]: the DS read's `latest_epoch`
- * of the same fetch.
+ * [rowId]: the row's DS id. [localEpoch]: the group's epoch read just before
+ * the row was processed. [registeredCommits]: the same fetch's `commits`.
  */
 internal fun registeredCommitVerdict(
     isOwnEcho: Boolean,
-    sealedEpoch: ULong?,
-    epochAfter: ULong?,
+    rowId: Long,
     localEpoch: ULong?,
-    latestEpoch: ULong?,
+    registeredCommits: Map<ULong, Long>?,
 ): RegisteredCommitVerdict {
     if (isOwnEcho) return RegisteredCommitVerdict.SKIP
-    if (sealedEpoch == null || epochAfter == null || localEpoch == null || latestEpoch == null) {
-        return RegisteredCommitVerdict.SKIP
-    }
-    // No next epoch exists to hold for.
-    if (localEpoch == ULong.MAX_VALUE) return RegisteredCommitVerdict.SKIP
-    val next = localEpoch + 1uL
-    return if (sealedEpoch == localEpoch && epochAfter == next && latestEpoch >= next) {
-        RegisteredCommitVerdict.HOLD
-    } else {
-        RegisteredCommitVerdict.SKIP
-    }
+    val leaving = registeredCommitLeaving(registeredCommits, localEpoch) ?: return RegisteredCommitVerdict.SKIP
+    return if (leaving == rowId) RegisteredCommitVerdict.HOLD else RegisteredCommitVerdict.SKIP
 }
 
 /** Attempts at one held row before it is skipped. Chosen, not measured. */
@@ -78,7 +83,8 @@ private const val MS_PER_SECOND: Long = 1_000L
 /** One conversation's held row. */
 internal data class RegisteredCommitHold(
     val rowId: Long,
-    val sealedEpoch: ULong,
+    /** The epoch the held commit leaves. */
+    val localEpoch: ULong,
     val attempts: Int,
     val firstFailedAtMs: Long,
     val nextAttemptAtMs: Long,
@@ -113,7 +119,7 @@ internal class RegisteredCommitHoldTracker(
     fun behindMark(groupIdHex: String): BehindMark? = behind[key(groupIdHex)]
 
     /** A HOLD row failed to apply. */
-    fun recordFailure(groupIdHex: String, rowId: Long, sealedEpoch: ULong, localEpoch: ULong): HoldDecision {
+    fun recordFailure(groupIdHex: String, rowId: Long, localEpoch: ULong): HoldDecision {
         val k = key(groupIdHex)
         val now = clock()
         val previous = holds[k]
@@ -126,7 +132,7 @@ internal class RegisteredCommitHoldTracker(
         val delayMs = REGISTERED_COMMIT_RETRY_DELAYS_SECS[attempts - 1] * MS_PER_SECOND
         holds[k] = RegisteredCommitHold(
             rowId = rowId,
-            sealedEpoch = sealedEpoch,
+            localEpoch = localEpoch,
             attempts = attempts,
             firstFailedAtMs = if (previous != null && previous.rowId == rowId) previous.firstFailedAtMs else now,
             nextAttemptAtMs = now + delayMs,
@@ -296,13 +302,19 @@ internal data class JournalRowsApplied(
  * row's `epochOfMessage` / `epochAfterMessage`, `null` when unknown (a throw
  * is unknown). [isOwnEchoFailure]: the failure is `CannotDecryptOwnMessage`.
  * [onApplied]: the row applied; called in order.
+ *
+ * [registeredCommits]: the fetch's `commits` (the hold rule). [readFrom]: where
+ * the rows start; below [after] only on an ADR-0091 phase-1b rewind
+ * ([snapshotRewindFrom]). The returned cursor is never below [after].
  */
 internal fun <T> applyJournalRowsHolding(
     groupIdHex: String,
     rows: List<MailboxMessage>,
     after: Long,
     latestEpoch: ULong?,
+    registeredCommits: Map<ULong, Long>?,
     holds: RegisteredCommitHoldTracker,
+    readFrom: Long = after,
     isOwnEchoRow: (Long) -> Boolean,
     takeSideRow: (MailboxMessage) -> Boolean = { false },
     localEpoch: () -> ULong?,
@@ -313,9 +325,9 @@ internal fun <T> applyJournalRowsHolding(
     log: (FailedRowLogLevel, String) -> Unit,
     onApplied: (MailboxMessage, T) -> Unit,
 ): JournalRowsApplied {
-    var cursor = after
+    var cursor = readFrom
     var touched = false
-    holds.releaseIfPassed(groupIdHex, after)
+    holds.releaseIfPassed(groupIdHex, readFrom)
     for (row in rows) {
         if (isOwnEchoRow(row.id)) {
             cursor = row.id
@@ -337,25 +349,24 @@ internal fun <T> applyJournalRowsHolding(
             }
             val verdict = registeredCommitVerdict(
                 isOwnEcho = isOwnEchoFailure(failure),
-                sealedEpoch = sealed,
-                epochAfter = epochAfter,
+                rowId = row.id,
                 localEpoch = local,
-                latestEpoch = latestEpoch,
+                registeredCommits = registeredCommits,
             )
             val kind = try {
                 classify(failure)
             } catch (_: Throwable) {
                 "other"
             }
-            if (verdict == RegisteredCommitVerdict.HOLD && sealed != null && local != null) {
-                val decision = holds.recordFailure(groupIdHex, row.id, sealed, local)
+            if (verdict == RegisteredCommitVerdict.HOLD && local != null) {
+                val decision = holds.recordFailure(groupIdHex, row.id, local)
                 log(
                     FailedRowLogLevel.WARN,
                     failedRowLine(kind, sealed, epochAfter, local, latestEpoch, verdict, decision.attempt),
                 )
                 if (kind.startsWith("refused:")) log(FailedRowLogLevel.ERROR, divergenceLine(kind))
                 if (decision.held) {
-                    return JournalRowsApplied(cursor = cursor, held = true, touchedMlsState = touched)
+                    return JournalRowsApplied(cursor = maxOf(cursor, after), held = true, touchedMlsState = touched)
                 }
                 log(FailedRowLogLevel.ERROR, exhaustionLine(local, latestEpoch))
             } else {
@@ -374,7 +385,7 @@ internal fun <T> applyJournalRowsHolding(
         onApplied(row, processed)
     }
     safeEpoch(localEpoch)?.let { holds.observeEpoch(groupIdHex, it) }
-    return JournalRowsApplied(cursor = cursor, held = false, touchedMlsState = touched)
+    return JournalRowsApplied(cursor = maxOf(cursor, after), held = false, touchedMlsState = touched)
 }
 
 private fun safeEpoch(read: () -> ULong?): ULong? = try {

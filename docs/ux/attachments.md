@@ -98,8 +98,14 @@ would otherwise not understand why the thing they look for is missing:
 
 - Web and desktop: `Enter` / `Space` on the paperclip opens the menu, arrow keys move,
   `Enter` picks, `Escape` closes (the `LakkoMenu` keyboard rule).
-- Dropping files on the conversation and pasting an image stay as they are (they send as
-  Photo or Video when the MIME is on the inline list, as File otherwise).
+- Dropping files on the conversation attaches them; so does **pasting** (amended
+  2026-11-18): any file on the clipboard (a screenshot, a copied picture, a video, a file
+  copied in the file manager) attaches as a drop would, sent as Photo or Video when the MIME
+  is on the inline list and as File otherwise. Web and desktop: `Cmd+V` / `Ctrl+V` anywhere
+  in the open conversation, not only in the composer; a paste into another field stays that
+  field's text, and a copy from a document (plain text and HTML together) pastes as text.
+  iOS and Android: the composer's Paste offers a copied photo or video and attaches it, as
+  the system keyboard's image insertion does.
 - The emoji button and the record button are not in this menu ([`media-messages.md`](media-messages.md)).
 
 ## 3. Photo or Video

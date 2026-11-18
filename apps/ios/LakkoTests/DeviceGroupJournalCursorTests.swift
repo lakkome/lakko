@@ -38,29 +38,39 @@ final class DeviceGroupJournalCursorTests: XCTestCase {
             0)
     }
 
+    /// ADR-0091: row 40 is the commit the DS registered as leaving epoch 7.
+    private let registered: [UInt64: Int64] = [8: 40, 9: 52]
+
     func testAnOwnRowAlwaysPasses() {
-        XCTAssertEqual(FailedRowVerdict.of(isOwnEcho: true, sealedEpoch: 7, epochAfter: 8, localEpoch: 7), .pass)
-        XCTAssertEqual(FailedRowVerdict.of(isOwnEcho: true, sealedEpoch: nil, epochAfter: nil, localEpoch: nil), .pass)
+        XCTAssertEqual(
+            FailedRowVerdict.of(isOwnEcho: true, rowId: 40, localEpoch: 7, registeredCommits: registered), .pass)
+        XCTAssertEqual(
+            FailedRowVerdict.of(isOwnEcho: true, rowId: 40, localEpoch: nil, registeredCommits: nil), .pass)
     }
 
-    func testAForeignCommitAtOrAboveTheHandleEpochHolds() {
-        XCTAssertEqual(FailedRowVerdict.of(isOwnEcho: false, sealedEpoch: 7, epochAfter: 8, localEpoch: 7), .hold)
-        XCTAssertEqual(FailedRowVerdict.of(isOwnEcho: false, sealedEpoch: 9, epochAfter: 10, localEpoch: 7), .hold)
+    func testTheRegisteredCommitLeavingTheHandleEpochHolds() {
         XCTAssertEqual(
-            FailedRowVerdict.of(isOwnEcho: false, sealedEpoch: 7, epochAfter: 8, localEpoch: nil), .hold,
-            "an unreadable handle epoch holds")
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 40, localEpoch: 7, registeredCommits: registered), .hold)
+        XCTAssertEqual(
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 52, localEpoch: 8, registeredCommits: registered), .hold)
     }
 
-    func testRowsThatCanNeverApplyPass() {
+    func testEveryOtherFailingRowPasses() {
         XCTAssertEqual(
-            FailedRowVerdict.of(isOwnEcho: false, sealedEpoch: 6, epochAfter: 7, localEpoch: 7), .pass,
-            "an older commit")
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 39, localEpoch: 7, registeredCommits: registered), .pass,
+            "a commit-shaped row the DS did not register")
         XCTAssertEqual(
-            FailedRowVerdict.of(isOwnEcho: false, sealedEpoch: 7, epochAfter: 7, localEpoch: 7), .pass,
-            "an application message")
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 52, localEpoch: 7, registeredCommits: registered), .pass,
+            "the commit of the epoch after the next")
         XCTAssertEqual(
-            FailedRowVerdict.of(isOwnEcho: false, sealedEpoch: nil, epochAfter: nil, localEpoch: 7), .pass,
-            "not MLS framing")
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 40, localEpoch: 8, registeredCommits: registered), .pass,
+            "a commit the handle is past")
+        XCTAssertEqual(
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 40, localEpoch: nil, registeredCommits: registered), .pass,
+            "an unreadable handle epoch")
+        XCTAssertEqual(
+            FailedRowVerdict.of(isOwnEcho: false, rowId: 40, localEpoch: 7, registeredCommits: nil), .pass,
+            "a read that named no commits")
     }
 
     func testTheOwnEchoIsRecognisedFromTheCoreError() {
@@ -75,7 +85,7 @@ final class DeviceGroupJournalCursorTests: XCTestCase {
     func testABatchOfOwnEchoesMovesTheStoredCursorPastThem() {
         var tracker = JournalCursorTracker(start: 0)
         for id in Int64(1)...229 {
-            tracker.refused(id, verdict: .of(isOwnEcho: true, sealedEpoch: 3, epochAfter: 3, localEpoch: 4))
+            tracker.refused(id, verdict: .of(isOwnEcho: true, rowId: id, localEpoch: 4, registeredCommits: nil))
         }
         XCTAssertEqual(tracker.cursorToWrite(), 229)
         tracker.cursorWritten(229)

@@ -9,14 +9,16 @@ import os
 // conversation.
 //
 // When a conversation row fails to apply, the receive loop classifies it before
-// skipping it. A row framed at this device's epoch, that is a commit (the epoch
-// after it is one higher), in a journal whose registered head the DS reports
-// above this device's epoch, is the registered commit for the next epoch: since
-// ADR-0081 an epoch is registered only together with its commit row, and a
-// losing commit is never appended. That row is HELD: the batch stops at it, the
-// cursor stays before it, and the apply is retried with a bounded backoff.
-// Anything else is skipped as before, so a row that can never apply still never
-// wedges the poll.
+// skipping it. Since ADR-0081 an epoch is registered on the DS only together
+// with its commit row, and a signed journal read names, for every epoch above
+// the one it was signed at, the row registered with it (`commits`, read as
+// ``FetchResult/registeredCommits``). A failing row that is the registered
+// commit leaving this device's epoch (`registeredCommits[local + 1]` is its id)
+// is HELD: the batch stops at it, the cursor stays before it, and the apply is
+// retried with a bounded backoff. Anything else is skipped as before, so a row
+// that can never apply still never wedges the poll, and a commit-shaped row a
+// member posted through the plain publish route is skipped at once (ADR-0091
+// open question 6, closed).
 //
 // The verdict, the tracker and the log lines are the same on web, iOS and
 // Android (contract in the ADR); the tracker lives in memory and is
@@ -29,25 +31,31 @@ enum RegisteredCommitVerdict: String, Equatable {
     /// Anything else: skipped as before.
     case skip
 
-    /// The verdict for a row that failed to apply.
+    /// The verdict for a row that failed to apply: hold exactly when it is the
+    /// registered commit leaving this device's epoch.
     ///
     /// - `isOwnEcho`: the failure was this device's own row coming back.
-    /// - `sealedEpoch` / `epochAfter`: `epochOfMessage` / `epochAfterMessage`
-    ///   of the row's bytes (`nil` when not an MLS message).
+    /// - `rowId`: the row's DS id.
     /// - `localEpoch`: the group's epoch read just before processing the row.
-    /// - `latestEpoch`: the DS read's `latest_epoch` of the same fetch.
+    /// - `registeredCommits`: the read's ``FetchResult/registeredCommits``.
     static func of(
         isOwnEcho: Bool,
-        sealedEpoch: UInt64?,
-        epochAfter: UInt64?,
+        rowId: Int64,
         localEpoch: UInt64?,
-        latestEpoch: UInt64?
+        registeredCommits: [UInt64: Int64]?
     ) -> Self {
         guard !isOwnEcho,
-              let sealedEpoch, let epochAfter, let localEpoch, let latestEpoch,
-              localEpoch < UInt64.max else { return .skip }
-        let next = localEpoch + 1
-        return sealedEpoch == localEpoch && epochAfter == next && latestEpoch >= next ? .hold : .skip
+              let leaving = leaving(registeredCommits: registeredCommits, localEpoch: localEpoch)
+        else { return .skip }
+        return leaving == rowId ? .hold : .skip
+    }
+
+    /// The id of the row the DS registered as the commit leaving `localEpoch`,
+    /// or `nil` when the read named none (an unclaimed journal, a device at
+    /// the head, a read signed above `localEpoch`).
+    static func leaving(registeredCommits: [UInt64: Int64]?, localEpoch: UInt64?) -> Int64? {
+        guard let registeredCommits, let localEpoch, localEpoch < UInt64.max else { return nil }
+        return registeredCommits[localEpoch + 1]
     }
 }
 

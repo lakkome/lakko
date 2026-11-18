@@ -1071,4 +1071,77 @@ mod tests {
         .encode();
         assert_eq!(send_raw(other, header).await, StatusCode::UNAUTHORIZED);
     }
+
+    /// ADR-0091: a signed read names the registered commit row of every
+    /// epoch above the one it was signed at, so a client can tell THE commit
+    /// from a commit-shaped row posted through the plain publish route.
+    #[tokio::test]
+    async fn a_signed_read_names_the_registered_commit_rows_above_its_epoch() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let (gid, root) = claimed(&app, 0x7e).await;
+        let body = body_for(&gid, &root, 2, &key(2), &[], b"commit 1->2");
+        let (status, json) = post(&app, &gid, body, &key(1), 1).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id2 = json["id"].as_u64().unwrap();
+        // A row through the plain publish route at the same epoch: never
+        // named.
+        let (status, json) = send(
+            &app,
+            Req {
+                method: "POST",
+                uri: &messages_uri("group", &gid),
+                body: b"garbage shaped like a commit".to_vec(),
+                proof: Some((&key(2), 2)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let garbage: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let garbage_id = garbage["id"].as_u64().unwrap();
+        let body = body_for(&gid, &root, 3, &key(3), &[], b"commit 2->3");
+        let (status, json) = post(&app, &gid, body, &key(2), 2).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id3 = json["id"].as_u64().unwrap();
+        assert!(garbage_id > id2 && id3 > garbage_id);
+
+        let read = |signed_at: u64, after: u64| {
+            let app = app.clone();
+            async move {
+                let (status, body) = send(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &format!("{}?after={after}", messages_uri("group", &gid)),
+                        body: vec![],
+                        proof: Some((&key(u8::try_from(signed_at).unwrap()), signed_at)),
+                    },
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        // Signed at 1: both commits, whatever the window.
+        let parsed = read(1, 0).await;
+        assert_eq!(parsed["latest_epoch"], 3);
+        assert_eq!(
+            parsed["commits"],
+            serde_json::json!([{ "epoch": 2, "id": id2 }, { "epoch": 3, "id": id3 }])
+        );
+        // The cursor past every row (a rolled-back snapshot): still named.
+        let parsed = read(1, id3).await;
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
+        assert_eq!(parsed["commits"][0]["id"], id2);
+        // Signed at 2: only the commit leaving 2.
+        let parsed = read(2, 0).await;
+        assert_eq!(
+            parsed["commits"],
+            serde_json::json!([{ "epoch": 3, "id": id3 }])
+        );
+        // At the head: an empty list, present.
+        let parsed = read(3, 0).await;
+        assert_eq!(parsed["commits"], serde_json::json!([]));
+    }
 }

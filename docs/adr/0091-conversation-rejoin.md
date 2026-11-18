@@ -9,8 +9,12 @@
   client"); the maintainer decided five points the same day (see
   "Maintainer decisions"), the main one being the order: **phase 1 prevents
   a device from dropping out, phase 2 brings back one that did**. Phase 1
-  (prevention) is being built on web (incl. desktop), iOS and Android; phase
-  2 (recovery) is not built.
+  (prevention) is built on web (incl. desktop), iOS and Android; phase 1b
+  (the DS names the registered commit row, a snapshot rolled back under its
+  cursor reads the commit again, the web DeviceGroup loop holds its commit,
+  identifier-free log lines) was built the same day on `services/ds` and the
+  three clients, host-tested only (section "Phase 1b, as built"); phase 2
+  (recovery) is not built.
 - **Date:** 2026-11-18
 - **Context:** proposal-based membership (ADR-0045), per-device leaves
   (ADR-0050), journal authorisation and ownership (ADR-0053, ADR-0057),
@@ -145,6 +149,11 @@ the device has evidence the epochs above are real (section 2).
 
 ### The rule
 
+**Superseded by phase 1b (the exact rule below in "Phase 1b, as built"):** a
+failing row is held exactly when the DS names it as the registered commit
+leaving this device's epoch. The framed-epoch rule of this section is what
+phase 1 first shipped and is kept as the record of it.
+
 When a row fails to apply, the client classifies it before skipping it. It
 reads, without decrypting, the row's framed epoch (`epochOfMessage`) and the
 epoch after it (`epochAfterMessage`; greater only for a commit), its own
@@ -215,13 +224,13 @@ the epochs above are then real (see "A hazard found on the way").
 **The DeviceGroup** already holds a failed commit on iOS and Android
 (ADR-0081, `FailedRowVerdict`: the persisted cursor stays before a commit
 framed at or above the local epoch). The web DeviceGroup loop
-(`devices/sync/journal-batch.ts`, rule 1) does not; it is left as it is in
-this pass and recorded as a difference. The channel PublisherGroup loops get
+(`devices/sync/journal-batch.ts`, rule 1) did not; phase 1b aligned it and
+moved all three to the exact rule (open question 7, closed). The channel PublisherGroup loops get
 the same identifier-free log line where they skip silently.
 
 ### What phase 1 needs from the server
 
-Nothing. The rule above identifies the registered commit from the framed
+(As first written; phase 1b made the server change, see below.) Nothing. The rule above identifies the registered commit from the framed
 epochs and `latest_epoch`, which the DS already returns. It is exact for
 honest devices; a member that posts a commit-shaped garbage row framed at the
 current epoch through the plain publish route, while a real commit for the
@@ -231,14 +240,114 @@ identification needs the DS to name the registered commit's row in a read
 response (it stores `commit_message_id` with each registration since
 ADR-0081): a server change, not made (open question 6).
 
-### Not in this pass
+### Not in this pass (built in phase 1b)
 
 A durable snapshot rolled back under an already advanced cursor (a handle
 writing an older snapshot) would also strand a device, and holding a row
 cannot catch it: the cursor is already past. Recording with the cursor the
 epoch it corresponds to, and rewinding to the commit that left the loaded
-epoch when the snapshot is found below it, would. Recorded here as the next
-prevention step; not built.
+epoch when the snapshot is found below it, would. Built in phase 1b (below).
+
+## Phase 1b, as built (2026-11-18)
+
+Approved by the maintainer the same day: open question 6 (the DS names the
+registered commit) and open question 7 (align the web DeviceGroup loop).
+Host-tested only; nothing was run on a device, against the test stack or in
+a live conversation, and nothing is deployed.
+
+### 1. The DS names the registered commit row
+
+A signed read of a claimed group journal (`GET /ds/group/{hex}/messages`
+with a valid proof) gains one field beside `latest_epoch`:
+
+```
+"commits": [ { "epoch": N, "id": row_id }, ... ]
+```
+
+one entry for every registration ABOVE the epoch the read's proof was signed
+at that carries a commit row (`ds_group_access.commit_message_id`, ADR-0081):
+row `id` is the commit that moves the journal from `N - 1` to `N`. Ascending
+by epoch, at most 64 entries (`MAX_RETAINED_EPOCHS`), present (possibly
+empty) exactly where `latest_epoch` is, absent for an unclaimed journal and
+a mailbox. It is read after the rows, so a commit row in `messages` always
+has its entry (a registration and its row commit in one transaction). An
+epoch registered without a row (claim, reset, Replace, which clears the
+binding) is not named. Keyed on the proof's epoch, not on the returned
+window, so a device whose cursor is already past a commit still learns it
+(item 2). The DS learns nothing new: the proof's epoch was already in the
+header, and the ids are its own. `services/ds/src/journal.rs`
+(`registered_commits_above`), `access.rs` (`Gated::Proven.proof_epoch`);
+test `a_signed_read_names_the_registered_commit_rows_above_its_epoch`
+(DB-gated). Considered and not chosen: only the commit leaving the proof's
+epoch (smallest, but a batch that applies one commit and fails the next
+would not know the second); the commits inside the returned window (a cursor
+past the commit learns nothing).
+
+**The hold rule becomes exact.** A failing row is held exactly when it is
+not this device's own echo and `commits[local + 1]` is its id; every other
+failing row is skipped at once. A commit-shaped row a member posted through
+the plain publish route is never named, so it no longer holds anyone (the
+G-58 phase-1 clause is closed). Web `chat/registered-commit-hold.ts`
+(`registeredCommitVerdict`, `registeredCommitLeaving`), iOS
+`Chat/RegisteredCommitHold.swift`, Android `chat/RegisteredCommitHold.kt`;
+the backoff, the attempts, the behind mark and the log line are unchanged.
+
+### 2. A snapshot rolled back under its cursor
+
+With each cursor advance of the conversation poll, made only after the
+snapshot reached disk (C-67), the client records the group's epoch with the
+cursor, keeping the highest (it never moves backward). When the poll finds
+the group loaded below the recorded epoch, and the read names the commit
+leaving the loaded epoch at or below the cursor, it reads again from just
+before that commit (at most 20 pages, chosen) and applies the rows; the
+cursor itself never moves backward, and rows already filed are filed again
+by DS id. One line is logged, epochs only. A commit the DS no longer names
+(past its retention, replaced) cannot be read again: no rewind, and the
+device is behind (phase 2). A held commit on a rewound read is held as
+usual. The record is written by the poll only; other cursor writers (the
+sweep verdict reader) do not record, so the record can lag, which only means
+fewer rewinds, never a wrong one.
+
+- Web: `chat/cursor-epoch.ts` (`localStorage`
+  `lakko.chat.cursor-epoch.v1:<account>:<group>`, dropped with the group in
+  `membership-wipe.ts` and on Forget device in `wipe-account.ts`, writes
+  through the ADR-0077 `Storage.setItem` gate), `ChatClient.pollMessages` /
+  `fetchRewound`.
+- iOS: `Chat/CursorEpoch.swift`; the epoch rides the message-log slot beside
+  the cursor (`PersistedGroup.cursorEpoch`, same store, same wrap key, same
+  wipe), recorded in the durable-cursor advance; `ChatRepository.pollGroup`
+  and `ChatClient.fetchRewound`.
+- Android: `chat/CursorEpoch.kt`; `GroupSettingsStore` holds the epoch per
+  account and group (cleared with the group's settings and on Forget
+  device, behind the store gate), recorded in the poll's advance;
+  `ChatRepository.rewoundIfRolledBack`. The fetch-half rewind in
+  `pollGroupOnMlsThread` has no test of its own (it needs a `Context` and an
+  FFI group); its rule and the apply loop are tested.
+
+### 3. The DeviceGroup (open question 7)
+
+All three DeviceGroup receive loops use the exact rule: a failing row that is
+the registered commit leaving the handle's epoch pins the PERSISTED cursor
+before it for the rest of the run; the run reads on (a row that can never
+apply must not wedge the loop), and the next start reads the commit again.
+Every other failing row passes. iOS and Android `FailedRowVerdict` changed
+from "a commit framed at or above the local epoch" to this rule (an
+unreadable handle epoch now passes on Android, where it held); web
+`devices/sync/journal-batch.ts` gains rule 5 and `DeviceGroupSyncContext`
+supplies the verdict from the read's `commits`.
+
+### 4. Log lines without identifiers
+
+Every line touched here prints no group id, journal id, row id, key, account
+or endpoint, and no error text (a DS error's text names its endpoint, which
+names the journal). A small error tag keeps the error type names along the
+cause chain, a DS status and a typed refusal code: web `chat/log-tag.ts`,
+iOS `Chat/ErrorLogTag.swift`, Android `chat/ErrorLogTag.kt`. Changed: the
+ADR-0050 re-admission lines (check failed, add not proposed, retire not
+proposed, and "N to admit, N to retire", which named the group) on all three;
+the DeviceGroup row-not-applied lines (web printed the row id and the error,
+Android printed `message.id` on two lines); web's knock read, knock row and
+knock persist lines; Android's held-persist line (it printed the cursor).
 
 ## Phase 2: recovery
 
@@ -537,7 +646,8 @@ sends them.
 
 ### 8. Server
 
-No DS, discovery or auth change. The DS already returns `latest_epoch` on
+No further DS, discovery or auth change (phase 1b already added `commits`
+to signed reads). The DS already returns `latest_epoch` on
 signed reads, keeps read access for 30 days or 64 epochs, accepts knocks with
 a token, and takes one commit per epoch. The new knock kind and the new
 mailbox kind are inside sealed payloads the servers do not read.
@@ -641,23 +751,28 @@ like the group name. Nothing grows with contacts times contacts.
 - **New C-93 (proposed, phase 2):** a device behind in a conversation never commits,
   sweeps, registers or repairs there, and is replaced only by a commit adding
   a KeyPackage it minted for that conversation and epoch.
-- **New C-92 (proposed, phase 1):** a conversation row framed at the
-  device's epoch that is a commit, while the DS has registered the next
-  epoch, is never skipped on a first failure: it is held and retried, and a
-  final skip marks the device behind; every failed apply is logged without
+- **New C-92 (proposed, phase 1 and 1b):** the conversation row the DS
+  names as the registered commit leaving the device's epoch is never
+  skipped on a first failure: it is held and retried, and a final skip
+  marks the device behind; a group loaded below the epoch recorded with its
+  cursor reads that commit again; every failed apply is logged without
   identifiers.
 - **New G-58 (proposed):** a member registrar can put devices into
-  "suspected"; a member can make devices hold at a commit-shaped garbage
-  row until the attempts are spent (phase 1, open question 6); a
+  "suspected"; (closed in phase 1b: a commit-shaped garbage row no longer
+  holds anyone, the DS names the registered commit); a
   single-device account removed while its device was behind waits with no
   end; a group whose only owner or admin is the behind
   device recovers only through another device of the owner.
 
 ## Plan
 
-- **Phase 1 (this pass):** the hold rule, the backoff, the behind mark, the
+- **Phase 1 (built):** the hold rule, the backoff, the behind mark, the
   log line and the journal-repair guard on web (incl. desktop), iOS and
   Android, each with tests; no server and no `lakko-mls` change.
+- **Phase 1b (built, host-tested):** `commits` on signed DS reads and the
+  exact hold rule; the cursor epoch and the rewind; the DeviceGroup loops on
+  the exact rule (web aligned); identifier-free log lines. No `lakko-mls`
+  change.
 - **S0, spike (core, scratch):** OpenMLS 0.8.1 behaviour for a private
   KeyPackage extension through an `Add`; a pending `Add` whose signature key
   collides with a current leaf; the pair building in one sweep.
@@ -684,13 +799,15 @@ Still open:
    attempts; phase 2's re-request every 30 minutes, 10 minutes before a
    suspicion without other evidence is shown, the one-hour per-leaf limits,
    30 seconds before the second line of the note.
-6. **Naming the registered commit exactly.** Phase 1 identifies it from the
+6. **Naming the registered commit exactly.** CLOSED 2026-11-18 (maintainer
+   approved; built in phase 1b, section 1). As first written: Phase 1 identifies it from the
    framed epochs and `latest_epoch` (exact for honest devices). The DS could
    name it in each read (`commit_message_id` per registration, stored since
    ADR-0081), which closes the garbage-row case above. A server change; not
    made.
 7. **The web DeviceGroup loop** skips a failed commit where iOS and Android
-   hold it (ADR-0081). Align it?
+   hold it (ADR-0081). Align it? CLOSED 2026-11-18 (maintainer: align;
+   built in phase 1b, section 3, with all three on the exact rule).
 
 ## References
 

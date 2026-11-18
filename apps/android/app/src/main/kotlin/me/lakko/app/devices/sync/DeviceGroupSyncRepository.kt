@@ -2442,7 +2442,8 @@ public class DeviceGroupSyncRepository(
                     val entry = try {
                         DeviceGroupJournalEnvelope.decode(message.payload)
                     } catch (cause: Throwable) {
-                        Log.w(LOG_TAG, "journal envelope decode failed at ${message.id}", cause)
+                        // No identifier: the row id and the cause's text are left out.
+                        Log.w(LOG_TAG, "journal envelope decode failed (${cause.javaClass.simpleName})")
                         // Never readable by any later pass either.
                         durableCursor.passed(message.id)
                         continue
@@ -2469,20 +2470,25 @@ public class DeviceGroupSyncRepository(
                         )
                     } catch (cause: Throwable) {
                         val own = me.lakko.app.push.isOwnMessageEcho(cause)
+                        val verdict = failedRowVerdict(
+                            isOwnEcho = own,
+                            rowId = message.id,
+                            localEpoch = epochBeforeRow,
+                            registeredCommits = result.registeredCommits,
+                        )
                         if (own) {
                             ownRows += 1
                         } else {
-                            Log.w(LOG_TAG, "processIncomingVerifyingRemovals failed at ${message.id}", cause)
+                            // ADR-0091: no identifier, the failure kind and
+                            // the verdict only.
+                            Log.w(
+                                LOG_TAG,
+                                "DeviceGroup journal row not applied: kind=" +
+                                    me.lakko.app.chat.failedRowKind(cause) +
+                                    " verdict=" + (if (verdict == FailedRowVerdict.HOLD) "hold" else "skip"),
+                            )
                         }
-                        durableCursor.refused(
-                            message.id,
-                            failedRowVerdict(
-                                isOwnEcho = own,
-                                sealedEpoch = runCatching { uniffi.lakko_ffi_uniffi.epochOfMessage(entry.first) }.getOrNull(),
-                                epochAfter = runCatching { uniffi.lakko_ffi_uniffi.epochAfterMessage(entry.first) }.getOrNull(),
-                                localEpoch = epochBeforeRow,
-                            ),
-                        )
+                        durableCursor.refused(message.id, verdict)
                         // A commit that took effect (its own, merged early)
                         // still moves the journal's epoch.
                         journal = observeJournalRow(entry.first, message.id, g, journal)

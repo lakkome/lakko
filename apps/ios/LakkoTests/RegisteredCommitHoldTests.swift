@@ -10,31 +10,40 @@ import LakkoCore
 /// (against a real FFI `Identity` + `Group`) and the log lines.
 final class RegisteredCommitHoldTests: XCTestCase {
 
-    // MARK: - 1. The verdict
+    // MARK: - 1. The verdict (the same truth table as web and Android)
+
+    /// Row 7967 is the commit the DS registered as leaving epoch 6.
+    private let registered: [UInt64: Int64] = [7: 7967, 8: 8100]
 
     private func verdict(
-        own: Bool = false, sealed: UInt64? = 4, after: UInt64? = 5, local: UInt64? = 4, latest: UInt64? = 5
+        own: Bool = false, rowId: Int64 = 7967, local: UInt64? = 6, commits: [UInt64: Int64]?? = .none
     ) -> RegisteredCommitVerdict {
         RegisteredCommitVerdict.of(
-            isOwnEcho: own, sealedEpoch: sealed, epochAfter: after, localEpoch: local, latestEpoch: latest)
+            isOwnEcho: own, rowId: rowId, localEpoch: local,
+            registeredCommits: commits ?? registered)
     }
 
-    func testTheRegisteredCommitForTheNextEpochIsHeld() {
+    func testTheRegisteredCommitLeavingThisEpochIsHeld() {
         XCTAssertEqual(verdict(), .hold)
-        XCTAssertEqual(verdict(latest: 9), .hold, "a registered head further above still holds")
+        XCTAssertEqual(verdict(rowId: 8100, local: 7), .hold)
     }
 
     func testEverythingElseIsSkipped() {
         XCTAssertEqual(verdict(own: true), .skip, "own echo")
-        XCTAssertEqual(verdict(sealed: nil), .skip, "unknown sealed epoch")
-        XCTAssertEqual(verdict(after: nil), .skip, "unknown epoch after")
         XCTAssertEqual(verdict(local: nil), .skip, "unknown local epoch")
-        XCTAssertEqual(verdict(after: 4), .skip, "not a commit")
-        XCTAssertEqual(verdict(sealed: 3, after: 4), .skip, "sealed below local")
-        XCTAssertEqual(verdict(sealed: 5, after: 6), .skip, "sealed above local")
-        XCTAssertEqual(verdict(latest: nil), .skip, "latest unknown")
-        XCTAssertEqual(verdict(latest: 4), .skip, "the DS names no later epoch")
-        XCTAssertEqual(verdict(sealed: .max, after: .max, local: .max, latest: .max), .skip, "no overflow")
+        XCTAssertEqual(verdict(commits: .some(nil)), .skip, "a read that named no commits")
+        XCTAssertEqual(verdict(commits: .some([:])), .skip, "an empty list")
+        XCTAssertEqual(verdict(rowId: 7966), .skip, "another row at the same epoch (plain publish)")
+        XCTAssertEqual(verdict(rowId: 8100), .skip, "the commit of the epoch after the next")
+        XCTAssertEqual(verdict(local: 7), .skip, "a commit this device is already past")
+        XCTAssertEqual(verdict(local: .max), .skip, "no overflow")
+    }
+
+    func testTheCommitLeavingAnEpoch() {
+        XCTAssertEqual(RegisteredCommitVerdict.leaving(registeredCommits: registered, localEpoch: 6), 7967)
+        XCTAssertNil(RegisteredCommitVerdict.leaving(registeredCommits: registered, localEpoch: 8))
+        XCTAssertNil(RegisteredCommitVerdict.leaving(registeredCommits: nil, localEpoch: 6))
+        XCTAssertNil(RegisteredCommitVerdict.leaving(registeredCommits: registered, localEpoch: nil))
     }
 
     // MARK: - 2. The tracker
@@ -129,11 +138,16 @@ final class RegisteredCommitHoldTests: XCTestCase {
         try Identity.fromSeed(seed: Data(repeating: byte, count: 32))
     }
 
-    private func batch(_ rows: [(Int64, Data)], latest: UInt64?) -> FetchResult {
+    /// A batch; `registered` maps an epoch to the row the DS registered as
+    /// reaching it (present only where `latest` is, as on the wire).
+    private func batch(
+        _ rows: [(Int64, Data)], latest: UInt64?, registered: [UInt64: Int64] = [:]
+    ) -> FetchResult {
         FetchResult(
             messages: rows.map { MailboxMessage(id: $0.0, payload: $0.1, createdAt: "t-\($0.0)") },
             hasMore: true,
-            latestEpoch: latest)
+            latestEpoch: latest,
+            registeredCommits: latest == nil ? nil : registered)
     }
 
     /// A commit framed at epoch 0 (epoch after 1) that a fresh group of
@@ -172,7 +186,8 @@ final class RegisteredCommitHoldTests: XCTestCase {
         let lines = capturedLines {
             first = client.applyFetchedMessages(
                 identity: local, group: group, groupIdHex: journal,
-                raw: batch([(5, garbage), (6, commit), (7, garbage)], latest: 1), after: 4)
+                raw: batch([(5, garbage), (6, commit), (7, garbage)], latest: 1, registered: [1: 6]),
+                after: 4)
         }
         XCTAssertEqual(first.cursor, 5, "the cursor stays before the held row; row 5 was skipped")
         XCTAssertFalse(first.hasMore, "a held batch does not ask to be read again at once")
@@ -188,7 +203,7 @@ final class RegisteredCommitHoldTests: XCTestCase {
         XCTAssertEqual(client.registeredCommitHold.pollGate(groupIdHex: journal, waitSecs: 25), .fetch)
         let second = client.applyFetchedMessages(
             identity: local, group: group, groupIdHex: journal,
-            raw: batch([(6, commit), (7, garbage)], latest: 1), after: first.cursor)
+            raw: batch([(6, commit), (7, garbage)], latest: 1, registered: [1: 6]), after: first.cursor)
         XCTAssertEqual(second.cursor, 5)
         XCTAssertEqual(client.registeredCommitHold.hold(groupIdHex: journal)?.attempts, 2)
     }
@@ -201,13 +216,77 @@ final class RegisteredCommitHoldTests: XCTestCase {
         let client = Offline.chatClient()
         client.registeredCommitHold = RegisteredCommitHold(nowMs: { 0 })
 
-        for latest: UInt64? in [nil, 0] {
+        // No commits named (an unclaimed journal), none for this epoch, or
+        // another row named (row 6 is a commit-shaped row posted through the
+        // plain publish route).
+        for (latest, registered) in [(nil, [:]), (UInt64(0), [:]), (UInt64(1), [UInt64(1): Int64(9)])]
+            as [(UInt64?, [UInt64: Int64])] {
             let result = client.applyFetchedMessages(
                 identity: local, group: group, groupIdHex: journal,
-                raw: batch([(6, commit), (7, Data([0xFF]))], latest: latest), after: 5)
-            XCTAssertEqual(result.cursor, 7, "skipped as before when latest is \(String(describing: latest))")
+                raw: batch([(6, commit), (7, Data([0xFF]))], latest: latest, registered: registered), after: 5)
+            XCTAssertEqual(result.cursor, 7, "skipped as before with \(registered)")
             XCTAssertNil(client.registeredCommitHold.hold(groupIdHex: journal))
         }
+    }
+
+    // MARK: - 3b. ADR-0091 phase 1b — the cursor epoch
+
+    func testTheRewindRule() {
+        let commits: [UInt64: Int64] = [7: 500, 8: 640]
+        XCTAssertEqual(CursorEpoch.rewindFrom(after: 700, loaded: 6, recorded: 8, registeredCommits: commits), 499)
+        XCTAssertEqual(CursorEpoch.rewindFrom(after: 500, loaded: 6, recorded: 7, registeredCommits: commits), 499,
+                       "at the cursor itself")
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 700, loaded: 6, recorded: nil, registeredCommits: commits))
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 700, loaded: nil, recorded: 8, registeredCommits: commits))
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 700, loaded: 8, recorded: 8, registeredCommits: commits))
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 700, loaded: 9, recorded: 8, registeredCommits: commits))
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 400, loaded: 6, recorded: 8, registeredCommits: commits),
+                     "the commit is still ahead of the cursor")
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 700, loaded: 4, recorded: 8, registeredCommits: commits),
+                     "no commit named for the loaded epoch")
+        XCTAssertNil(CursorEpoch.rewindFrom(after: 700, loaded: 6, recorded: 8, registeredCommits: nil))
+        XCTAssertEqual(
+            CursorEpoch.rewindLine(loaded: 6, recorded: 8),
+            "chat snapshot behind its cursor: loaded=6 recorded=8; "
+                + "reading again from the commit that leaves the loaded epoch")
+    }
+
+    func testTheRecordedEpochNeverMovesBackwardAndTravelsWithTheCursor() throws {
+        XCTAssertEqual(CursorEpoch.advanced(nil, to: 3), 3)
+        XCTAssertEqual(CursorEpoch.advanced(5, to: 3), 5)
+        XCTAssertEqual(CursorEpoch.advanced(5, to: 9), 9)
+        XCTAssertEqual(CursorEpoch.advanced(5, to: nil), 5)
+
+        let slot = PersistedGroup(cursor: 42, messages: [], cursorEpoch: 7)
+        let decoded = try JSONDecoder().decode(PersistedGroup.self, from: JSONEncoder().encode(slot))
+        XCTAssertEqual(decoded.cursorEpoch, 7)
+        XCTAssertEqual(decoded.cursor, 42)
+        let legacy = try JSONDecoder().decode(
+            PersistedGroup.self, from: Data(#"{"cursor":3,"messages":[]}"#.utf8))
+        XCTAssertNil(legacy.cursorEpoch)
+    }
+
+    /// A rewound batch (`readFrom` below `after`) applies from the rewind point
+    /// but never reports a cursor below `after`.
+    func testARewoundBatchNeverWindsTheCursorBackward() throws {
+        let alice = try identity(0x5A)
+        let bob = try identity(0x5B)
+        let aliceGroup = try Group.create(identity: alice, kind: .group)
+        let added = try aliceGroup.addMemberFromWire(identity: alice, keyPackage: try bob.createKeyPackage())
+        let bobGroup = try Group.joinFromWelcome(welcome: added.welcome, identity: bob)
+        let next = try aliceGroup.addMemberFromWire(
+            identity: alice, keyPackage: try identity(0x5C).createKeyPackage()).commit
+        let journal = DsClient.pseudonymHex(try bobGroup.groupId())
+        let epoch = try bobGroup.epoch()
+        let client = Offline.chatClient()
+        client.registeredCommitHold = RegisteredCommitHold(nowMs: { 0 })
+        // The commit that leaves Bob's epoch is row 20; Bob's cursor is 30.
+        let result = client.applyFetchedMessages(
+            identity: bob, group: bobGroup, groupIdHex: journal,
+            raw: batch([(20, next), (25, Data([0xFF]))], latest: epoch + 1, registered: [epoch + 1: 20]),
+            after: 30, readFrom: 19)
+        XCTAssertEqual(try bobGroup.epoch(), epoch + 1, "the commit behind the cursor applied")
+        XCTAssertEqual(result.cursor, 30, "the cursor never moves below `after`")
     }
 
     func testTheEighthFailureSkipsTheRowAndMarksTheDeviceBehind() throws {
@@ -221,7 +300,7 @@ final class RegisteredCommitHoldTests: XCTestCase {
         for _ in 1..<RegisteredCommitHold.maxAttempts {
             let held = client.applyFetchedMessages(
                 identity: local, group: group, groupIdHex: journal,
-                raw: batch([(6, commit), (7, Data([0xFF]))], latest: 1), after: 5)
+                raw: batch([(6, commit), (7, Data([0xFF]))], latest: 1, registered: [1: 6]), after: 5)
             XCTAssertEqual(held.cursor, 5)
             clock.ms += 300_000
         }
@@ -229,7 +308,7 @@ final class RegisteredCommitHoldTests: XCTestCase {
         let lines = capturedLines {
             last = client.applyFetchedMessages(
                 identity: local, group: group, groupIdHex: journal,
-                raw: batch([(6, commit), (7, Data([0xFF]))], latest: 1), after: 5)
+                raw: batch([(6, commit), (7, Data([0xFF]))], latest: 1, registered: [1: 6]), after: 5)
         }
         XCTAssertEqual(last.cursor, 7, "spent: skipped as today")
         XCTAssertNil(client.registeredCommitHold.hold(groupIdHex: journal))
@@ -256,7 +335,7 @@ final class RegisteredCommitHoldTests: XCTestCase {
 
         let result = client.applyFetchedMessages(
             identity: bob, group: bobGroup, groupIdHex: journal,
-            raw: batch([(6, next)], latest: epoch + 1), after: 5)
+            raw: batch([(6, next)], latest: epoch + 1, registered: [epoch + 1: 6]), after: 5)
         XCTAssertEqual(result.cursor, 6)
         XCTAssertEqual(try bobGroup.epoch(), epoch + 1)
         XCTAssertNil(client.registeredCommitHold.hold(groupIdHex: journal))
@@ -275,9 +354,11 @@ final class RegisteredCommitHoldTests: XCTestCase {
         let lines = capturedLines {
             _ = client.applyFetchedMessages(
                 identity: local, group: group, groupIdHex: journal,
-                raw: batch([(rowId - 1, Data([0xFF])), (rowId, commit)], latest: 1), after: 0)
+                raw: batch([(rowId - 1, Data([0xFF])), (rowId, commit)], latest: 1, registered: [1: rowId]),
+                after: 0)
             _ = client.failedRowIsHeld(
                 groupIdHex: journal, rowId: rowId, payload: commit, localEpoch: 0, latestEpoch: 1,
+                registeredCommits: [1: rowId],
                 error: FfiError.MembershipNotOwner(message: "refused in \(journal) row \(rowId)"))
         }
         XCTAssertFalse(lines.isEmpty)

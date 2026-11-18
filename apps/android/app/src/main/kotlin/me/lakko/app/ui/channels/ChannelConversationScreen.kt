@@ -638,10 +638,12 @@ private fun ChannelTimelineView(
     // video rule; a channel file lives CHANNEL_FILE_IDLE_DAYS idle days.
     var channelPreview by remember { mutableStateOf<me.lakko.app.ui.chat.SendPreview?>(null) }
     val previewIds = remember { java.util.concurrent.atomic.AtomicLong(1) }
-    fun openPreview(uris: List<android.net.Uri>, filesOnly: Boolean) {
+    fun openPreview(uris: List<android.net.Uri>, filesOnly: Boolean, mimeHints: List<String?> = emptyList()) {
         if (uris.isEmpty()) return
-        scope.launch {
-            val items = me.lakko.app.ui.chat.buildPreviewItems(context, uris, filesOnly) { previewIds.getAndIncrement() }
+        // `scope.launch` dispatches on the main thread; buildPreviewItems moves
+        // to IO at once, so a pasted URI is read while its grant still holds.
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            val items = me.lakko.app.ui.chat.buildPreviewItems(context, uris, filesOnly, mimeHints) { previewIds.getAndIncrement() }
             val tooBig = items.filter { it.problemKey == "attach.preview.file_too_big" }
             if (tooBig.isNotEmpty()) sendError = UiText("attach.preview.file_too_big")
             val kept = items - tooBig.toSet()
@@ -1061,6 +1063,11 @@ private fun ChannelTimelineView(
                     onAttachClicked = { attachMenuOpen = true },
                     onRemoveAttachment = { index ->
                         pending.value = pending.value.filterIndexed { i, _ -> i != index }
+                    },
+                    // docs/ux/attachments.md 2.5 — a pasted or keyboard-inserted
+                    // photo or video opens this screen's send preview.
+                    onPasteMedia = channelPasteHandler(isPublisher) { uris, filesOnly, mimes ->
+                        openPreview(uris, filesOnly, mimes)
                     },
                 )
             }

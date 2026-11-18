@@ -345,19 +345,25 @@ public struct PersistedGroup: Codable, Equatable {
     /// person saw. Absent when no bundle brought this group. Every writer of
     /// the log carries it through.
     public let syncedThroughMessageId: Int64?
+    /// ADR-0091 phase 1b — the MLS epoch the durable snapshot was at when the
+    /// poll last advanced ``cursor`` (the highest such, never backward); see
+    /// `Chat/CursorEpoch.swift`. Absent when the poll never recorded one.
+    public let cursorEpoch: UInt64?
 
     public init(
         cursor: Int64,
         messages: [PersistedMessage],
         lastViewedMessageId: Int64? = nil,
         feedSeen: [Int64]? = nil,
-        syncedThroughMessageId: Int64? = nil
+        syncedThroughMessageId: Int64? = nil,
+        cursorEpoch: UInt64? = nil
     ) {
         self.cursor = cursor
         self.messages = messages
         self.lastViewedMessageId = lastViewedMessageId
         self.feedSeen = feedSeen
         self.syncedThroughMessageId = syncedThroughMessageId
+        self.cursorEpoch = cursorEpoch
     }
 }
 

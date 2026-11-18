@@ -568,6 +568,7 @@ async fn gate_read(
         (epoch == current_epoch).then_some(key)
     })
     .await
+    .map(|_| ())
 }
 
 fn binary(bytes: Vec<u8>) -> Response {

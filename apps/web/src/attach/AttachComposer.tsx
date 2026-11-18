@@ -12,13 +12,14 @@
  * publishers); a channel subscriber gets no paperclip (the core's rows are
  * empty for it).
  */
-import { createEffect, createMemo, createResource, createSignal, Match, on, Show, Switch, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, Match, on, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
 import { wasmSync } from "../wasm";
 import { ConversationKind } from "../../wasm/lakko_ffi_wasm";
 import type { Article, MessageContent, SharedContactCard, SharedLocation } from "../../wasm/lakko_ffi_wasm";
 import { AttachMenu } from "./AttachMenu";
+import { pasteBelongsToField, pastedFiles } from "../chat/pasted-files";
 import { deviceHasCamera, deviceHasLocation, menuEntriesOf } from "./attach-menu";
 import { SendPreview } from "./SendPreview";
 import { CameraScreen } from "./CameraScreen";
@@ -70,6 +71,13 @@ export interface AttachComposerProps {
   sendLocation(l: SharedLocation): Promise<void>;
   sendContact(c: SharedContactCard): Promise<void>;
   sendArticle(out: ArticleDraftOut, editTarget: number | undefined): Promise<void>;
+  /** `docs/ux/attachments.md` section 2.5: when true, files pasted anywhere
+   *  in the page (or into a field marked `data-paste-files`) open the send
+   *  preview, as the paperclip's Photo or Video / File would. */
+  readonly acceptPaste?: () => boolean;
+  /** Hands the owner a function that opens the send preview for files from
+   *  elsewhere (a drop on the conversation). */
+  readonly bindOpenFiles?: (open: (files: readonly File[]) => void) => void;
 }
 
 type Screen =
@@ -193,6 +201,28 @@ export function AttachComposer(props: AttachComposerProps): JSX.Element {
   const close = (): void => {
     setScreen({ kind: "none" });
   };
+
+  const openFiles = (files: readonly File[]): void => {
+    if (files.length === 0 || screen().kind !== "none" || props.hidden()) return;
+    const media = files.every((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
+    setScreen({ kind: "preview", files, mode: media ? "media" : "file", fromCamera: false });
+  };
+  props.bindOpenFiles?.(openFiles);
+
+  onMount(() => {
+    const onPaste = (e: ClipboardEvent): void => {
+      if (e.defaultPrevented || props.acceptPaste?.() !== true || screen().kind !== "none" || props.hidden()) return;
+      const target = e.target as Element | null;
+      const intoComposer = target !== null && typeof target.closest === "function" && target.closest("[data-paste-files]") !== null;
+      if (!intoComposer && pasteBelongsToField(e.target)) return;
+      const files = pastedFiles(e.clipboardData);
+      if (files.length === 0) return;
+      e.preventDefault();
+      openFiles(files);
+    };
+    document.addEventListener("paste", onPaste);
+    onCleanup(() => document.removeEventListener("paste", onPaste));
+  });
   const run = async (f: () => Promise<void>): Promise<void> => {
     await f();
     close();

@@ -3582,16 +3582,31 @@ public class ChatViewModel(
     public val sendPreview: kotlinx.coroutines.flow.StateFlow<SendPreview?> = sendPreviewState
 
     /** Open the send preview with [uris] (Photo or Video, Camera, or File). */
-    public fun openSendPreview(uris: List<android.net.Uri>, filesOnly: Boolean) {
+    public fun openSendPreview(
+        uris: List<android.net.Uri>,
+        filesOnly: Boolean,
+        mimeHints: List<String?> = emptyList(),
+    ) {
         if (uris.isEmpty()) return
+        // viewModelScope runs on Main.immediate, so the read below starts on IO
+        // before this call returns: a pasted or keyboard-inserted URI is read
+        // while the read permission granted with it still holds.
         viewModelScope.launch {
-            val items = buildPreviewItems(repo.context, uris, filesOnly) { nextPickId.getAndIncrement() }
+            val items = buildPreviewItems(repo.context, uris, filesOnly, mimeHints) { nextPickId.getAndIncrement() }
             // UX 4 — a file over the cap is removed from the preview, and says so.
             val tooBig = items.filter { it.problemKey == "attach.preview.file_too_big" }
             if (tooBig.isNotEmpty()) composer.update { it.copy(sendError = UiText("attach.preview.file_too_big")) }
             val kept = items - tooBig.toSet()
             if (kept.isNotEmpty()) sendPreviewState.value = SendPreview(kept, filesOnly = filesOnly)
         }
+    }
+
+    /**
+     * docs/ux/attachments.md 2.5 — a photo or video pasted into the composer,
+     * or inserted from the keyboard: the same send preview as Photo or Video.
+     */
+    public fun openPastedMedia(items: List<me.lakko.app.chat.PastedMedia>) {
+        openSendPreview(items.map { it.uri }, filesOnly = false, mimeHints = items.map { it.mime })
     }
 
     public fun onPreviewCaption(text: String) {

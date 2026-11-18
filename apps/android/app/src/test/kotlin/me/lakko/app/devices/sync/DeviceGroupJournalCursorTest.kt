@@ -39,30 +39,34 @@ class DeviceGroupJournalCursorTest {
         assertEquals(0L, DeviceGroupJournalCursor.decode(DeviceGroupJournalCursor.encode(groupA, -4L), groupA))
     }
 
+    /** Row 12 is the commit the DS registered as leaving epoch 7 (ADR-0091). */
+    private val registered: Map<ULong, Long> = mapOf(8uL to 12L, 9uL to 20L)
+
     @Test
     fun an_own_row_always_passes() {
-        assertEquals(FailedRowVerdict.PASS, failedRowVerdict(true, 7u, 8u, 7u))
-        assertEquals(FailedRowVerdict.PASS, failedRowVerdict(true, null, null, null))
+        assertEquals(FailedRowVerdict.PASS, failedRowVerdict(true, 12L, 7u, registered))
+        assertEquals(FailedRowVerdict.PASS, failedRowVerdict(true, 12L, null, null))
     }
 
     @Test
-    fun a_foreign_commit_at_or_above_the_handle_epoch_holds() {
-        assertEquals(FailedRowVerdict.HOLD, failedRowVerdict(false, 7u, 8u, 7u))
-        assertEquals(FailedRowVerdict.HOLD, failedRowVerdict(false, 9u, 10u, 7u))
-        assertEquals("an unreadable handle epoch holds", FailedRowVerdict.HOLD, failedRowVerdict(false, 7u, 8u, null))
+    fun the_registered_commit_leaving_the_handle_epoch_holds() {
+        assertEquals(FailedRowVerdict.HOLD, failedRowVerdict(false, 12L, 7u, registered))
+        assertEquals(FailedRowVerdict.HOLD, failedRowVerdict(false, 20L, 8u, registered))
     }
 
     @Test
-    fun rows_that_can_never_apply_pass() {
-        assertEquals("an older commit", FailedRowVerdict.PASS, failedRowVerdict(false, 6u, 7u, 7u))
-        assertEquals("an application message", FailedRowVerdict.PASS, failedRowVerdict(false, 7u, 7u, 7u))
-        assertEquals("not MLS framing", FailedRowVerdict.PASS, failedRowVerdict(false, null, null, 7u))
+    fun every_other_failed_row_passes() {
+        assertEquals("a commit-shaped row the DS did not register", FailedRowVerdict.PASS, failedRowVerdict(false, 11L, 7u, registered))
+        assertEquals("the commit after the next", FailedRowVerdict.PASS, failedRowVerdict(false, 20L, 7u, registered))
+        assertEquals("an older commit", FailedRowVerdict.PASS, failedRowVerdict(false, 12L, 8u, registered))
+        assertEquals("an unreadable handle epoch", FailedRowVerdict.PASS, failedRowVerdict(false, 12L, null, registered))
+        assertEquals("a read that named no commits", FailedRowVerdict.PASS, failedRowVerdict(false, 12L, 7u, null))
     }
 
     @Test
     fun a_batch_of_own_echoes_moves_the_stored_cursor_past_them() {
         val tracker = JournalCursorTracker(0L)
-        for (id in 1L..229L) tracker.refused(id, failedRowVerdict(true, 3u, 3u, 4u))
+        for (id in 1L..229L) tracker.refused(id, failedRowVerdict(true, id, 4u, registered))
         assertEquals(229L, tracker.cursorToWrite())
         tracker.cursorWritten(229L)
         assertNull("nothing new to store", tracker.cursorToWrite())

@@ -21,11 +21,13 @@ import LakkoCore
 /// The persisted cursor may LAG the durable DeviceGroup snapshot, never LEAD
 /// it. So it is written only after the snapshot that reflects every row up to
 /// it was written successfully in the same run, and it never moves past a row
-/// that might still take this device forward if read again: a foreign commit
-/// that failed while sealed at or above the handle's epoch. A row that can
-/// never apply (an own echo, an older epoch's commit, an application message
-/// whose generation is consumed, bytes that are not MLS) is passed, exactly as
-/// the in-session loop always passed it.
+/// that might still take this device forward if read again: the commit the DS
+/// registered as leaving the handle's epoch (ADR-0091: the read names it in
+/// ``FetchResult/registeredCommits``). Every other failing row (an own echo,
+/// another epoch's commit, a commit-shaped row posted through the plain
+/// publish route, an application message whose generation is consumed, bytes
+/// that are not MLS) is passed, exactly as the in-session loop always passed
+/// it.
 ///
 /// The cursor is bound to the journal it was read on: a key reset founds a new
 /// DeviceGroup journal (ADR-0078 phase 6), and a position on the old one must
@@ -89,22 +91,19 @@ enum FailedRowVerdict: Equatable {
     /// cursor stays before it.
     case hold
 
-    /// The verdict for a row `processIncomingVerifyingRemovals` refused.
+    /// The verdict for a row `processIncomingVerifyingRemovals` refused: hold
+    /// exactly when it is the commit the DS registered as leaving the handle's
+    /// epoch (the same rule as a conversation, ``RegisteredCommitVerdict``).
     ///
-    /// `sealedEpoch` / `epochAfter`: the row's framed epoch and the epoch after
-    /// it (`epochOfMessage` / `epochAfterMessage`; `after > sealed` only for a
-    /// commit), `nil` when the bytes are not an MLS message. `localEpoch`: the
-    /// handle's epoch when the row was read, `nil` when unreadable.
-    static func of(isOwnEcho: Bool, sealedEpoch: UInt64?, epochAfter: UInt64?, localEpoch: UInt64?) -> Self {
-        if isOwnEcho { return .pass }
-        // Not MLS framing: no later read can process it either.
-        guard let sealedEpoch, let epochAfter else { return .pass }
-        // Not a commit: an application message or a proposal cannot move this
-        // device's epoch, and a consumed generation never opens again.
-        if epochAfter <= sealedEpoch { return .pass }
-        // A commit of an epoch this handle is already past can never apply.
-        if let localEpoch, sealedEpoch < localEpoch { return .pass }
-        return .hold
+    /// `rowId`: the row's DS id. `localEpoch`: the handle's epoch when the row
+    /// was read, `nil` when unreadable. `registeredCommits`: the read's
+    /// ``FetchResult/registeredCommits``.
+    static func of(
+        isOwnEcho: Bool, rowId: Int64, localEpoch: UInt64?, registeredCommits: [UInt64: Int64]?
+    ) -> Self {
+        RegisteredCommitVerdict.of(
+            isOwnEcho: isOwnEcho, rowId: rowId, localEpoch: localEpoch,
+            registeredCommits: registeredCommits) == .hold ? .hold : .pass
     }
 }
 
@@ -132,7 +131,7 @@ struct JournalCursorTracker {
         if !holding, rowId > safe { safe = rowId }
     }
 
-    /// A row refused; see ``FailedRowVerdict/of(isOwnEcho:sealedEpoch:epochAfter:localEpoch:)``.
+    /// A row refused; see ``FailedRowVerdict/of(isOwnEcho:rowId:localEpoch:registeredCommits:)``.
     mutating func refused(_ rowId: Int64, verdict: FailedRowVerdict) {
         switch verdict {
         case .pass: passed(rowId)

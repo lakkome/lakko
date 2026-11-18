@@ -183,6 +183,14 @@ private struct ChatScaledFont: ViewModifier {
     }
 }
 
+/// The point size ``View/chatFont(_:weight:italic:monospacedDigit:)`` gives
+/// a text style, for UIKit text (the composer's text view).
+enum ChatFontSize {
+    static func points(style: UIFont.TextStyle, dynamicTypeSize: DynamicTypeSize, scale: CGFloat) -> CGFloat {
+        ChatScaledFont.size(style: style, base: nil, dynamicTypeSize: dynamicTypeSize) * scale
+    }
+}
+
 extension View {
     /// Read the stored chat text size at the root of a window.
     func chatTextScaleRoot() -> some View { modifier(ChatTextScaleRoot()) }

@@ -78,7 +78,14 @@ describe("applyDeviceJournalBatch", () => {
   it("an empty batch persists nothing and keeps its position", async () => {
     const h = harness();
     const out = await applyDeviceJournalBatch([], 12, h.deps);
-    expect(out).toEqual({ nextCursor: 12, persisted: false, skippedOwnEchoes: [], applied: 0 });
+    expect(out).toEqual({
+      nextCursor: 12,
+      persisted: false,
+      skippedOwnEchoes: [],
+      applied: 0,
+      pin: undefined,
+      persistedCursor: undefined,
+    });
     expect(h.stored()).toBeNull();
   });
 
@@ -88,6 +95,62 @@ describe("applyDeviceJournalBatch", () => {
     expect(h.applied).toEqual([]);
     expect(out.persisted).toBe(true);
     expect(h.stored()).toBe(21);
+  });
+});
+
+describe("rule 5: a held DeviceGroup commit (ADR-0091 open question 7)", () => {
+  /** Rows 5 and 9 throw; `registered` is the registered commit leaving the
+   *  epoch. */
+  function held(registered: number) {
+    const h = harness({ applyThrowsOn: [5, 9] });
+    const verdicts: boolean[] = [];
+    return {
+      h,
+      verdicts,
+      deps: {
+        ...h.deps,
+        localEpoch: () => 3n,
+        failedRowHeld: (row: DeviceJournalRow, local: bigint | undefined) =>
+          local === 3n && row.id === registered,
+        onApplyError: (_row: DeviceJournalRow, _err: unknown, isHeld: boolean) => {
+          verdicts.push(isHeld);
+        },
+      },
+    };
+  }
+
+  it("pins the persisted cursor before the registered commit while the run reads on", async () => {
+    const t = held(5);
+    const out = await applyDeviceJournalBatch(rows(4, 5, 6), 3, t.deps);
+    expect(t.h.applied).toEqual([4, 5, 6]);
+    expect(out.nextCursor).toBe(6);
+    expect(out.pin).toBe(4);
+    expect(out.persistedCursor).toBe(4);
+    expect(t.h.stored()).toBe(4);
+    expect(t.verdicts).toEqual([true]);
+    // A later batch of the same run keeps the pin.
+    const next = await applyDeviceJournalBatch(rows(7, 8), out.nextCursor, t.deps, out.pin);
+    expect(next.nextCursor).toBe(8);
+    expect(t.h.stored()).toBe(4);
+    expect(next.pin).toBe(4);
+  });
+
+  it("passes a failing row that is not the registered commit", async () => {
+    const t = held(42);
+    const out = await applyDeviceJournalBatch(rows(4, 5, 6), 3, t.deps);
+    expect(out.pin).toBeUndefined();
+    expect(t.h.stored()).toBe(6);
+    expect(t.verdicts).toEqual([false]);
+  });
+
+  it("the first held row wins", async () => {
+    const t = held(5);
+    const out = await applyDeviceJournalBatch(rows(5, 9), 4, {
+      ...t.deps,
+      failedRowHeld: () => true,
+    });
+    expect(out.pin).toBe(4);
+    expect(t.h.stored()).toBe(4);
   });
 });
 

@@ -225,7 +225,8 @@ public enum HistoryBundleCodec {
                 messages: merged.rows,
                 lastViewedMessageId: slot.lastViewedMessageId,
                 feedSeen: slot.feedSeen,
-                syncedThroughMessageId: PairingHistory.higherFloor(slot.syncedThroughMessageId, floor)
+                syncedThroughMessageId: PairingHistory.higherFloor(slot.syncedThroughMessageId, floor),
+                cursorEpoch: slot.cursorEpoch
             )
             opened[hex] = PersistedGroup(
                 cursor: 0,

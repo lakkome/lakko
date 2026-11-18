@@ -228,8 +228,11 @@ app.
   attaches it, as the attach button would. While dragging over a conversation
   the pane shows "Drop files to attach"; over any other screen the drop is
   refused (no drop target is shown).
-- Pasting an image from the clipboard into the composer attaches it. A copy
-  from a document, which holds text beside a picture of it, pastes as text.
+- Pasting files from the clipboard (`Cmd+V` / `Ctrl+V`) anywhere in an open
+  conversation attaches them, as a drop would: a screenshot, a copied picture,
+  a video, a file copied in the file manager. A paste into another field is
+  that field's text. A copy from a document, which holds text beside a
+  picture of it, pastes as text.
 - "Save" on an attachment opens the system save dialog (allowed: it is the
   file picker); the default folder is the system Downloads folder.
 - Opening an attachment with another app (the system's "open with") is not in

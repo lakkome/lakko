@@ -109,6 +109,8 @@ import { tryDecodeSecretEnvelope } from "../push/group-routing";
 import { looksLikeCallSignaling as looksLikeCallSignalingBytes } from "../calls/call-signaling-wake";
 import { DurableCursorGate } from "./durable-cursor";
 import { registeredCommitHolds } from "./registered-commit-hold";
+import { readCursorEpoch, recordCursorEpoch, rewindLine, snapshotRewindFrom } from "./cursor-epoch";
+import { errorLogTag } from "./log-tag";
 import {
   consumeOwnPublished,
   isOwnPublished,
@@ -1277,6 +1279,32 @@ export class ChatClient {
     } catch (err) {
       throw new ChatError("DS fetch failed", err);
     }
+    // ADR-0091 phase 1b - a snapshot rolled back under an advanced cursor:
+    // the group was loaded below the epoch recorded with its cursor, so the
+    // commit leaving the loaded epoch lies behind the cursor. Read again from
+    // just before it (`chat/cursor-epoch.ts`). The cursor itself never moves
+    // backward; the rows between are re-applied and re-filed by DS id.
+    let readFrom = after;
+    {
+      const loaded = readGroupEpoch(group);
+      const recorded = readCursorEpoch(base64Encode(groupId));
+      const rewind = snapshotRewindFrom({
+        after,
+        loaded,
+        recorded,
+        registeredCommits: raw.registeredCommits,
+      });
+      if (rewind !== undefined && loaded !== undefined && recorded !== undefined) {
+        // eslint-disable-next-line no-console
+        console.warn(rewindLine(loaded, recorded));
+        try {
+          raw = await this.fetchRewound(groupId, rewind, after, signal);
+        } catch (err) {
+          throw new ChatError("DS fetch failed", err);
+        }
+        readFrom = rewind;
+      }
+    }
 
     // ADR-0053 contract point 7 — an owner or admin also reads the group's
     // KNOCK queue, where a `/g/` joiner's external-join proposal and its
@@ -1305,13 +1333,13 @@ export class ChatClient {
         };
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("ChatClient: knock read failed; retried next poll", err);
+        console.warn(`ChatClient: knock read failed; retried next poll: ${errorLogTag(err)}`);
       }
     }
 
     // The APPLY + the cursor advance — inside the lock, atomic together.
     return withGroupMlsLock(groupIdB64, async () => {
-      const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef);
+      const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef, readFrom);
       if (knocks === null || result.outcome !== "applied") return result;
       const knockEvents = await this.applyKnocks(
         myIdentity,
@@ -1378,7 +1406,7 @@ export class ChatClient {
         // group), an attribution (not MLS), a stale-epoch proposal, garbage.
         // Dropped; the knock cursor still moves past it.
         // eslint-disable-next-line no-console
-        console.warn("ChatClient: knock row dropped", row.id, err);
+        console.warn(`ChatClient: knock row dropped: ${errorLogTag(err)}`);
         continue;
       }
       if (processed.kind !== "ExternalJoinProposal") continue;
@@ -1402,7 +1430,7 @@ export class ChatClient {
       await this.persistDurableOrThrow();
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("ChatClient: knock batch not persisted; cursor held", err);
+      console.warn(`ChatClient: knock batch not persisted; cursor held: ${errorLogTag(err)}`);
       return events;
     }
     writeKnockCursor(groupIdB64, last, owner);
@@ -1528,6 +1556,7 @@ export class ChatClient {
     after: number,
     raw: FetchResult,
     cursorRef: PollCursorRef | undefined,
+    readFrom: number = after,
   ): Promise<PollMessagesResult> {
     // Re-read under the lock: did someone else consume past `after` while we
     // were parked on the network? Then this batch is stale — drop it whole.
@@ -1542,7 +1571,7 @@ export class ChatClient {
       cursorRef.beforeApply?.();
     }
 
-    return this.applyPolledRows(myIdentity, group, after, raw, cursorRef);
+    return this.applyPolledRows(myIdentity, group, after, raw, cursorRef, readFrom);
   }
 
   /** The row loop and the cursor gate of {@link applyPolledBatch}. */
@@ -1552,9 +1581,12 @@ export class ChatClient {
     after: number,
     raw: FetchResult,
     cursorRef: PollCursorRef | undefined,
+    readFrom: number = after,
   ): Promise<PollMessagesResult> {
     const events: IncomingChatEvent[] = [];
-    let cursor = after;
+    // `readFrom` is below `after` only on a phase-1b rewind; the cursor
+    // reported and advanced is never below `after` (see the end).
+    let cursor = readFrom;
     // Echo ids matched in this batch, CONSUMED only once the cursor actually
     // advances past them. Deleting on match would be wrong on the held path:
     // the batch gets re-fetched, our own row would then be handed to OpenMLS,
@@ -1621,6 +1653,7 @@ export class ChatClient {
           after: framedEpochAfter(message.payload),
           local: localEpoch,
           latest: latestEpoch,
+          registeredCommits: raw.registeredCommits,
           error: err,
         });
         if (outcome.kind === "held") {
@@ -1704,7 +1737,11 @@ export class ChatClient {
         await this.persistDurableOrThrow();
       },
       () => {
-        cursorRef?.advance(cursor);
+        cursorRef?.advance(Math.max(cursor, after));
+        // ADR-0091 phase 1b - the epoch the snapshot just written is at, with
+        // the cursor it was written for.
+        const durableEpoch = readGroupEpoch(group);
+        if (durableEpoch !== undefined) recordCursorEpoch(groupIdB64, durableEpoch);
         // Consume the echo registry entries only now: on the held path they
         // stay armed so the re-fetched batch still suppresses our own rows.
         for (const id of matchedEchoes) consumeOwnPublished(groupIdB64, id);
@@ -1720,9 +1757,42 @@ export class ChatClient {
       // `outcome` and writes `result.cursor` back must still not lead.
       return { events, cursor: after, hasMore: false, outcome: "persist-held" };
     }
-    return { events, cursor, hasMore: holding ? false : raw.hasMore, outcome: "applied" };
+    return {
+      events,
+      cursor: Math.max(cursor, after),
+      hasMore: holding ? false : raw.hasMore,
+      outcome: "applied",
+    };
+  }
+
+  /**
+   * ADR-0091 phase 1b - the rows from `from` on, read page by page until a
+   * page reaches past `after` or the journal ends (at most
+   * {@link REWIND_MAX_PAGES} pages), as one result. The last page's
+   * `hasMore`, `latestEpoch` and `registeredCommits` stand for the whole.
+   */
+  private async fetchRewound(
+    groupId: Uint8Array,
+    from: number,
+    after: number,
+    signal: AbortSignal | undefined,
+  ): Promise<FetchResult> {
+    const opts = signal !== undefined ? { signal } : {};
+    let page = await this.ds.fetchGroup(groupId, { after: from, waitSecs: 0, ...opts });
+    const messages = [...page.messages];
+    for (let pages = 1; pages < REWIND_MAX_PAGES && page.hasMore; pages += 1) {
+      const last = messages.at(-1)?.id ?? from;
+      if (last >= after) break;
+      page = await this.ds.fetchGroup(groupId, { after: last, waitSecs: 0, ...opts });
+      messages.push(...page.messages);
+    }
+    return { ...page, messages };
   }
 }
+
+/** Pages a phase-1b rewind reads at most before it applies. Chosen, not
+ *  measured: a rewind normally re-reads the rows of one missed commit. */
+const REWIND_MAX_PAGES = 20;
 
 /** The group's epoch, `undefined` when it cannot be read. */
 function readGroupEpoch(group: WasmGroup): bigint | undefined {

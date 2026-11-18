@@ -577,7 +577,6 @@ import {
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { createDraftSeed } from "../chat/draft-seed";
-import { pastedImages } from "../chat/pasted-files";
 import {
   membershipNoticeAfterAttempt,
   membershipNoticeLanded,
@@ -5764,8 +5763,11 @@ function ChatView(props: {
     setIsDragOver(false);
     const files = e.dataTransfer?.files;
     if (files === undefined || files.length === 0) return;
-    await processFiles(files);
+    // Like the paperclip and a paste: the send preview, not straight in.
+    if (openAttachFiles !== null) openAttachFiles(Array.from(files));
+    else await processFiles(files);
   }
+  let openAttachFiles: ((files: readonly File[]) => void) | null = null;
 
   function removePendingAttachment(index: number): void {
     const removed = pendingAttachments()[index];
@@ -9032,6 +9034,10 @@ function ChatView(props: {
           contacts={shareableContacts}
           editRequest={attachEdit}
           clearEditRequest={() => setAttachEdit(null)}
+          acceptPaste={() => true}
+          bindOpenFiles={(open) => {
+            openAttachFiles = open;
+          }}
           sendFiles={sendPreviewFiles}
           sendPoll={sendPollDraft}
           sendChecklist={sendChecklistDraft}
@@ -9073,6 +9079,7 @@ function ChatView(props: {
             grows to five lines; Enter sends, Shift+Enter breaks the line. */}
         <textarea
           ref={composerInput}
+          data-paste-files=""
           class="lk-composer-input"
           data-lk-composer=""
           rows={1}
@@ -9089,12 +9096,6 @@ function ChatView(props: {
             if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
               refreshColonQuery();
             }
-          }}
-          onPaste={(e) => {
-            const images = pastedImages(e.clipboardData);
-            if (images.length === 0) return;
-            e.preventDefault();
-            void processFiles(images);
           }}
           onKeyDown={(e) => {
             // Reactions section 13 — the strip takes the arrows, Enter, Tab

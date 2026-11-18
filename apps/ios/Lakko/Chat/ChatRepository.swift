@@ -1102,7 +1102,8 @@ public final class ChatRepository: ObservableObject {
                     cursor: persisted.cursor,
                     lastViewedMessageId: persisted.lastViewedMessageId,
                     feedSeen: Set(persisted.feedSeen ?? []),
-                    syncedThroughMessageId: persisted.syncedThroughMessageId)
+                    syncedThroughMessageId: persisted.syncedThroughMessageId,
+                    cursorEpoch: persisted.cursorEpoch)
             }
             // `docs/ux/second-device.md` section 2 — the rest of the log (a
             // history bundle lands before its Welcomes) waits for its join.
@@ -5531,16 +5532,36 @@ public final class ChatRepository: ObservableObject {
             return
         }
         // ADR-0053 point 1 — the read is signed with the group's access key.
-        let raw = try await chatClient.fetchGroupJournal(
+        var raw = try await chatClient.fetchGroupJournal(
             groupId: groupId,
             after: after,
             waitSecs: waitSecs,
             auth: dsAuth(groupIdHex: groupIdHex)
         )
         guard bound.isCurrent else { return }
+        // ADR-0091 phase 1b — a snapshot rolled back under an advanced cursor:
+        // the group was loaded below the epoch recorded with its cursor, so
+        // the commit leaving the loaded epoch lies behind the cursor. Read
+        // again from just before it (`Chat/CursorEpoch.swift`); the cursor
+        // itself never moves backward.
+        var readFrom: Int64?
+        if let live = groups[groupIdHex] {
+            let loaded = try? live.group.epoch()
+            if let rewind = CursorEpoch.rewindFrom(
+                after: after, loaded: loaded, recorded: live.cursorEpoch,
+                registeredCommits: raw.registeredCommits),
+               let loaded, let recorded = live.cursorEpoch {
+                RegisteredCommitLog.emit(.notice, CursorEpoch.rewindLine(loaded: loaded, recorded: recorded))
+                raw = try await chatClient.fetchRewound(
+                    groupId: groupId, from: rewind, after: after,
+                    auth: dsAuth(groupIdHex: groupIdHex))
+                guard bound.isCurrent else { return }
+                readFrom = rewind
+            }
+        }
         // G-38 steps 3+4 — the MLS half, inside the per-group commit chain.
-        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-            applyFetchedBatch(groupIdHex: groupIdHex, after: after, raw: raw)
+        try await withCommitLock(groupIdHex: groupIdHex) { [self, raw, readFrom] in
+            applyFetchedBatch(groupIdHex: groupIdHex, after: after, raw: raw, readFrom: readFrom)
         }
         guard bound.isCurrent else { return }
         // ADR-0057, live walk 2026-09-29 — the owner claims the journal on
@@ -5614,7 +5635,8 @@ public final class ChatRepository: ObservableObject {
     private func applyFetchedBatch(
         groupIdHex: String,
         after: Int64,
-        raw: FetchResult
+        raw: FetchResult,
+        readFrom: Int64? = nil
     ) {
         guard let identity = canonicalIdentity else { return }
         guard let record = groups[groupIdHex] else { return }
@@ -5657,7 +5679,8 @@ public final class ChatRepository: ObservableObject {
             // journal this batch came off: a DS id is assigned per group.
             groupIdHex: groupIdHex,
             raw: raw,
-            after: after
+            after: after,
+            readFrom: readFrom
         )
         // ADR-0073 — two silent drops before anything is counted or drawn: a
         // chat row whose sender is a key an accepted reset retired (a removed
@@ -5794,7 +5817,12 @@ public final class ChatRepository: ObservableObject {
             // resolve to "the write succeeded" when it never ran at all, which
             // is the one direction this gate must never fail in.
             persist: { try self.persistSnapshotDurableOrThrow() },
-            advance: { record.advanceCursor(to: result.cursor) }
+            advance: {
+                record.advanceCursor(to: result.cursor)
+                // ADR-0091 phase 1b — the epoch the snapshot just written is
+                // at, kept with the cursor it was written for.
+                record.noteCursorEpoch(try? record.group.epoch())
+            }
         )
         // The plaintext timeline is written either way — held or advanced — and
         // deliberately AFTER the gate so it records whatever cursor the gate
@@ -6783,7 +6811,7 @@ public final class ChatRepository: ObservableObject {
                     proposed += 1
                 }
             } catch {
-                NSLog("ADR-0050 re-admission: add not proposed: \(error)")
+                NSLog("ADR-0050 re-admission: add not proposed: %@", ErrorLogTag.of(error))
             }
         }
         for leafKeyB64 in plan.retire {
@@ -6794,12 +6822,13 @@ public final class ChatRepository: ObservableObject {
                     proposed += 1
                 }
             } catch {
-                NSLog("ADR-0050 re-admission: retire not proposed: \(error)")
+                NSLog("ADR-0050 re-admission: retire not proposed: %@", ErrorLogTag.of(error))
             }
         }
         guard bound.isCurrent else { return }
         if proposed > 0 {
-            NSLog("ADR-0050 re-admission: \(plan.admit.count) to admit, \(plan.retire.count) to retire in \(groupIdHex)")
+            NSLog("ADR-0050 re-admission: %d to admit, %d to retire in a conversation",
+                  plan.admit.count, plan.retire.count)
             await sweepIfCommitter(groupIdHex: groupIdHex)
         }
     }
@@ -10160,7 +10189,8 @@ public final class ChatRepository: ObservableObject {
                 messages: PersistedMessage.persistable(record.messages),
                 lastViewedMessageId: record.lastViewedMessageId,
                 feedSeen: record.feedSeen.isEmpty ? nil : record.feedSeen.sorted(),
-                syncedThroughMessageId: record.syncedThroughMessageId
+                syncedThroughMessageId: record.syncedThroughMessageId,
+                cursorEpoch: record.cursorEpoch
             )
         }
         let payload = MessageLogPayload(groups: waitingLogSlots.composed(with: slots))
@@ -10802,13 +10832,25 @@ final class GroupRecord {
         cursor: Int64,
         lastViewedMessageId: Int64? = nil,
         feedSeen: Set<Int64> = [],
-        syncedThroughMessageId: Int64? = nil
+        syncedThroughMessageId: Int64? = nil,
+        cursorEpoch: UInt64? = nil
     ) {
         self.messages = messages
         self.cursor = cursor
         self.lastViewedMessageId = lastViewedMessageId
         self.feedSeen = feedSeen
         self.syncedThroughMessageId = syncedThroughMessageId
+        self.cursorEpoch = cursorEpoch
+    }
+
+    /// ADR-0091 phase 1b — the epoch the durable snapshot was at when the
+    /// poll last advanced ``cursor`` (the highest such). Persisted with the
+    /// cursor (``PersistedGroup/cursorEpoch``); see `Chat/CursorEpoch.swift`.
+    private(set) var cursorEpoch: UInt64?
+
+    /// Record a cursor advance at `epoch`. Never moves backward.
+    func noteCursorEpoch(_ epoch: UInt64?) {
+        cursorEpoch = CursorEpoch.advanced(cursorEpoch, to: epoch)
     }
 
     /// `docs/ux/second-device.md` section 2 — the highest id a pairing bundle

@@ -334,20 +334,21 @@ where
 }
 
 /// Parse the proof header, verify it under `key_for_epoch`, and consume the
-/// nonce. Every failure is [`refused`].
+/// nonce. Every failure is [`refused`]; success answers the epoch the proof
+/// was signed at.
 pub(crate) async fn check_proof(
     pool: &MySqlPool,
     pseudonym: &[u8; PSEUDONYM_LEN],
     headers: &HeaderMap,
     parts: &RequestParts<'_>,
     key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
-) -> Result<(), HandlerError> {
+) -> Result<u64, HandlerError> {
     let proof = verify_header(headers, parts, key_for_epoch)?;
     if consume_nonce(pool, pseudonym, &proof.nonce)
         .await
         .map_err(db_error("record proof nonce"))?
     {
-        Ok(())
+        Ok(proof.epoch)
     } else {
         Err(refused())
     }
@@ -375,6 +376,9 @@ pub(crate) enum Gated {
         /// still behind it can tell it will never catch up (its state forked
         /// from the chain) rather than wait forever.
         latest_epoch: u64,
+        /// The epoch the request's proof was signed at (ADR-0091: a read
+        /// names the registered commit rows above it).
+        proof_epoch: u64,
     },
 }
 
@@ -404,7 +408,7 @@ pub(crate) async fn gate_group(
     let latest_epoch = keys[0].epoch;
     let floor = admin_floor(&keys);
     let req = parts(method, uri, body);
-    check_proof(&state.db, group_id, headers, &req, |epoch| {
+    let proof_epoch = check_proof(&state.db, group_id, headers, &req, |epoch| {
         keys.iter()
             .enumerate()
             .find(|(_, k)| k.epoch == epoch)
@@ -415,7 +419,10 @@ pub(crate) async fn gate_group(
             .map(|(_, k)| k.key)
     })
     .await?;
-    Ok(Gated::Proven { latest_epoch })
+    Ok(Gated::Proven {
+        latest_epoch,
+        proof_epoch,
+    })
 }
 
 /// Gate a mailbox read: a valid proof under the mailbox key at
@@ -438,6 +445,7 @@ pub(crate) async fn gate_mailbox_read(
         (epoch == MAILBOX_EPOCH).then_some(key)
     })
     .await
+    .map(|_| ())
 }
 
 // ============================================================================
@@ -889,6 +897,7 @@ pub(crate) mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // An unclaimed journal has no chain to report.
         assert!(parsed.get("latest_epoch").is_none());
+        assert!(parsed.get("commits").is_none());
     }
 
     /// ADR-0054: the wake header (since ADR-0078 a sealed blob) is parsed
@@ -1137,6 +1146,8 @@ pub(crate) mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
         assert_eq!(parsed["latest_epoch"], 3);
+        // ADR-0091: no registration above epoch 3 carries a row.
+        assert_eq!(parsed["commits"], serde_json::json!([]));
     }
 
     #[tokio::test]

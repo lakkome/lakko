@@ -1398,6 +1398,7 @@ public fun ChatScreen(
                 },
                 onAttachClicked = { attachMenuOpen = true },
                 onRemoveAttachment = viewModel::onRemovePendingAttachment,
+                onPasteMedia = viewModel::openPastedMedia,
             )
 
             is me.lakko.app.chat.ComposerSlot.Withdrawn -> WithdrawnComposer(slot)
@@ -3550,6 +3551,10 @@ internal fun Composer(
     /** reactions-and-emoji section 13 — the emoji matching a `:word`, Recent
      *  first. Empty when the emoji data is not loaded. */
     colonSuggest: (String) -> List<String> = { emptyList() },
+    /** docs/ux/attachments.md 2.5 — a photo or video pasted into the field or
+     *  inserted from the keyboard; opens the send preview. Null where
+     *  nothing can be attached: a paste is then text only. */
+    onPasteMedia: ((List<me.lakko.app.chat.PastedMedia>) -> Unit)? = null,
 ) {
     // The caret has to be known to insert an emoji AT it (UX spec §4), which a
     // bare `String` value cannot carry. The view model still owns the text;
@@ -3560,18 +3565,56 @@ internal fun Composer(
     // screen late while the person types, so treating a change of it as an
     // outside edit put an older text back over what was just typed and the
     // letters after it were lost.
-    var field by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
+    //
+    // The field is state-based (see [ComposerTextField]), so the person's own
+    // edits reach the view model through the text flow below; [reported]
+    // remembers the last text handed on, so a reset from [draftRevision] is
+    // not echoed back as an edit.
+    val fieldState = remember { androidx.compose.foundation.text.input.TextFieldState(draft, TextRange(draft.length)) }
+    val reported = remember { arrayOf(draft) }
     var lastRevision by remember { mutableStateOf(draftRevision) }
-    if (draftRevision != lastRevision) {
-        lastRevision = draftRevision
-        if (field.text != draft) field = TextFieldValue(draft, TextRange(draft.length))
+    val currentDraft by androidx.compose.runtime.rememberUpdatedState(draft)
+    LaunchedEffect(draftRevision) {
+        if (draftRevision != lastRevision) {
+            lastRevision = draftRevision
+            val outside = currentDraft
+            if (fieldState.text.toString() != outside) {
+                reported[0] = outside
+                fieldState.edit {
+                    replace(0, length, outside)
+                    selection = TextRange(outside.length)
+                }
+            }
+        }
+    }
+    val currentOnDraftChange by androidx.compose.runtime.rememberUpdatedState(onDraftChange)
+    LaunchedEffect(fieldState) {
+        androidx.compose.runtime.snapshotFlow { fieldState.text.toString() }.collect { text ->
+            if (text != reported[0]) {
+                reported[0] = text
+                currentOnDraftChange(text)
+            }
+        }
+    }
+    // Hands the field's text on at once when the flow above has not yet: a
+    // send right after the last keystroke must carry that keystroke.
+    val flushDraft = {
+        val text = fieldState.text.toString()
+        if (text != reported[0]) {
+            reported[0] = text
+            onDraftChange(text)
+        }
     }
     LaunchedEffect(emojiInsert) {
         val emoji = emojiInsert?.second ?: return@LaunchedEffect
-        val sel = field.selection
-        val text = field.text.replaceRange(sel.min, sel.max, emoji)
+        val sel = fieldState.selection
+        val text = fieldState.text.toString().replaceRange(sel.min, sel.max, emoji)
         val caret = sel.min + emoji.length
-        field = TextFieldValue(text, TextRange(caret))
+        reported[0] = text
+        fieldState.edit {
+            replace(0, length, text)
+            selection = TextRange(caret)
+        }
         onDraftChange(text)
         onEmojiInserted()
     }
@@ -3629,10 +3672,12 @@ internal fun Composer(
             }
         }
         // reactions-and-emoji section 13 — the `:` suggestions strip.
+        val fieldText = fieldState.text.toString()
+        val fieldSelection = fieldState.selection
         val colonQuery = me.lakko.app.chat.colonQueryAt(
-            field.text,
-            field.selection.end,
-            collapsed = field.selection.collapsed,
+            fieldText,
+            fieldSelection.end,
+            collapsed = fieldSelection.collapsed,
         )
         val colonEmoji = remember(colonQuery?.word) {
             colonQuery?.let { colonSuggest(it.word).take(me.lakko.app.chat.COLON_SUGGESTIONS_MAX) }.orEmpty()
@@ -3652,12 +3697,16 @@ internal fun Composer(
                             .size(40.dp)
                             .clickable(onClickLabel = emoji) {
                                 val (text, caret) = me.lakko.app.chat.applyColonPick(
-                                    field.text,
-                                    field.selection.end,
+                                    fieldState.text.toString(),
+                                    fieldState.selection.end,
                                     colonQuery,
                                     emoji,
                                 )
-                                field = TextFieldValue(text, TextRange(caret))
+                                reported[0] = text
+                                fieldState.edit {
+                                    replace(0, length, text)
+                                    selection = TextRange(caret)
+                                }
                                 onDraftChange(text)
                             },
                     ) {
@@ -3708,39 +3757,23 @@ internal fun Composer(
                 // UX 5.2 — a pill field on the sunken surface that grows to
                 // five lines and then scrolls; the IME resizes the screen
                 // (adjustResize + the Scaffold's safe-drawing insets).
-                OutlinedTextField(
-                    value = field,
-                    onValueChange = { next ->
-                        val changed = next.text != field.text
-                        field = next
-                        if (changed) onDraftChange(next.text)
-                    },
-                    placeholder = { Text(t("chat.composer.placeholder")) },
-                    singleLine = false,
-                    maxLines = 5,
-                    // Not disabled while a message is on its way: the draft was
-                    // cleared when it was sent, and a disabled field loses the
-                    // focus, so the keyboard closed after every message and what
-                    // was typed next went nowhere (base scenario 17, seen
-                    // 2026-11-11). Send stays off until the message is out.
-                    shape = RoundedCornerShape(24.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedBorderColor = Color.Transparent,
-                        disabledBorderColor = Color.Transparent,
-                    ),
+                // Not disabled while a message is on its way: the draft was
+                // cleared when it was sent, and a disabled field loses the
+                // focus, so the keyboard closed after every message and what
+                // was typed next went nowhere (base scenario 17, seen
+                // 2026-11-11). Send stays off until the message is out.
+                // docs/ux/attachments.md 2.5 — a pasted or keyboard-inserted
+                // photo or video attaches (see ComposerTextField).
+                ComposerTextField(
+                    state = fieldState,
+                    placeholder = t("chat.composer.placeholder"),
+                    onPasteMedia = onPasteMedia,
                     // docs/ux/text-size.md — the composer's text follows the
                     // device's text size; the field's frame does not.
                     textStyle = MaterialTheme.typography.bodyLarge.let { base ->
                         val f = me.lakko.app.ui.theme.chatTextFactor()
                         base.copy(fontSize = base.fontSize * f, lineHeight = base.lineHeight * f)
                     },
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Sentences,
-                    ),
                     modifier = Modifier
                         .weight(1f)
                         .focusRequester(fieldFocus)
@@ -3748,7 +3781,8 @@ internal fun Composer(
                         // (Shift+Enter is a new line); the on-screen keyboard's
                         // Enter stays a new line.
                         .submitOnHardwareEnter {
-                            if (!sending && !uploading && (draft.isNotBlank() || pendingAttachments.isNotEmpty())) {
+                            flushDraft()
+                            if (!sending && !uploading && (fieldState.text.isNotBlank() || pendingAttachments.isNotEmpty())) {
                                 onSendClicked()
                             }
                         }
@@ -3771,7 +3805,10 @@ internal fun Composer(
                 // a draft or an attachment; the mic otherwise (below).
                 val sendLabel = t("chat.composer.send")
                 FilledIconButton(
-                    onClick = onSendClicked,
+                    onClick = {
+                        flushDraft()
+                        onSendClicked()
+                    },
                     enabled = !sending && !uploading
                         && (draft.isNotBlank() || pendingAttachments.isNotEmpty()),
                     colors = IconButtonDefaults.filledIconButtonColors(

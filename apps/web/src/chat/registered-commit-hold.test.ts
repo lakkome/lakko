@@ -16,30 +16,41 @@ import {
   exhaustionLine,
   failedApplyKind,
   failedRowLine,
+  registeredCommitLeaving,
   registeredCommitVerdict,
 } from "./registered-commit-hold";
 
-const HOLD = { isOwnEcho: false, sealed: 6n, after: 7n, local: 6n, latest: 7n };
+/** Row 7967 is the commit the DS registered as leaving epoch 6. */
+const REGISTERED: ReadonlyMap<bigint, number> = new Map([
+  [7n, 7967],
+  [8n, 8100],
+]);
+const HOLD = { isOwnEcho: false, rowId: 7967, local: 6n, registeredCommits: REGISTERED };
 
 describe("registeredCommitVerdict", () => {
-  it("holds the commit framed at this epoch when the DS registered the next one", () => {
+  it("holds the commit the DS registered as leaving this device's epoch", () => {
     expect(registeredCommitVerdict(HOLD)).toBe("hold");
-    expect(registeredCommitVerdict({ ...HOLD, latest: 16n })).toBe("hold");
+    expect(registeredCommitVerdict({ ...HOLD, rowId: 8100, local: 7n })).toBe("hold");
   });
 
   it.each([
     ["an own echo", { ...HOLD, isOwnEcho: true }],
-    ["no framed epoch", { ...HOLD, sealed: undefined }],
-    ["no epoch after", { ...HOLD, after: undefined }],
     ["no local epoch", { ...HOLD, local: undefined }],
-    ["no DS epoch", { ...HOLD, latest: undefined }],
-    ["not a commit", { ...HOLD, after: 6n }],
-    ["a commit of an epoch already passed", { ...HOLD, sealed: 5n, after: 6n }],
-    ["a commit beyond the next epoch", { ...HOLD, sealed: 7n, after: 8n, latest: 8n }],
-    ["the DS at this device's epoch", { ...HOLD, latest: 6n }],
-    ["the DS below this device's epoch", { ...HOLD, latest: 5n }],
+    ["a read that named no commits", { ...HOLD, registeredCommits: undefined }],
+    ["an empty list", { ...HOLD, registeredCommits: new Map<bigint, number>() }],
+    // A commit-shaped row posted through the plain publish route.
+    ["another row at the same epoch", { ...HOLD, rowId: 7966 }],
+    ["the commit of the epoch after the next", { ...HOLD, rowId: 8100 }],
+    ["a commit this device is already past", { ...HOLD, local: 7n }],
   ])("skips %s", (_name, input) => {
     expect(registeredCommitVerdict(input)).toBe("skip");
+  });
+
+  it("names the commit leaving an epoch", () => {
+    expect(registeredCommitLeaving(REGISTERED, 6n)).toBe(7967);
+    expect(registeredCommitLeaving(REGISTERED, 8n)).toBeUndefined();
+    expect(registeredCommitLeaving(undefined, 6n)).toBeUndefined();
+    expect(registeredCommitLeaving(REGISTERED, undefined)).toBeUndefined();
   });
 });
 
@@ -62,7 +73,16 @@ function tracker(start = 1_000_000) {
   };
 }
 
-const ROW = { id: 7967, ...HOLD, error: new Error("InvalidCommit(MissingProposal)") };
+const ROW = {
+  id: 7967,
+  isOwnEcho: false,
+  sealed: 6n,
+  after: 7n,
+  local: 6n,
+  latest: 8n,
+  registeredCommits: REGISTERED,
+  error: new Error("InvalidCommit(MissingProposal)"),
+};
 
 describe("RegisteredCommitHolds", () => {
   it("retries on the stated schedule and skips after the last attempt, marking the device behind", () => {
@@ -86,7 +106,11 @@ describe("RegisteredCommitHolds", () => {
     const { holds } = tracker();
     holds.recordFailure("g", ROW);
     holds.recordFailure("g", ROW);
-    expect(holds.recordFailure("g", { ...ROW, id: 8000 })).toEqual({ kind: "held", attempt: 1 });
+    const other = new Map([[7n, 8000]]);
+    expect(holds.recordFailure("g", { ...ROW, id: 8000, registeredCommits: other })).toEqual({
+      kind: "held",
+      attempt: 1,
+    });
   });
 
   it("an applied row ends its hold; a moved epoch ends the hold and the behind mark", () => {
@@ -109,7 +133,7 @@ describe("RegisteredCommitHolds", () => {
 
   it("a skipped row is logged and never held", () => {
     const { holds, lines } = tracker();
-    expect(holds.recordFailure("g", { ...ROW, latest: undefined })).toEqual({ kind: "skipped" });
+    expect(holds.recordFailure("g", { ...ROW, id: 7966, latest: undefined })).toEqual({ kind: "skipped" });
     expect(holds.heldRowId("g")).toBeUndefined();
     expect(lines).toEqual([
       {
@@ -136,7 +160,7 @@ describe("RegisteredCommitHolds", () => {
     expect(lines).toEqual([
       {
         level: "warn",
-        line: "chat row not applied: kind=refused:notOwner sealed=6 after=7 local=6 latest=7 verdict=hold attempt=1/8",
+        line: "chat row not applied: kind=refused:notOwner sealed=6 after=7 local=6 latest=8 verdict=hold attempt=1/8",
       },
       {
         level: "error",
@@ -150,10 +174,11 @@ describe("the log lines", () => {
   it("never carry a group id, a row id or the error text", () => {
     const groupIdB64 = "wUrjs9ZrtmYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     const rowId = 987654321;
+    const registeredCommits = new Map([[7n, rowId]]);
     const { holds, lines } = tracker();
     const err = new Error(`WrongEpoch in ${groupIdB64} row ${rowId}`);
     for (let i = 0; i < REGISTERED_COMMIT_MAX_ATTEMPTS; i += 1) {
-      holds.recordFailure(groupIdB64, { ...ROW, id: rowId, error: err });
+      holds.recordFailure(groupIdB64, { ...ROW, id: rowId, registeredCommits, error: err });
     }
     const all = [
       ...lines.map((l) => l.line),
@@ -168,7 +193,7 @@ describe("the log lines", () => {
       expect(line).not.toContain("WrongEpoch in");
     }
     expect(lines.at(-1)?.line).toBe(
-      "chat registered commit skipped after 8 attempts: this device is now behind in a conversation (local=6 latest=7)",
+      "chat registered commit skipped after 8 attempts: this device is now behind in a conversation (local=6 latest=8)",
     );
   });
 

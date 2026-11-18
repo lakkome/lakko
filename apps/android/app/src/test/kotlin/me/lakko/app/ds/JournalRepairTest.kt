@@ -123,13 +123,13 @@ class JournalRepairTest {
         val ports = Ports().apply { knownAbove = { epoch -> holds.repairBlocked(group, epoch) } }
         val repair = JournalRepair(this, ports)
 
-        holds.recordFailure(group, rowId = 10L, sealedEpoch = 5uL, localEpoch = 5uL)
+        holds.recordFailure(group, rowId = 10L, localEpoch = 5uL)
         assertEquals(RepairOutcome.BEHIND, repair.check(group, journal, 5uL))
         assertTrue("no Replace while held", ports.signer.calls.isEmpty())
 
         // Exhausted: the hold becomes a behind mark at epoch 5.
         repeat(me.lakko.app.chat.REGISTERED_COMMIT_MAX_ATTEMPTS - 1) {
-            holds.recordFailure(group, rowId = 10L, sealedEpoch = 5uL, localEpoch = 5uL)
+            holds.recordFailure(group, rowId = 10L, localEpoch = 5uL)
         }
         assertEquals(null, holds.hold(group))
         assertEquals(RepairOutcome.BEHIND, repair.check(group, journal, 5uL))

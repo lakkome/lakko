@@ -13,13 +13,15 @@
  * ## The rule
  *
  * Since ADR-0081 an epoch is registered on the DS only together with its
- * commit row, and a losing commit is never appended. So a failing row framed
- * at this device's epoch, that is a commit (`epochAfterMessage` one above
- * `epochOfMessage`), in a read whose `latest_epoch` is above this device's
- * epoch, is the registered commit for the next epoch. It is HELD: the batch
- * stops at it, the cursor stays before it, and it is retried on later polls
- * with a bounded backoff. Every other failing row is skipped as before, so a
- * row that can never apply still never wedges the poll.
+ * commit row, and a signed journal read names, for every epoch above the one
+ * it was signed at, the row registered with it (`commits`, read as
+ * `FetchResult.registeredCommits`). A failing row that is the registered
+ * commit leaving this device's epoch (`registeredCommits.get(local + 1)` is
+ * its id) is HELD: the batch stops at it, the cursor stays before it, and it
+ * is retried on later polls with a bounded backoff. Every other failing row is
+ * skipped as before, so a row that can never apply still never wedges the
+ * poll, and a commit-shaped row a member posted through the plain publish
+ * route is skipped at once (ADR-0091 open question 6, closed).
  *
  * After {@link REGISTERED_COMMIT_MAX_ATTEMPTS} failures the row is skipped as
  * before and the group keeps a behind mark (for ADR-0091 phase 2, and for the
@@ -51,27 +53,32 @@ export const REGISTERED_COMMIT_RETRY_DELAYS_SECS: readonly number[] = [2, 5, 15,
 export type RegisteredCommitVerdict = "hold" | "skip";
 
 /**
- * Hold or skip a row that failed to apply. `sealed` / `after`: the row's
- * framed epoch and the epoch after it (`undefined` when the bytes are not an
- * MLS message); `local`: this device's epoch before the row; `latest`: the
- * DS read's `latest_epoch` (`undefined` when it named none).
+ * The id of the row the DS registered as the commit leaving `local`, or
+ * `undefined` when the read named none (an unclaimed journal, a device at the
+ * head, a read signed above `local`).
+ */
+export function registeredCommitLeaving(
+  registeredCommits: ReadonlyMap<bigint, number> | undefined,
+  local: bigint | undefined,
+): number | undefined {
+  if (registeredCommits === undefined || local === undefined) return undefined;
+  return registeredCommits.get(local + 1n);
+}
+
+/**
+ * Hold or skip a row that failed to apply: hold exactly when it is the
+ * registered commit leaving this device's epoch. `local`: this device's epoch
+ * before the row; `registeredCommits`: the read's `commits`.
  */
 export function registeredCommitVerdict(input: {
   readonly isOwnEcho: boolean;
-  readonly sealed: bigint | undefined;
-  readonly after: bigint | undefined;
+  readonly rowId: number;
   readonly local: bigint | undefined;
-  readonly latest: bigint | undefined;
+  readonly registeredCommits: ReadonlyMap<bigint, number> | undefined;
 }): RegisteredCommitVerdict {
-  const { isOwnEcho, sealed, after, local, latest } = input;
-  if (isOwnEcho) return "skip";
-  if (sealed === undefined || after === undefined || local === undefined || latest === undefined) {
-    return "skip";
-  }
-  if (sealed !== local) return "skip";
-  if (after !== local + 1n) return "skip";
-  if (latest < local + 1n) return "skip";
-  return "hold";
+  if (input.isOwnEcho) return "skip";
+  const leaving = registeredCommitLeaving(input.registeredCommits, input.local);
+  return leaving !== undefined && leaving === input.rowId ? "hold" : "skip";
 }
 
 /** What a failed row was, from a fixed set (never the error text). */
@@ -144,7 +151,8 @@ const consoleLog: HoldLog = {
 
 interface Hold {
   readonly rowId: number;
-  readonly sealed: bigint;
+  /** The epoch the held commit leaves. */
+  readonly local: bigint;
   attempts: number;
   readonly firstFailedAtMs: number;
   nextAttemptAtMs: number;
@@ -183,7 +191,8 @@ export class RegisteredCommitHolds {
 
   /**
    * A row failed to apply. Judges it, logs the line (no identifier), and
-   * updates the hold. `held` means: stop the batch at this row.
+   * updates the hold. `held` means: stop the batch at this row. `sealed` /
+   * `after` / `latest` only feed the line.
    */
   recordFailure(
     group: string,
@@ -194,11 +203,17 @@ export class RegisteredCommitHolds {
       readonly after: bigint | undefined;
       readonly local: bigint | undefined;
       readonly latest: bigint | undefined;
+      readonly registeredCommits: ReadonlyMap<bigint, number> | undefined;
       readonly error: unknown;
     },
   ): FailureOutcome {
     const kind = failedApplyKind(row.error);
-    const verdict = registeredCommitVerdict(row);
+    const verdict = registeredCommitVerdict({
+      isOwnEcho: row.isOwnEcho,
+      rowId: row.id,
+      local: row.local,
+      registeredCommits: row.registeredCommits,
+    });
     if (verdict === "skip") {
       // A held row read again as a skip (another path moved the group) no
       // longer needs holding.
@@ -213,7 +228,7 @@ export class RegisteredCommitHolds {
         ? existing
         : {
             rowId: row.id,
-            sealed: row.sealed as bigint,
+            local: row.local as bigint,
             attempts: 0,
             firstFailedAtMs: nowMs,
             nextAttemptAtMs: nowMs,
@@ -246,7 +261,7 @@ export class RegisteredCommitHolds {
   observeEpoch(group: string, epoch: bigint | undefined): void {
     if (epoch === undefined) return;
     const hold = this.holds.get(group);
-    if (hold !== undefined && epoch > hold.sealed) this.holds.delete(group);
+    if (hold !== undefined && epoch > hold.local) this.holds.delete(group);
     const mark = this.behind.get(group);
     if (mark !== undefined && epoch > mark.epoch) this.behind.delete(group);
   }

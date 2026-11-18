@@ -57,6 +57,7 @@ import { guestPhraseKey, markGuestAccount } from "./guest-account";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
+import { recordCursorEpoch } from "../chat/cursor-epoch";
 import { saveKnownGroupIds } from "../devices/state-bundle";
 import {
   addRestoredKnownGroups,
@@ -323,6 +324,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   markRootHeld(acct, G);
   put(`lakko.backup.auto.${acct}`, JSON.stringify({ lastUploadAtMs: 1, dirtySinceMs: null, groupsKey: null }));
   writeKnockCursor(G, 7, acct);
+  recordCursorEpoch(G, 7n, acct);
   saveKnownGroupIds([G], acct);
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
@@ -703,6 +705,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.restored-marker.v1.": "account",
   "lakko.backup.restore-answer.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
+  "lakko.chat.cursor-epoch.v1:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
   "lakko.channels.publish-counter.v2.": "account",

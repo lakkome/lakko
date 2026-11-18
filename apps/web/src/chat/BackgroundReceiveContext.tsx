@@ -212,6 +212,7 @@ import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { BindingEpoch, StaleBindingError } from "../auth/binding-epoch";
 import type { SweepOutcome } from "./sweep";
 import { durableSnapshotHook, sessionAccountOf } from "./persist-hooks";
+import { errorLogTag } from "./log-tag";
 
 export interface BackgroundReceiveApi {
   /** Shared with the chat view — see `receive-coordinator.ts`. */
@@ -574,7 +575,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // chat; see `device-readmission.ts`.
     void readmitFor(entry).catch((err: unknown) => {
       // eslint-disable-next-line no-console
-      console.warn("ADR-0050 re-admission check failed", err);
+      console.warn(`ADR-0050 re-admission check failed: ${errorLogTag(err)}`);
     });
     // ADR-0073 R.7 case 2 — an accepted reset reaches every shared group
     // here, chat open or not: where this account administers the group the
@@ -1577,7 +1578,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("ADR-0050 re-admission: add not proposed", err);
+        console.warn(`ADR-0050 re-admission: add not proposed: ${errorLogTag(err)}`);
       }
     }
     for (const leafKeyB64 of plan.retire) {
@@ -1596,13 +1597,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("ADR-0050 re-admission: retire not proposed", err);
+        console.warn(`ADR-0050 re-admission: retire not proposed: ${errorLogTag(err)}`);
       }
     }
     if (proposed > 0) {
       // eslint-disable-next-line no-console
       console.info(
-        `ADR-0050 re-admission: ${plan.admit.length} to admit, ${plan.retire.length} to retire in ${entry.groupIdB64}`,
+        `ADR-0050 re-admission: ${plan.admit.length} to admit, ${plan.retire.length} to retire in a conversation`,
       );
       await sweepGroup(entry);
     }

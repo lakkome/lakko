@@ -51,6 +51,28 @@ struct SendPreviewItem: Identifiable {
     }
 }
 
+extension SendPreviewItem {
+    /// A picked or pasted photo: its picture, or why it cannot be read.
+    static func previewPhoto(_ data: Data) -> SendPreviewItem {
+        var entry = SendPreviewItem(source: .photo(data))
+        entry.thumbnail = UIImage(data: data)
+        if entry.thumbnail == nil { entry.problemKey = "attach.preview.photo_unreadable" }
+        return entry
+    }
+
+    /// A picked or pasted video: its poster, and whether it may be sent as
+    /// it is (UX section 3).
+    static func previewVideo(at url: URL) async -> SendPreviewItem {
+        var entry = SendPreviewItem(source: .video(url))
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 640, height: 640)
+        if case let (image, _)? = try? await generator.image(at: .zero) { entry.thumbnail = UIImage(cgImage: image) }
+        if !(await SendPreviewRules.inspectVideo(url)) { entry.problemKey = "attach.preview.video_refused" }
+        return entry
+    }
+}
+
 /// The pure video rule (UX section 3): MP4 with H.264, at most the cap.
 enum SendPreviewRules {
     static func videoAcceptable(isMP4: Bool, isH264: Bool, bytes: Int) -> Bool {

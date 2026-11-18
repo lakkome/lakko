@@ -7964,6 +7964,57 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0091 phase 1b — the poll's fetch half: when the group was loaded
+     * below the epoch recorded with its cursor and the DS names the commit
+     * leaving the loaded epoch at or below [after], read again from just
+     * before it (at most [REWIND_MAX_PAGES] pages, until a page reaches past
+     * [after] or the journal ends). Returns where the rows start and the rows.
+     * The epoch is read under the provider lock, briefly; nothing else here
+     * touches MLS state.
+     */
+    private suspend fun rewoundIfRolledBack(
+        groupIdHex: String,
+        record: GroupRecord,
+        after: Long,
+        first: me.lakko.app.ds.FetchResult,
+    ): Pair<Long, me.lakko.app.ds.FetchResult> {
+        val commits = first.registeredCommits ?: return after to first
+        val recorded = try {
+            GroupSettingsStore.cursorEpoch(applicationContext, currentAccountIdB64.get(), groupIdHex)
+        } catch (_: Throwable) {
+            null
+        } ?: return after to first
+        val loaded = providerLock.withLock {
+            runCatching { record.group.epoch() }.getOrNull()
+        }
+        val from = snapshotRewindFrom(after, loaded, recorded, commits) ?: return after to first
+        android.util.Log.w(FAILED_ROW_LOG_TAG, rewindLine(loaded ?: 0uL, recorded))
+        var page = chatClient.fetchGroupJournal(groupId = record.groupId, after = from, waitSecs = 0)
+        val rows = page.messages.toMutableList()
+        var pages = 1
+        while (pages < REWIND_MAX_PAGES && page.hasMore) {
+            val last = rows.lastOrNull()?.id ?: from
+            if (last >= after) break
+            page = chatClient.fetchGroupJournal(groupId = record.groupId, after = last, waitSecs = 0)
+            rows.addAll(page.messages)
+            pages += 1
+        }
+        return from to page.copy(messages = rows)
+    }
+
+    /** ADR-0091 phase 1b — record the group's epoch with its cursor. Runs in
+     *  the poll's locked apply region. */
+    private fun saveCursorEpochBestEffort(groupIdHex: String, record: GroupRecord) {
+        val acct = currentAccountIdB64.get() ?: return
+        val epoch = runCatching { record.group.epoch() }.getOrNull() ?: return
+        try {
+            GroupSettingsStore.saveCursorEpoch(applicationContext, acct, groupIdHex, epoch)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "cursor epoch not saved: ${cause.javaClass.simpleName}")
+        }
+    }
+
     /** Section 5 — save the knock position once everything read up to it is
      *  saved (the MLS snapshot with the retained requests is durable). */
     private fun saveKnockCursorBestEffort(groupIdHex: String, cursor: Long) {
@@ -10749,15 +10800,17 @@ public class ChatRepository(
             providerLock = providerLock,
             readCursor = { record.cursor },
             fetch = { after ->
-                chatClient.fetchGroupJournal(
+                val first = chatClient.fetchGroupJournal(
                     // The record caches the group id, so the network half does
                     // not read the `Group` handle at all.
                     groupId = record.groupId,
                     after = after,
                     waitSecs = waitSecs,
                 )
+                rewoundIfRolledBack(groupIdHex, record, after, first)
             },
-        ) { after, raw ->
+        ) { after, fetched ->
+            val (readFrom, raw) = fetched
             MainThreadGuard.assertOffMain("pollGroup apply")
             // ADR-0087 section 9 — a Welcome replaced this record during the
             // fetch and closed its handle: the rows are read by the new one.
@@ -10796,6 +10849,8 @@ public class ChatRepository(
                 // journal: without it an id published in another chat dropped
                 // this chat's row of the same number, unread and unrecoverable.
                 groupIdHex = groupIdHex,
+                // ADR-0091 phase 1b — below `after` only on a rewind.
+                readFrom = readFrom,
             )
             // ADR-0073 R.5 / R.8 — nothing a superseded sender posted acts:
             // dropped here, before any sink, row or call route sees it
@@ -10962,13 +11017,19 @@ public class ChatRepository(
                     groupContactRequestsFlush?.invoke()
                     persistSnapshotDurableOrThrow()
                 },
-                advance = { record.advanceCursor(result.cursor) },
+                advance = {
+                    record.advanceCursor(result.cursor)
+                    // ADR-0091 phase 1b — the epoch the snapshot just written
+                    // is at, recorded with the cursor it was written for.
+                    saveCursorEpochBestEffort(groupIdHex, record)
+                },
                 onHeld = { cause ->
+                    // No identifier: the cursor value and the cause's text are
+                    // left out.
                     android.util.Log.w(
                         "ChatRepository",
-                        "MLS snapshot persist failed — holding the journal cursor at " +
-                            "${record.cursor} so this batch is re-fetched rather than lost",
-                        cause,
+                        "MLS snapshot persist failed; holding the journal cursor so this " +
+                            "batch is re-fetched rather than lost (${cause.javaClass.simpleName})",
                     )
                 },
             )
@@ -11129,7 +11190,7 @@ public class ChatRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0050 re-admission check failed", cause)
+            android.util.Log.w("ChatRepository", "ADR-0050 re-admission check failed: ${errorLogTag(cause)}")
         }
         return GroupPollOutcome.APPLIED
     }
@@ -11939,7 +12000,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0050 re-admission: add not proposed", cause)
+                android.util.Log.w("ChatRepository", "ADR-0050 re-admission: add not proposed: ${errorLogTag(cause)}")
             }
         }
         val ownLeafHex = DsClient.pseudonymHex(identity.signaturePublicKey())
@@ -11954,13 +12015,13 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0050 re-admission: retire not proposed", cause)
+                android.util.Log.w("ChatRepository", "ADR-0050 re-admission: retire not proposed: ${errorLogTag(cause)}")
             }
         }
         if (proposed > 0) {
             android.util.Log.i(
                 "ChatRepository",
-                "ADR-0050 re-admission: ${plan.admit.size} to admit, ${plan.retire.size} to retire in $groupIdHex",
+                "ADR-0050 re-admission: ${plan.admit.size} to admit, ${plan.retire.size} to retire in a conversation",
             )
             sweepIfCommitter(groupIdHex)
         }

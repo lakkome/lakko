@@ -90,6 +90,7 @@ import {
   putDeviceGroupPending,
 } from "../device-group-snapshot-store";
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
+import { failedApplyKind, registeredCommitVerdict } from "../../chat/registered-commit-hold";
 import { BindingEpoch, StaleBindingError } from "../../auth/binding-epoch";
 import {
   admissionVerdict,
@@ -2255,6 +2256,9 @@ export function DeviceGroupSyncProvider(props: {
     // row and write as the snapshot the provider was just restored from, so it
     // never names a row that snapshot has not consumed.
     let cursor = 0;
+    /** ADR-0091 open question 7: the persisted-cursor ceiling of this run
+     *  once a registered commit failed (rule 5 of `journal-batch.ts`). */
+    let pin: number | undefined;
     try {
       cursor = startingCursor(await getDeviceGroupJournalCursor(accountIdB64));
     } catch (err) {
@@ -2591,9 +2595,24 @@ export function DeviceGroupSyncProvider(props: {
           await writeHandleSnapshot(id, accountIdB64, deviceKey, to, () => group === g);
           await saveAdmissions(accountIdB64, deviceKey);
         },
-        onApplyError: (message, err) => {
+        // ADR-0091 open question 7: the registered commit leaving this
+        // handle's epoch pins the persisted cursor before it (rule 5 of
+        // `journal-batch.ts`), as iOS and Android hold it (ADR-0081).
+        localEpoch: () => g.epoch(),
+        failedRowHeld: (message, local) =>
+          registeredCommitVerdict({
+            isOwnEcho: false,
+            rowId: message.id,
+            local,
+            registeredCommits: raw.registeredCommits,
+          }) === "hold",
+        onApplyError: (_message, err, held) => {
+          // No identifier: the failure kind and the verdict only.
           // eslint-disable-next-line no-console
-          console.warn("DeviceGroup journal row not applied", message.id, err);
+          console.warn(
+            `DeviceGroup journal row not applied: kind=${failedApplyKind(err)} ` +
+              `verdict=${held ? "hold" : "skip"}`,
+          );
         },
         onPersistError: (err) => {
           // eslint-disable-next-line no-console
@@ -2609,7 +2628,8 @@ export function DeviceGroupSyncProvider(props: {
             void reloadBehindHandle();
           }
         },
-      });
+      }, pin);
+      pin = batch.pin;
       try {
         readability?.dispose();
       } catch (err) {
@@ -2659,8 +2679,12 @@ export function DeviceGroupSyncProvider(props: {
       }
       if (batch.persisted) {
         cursor = batch.nextCursor;
-        // Past the cursor on disk now, so these ids can never come back.
-        for (const echoId of batch.skippedOwnEchoes) ownPublishedIds.delete(echoId);
+        // Past the cursor on disk now, so these ids can never come back (an
+        // id above a rule-5 pin can: it stays armed).
+        const onDisk = batch.persistedCursor ?? batch.nextCursor;
+        for (const echoId of batch.skippedOwnEchoes) {
+          if (echoId <= onDisk) ownPublishedIds.delete(echoId);
+        }
       } else if (raw.messages.length > 0) {
         // Held: give storage a moment before the same rows are fetched again.
         await sleepCancellable(2000, signal);

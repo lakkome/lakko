@@ -368,6 +368,55 @@ pub(crate) struct FetchResponse {
     /// registered for it. Absent for an unclaimed group and a mailbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_epoch: Option<u64>,
+    /// For a signed read of a claimed group journal (ADR-0091): every
+    /// registration above the epoch the read was signed at that carries a
+    /// commit row (ADR-0081), as `(epoch, id)`: row `id` is THE commit that
+    /// moves the journal from `epoch - 1` to `epoch`. Ascending by epoch, at
+    /// most [`crate::access::MAX_RETAINED_EPOCHS`] entries. Read after the
+    /// rows, so a commit row in `messages` always has its entry (a
+    /// registration and its row commit in one transaction). Absent where
+    /// `latest_epoch` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) commits: Option<Vec<RegisteredCommit>>,
+}
+
+/// One entry of [`FetchResponse::commits`].
+#[derive(Serialize)]
+pub(crate) struct RegisteredCommit {
+    /// The epoch the row registers (the epoch after the commit).
+    pub(crate) epoch: u64,
+    /// The journal row id of the commit.
+    pub(crate) id: u64,
+}
+
+/// The registrations of `owner_id` above `proof_epoch` that carry a commit
+/// row (ADR-0091), ascending by epoch.
+async fn registered_commits_above(
+    pool: &MySqlPool,
+    owner_id: &[u8; PSEUDONYM_LEN],
+    proof_epoch: u64,
+) -> Result<Vec<RegisteredCommit>, (StatusCode, String)> {
+    let rows: Vec<(u64, u64)> = sqlx::query_as(
+        "SELECT epoch, commit_message_id FROM ds_group_access \
+         WHERE group_id = ? AND epoch > ? AND commit_message_id IS NOT NULL \
+         ORDER BY epoch ASC LIMIT ?",
+    )
+    .bind(&owner_id[..])
+    .bind(proof_epoch)
+    .bind(crate::access::MAX_RETAINED_EPOCHS)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "fetch registered commits");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+    Ok(rows
+        .into_iter()
+        .map(|(epoch, id)| RegisteredCommit { epoch, id })
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -451,6 +500,7 @@ async fn fetch(
         messages,
         has_more,
         latest_epoch: None,
+        commits: None,
     }))
 }
 
@@ -592,8 +642,15 @@ pub(crate) async fn get_group(
         wait,
     )
     .await?;
-    if let crate::access::Gated::Proven { latest_epoch } = gated {
+    if let crate::access::Gated::Proven {
+        latest_epoch,
+        proof_epoch,
+    } = gated
+    {
         resp.latest_epoch = Some(latest_epoch);
+        // ADR-0091: after the rows, so every commit row returned has its
+        // entry.
+        resp.commits = Some(registered_commits_above(&state.db, &owner, proof_epoch).await?);
     }
     let mut response = Json(resp).into_response();
     response.headers_mut().insert(

@@ -476,6 +476,9 @@ public class DsClient(
             },
             hasMore = parsed.has_more,
             latestEpoch = parsed.latest_epoch?.takeIf { it >= 0 }?.toULong(),
+            registeredCommits = parsed.commits?.let { list ->
+                list.filter { it.epoch >= 0 && it.id >= 0 }.associate { it.epoch.toULong() to it.id }
+            },
         )
     }
 
@@ -1063,6 +1066,14 @@ private data class FetchWireResponse(
     val messages: List<FetchWireMessage>,
     val has_more: Boolean,
     val latest_epoch: Long? = null,
+    /** ADR-0091 — `[{epoch, id}]`, see [FetchResult.registeredCommits]. */
+    val commits: List<RegisteredCommitWire>? = null,
+)
+
+@Serializable
+private data class RegisteredCommitWire(
+    val epoch: Long,
+    val id: Long,
 )
 
 @Serializable
@@ -1185,6 +1196,13 @@ public data class FetchResult(
      *  for mailboxes. A DeviceGroup reader compares it with its own epoch to
      *  notice a fork it can never catch up from ([me.lakko.app.devices.sync.DeviceGroupFork]). */
     val latestEpoch: ULong? = null,
+    /** ADR-0091 — a signed read of a CLAIMED group journal only: the commit
+     *  row the DS registered for each epoch above the one the read was signed
+     *  at (`commits`), keyed by the epoch the row moves the journal TO. Row
+     *  `id` of entry `n` is THE commit from `n - 1` to `n` (ADR-0081); a
+     *  commit-shaped row posted through the plain publish route is never
+     *  named. `null` where [latestEpoch] is. */
+    val registeredCommits: Map<ULong, Long>? = null,
 )
 
 // =============================================================================

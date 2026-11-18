@@ -96,7 +96,7 @@ public struct ChatScreen: View {
     /// The composer field's focus. Owned here so the view model can ask for
     /// the keyboard (choosing Reply focuses the composer,
     /// `docs/ux/message-actions.md` section 3.1).
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     /// ADR-0052 / section 3.1 "tap to jump" — the row a tapped quote pointed
     /// at, highlighted for about a second and a half, then `nil`.
@@ -1682,7 +1682,8 @@ public struct ChatScreen: View {
                             guard !viewModel.uploading, !media.recState.isCapturing else { return }
                             viewModel.onSendClicked()
                         },
-                        focus: $composerFocused)
+                        focus: $composerFocused,
+                        onPasteMedia: viewModel.uploading ? nil : { openPastedMedia($0) })
                     // ADR-0047 §4 — the smiley opens the picker on Emoji.
                     Button {
                         picker = PickerRequest(mode: .compose, message: nil)
@@ -1927,23 +1928,32 @@ public struct ChatScreen: View {
                     viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_video"))
                     continue
                 }
-                var entry = SendPreviewItem(source: .video(movie.url))
-                let generator = AVAssetImageGenerator(asset: AVURLAsset(url: movie.url))
-                generator.appliesPreferredTrackTransform = true
-                generator.maximumSize = CGSize(width: 640, height: 640)
-                if case let (image, _)? = try? await generator.image(at: .zero) { entry.thumbnail = UIImage(cgImage: image) }
-                if !(await SendPreviewRules.inspectVideo(movie.url)) { entry.problemKey = "attach.preview.video_refused" }
-                out.append(entry)
+                out.append(await SendPreviewItem.previewVideo(at: movie.url))
             } else if let data = try? await item.loadTransferable(type: Data.self), !data.isEmpty {
-                var entry = SendPreviewItem(source: .photo(data))
-                entry.thumbnail = UIImage(data: data)
-                if entry.thumbnail == nil { entry.problemKey = "attach.preview.photo_unreadable" }
-                out.append(entry)
+                out.append(SendPreviewItem.previewPhoto(data))
             } else {
                 viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_photo"))
             }
         }
         return out
+    }
+
+    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video opens
+    /// the same send preview a picked one does.
+    private func openPastedMedia(_ providers: [NSItemProvider]) {
+        Task {
+            var items: [SendPreviewItem] = []
+            for loaded in await PastedMedia.load(providers) {
+                switch loaded {
+                case .photo(let data): items.append(SendPreviewItem.previewPhoto(data))
+                case .video(let url): items.append(await SendPreviewItem.previewVideo(at: url))
+                case .failed(let isVideo):
+                    viewModel.reportAttachmentProblem(
+                        .key(isVideo ? "chat.attachment.error.open_video" : "chat.attachment.error.open_photo"))
+                }
+            }
+            if !items.isEmpty { previewItems = items }
+        }
     }
 
     private static func pickStamp() -> String {

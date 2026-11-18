@@ -54,7 +54,7 @@ struct ChannelConversationScreen: View {
     @State private var previewImageData: Data?
     @State private var width: CGFloat = 360
     @State private var onScreen: Set<UInt64> = []
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     private func onEnded() {
         if let onEndedHere { onEndedHere() } else { dismiss() }
@@ -720,7 +720,10 @@ struct ChannelConversationScreen: View {
                     ComposerTextField(
                         text: $model.draft, caret: caret, disabled: model.sending,
                         onReturn: { Task { await model.sendDraft() } },
-                        focus: $composerFocused)
+                        focus: $composerFocused,
+                        onPasteMedia: model.uploading ? nil : { providers in
+                            Task { await stagePasted(providers) }
+                        })
                     Button { picker = PickerRequest(mode: .compose, item: nil) } label: {
                         composerIcon(.faceSmiling)
                     }
@@ -838,6 +841,32 @@ struct ChannelConversationScreen: View {
             }
         )
         .presentationDetents([.medium, .large])
+    }
+
+    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video is
+    /// staged as a picked one is.
+    private func stagePasted(_ providers: [NSItemProvider]) async {
+        for loaded in await PastedMedia.load(providers) {
+            let stamp = String(UUID().uuidString.prefix(8)).lowercased()
+            switch loaded {
+            case .photo(let bytes):
+                let prepared = await Task.detached(priority: .userInitiated) {
+                    PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
+                }.value
+                if let prepared {
+                    await model.stagePrepared(prepared)
+                } else {
+                    await model.stageAttachment(
+                        bytes: bytes, mime: PhotoVideoPrep.sniffInlineImageMime(bytes), name: "file-\(stamp)")
+                }
+            case .video(let url):
+                let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp)
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                if let prepared { await model.stagePrepared(prepared) }
+            case .failed:
+                continue
+            }
+        }
     }
 
     private func stagePicked(_ item: PhotosPickerItem) async {

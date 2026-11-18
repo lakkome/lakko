@@ -1508,16 +1508,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     )
                 } catch {
                     let own = DeviceGroupJournalCursor.isOwnMessageEcho(error)
+                    let verdict = FailedRowVerdict.of(
+                        isOwnEcho: own, rowId: message.id, localEpoch: epochBeforeRow,
+                        registeredCommits: result.registeredCommits)
                     if own {
                         ownRows += 1
                     } else {
-                        NSLog("DeviceGroupSync processIncomingVerifyingRemovals failed: %@", error.localizedDescription)
+                        // ADR-0091: the failure kind and the verdict only, no
+                        // identifier and no error text.
+                        NSLog("DeviceGroupSync row not applied: kind=%@ verdict=%@",
+                              FailedApplyKind.of(error), verdict == .hold ? "hold" : "pass")
                     }
-                    durableCursor.refused(message.id, verdict: FailedRowVerdict.of(
-                        isOwnEcho: own,
-                        sealedEpoch: epochOfMessage(bytes: entry.message),
-                        epochAfter: epochAfterMessage(bytes: entry.message),
-                        localEpoch: epochBeforeRow))
+                    durableCursor.refused(message.id, verdict: verdict)
                     continue
                 }
                 durableCursor.passed(message.id)

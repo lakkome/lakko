@@ -437,6 +437,9 @@ public class ChatClient(
          * with the group whose journal assigned it.
          */
         groupIdHex: String,
+        /** Where [raw] starts: below [after] only on an ADR-0091 phase-1b
+         *  rewind; the cursor returned is never below [after]. */
+        readFrom: Long = after,
     ): PollMessagesResult {
         val events = mutableListOf<IncomingChatEvent>()
         // ADR-0091 phase 1 — a failed row is classified before it is skipped:
@@ -449,7 +452,9 @@ public class ChatClient(
             rows = raw.messages,
             after = after,
             latestEpoch = raw.latestEpoch,
+            registeredCommits = raw.registeredCommits,
             holds = holds,
+            readFrom = readFrom,
             // Drop our own echoes — the DS doesn't dedupe and OpenMLS can't
             // decrypt them on the sender side at the same epoch.
             //

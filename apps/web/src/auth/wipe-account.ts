@@ -87,6 +87,7 @@ import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
+import { clearCursorEpochsForAccount } from "../chat/cursor-epoch";
 import { deleteMembershipEndRow } from "../chat/membership-end-idb";
 import { deleteGroupClosedRow } from "../chat/group-closed-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
@@ -448,6 +449,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "backup-restore-owed", run: () => clearBackupRestoreOwed(accountIdB64) },
     { name: "backup-restored-marker", run: () => clearRestoreMarker(accountIdB64) },
     { name: "knock-cursors", run: () => clearKnockCursorsForAccount(accountIdB64) },
+    { name: "cursor-epochs", run: () => clearCursorEpochsForAccount(accountIdB64) },
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },
     { name: "unconfirmed-foundings", run: () => clearUnconfirmedFoundingsForAccount(accountIdB64) },

@@ -385,6 +385,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
             editRequest={() => props.contentEdit?.() ?? null}
             clearEditRequest={() => props.clearContentEdit?.()}
             sendFiles={sendPreviewFiles}
+            acceptPaste={() => true}
             sendPoll={async (d) => {
               const body = await pollBodyOf({ ...d, anonymous: false }, [], Date.now());
               await publishContent({ kind: "poll", poll: { body, authorSig: null } });
@@ -420,6 +421,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
         </Show>
         <textarea
           ref={field}
+          data-paste-files=""
           class="lk-composer-input"
           rows={1}
           placeholder={t("channels.compose.placeholder")}
