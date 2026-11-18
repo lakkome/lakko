@@ -469,7 +469,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // push wakes and subscriptions.
                 .Mailbox, .CallRelay, .PushWake,
                 // G-56 the recovery row v3 and the own binding verdict.
-                .RecoveryPayload:
+                .RecoveryPayload,
+                // docs/ux/donations.md section 3 — a donation statement.
+                .Donation:
                 return nil
             }
         }

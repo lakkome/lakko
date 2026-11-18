@@ -60,16 +60,24 @@ options:
 #     calls refuse with a clear message.
 #       Debug:   wss://test.lakko.me/sfu
 #       Release: empty
+#   * LAKKO_DONATIONS_KEY -> Info.plist `LakkoDonationsKey` (`DonationsPin`,
+#     docs/ux/donations.md section 4.1). The public half of the offline
+#     donations key, base64url without padding (32 bytes), as
+#     `just gen-donations-key` prints it. EMPTY -> the donations screen shows
+#     "No way to donate is available" and asks the server nothing. Never
+#     taken from the server.
 settings:
   configs:
     Debug:
       LAKKO_API_BASE_URL: "https://test.lakko.me/native"
       LAKKO_SFU_URL: "wss://test.lakko.me/sfu"
       LAKKO_WEB_ORIGIN: "https://test.lakko.me"
+      LAKKO_DONATIONS_KEY: ""
     Release:
       LAKKO_API_BASE_URL: ""
       LAKKO_SFU_URL: ""
       LAKKO_WEB_ORIGIN: "https://lakko.me"
+      LAKKO_DONATIONS_KEY: ""
 
 # Single iOS app target — `Lakko`. The SwiftUI source lives at
 # `apps/ios/Lakko/` (committed); the `Info.plist` is
@@ -125,6 +133,9 @@ targets:
         # under (`ApiEndpoints.webOrigin`): the host the same stack's web
         # client and app-link association live on. Debug: the test stack.
         LakkoWebOrigin: "$(LAKKO_WEB_ORIGIN)"
+        # docs/ux/donations.md section 4.1 — the pinned donations key
+        # (`DonationsPin`); empty by default (see the settings block above).
+        LakkoDonationsKey: "$(LAKKO_DONATIONS_KEY)"
         # `docs/ux/desktop.md` section 7.1 — the app's own scheme. Safari
         # never hands a link to the app while the person stays on the same
         # site, so "Open in the app" on a link's web page opens

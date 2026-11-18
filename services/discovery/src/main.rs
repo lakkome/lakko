@@ -251,8 +251,9 @@ pub(crate) struct AppState {
     /// ADR-0080 — the city database `GET /discovery/locate` reads. Knows
     /// nothing when `LAKKO_DISCOVERY_CITY_DB` is unset or unreadable.
     pub(crate) city_lookup: Arc<dyn locate::CityLookup>,
-    /// `docs/ux/donations.md` - the ways to donate, read once from
-    /// `LAKKO_DISCOVERY_DONATIONS_FILE`; empty when unset or refused.
+    /// `docs/ux/donations.md` - the signed ways to donate, read once from the
+    /// `lakko-donations` credential or `LAKKO_DISCOVERY_DONATIONS_FILE`;
+    /// empty when absent or refused.
     pub(crate) donations: Arc<donate::Donations>,
 }
 
@@ -1017,6 +1018,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn donate_routes_follow_the_country_rule() {
+        use base64::Engine as _;
         let lookup = FakeCities(vec![
             ("203.0.113.7".parse().unwrap(), almere()),
             (
@@ -1034,12 +1036,7 @@ mod tests {
             },
             Arc::new(lookup),
         );
-        state.donations = donate::test_donations(
-            r#"{"methods": [
-                {"id": "sbp", "kind": "sbp", "qr_file": "/q.png", "phone": "+7 900", "countries": "RU"},
-                {"id": "bmc", "kind": "bmc", "link": "https://buymeacoffee.com/x", "countries": "!RU"}
-            ]}"#,
-        );
+        state.donations = donate::test_donations();
         let app = build_app(state);
         let send = |method: &str, uri: &str, ip: &str, body: &str| {
             Request::builder()
@@ -1068,7 +1065,8 @@ mod tests {
             body.contains(r#""id":"sbp""#) && !body.contains("bmc"),
             "{body}"
         );
-        assert!(!body.contains("+7 900"), "{body}");
+        assert!(body.contains(r#""statement_b64":""#), "{body}");
+        assert!(!body.contains("phone"), "{body}");
 
         let (_, body) = text(
             app.clone()
@@ -1095,7 +1093,18 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("+7 900"), "{body}");
+        // The answer is the signed phone statement, which verifies under the
+        // fixture key for this method.
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let wire = base64::engine::general_purpose::STANDARD
+            .decode(answer["statement_b64"].as_str().unwrap())
+            .unwrap();
+        let key =
+            lakko_crypto::signing::SigningKey::from_seed(&donate::TEST_KEY_SEED).verifying_key();
+        assert_eq!(
+            lakko_attest::verify_donation_phone(&wire, &key, "sbp").unwrap(),
+            "+7 900"
+        );
 
         for (ip, body, want) in [
             (

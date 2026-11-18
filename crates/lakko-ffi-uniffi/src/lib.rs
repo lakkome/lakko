@@ -54,6 +54,7 @@ pub mod device_card;
 pub mod device_link;
 pub mod discover;
 pub mod discovery;
+pub mod donation;
 pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;
@@ -810,6 +811,19 @@ pub enum FfiError {
     /// means the keys were not handed over.
     #[error("{0}")]
     RecoveryPayload(String),
+
+    // ------------------------------------------------------------------
+    // Donation statements (`docs/ux/donations.md` section 3, G-57).
+    // APPENDED last: a `flat_error` lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// A donation method or phone statement was refused (`donation.rs`). The
+    /// message is `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_attest::DonationError` (`bad-length`, `bad-version`,
+    /// `bad-kind`, `bad-field`, `kind-mismatch`, `bad-signature`,
+    /// `id-mismatch`) or `bad-key` when the pinned donations key is not an
+    /// Ed25519 key. The screen shows nothing for a refused statement.
+    #[error("{0}")]
+    Donation(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

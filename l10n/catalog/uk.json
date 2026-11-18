@@ -5649,6 +5649,10 @@
       "text": "Показати",
       "status": "machine"
     },
+    "donate.phone_hidden": {
+      "text": "Номер телефону приховано",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Підтримати Lakko",
       "status": "machine"

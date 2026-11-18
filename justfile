@@ -1066,6 +1066,24 @@ mint-release-manifest latest min_supported:
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
 
+# docs/ux/donations.md section 3 - generate the OFFLINE donations signing
+# key. Writes the 32-byte private seed to donations-signing-key.seed (mode
+# 0600, keep it OFFLINE, never commit) and PRINTS the base64url public key
+# for the web build (VITE_LAKKO_DONATIONS_KEY) and discovery's optional
+# startup check (LAKKO_DISCOVERY_DONATIONS_KEY). Refuses to overwrite a seed.
+gen-donations-key:
+    cargo run -q -p lakko-donations-tool -- keygen --out donations-signing-key.seed
+
+# docs/ux/donations.md section 3 - sign the plain donation methods file
+# (id, kind, link, qr_file, phone, coin, network, address, countries) into
+# the signed file discovery loads as the `lakko-donations` credential.
+# Install it as root 0600 at /etc/lakko/credstore/lakko-donations.json and
+# restart discovery (infra/README.md, "Donation methods").
+# Example: just sign-donations donations.json
+sign-donations input out="donations.signed.json":
+    cargo run -q -p lakko-donations-tool -- \
+        sign --in {{input}} --key donations-signing-key.seed --out {{out}}
+
 # ADR-0026 - put the anti-censorship tunnel on the test stack: obfs-proxy
 # alone, no other service restarted, and a freshly signed bootstrap config.
 deploy-test-obfs:

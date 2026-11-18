@@ -85,6 +85,7 @@ pub mod device_card;
 pub mod device_link;
 pub mod discover;
 pub mod discovery;
+pub mod donation;
 pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;

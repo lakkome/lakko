@@ -5649,6 +5649,10 @@
       "text": "Göster",
       "status": "machine"
     },
+    "donate.phone_hidden": {
+      "text": "Telefon numarası gizli",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Lakko'yu destekle",
       "status": "machine"

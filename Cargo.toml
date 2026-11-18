@@ -61,6 +61,7 @@ members = [
     "services/witness",
     "services/transport-rendezvous",
     "tools/release-manifest",
+    "tools/donations",
     "tools/bootstrap-config",
     "tools/l10n",
 ]

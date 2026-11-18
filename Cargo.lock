@@ -2712,6 +2712,7 @@ name = "lakko-attest"
 version = "0.0.0"
 dependencies = [
  "lakko-crypto",
+ "proptest",
  "thiserror 1.0.69",
 ]
 
@@ -2878,6 +2879,17 @@ dependencies = [
  "thiserror 1.0.69",
  "unicode-normalization",
  "voprf",
+]
+
+[[package]]
+name = "lakko-donations-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "lakko-attest",
+ "lakko-crypto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

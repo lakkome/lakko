@@ -5649,6 +5649,10 @@
       "text": "दिखाएँ",
       "status": "machine"
     },
+    "donate.phone_hidden": {
+      "text": "फ़ोन नंबर छिपा है",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Lakko का समर्थन करें",
       "status": "machine"

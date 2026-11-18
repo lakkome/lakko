@@ -221,6 +221,16 @@ sudo chmod 640 /etc/lakko/secrets/*
 
 ### 10. Install systemd units
 
+Discovery loads the signed donations file as a systemd credential, and systemd
+fails a unit whose `LoadCredential=` source is missing, so create the empty
+placeholder first ("Donation methods" below replaces it):
+
+```bash
+sudo install -d -m 700 -o root -g root /etc/lakko/credstore
+sudo sh -c 'umask 077; f=/etc/lakko/credstore/lakko-donations.json; \
+  [ -f "$f" ] || printf "{\"methods\":[]}\n" > "$f"'
+```
+
 ```bash
 cd ~/lakko
 sudo cp infra/systemd/*.service infra/systemd/lakko.target /etc/systemd/system/
@@ -439,6 +449,53 @@ scp release-manifest.bin lakkome@lakko.me:/var/www/lakko-release/lakko-release.b
 ```
 
 Served **immediately** — no service restart, no nginx reload. Clients fetch the raw blob, verify the Ed25519 signature against the pinned key, and render the notice; an **absent** manifest (before the first publish, or a 404) means **no notice** (fail-open). `latest` is the newest published release number; `min_supported` is the oldest release the backend still accepts (a client below it is told it must update). `no-store` means a freshly-published manifest is picked up on the next fetch.
+
+### Donation methods (`docs/ux/donations.md` section 3)
+
+The donations page shows only methods signed **offline** by a dedicated
+donations key: each payment link, QR image hash, crypto address and phone
+number is an Ed25519 statement (`lakko-attest`'s `donation` module) that the web
+client verifies against the key pinned into its build. The server can hide a
+method; it cannot alter one. Discovery reads the signed file from the systemd
+credential `lakko-donations` (source `/etc/lakko/credstore/lakko-donations.json`,
+root:root 0600; systemd hands the service a private copy in
+`$CREDENTIALS_DIRECTORY`). The country rule (`countries`) is the only unsigned
+part.
+
+**Generate the key - once, offline:**
+
+```bash
+just gen-donations-key
+# -> donations-signing-key.seed (0600, keep OFFLINE, never commit) and the
+#    base64url public key: pin it in the web build (VITE_LAKKO_DONATIONS_KEY)
+#    and, optionally, in /etc/lakko/lakko.env as LAKKO_DISCOVERY_DONATIONS_KEY
+#    (discovery then refuses a file whose signatures do not verify)
+```
+
+**Sign and install - whenever a method changes:**
+
+```bash
+# donations.json: {"methods":[{"id","kind": sbp|revolut|bmc|crypto,"link",
+#   "qr_file" (path relative to the file),"phone","countries","coin","network","address"}]}
+just sign-donations donations.json        # -> donations.signed.json (0600)
+scp donations.signed.json lakkome@lakko.me:/tmp/
+ssh lakkome@lakko.me 'sudo install -m 600 -o root -g root /tmp/donations.signed.json \
+  /etc/lakko/credstore/lakko-donations.json && rm /tmp/donations.signed.json && \
+  sudo systemctl restart lakko-svc-discovery'
+```
+
+The two `sudo` commands are not in the deploy sudoers entry; run them in an
+interactive session. A file discovery refuses (bad JSON, a statement that does
+not match its entry, a QR that does not hash to the signed value, a bad
+signature when the key is set) leaves the page empty and logs one warning
+naming only the method's position. QR images are PNG, at most 128 KiB; the
+signed file is at most 1 MiB.
+
+**At rest the file is plain.** Ubuntu 22.04 has systemd 249;
+`LoadCredentialEncrypted=` needs 250. After an OS upgrade, encrypt it with
+`systemd-creds encrypt --name=lakko-donations donations.signed.json
+/etc/lakko/credstore.encrypted/lakko-donations.cred` and switch the unit line
+as its comment says.
 
 ### Translation bundle (ADR-0061)
 

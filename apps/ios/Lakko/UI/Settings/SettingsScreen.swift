@@ -20,8 +20,6 @@ struct SettingsScreen: View {
     @ObservedObject private var l10n = Localization.shared
     /// ADR-0080 — the "Show my city to my other devices" switch.
     @ObservedObject private var deviceCards = DeviceCardCenter.shared
-    /// docs/ux/donations.md — Support Lakko opens the web page in the browser.
-    @Environment(\.openURL) private var openURL
     /// The existing delete-account flow (auth `DELETE /account`, the passkey
     /// action ceremony on a 403, the discovery purge, then the local wipe)
     /// lives on ``PasskeysViewModel``; the danger zone drives that same
@@ -336,22 +334,11 @@ struct SettingsScreen: View {
                     Text("AGPL-3.0-or-later")
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
-                // docs/ux/donations.md — opens `<web origin>/donations` in
-                // the system browser (maintainer decision, 2026-11-15).
-                Button {
-                    let origin = ApiEndpoints.webOrigin.hasSuffix("/")
-                        ? String(ApiEndpoints.webOrigin.dropLast()) : ApiEndpoints.webOrigin
-                    if let url = URL(string: origin + "/donations") { openURL(url) }
-                } label: {
-                    HStack {
-                        Label(l10n.t("settings.about.support"), icon: .heart)
-                            .foregroundStyle(Color.lakkoText)
-                        Spacer()
-                        LkIconView(.arrowUpRight, size: 14, relativeTo: .footnote)
-                            .foregroundStyle(Color.lakkoTextMuted)
-                    }
+                // docs/ux/donations.md section 4 — the app's own donations
+                // screen (maintainer decision, 2026-11-16).
+                row(l10n.t("settings.about.support"), icon: .heart) {
+                    onOpen(.donations)
                 }
-                .buttonStyle(.plain)
                 // ADR-0080 — the city database's attribution (CC BY 4.0).
                 Text(l10n.t("settings.about.city_data"))
                     .font(.footnote)

@@ -95,6 +95,15 @@ set -euo pipefail
 cd /tmp/lakko-test-deploy
 if [[ $SKIP_BACKEND != 1 ]]; then
   install -m 644 lakko-test-*.service lakko-test.target /etc/systemd/system/
+  # docs/ux/donations.md: discovery loads the signed donations file as a
+  # systemd credential, and a missing source fails the unit; an absent file
+  # becomes the empty list (the page shows no method) until the operator
+  # installs a signed one (README.md, "Donation methods").
+  install -d -m 700 -o root -g root /etc/lakko-test/credstore
+  if [[ ! -f /etc/lakko-test/credstore/lakko-donations.json ]]; then
+    printf '{"methods":[]}\n' > /etc/lakko-test/credstore/lakko-donations.json
+    chmod 600 /etc/lakko-test/credstore/lakko-donations.json
+  fi
   install -m 755 lakko-svc-* /opt/lakko-test/bin/
   systemctl daemon-reload
   systemctl enable lakko-test.target lakko-test-*.service >/dev/null 2>&1

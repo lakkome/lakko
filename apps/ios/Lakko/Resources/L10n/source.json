@@ -6019,6 +6019,10 @@
       "text": "Show",
       "comment": "Button next to a hidden phone number on the donations page; shows the number."
     },
+    "donate.phone_hidden": {
+      "text": "Phone number hidden",
+      "comment": "Read by the screen reader in place of the masked phone number on the donations screen, before the person taps Show."
+    },
     "donate.title": {
       "text": "Support Lakko",
       "comment": "Heading of the donations page."

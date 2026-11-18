@@ -5769,6 +5769,10 @@
       "text": "Показать",
       "status": "machine"
     },
+    "donate.phone_hidden": {
+      "text": "Номер телефона скрыт",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Поддержать Lakko",
       "status": "machine"

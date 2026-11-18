@@ -6,8 +6,12 @@
  * Public: signed in or not, the same page. Opened from Settings > About on
  * web and in the desktop app; iOS and Android open this address in the
  * system browser.
+ *
+ * Every method, QR image and phone number shown here verified against the
+ * donations key pinned into this build (`src/donate/client.ts`); a build with
+ * no pinned key, or an answer where nothing verifies, shows `donate.none`.
  */
-import { createResource, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
+import { createResource, createSignal, For, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { PublicLayout } from "../ui/PublicLayout";
@@ -17,8 +21,8 @@ import { isDesktop } from "../platform";
 import { openHostUrl } from "../platform/host";
 import { paths } from "./paths";
 import {
-  donateQrUrl,
   fetchDonateMethods,
+  fetchDonateQr,
   MASKED_PHONE,
   revealDonatePhone,
   type DonateMethod,
@@ -94,7 +98,7 @@ function PhoneRow(props: { readonly id: string }): JSX.Element {
   return (
     <div class="lk-donate-phone">
       <div class="lk-donate-phone-row">
-        <span class="lk-donate-mono" ref={field}>
+        <span class="lk-donate-mono" ref={field} aria-label={phone() === null ? t("donate.phone_hidden") : undefined}>
           {phone() ?? MASKED_PHONE}
         </span>
         <Show
@@ -117,6 +121,28 @@ function PhoneRow(props: { readonly id: string }): JSX.Element {
   );
 }
 
+/** A method's QR image, shown only once its bytes hash to the signed
+ *  SHA-256; on a mismatch or a failure nothing is shown and the rest of the
+ *  card stays. */
+function VerifiedQr(props: { readonly id: string; readonly sha256: Uint8Array }): JSX.Element {
+  const [url, setUrl] = createSignal<string | null>(null);
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+    const u = url();
+    if (u !== null) URL.revokeObjectURL(u);
+  });
+  void fetchDonateQr(props.id, props.sha256).then((blob) => {
+    if (!alive || blob === null) return;
+    setUrl(URL.createObjectURL(blob));
+  });
+  return (
+    <Show when={url()}>
+      {(u) => <img class="lk-donate-qr" src={u()} alt={t("common.qr_code")} width="200" height="200" />}
+    </Show>
+  );
+}
+
 function PaymentCard(props: { readonly method: DonateMethod }): JSX.Element {
   const m = (): DonateMethod => props.method;
   const name = (): string => (m().kind === "crypto" ? "" : METHOD_NAMES[m().kind as Exclude<DonateMethod["kind"], "crypto">]);
@@ -124,8 +150,8 @@ function PaymentCard(props: { readonly method: DonateMethod }): JSX.Element {
     <section class="lk-card lk-donate-card">
       <h2>{name()}</h2>
       <p class="lk-donate-sub">{m().kind === "sbp" ? t("donate.for_russia") : t("donate.worldwide")}</p>
-      <Show when={m().hasQr}>
-        <img class="lk-donate-qr" src={donateQrUrl(m().id)} alt={t("common.qr_code")} width="200" height="200" />
+      <Show when={m().qrSha256}>
+        {(sha) => <VerifiedQr id={m().id} sha256={sha()} />}
       </Show>
       <Show when={m().link}>
         {(link) => (

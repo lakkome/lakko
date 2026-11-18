@@ -1312,6 +1312,8 @@ enum TabRoute: Hashable {
     /// that holds the account's keys.
     case password
     case antiCensorship
+    /// Settings > About > Support Lakko (`docs/ux/donations.md` section 4).
+    case donations
     /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
     case channelsIShare
     /// Settings > Language (ADR-0061).
@@ -2655,6 +2657,8 @@ private struct SessionRoot: View, Equatable {
             PasswordSettingsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .donations:
+            DonationsScreen()
         case .channelsIShare:
             ChannelsIShareScreen(
                 hub: chatRepository.sharedChannels,

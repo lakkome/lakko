@@ -3407,3 +3407,48 @@ account's lineage seed, which every device of the account holds.
   restored after a rotation binds under the conversation key and opens the
   same DeviceGroup and PublisherGroups as its siblings.
 
+
+### G-57: Signed donation methods: what the signature does not stop
+
+- Status: open, by design for the parts below; the signing itself is
+  built (2026-11-16) in `lakko-attest` (`donation` module), the wasm and
+  UniFFI surfaces (`verifyDonationMethod`, `verifyDonationPhone`),
+  `tools/donations`,
+  `services/discovery` (`donate.rs`) and the systemd units, host-tested
+  only, not deployed. UX `docs/ux/donations.md` section 3.
+- What changed: every donation method (payment link, SHA-256 of the QR
+  image, crypto coin / network / address) and every phone number is an
+  Ed25519 statement signed offline by a dedicated donations key that is
+  never on a server. The web client shows only statements that verify
+  against the key pinned into its build, so a server operator (or an
+  attacker holding the server) can no longer show their own address or
+  link on the donations page. Discovery reads the signed file as a
+  systemd credential (root 0600 at rest; plain, since Ubuntu 22.04's
+  systemd 249 has no `LoadCredentialEncrypted=`).
+- Residual 1, the main one: the web client and its pinned key are served
+  by the same server. A takeover that also replaces the web bundle ships a
+  bundle with another key, or none, and the check passes in a browser.
+  The desktop app serves the web build bundled in the app, so there the
+  check holds. On iOS and Android the Settings row opens a native screen
+  (2026-11-16) that verifies against a key built into the app
+  (Info.plist `LakkoDonationsKey` / `BuildConfig.LAKKO_DONATIONS_KEY`,
+  UX `docs/ux/donations.md` section 4; unit-tested only), so the residual
+  is closed there in code; it stays for a visitor who opens
+  `/donations` in a browser.
+- Residual 2: the server chooses which methods a country sees (the
+  `countries` rule is unsigned), so it can hide any method, and it can
+  serve an older statement signed for the same id (a retired address,
+  link or phone number). A statement carries `signed_at_unix_millis` but
+  no expiry, and no client compares it against anything. Retiring an
+  address safely means signing nothing more for that id is not enough:
+  the maintainer must treat every address ever signed as one that may be
+  shown again, or rotate the donations key (which invalidates every
+  earlier statement once the web build pins the new key).
+- Residual 3: anyone holding the offline seed file can sign methods. The
+  seed is written mode 0600 by `just gen-donations-key` and is never on a
+  server or in the repository (`.gitignore`), but its custody is the
+  maintainer's.
+- Closes for residual 1 on iOS and Android when the native screens ship
+  and verify statements against the key built into the app (the desktop
+  app's bundled build already holds); a browser visit to
+  `lakko.me/donations` keeps the residual.

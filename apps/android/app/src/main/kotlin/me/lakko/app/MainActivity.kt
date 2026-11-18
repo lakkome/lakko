@@ -2912,6 +2912,7 @@ private fun SessionRoot(
                         onOpenChannelsIShare = { navController.navigate(Routes.CHANNELS_I_SHARE) },
                         onOpenLanguage = { navController.navigate(Routes.LANGUAGE) },
                         onOpenTextSize = { navController.navigate(Routes.TEXT_SIZE) },
+                        onOpenSupport = { navController.navigate(Routes.DONATIONS) },
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
@@ -3408,6 +3409,9 @@ private fun SessionRoot(
                 composable(Routes.TEXT_SIZE) {
                     me.lakko.app.ui.settings.TextSizeScreen(onBack = { navController.popBackStack() })
                 }
+                composable(Routes.DONATIONS) {
+                    me.lakko.app.ui.donate.DonationsScreen(onBack = { navController.popBackStack() })
+                }
                 composable(Routes.ANTI_CENSORSHIP) {
                     AntiCensorshipSettingsScreen(
                         manager = antiCensorship,
@@ -3633,6 +3637,7 @@ private object Routes {
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"
     const val TEXT_SIZE = "settings/text-size"
+    const val DONATIONS = "settings/donations"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
     const val SAVED = "chats/saved"

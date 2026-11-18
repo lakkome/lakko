@@ -550,6 +550,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // G-56 - a recovery payload v3 or row the core refused; not a
                 // membership refusal.
                 is FfiException.RecoveryPayload,
+                // docs/ux/donations.md section 3 - a donation statement that
+                // does not verify; not a membership refusal.
+                is FfiException.Donation,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

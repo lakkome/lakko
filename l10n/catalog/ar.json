@@ -5649,6 +5649,10 @@
       "text": "إظهار",
       "status": "machine"
     },
+    "donate.phone_hidden": {
+      "text": "رقم الهاتف مخفي",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "ادعم Lakko",
       "status": "machine"

@@ -5649,6 +5649,10 @@
       "text": "הצג",
       "status": "machine"
     },
+    "donate.phone_hidden": {
+      "text": "מספר הטלפון מוסתר",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "תמכו ב-Lakko",
       "status": "machine"

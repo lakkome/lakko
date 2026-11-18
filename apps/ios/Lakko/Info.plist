@@ -81,6 +81,8 @@
 	<string></string>
 	<key>LakkoCurrentRelease</key>
 	<string>1</string>
+	<key>LakkoDonationsKey</key>
+	<string>$(LAKKO_DONATIONS_KEY)</string>
 	<key>LakkoGifProxyUrl</key>
 	<string></string>
 	<key>LakkoReleaseCheckDevOverride</key>

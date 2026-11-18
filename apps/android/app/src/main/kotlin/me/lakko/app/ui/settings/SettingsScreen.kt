@@ -101,6 +101,8 @@ public fun SettingsScreen(
     /** reactions-and-emoji D3 / D4 — Appearance > Quick reaction: save the
      *  account's quick reaction (synced to its other devices). */
     onSetQuickReaction: (String) -> Unit = {},
+    /** docs/ux/donations.md section 4 — About > Support Lakko. */
+    onOpenSupport: () -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -299,10 +301,8 @@ public fun SettingsScreen(
                 icon = R.drawable.ic_lk_info_circle,
             )
             TranslationsUpdatedRow()
-            // docs/ux/donations.md - the donations page opens in the browser.
-            SettingsRow(t("settings.about.support"), R.drawable.ic_lk_heart, {
-                openDonationsPage(context)
-            })
+            // docs/ux/donations.md section 4 - the app's own donations screen.
+            SettingsRow(t("settings.about.support"), R.drawable.ic_lk_heart, onOpenSupport)
             InfoRow(
                 title = t("settings.about.licence"),
                 value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
@@ -493,17 +493,5 @@ private fun openAppNotificationSettings(context: Context) {
         context.startActivity(details)
     } catch (_: ActivityNotFoundException) {
         // Nothing further to offer; the notice still says what is wrong.
-    }
-}
-
-/** docs/ux/donations.md: Support Lakko opens `<web origin>/donations` in
- *  the system browser (maintainer decision, 2026-11-15). */
-private fun openDonationsPage(context: Context) {
-    val url = me.lakko.app.config.ApiEndpoints.webOrigin.trimEnd('/') + "/donations"
-    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
-    try {
-        context.startActivity(intent)
-    } catch (_: ActivityNotFoundException) {
-        // No browser on the device; the row does nothing.
     }
 }

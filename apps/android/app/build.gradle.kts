@@ -308,6 +308,16 @@ android {
             "\"${project.findProperty("lakko.translation.url") as String? ?: "https://lakko.me/.well-known/lakko-translations"}\"",
         )
 
+        // docs/ux/donations.md section 4.1 — `LAKKO_DONATIONS_KEY`: base64url
+        // (no-pad) of the 32-byte Ed25519 key that signs the ways to donate
+        // (a dedicated offline key). Empty when unset → the Support Lakko
+        // screen shows no method and asks the server nothing.
+        buildConfigField(
+            "String",
+            "LAKKO_DONATIONS_KEY",
+            "\"${project.findProperty("lakko.donations.key") as String? ?: ""}\"",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a

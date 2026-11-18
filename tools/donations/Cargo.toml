@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-donations-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Offline tool (docs/ux/donations.md section 3) - generate the donations signing key and sign the donation methods file discovery serves."
+
+[[bin]]
+name = "lakko-donations"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-attest.workspace = true
+lakko-crypto.workspace = true
+base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
