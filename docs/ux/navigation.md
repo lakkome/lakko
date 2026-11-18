@@ -66,7 +66,9 @@ user is on lives in the browser's session history instead, so back and
 forward move between screens and a reload keeps the screen. A link opened
 from outside (`/i/`, `/c/`, `/g/`, a notification) is read once on entry and
 cleared from the address bar before anything renders
-(`apps/web/src/routes/origin-history.ts`).
+(`apps/web/src/routes/origin-history.ts`). One exception: a public page made
+to be shared, which carries nothing private, shows its own address exactly
+(`/donations`; never with a query or fragment).
 
 ## 2. The conversation list
 

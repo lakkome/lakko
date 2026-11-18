@@ -38,7 +38,9 @@ Entry points:
 
 - **The address `lakko.me/donations`.** Public: works signed in or signed
   out, shareable. It is the address the previous app used, so old links keep
-  working.
+  working. On web it is the one page whose address bar shows its path, opened
+  directly or from Settings (every other page shows the origin only,
+  `navigation.md` section 1), so the person can copy the link from it.
 - **Settings > About > Support Lakko** on web and in the desktop app: opens
   the same page inside the app.
 - **Settings > About > Support Lakko** on iOS and Android: opens the app's
