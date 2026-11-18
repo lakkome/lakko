@@ -36,6 +36,7 @@
  * rotated away from (the mid-call rekey, ADR-0029, fires when the poll that
  * applies the commit drains the group's MLS lock).
  */
+import { installHandoverPublisher } from "../attach/admission-hook";
 import {
   createContext,
   createEffect,
@@ -171,15 +172,11 @@ import {
 } from "./continuity-runtime";
 import { NO_CLAIMS } from "./group-closed-store";
 import { messagesToResend, resendParts, resendRemaining } from "./reset-repair";
-import {
-  composeEnvelope,
-  composeForwardEnvelope,
-  composeReplyEnvelope,
-  composeResendEnvelope,
-} from "./attachments";
+import { composeResendEnvelope } from "./attachments";
 import { heldResendPredicate } from "./resend-receive";
 import { flushVerdict, isDeadSession, replyForSend, sendRoute } from "./held-send";
 import {
+  composeHeldEnvelope,
   heldSends,
   notifyHeldFlushed,
   persistHeldSends,
@@ -319,6 +316,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
+  // ADR-0090 section 3.9 — the quiet send the open-items hand-over uses after
+  // any commit of this device that added a leaf (`attach/admission-hook.ts`).
+  onCleanup(
+    installHandoverPublisher((group, row) =>
+      chat.broadcastControl(auth.identitySecrets(), group as Parameters<typeof chat.broadcastControl>[1], row),
+    ),
+  );
   // ADR-0045 / ADR-0050 — the membership half for chats whose view is not
   // open: the sweep at the tail of every background poll, and the device
   // fan-outs. Same persist hooks the chat view's client uses, so a commit
@@ -1204,12 +1208,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           // its jump target: the id belongs to the old journal.
           const reply = replyForSend(m.reply, m.replyGroupIdB64, view.head.groupIdB64);
           try {
-            const envelope =
-              m.forward !== undefined
-                ? await composeForwardEnvelope(m.text, m.attached, m.forward)
-                : reply === undefined
-                  ? await composeEnvelope(m.text, m.attached)
-                  : await composeReplyEnvelope(m.text, m.attached, reply);
+            const envelope = await composeHeldEnvelope(m, reply);
             const result = await chat.sendMessage(secrets, view.head.group, envelope);
             sent.push({
               messageId: String(result.messageId),
@@ -1219,6 +1218,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
               createdAt: result.createdAt,
               ...(reply === undefined ? {} : { reply: persistedFromReplyRef(reply) }),
               ...(m.forward === undefined ? {} : { forward: persistedFromForwardRef(m.forward) }),
+              ...(m.content === undefined ? {} : { content: m.content }),
             });
           } catch (err) {
             // Not sent: this one and everything after it stay held, in order.

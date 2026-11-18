@@ -2662,6 +2662,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-anon-cred"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "curve25519-dalek",
+ "getrandom 0.2.17",
+ "proptest",
+ "rand_core 0.6.4",
+ "subtle",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "lakko-anon-token"
 version = "0.0.0"
 dependencies = [
@@ -2696,7 +2710,9 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
+ "lakko-contacts",
  "lakko-crypto",
+ "proptest",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -2752,6 +2768,21 @@ dependencies = [
  "proptest",
  "rand 0.8.6",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "lakko-ballot"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -2902,11 +2933,13 @@ name = "lakko-ffi-extension"
 version = "0.0.0"
 dependencies = [
  "lakko-attachments",
+ "lakko-ballot",
  "lakko-calls",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-ds-proof",
  "lakko-mls",
+ "lakko-sync",
  "thiserror 1.0.69",
  "uniffi",
 ]
@@ -2917,11 +2950,13 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-attachments",
  "lakko-attest",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-ballot",
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-channels",
@@ -2935,6 +2970,7 @@ dependencies = [
  "lakko-l10n",
  "lakko-mls",
  "lakko-mnemonic",
+ "lakko-open-items",
  "lakko-pow",
  "lakko-proto",
  "lakko-segment",
@@ -2959,11 +2995,13 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-attachments",
  "lakko-attest",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-ballot",
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-channels",
@@ -2977,6 +3015,7 @@ dependencies = [
  "lakko-l10n",
  "lakko-mls",
  "lakko-mnemonic",
+ "lakko-open-items",
  "lakko-pow",
  "lakko-presence",
  "lakko-proto",
@@ -2990,6 +3029,8 @@ dependencies = [
  "lakko-vault",
  "openmls",
  "prost 0.13.5",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -3068,6 +3109,18 @@ name = "lakko-noise-wasm"
 version = "0.0.0"
 dependencies = [
  "lakko-noise",
+]
+
+[[package]]
+name = "lakko-open-items"
+version = "0.0.0"
+dependencies = [
+ "lakko-attachments",
+ "lakko-ballot",
+ "lakko-contacts",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3195,6 +3248,7 @@ dependencies = [
  "equix",
  "hmac 0.12.1",
  "http-body-util",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-anon-token-server",
  "lakko-attest",
@@ -3238,6 +3292,7 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "hex",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-anon-token-server",
  "lakko-channels",
@@ -3605,6 +3660,7 @@ name = "lakko-ui-rules"
 version = "0.0.0"
 dependencies = [
  "icu_properties",
+ "lakko-attachments",
  "lakko-contacts",
  "lakko-sync",
  "proptest",

@@ -52,6 +52,11 @@ public final class HeldSendQueue {
         public let replyGroupIdB64: String?
         /// ADR-0052: set for a forward INTO the held conversation.
         public let forward: Data?
+        /// ADR-0090: a location, contact card or article (a forwarded one
+        /// above all) held with its content, as the content envelope the core
+        /// composes (no forward line: that is `forward`). `nil` for an
+        /// ordinary message and for every row stored before the field.
+        public let content: Data?
 
         public init(
             localId: String,
@@ -60,8 +65,10 @@ public final class HeldSendQueue {
             attachments: [Data] = [],
             reply: HeldSend.Reply? = nil,
             replyGroupIdB64: String? = nil,
-            forward: Data? = nil
+            forward: Data? = nil,
+            content: Data? = nil
         ) {
+            self.content = content.flatMap { $0.isEmpty ? nil : $0 }
             self.localId = localId
             self.queuedAtMs = queuedAtMs
             self.text = text
@@ -85,7 +92,8 @@ public final class HeldSendQueue {
                 attachments: try c.decode([Data].self, forKey: .attachments),
                 reply: try c.decodeIfPresent(HeldSend.Reply.self, forKey: .reply),
                 replyGroupIdB64: try c.decodeIfPresent(String.self, forKey: .replyGroupIdB64),
-                forward: try c.decodeIfPresent(Data.self, forKey: .forward))
+                forward: try c.decodeIfPresent(Data.self, forKey: .forward),
+                content: try c.decodeIfPresent(Data.self, forKey: .content))
         }
 
         /// Whether this is a message at all: junk is dropped, never sent.
@@ -96,15 +104,17 @@ public final class HeldSendQueue {
         /// | set      | empty | none        | no    |
         /// | set      | set   | any         | yes   |
         /// | set      | any   | some        | yes   |
+        ///
+        /// A held content message (``content`` set) is valid with no text.
         public var isValid: Bool {
-            !localId.isEmpty && !(text.isEmpty && attachments.isEmpty)
+            !localId.isEmpty && !(text.isEmpty && attachments.isEmpty && content == nil)
         }
 
         /// The same message with its give-up clock restarted.
         public func requeued(atMs nowMs: Int64) -> Entry {
             Entry(
                 localId: localId, queuedAtMs: nowMs, text: text, attachments: attachments,
-                reply: reply, replyGroupIdB64: replyGroupIdB64, forward: forward)
+                reply: reply, replyGroupIdB64: replyGroupIdB64, forward: forward, content: content)
         }
     }
 

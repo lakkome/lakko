@@ -17,6 +17,8 @@
  * at most `CHANNEL_POST_CAP` posts are kept per channel, newest kept.
  */
 
+import type { PersistedAttachment } from "../chat/message-log-store";
+
 /** Payload schema version this client writes. */
 export const CHANNEL_POST_LOG_VERSION = 1;
 /** Most posts kept per channel (chosen, ADR-0063 open question 1). */
@@ -29,13 +31,20 @@ export const CHANNEL_POST_PAGE = 100;
  *  loop; the rest arrives on the next sync. */
 export const CHANNEL_POST_MAX_PAGES = 5;
 
-/** One decrypted text post. */
+/** One decrypted post. */
 export interface PersistedChannelPost {
   /** The server's per-channel cursor, the post's id in the feed. */
   readonly cursor: number;
   /** Server receive time, unix ms. */
   readonly serverTsMs: number;
   readonly text: string;
+  /** The post's files (an article's images for a content post), in the
+   *  message log's stored form; absent on rows written before the field. A
+   *  forward from the feed re-encrypts them. */
+  readonly attachments?: readonly PersistedAttachment[];
+  /** ADR-0090 — a content post's `MessageContent`, verbatim; absent on an
+   *  ordinary post. */
+  readonly content?: unknown;
 }
 
 /** One channel's slice of the log. */
@@ -67,7 +76,15 @@ function decodePost(raw: unknown): PersistedChannelPost | null {
   if (!isCursor(r.cursor) || r.cursor === 0) return null;
   if (typeof r.serverTsMs !== "number" || !Number.isFinite(r.serverTsMs)) return null;
   if (typeof r.text !== "string") return null;
-  return { cursor: r.cursor, serverTsMs: r.serverTsMs, text: r.text };
+  return {
+    cursor: r.cursor,
+    serverTsMs: r.serverTsMs,
+    text: r.text,
+    ...(Array.isArray(r.attachments) && r.attachments.length > 0
+      ? { attachments: r.attachments as readonly PersistedAttachment[] }
+      : {}),
+    ...(r.content === undefined || r.content === null ? {} : { content: r.content }),
+  };
 }
 
 /**
@@ -128,8 +145,13 @@ export function retainChannels(log: ChannelPostLog, keep: ReadonlySet<string>): 
 
 /** What one post decoded to, as far as the log cares. */
 export type PostOutcome =
-  /** A text post: kept. */
-  | { readonly kind: "text"; readonly text: string }
+  /** A post: kept, with its files and, for a content post, its content. */
+  | {
+      readonly kind: "text";
+      readonly text: string;
+      readonly attachments?: readonly PersistedAttachment[];
+      readonly content?: unknown;
+    }
   /** Read and not a feed item (a metadata record, a malformed record, a
    *  post that failed to open under its epoch's seed): passed over. */
   | { readonly kind: "skip" }
@@ -178,7 +200,15 @@ export async function syncChannelSlot(
         break;
       }
       if (outcome.kind === "text") {
-        fresh.push({ cursor: p.cursor, serverTsMs: p.serverTsMs, text: outcome.text });
+        fresh.push({
+          cursor: p.cursor,
+          serverTsMs: p.serverTsMs,
+          text: outcome.text,
+          ...(outcome.attachments === undefined || outcome.attachments.length === 0
+            ? {}
+            : { attachments: outcome.attachments }),
+          ...(outcome.content === undefined ? {} : { content: outcome.content }),
+        });
       }
       cursor = p.cursor;
     }

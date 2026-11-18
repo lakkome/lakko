@@ -546,8 +546,12 @@ fn bound_media(a: &mut rec::VaultAttachment) {
             width: t.width.map(u32::from),
             height: t.height.map(u32::from),
         }),
+        title: some_text(&a.title),
+        artist: some_text(&a.artist),
     }
     .bounded();
+    a.title = media.title.unwrap_or_default();
+    a.artist = media.artist.unwrap_or_default();
     a.kind = media.kind.unwrap_or_default();
     a.duration_ms = media.duration_ms;
     a.waveform = media.waveform.unwrap_or_default();
@@ -663,6 +667,8 @@ impl VaultAttachment {
                 width: None,
                 height: None,
                 thumb: None,
+                title: String::new(),
+                artist: String::new(),
             },
         })
     }
@@ -736,6 +742,27 @@ impl VaultAttachment {
         self.inner.width = narrow(width);
         self.inner.height = narrow(height);
         bound_media(&mut self.inner);
+    }
+
+    /// ADR-0090 audio title and artist tags (kept on kind `"audio"` only,
+    /// within 255 bytes; anything else is dropped). Call after `setMedia`.
+    #[wasm_bindgen(js_name = setAudioTags)]
+    pub fn set_audio_tags(&mut self, title: Option<String>, artist: Option<String>) {
+        self.inner.title = title.unwrap_or_default();
+        self.inner.artist = artist.unwrap_or_default();
+        bound_media(&mut self.inner);
+    }
+
+    /// ADR-0090 audio title tag.
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        some_text(&self.inner.title)
+    }
+
+    /// ADR-0090 audio artist tag.
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> {
+        some_text(&self.inner.artist)
     }
 
     /// ADR-0047 poster frame; replaces one set before. `blobId` / `key` MUST
@@ -891,6 +918,7 @@ impl VaultMessage {
                 reactions: Vec::new(),
                 call: None,
                 unsupported_version: None,
+                content: None,
             },
         })
     }
@@ -1024,6 +1052,49 @@ impl VaultMessage {
     #[wasm_bindgen(js_name = setUnsupportedVersion)]
     pub fn set_unsupported_version(&mut self, version: u32) {
         self.inner.unsupported_version = Some(version);
+    }
+
+    /// ADR-0090 — set the `ContentMessage` of a poll / checklist / location /
+    /// contact card / article row (`undefined` clears it). Set the
+    /// attachments first: an article's images are checked against them only
+    /// on read.
+    ///
+    /// # Errors
+    ///
+    /// Throws a content code (`state.mismatch`, `<field>.tooLong`, ...).
+    #[wasm_bindgen(js_name = setContent)]
+    pub fn set_content(
+        &mut self,
+        content: Option<crate::content::JsContentMessage>,
+    ) -> Result<(), JsError> {
+        self.inner.content = match content {
+            None => None,
+            Some(c) => {
+                crate::content::content_message_from_js(&c)?.map(|(kind, payload, state)| {
+                    rec::VaultContent {
+                        kind,
+                        payload,
+                        state,
+                    }
+                })
+            },
+        };
+        Ok(())
+    }
+
+    /// ADR-0090 — the `ContentMessage`, or `undefined` (also when its
+    /// payload does not decode; a state that does not belong is dropped).
+    #[wasm_bindgen(getter, unchecked_return_type = "ContentMessage | undefined")]
+    pub fn content(&self) -> JsValue {
+        let mimes: Vec<Option<String>> = self
+            .inner
+            .attachments
+            .iter()
+            .map(|a| some_text(&a.mime))
+            .collect();
+        self.inner.content.as_ref().map_or(JsValue::UNDEFINED, |c| {
+            crate::content::content_message_to_js(c.kind, &c.payload, &c.state, &mimes)
+        })
     }
 
     /// The Delivery Service journal id. A `bigint`.
@@ -2307,7 +2378,7 @@ mod tests {
             "truncated"
         );
         assert_eq!(
-            code(&try_decode_history_chunk(&[0x02, 0, 0]).unwrap_err()),
+            code(&try_decode_history_chunk(&[0x01, 0, 0]).unwrap_err()),
             "unknownVersion"
         );
         let mut trailing = try_encode_devices_head(vec![]).unwrap();
@@ -2502,6 +2573,8 @@ mod tests {
                 width: Some(240),
                 height: Some(0),
             }),
+            title: String::new(),
+            artist: String::new(),
         };
         let mut message = plain_message(1, 1, "").inner;
         message.attachments = vec![

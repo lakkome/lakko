@@ -1368,7 +1368,8 @@ public final class ContactsClient {
                     // `nil` when it sent none (ADR-0021 tile match).
                     accountId: $0.accountId,
                     usernameCertificate: $0.usernameCertificate,
-                    avatar: ProfileAvatar($0.avatar)
+                    avatar: ProfileAvatar($0.avatar),
+                    cardShareable: $0.cardShareable
                 )
             }
         } catch {

@@ -756,6 +756,9 @@ export async function decryptPushWake(wake, deps) {
     let held = null;
     let unreadableRows = 0;
     for (const message of messages) {
+      // ADR-0090 — an anonymous ballot row is not an MLS message: never a
+      // preview, never counted as unreadable.
+      if (isPollBallotRow(deps.wasm, message.payload)) continue;
       let processed;
       try {
         processed = group.processIncomingVerifyingRoles(identity, message.payload);
@@ -2440,6 +2443,12 @@ function previewFromProcessed(wasm, processed, words) {
       if (count > 0) return attachmentsLine(words, count);
       return null;
     }
+    // ADR-0090 — a poll, checklist, location, contact card or article: its
+    // one-line preview, never JSON. Ops on them (votes, ticks, closes, added
+    // items, edits) fall through to `null` below, like reactions.
+    if (kind === "poll" || kind === "checklist" || kind === "location" || kind === "contact-card" || kind === "article") {
+      return contentPreviewLine(parsed.content, words);
+    }
     // An edit rewrites a prior message → surface the new text.
     if (kind === "edit") {
       const text = typeof parsed.text === "string" ? parsed.text : "";
@@ -2450,6 +2459,45 @@ function previewFromProcessed(wasm, processed, words) {
     return null;
   } finally {
     freeQuietly(parsed);
+  }
+}
+
+/**
+ * ADR-0090 — the preview line of a content message from the stored words.
+ * @param {any} content
+ * @param {any} words
+ * @returns {string | null}
+ */
+function contentPreviewLine(content, words) {
+  if (content === null || typeof content !== "object") return null;
+  const fill = (template, value) =>
+    truncate(String(template).replace("\u0001", String(value ?? "").replace(/\s+/g, " ").trim()));
+  switch (content.kind) {
+    case "poll":
+      return fill(words.pollPreview, content.poll?.body?.question);
+    case "checklist":
+      return fill(words.checklistPreview, content.checklist?.body?.title);
+    case "location":
+      return truncate(String(words.locationPreview));
+    case "contactCard":
+      return fill(words.contactPreview, content.card?.name);
+    case "article":
+      return fill(words.articlePreview, content.article?.title);
+    default:
+      return null;
+  }
+}
+
+/**
+ * ADR-0090 — whether a journal row is an anonymous poll ballot.
+ * @param {any} wasm
+ * @param {Uint8Array} payload
+ */
+function isPollBallotRow(wasm, payload) {
+  try {
+    return typeof wasm?.isPollBallotRow === "function" && wasm.isPollBallotRow(payload) === true;
+  } catch {
+    return false;
   }
 }
 

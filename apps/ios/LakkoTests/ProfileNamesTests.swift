@@ -445,6 +445,74 @@ final class ProfileNamesTests: XCTestCase {
         XCTAssertFalse(membershipGrew(previousMemberKeys: nil, currentMemberKeys: ["a", "b"]))
         XCTAssertFalse(membershipGrew(previousMemberKeys: ["a"], currentMemberKeys: nil))
     }
+
+    // MARK: - ADR-0090 section 7 — "my card may be shared"
+
+    func testTheOwnFlagIsOffExactlyOnNobody() {
+        let base = defaultVisibilitySetting()
+        XCTAssertFalse(ProfileDirectory.cardShareable(for: chooseVisibilityMode(setting: base, mode: .nobody)))
+        XCTAssertTrue(ProfileDirectory.cardShareable(for: chooseVisibilityMode(setting: base, mode: .everyone)))
+        XCTAssertTrue(ProfileDirectory.cardShareable(for: chooseVisibilityMode(setting: base, mode: .some)))
+    }
+
+    func testTheSharingFlagTravelsInTheEnvelopeAndIsKeptOnTheClaim() throws {
+        for shareable in [true, false] {
+            let bytes = try composeProfileEnvelope(profile: FfiProfile(
+                displayName: "Anna", username: nil, updatedAtMs: 5, accountId: nil,
+                usernameCertificate: nil, grants: [], cardShareable: shareable))
+            XCTAssertEqual(try decodeProfileEnvelope(plaintext: bytes).cardShareable, shareable)
+            XCTAssertEqual(ChatClient.decodeProfileIfEnvelope(bytes)?.cardShareable, shareable)
+        }
+    }
+
+    func testAStoredClaimFromBeforeTheFieldReadsAsShareable() throws {
+        let old = Data(#"{"displayName":"Anna","updatedAtMs":3}"#.utf8)
+        XCTAssertTrue(try JSONDecoder().decode(ProfileClaim.self, from: old).cardShareable)
+        let kept = ProfileClaim(displayName: "Anna", username: nil, updatedAtMs: 3, cardShareable: false)
+        let again = try JSONDecoder().decode(ProfileClaim.self, from: JSONEncoder().encode(kept))
+        XCTAssertFalse(again.cardShareable)
+        XCTAssertFalse(kept.withoutGrants.cardShareable)
+    }
+
+    func testANewerProfileCarriesTheNewFlagAndAnEqualOneDoesNot() {
+        let store = makeStore()
+        XCTAssertEqual(store.accept(claim("Anna", at: 10), signatureKeyB64: keyAB64), .stored)
+        let off = ProfileClaim(displayName: "Anna", username: nil, updatedAtMs: 10, cardShareable: false)
+        XCTAssertEqual(store.accept(off, signatureKeyB64: keyAB64), .notNewer,
+                       "the same stamp is not an update: the sender re-stamps on a change")
+        let offLater = ProfileClaim(displayName: "Anna", username: nil, updatedAtMs: 11, cardShareable: false)
+        XCTAssertEqual(store.accept(offLater, signatureKeyB64: keyAB64), .stored)
+        XCTAssertEqual(store.profile(signatureKeyB64: keyAB64)?.cardShareable, false)
+    }
+
+    func testANamelessProfileKeepsAFoundNameAndTakesOnlyTheFlag() {
+        let store = makeStore()
+        XCTAssertEqual(store.accept(claim("Found", at: 0, username: "anna"), signatureKeyB64: keyAB64), .stored)
+        let nameless = ProfileClaim(
+            displayName: nil, username: nil, updatedAtMs: 20, accountId: Data(repeating: 1, count: 16),
+            cardShareable: false)
+        XCTAssertEqual(store.accept(nameless, signatureKeyB64: keyAB64), .stored)
+        let held = store.profile(signatureKeyB64: keyAB64)
+        XCTAssertEqual(held?.displayName, "Found")
+        XCTAssertEqual(held?.username, "anna")
+        XCTAssertEqual(held?.cardShareable, false)
+        XCTAssertEqual(held?.isFoundName, true, "a later profile with a name still replaces it")
+    }
+
+    func testThePickerDisablesAContactWhoDoesNotLetTheirCardBeShared() {
+        let key = Data(repeating: 2, count: 32)
+        func row(username: String?, shareable: Bool) -> ContactCardCandidate {
+            ContactCardCandidate(id: "k", name: "Anna", username: username, accountKey: key, shareable: shareable)
+        }
+        XCTAssertEqual(row(username: "anna", shareable: true).availability, .available)
+        XCTAssertEqual(row(username: "anna", shareable: false).availability, .notShareable)
+        XCTAssertEqual(row(username: nil, shareable: false).availability, .notShareable)
+        XCTAssertEqual(row(username: nil, shareable: true).availability, .noUsername)
+        XCTAssertEqual(
+            Localization.text("contact.not_shareable", texts: ["name": "Anna"]),
+            "\u{2068}Anna\u{2069} doesn't let others share their contact",
+            "the name is isolated like every text argument")
+    }
 }
 
 /// ADR-0048 §2 — the publish triggers: join and change publish now, growth
@@ -1170,4 +1238,5 @@ final class ProfileDirectoryTests: XCTestCase {
         XCTAssertNil(directory.ownProfileEnvelope(), "no account, nothing to publish")
         XCTAssertNil(directory.ownProfileForRequest())
     }
+
 }

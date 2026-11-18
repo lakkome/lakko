@@ -23,6 +23,21 @@ public sealed interface ChannelRowContent {
         val text: String,
         val attachments: List<AttachmentRef>,
         val channelInvite: ByteArray? = null,
+        /** ADR-0090 — a poll, checklist, location, contact card or article post. */
+        val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+    ) : ChannelRowContent
+
+    /** ADR-0090 section 4 — the publisher closed the poll at [target],
+     *  freezing [tally] into it (absent on an older close). */
+    public data class Close(val target: Long, val tally: uniffi.lakko_ffi_uniffi.ChannelPollTally?) : ChannelRowContent
+
+    /** ADR-0090 / UX 8 — a publisher's tick or added item on the checklist at [target]. */
+    public data class ChecklistOp(
+        val target: Long,
+        val add: Boolean,
+        val item: uniffi.lakko_ffi_uniffi.ChecklistItemRef?,
+        val done: Boolean,
+        val text: String,
     ) : ChannelRowContent
 
     /** ADR-0023 — replace the text of the post at [target]. */
@@ -60,7 +75,17 @@ public data class ChannelPostItem(
      *  no key for, after the first one it can read. */
     val unavailable: Boolean = false,
     val channelInvite: ByteArray? = null,
+    /** ADR-0090 — the post's content, when it is one. */
+    val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+    /** ADR-0090 section 4 — closed by a publisher, with the frozen tally. */
+    val closed: Boolean = false,
+    val frozenTally: uniffi.lakko_ffi_uniffi.ChannelPollTally? = null,
+    /** ADR-0090 — ops a checklist post collected (publishers' ticks and adds, a close). */
+    val ops: List<me.lakko.app.chat.ContentOpRecord> = emptyList(),
 )
+
+/** In a channel every op is a publisher's: one stand-in key, always privileged. */
+public val CHANNEL_PUBLISHER_KEY: String = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
 
 /** The fold's answer. */
 public data class ChannelTimeline(
@@ -95,7 +120,37 @@ public fun foldChannelTimeline(rows: List<ChannelRow>): ChannelTimeline {
                     attachments = c.attachments,
                     edited = false,
                     channelInvite = c.channelInvite,
+                    content = c.content,
                 )
+            }
+            is ChannelRowContent.Close -> {
+                val held = posts[c.target]
+                if (held != null && held.content != null && !held.closed) {
+                    posts[c.target] = held.copy(
+                        closed = true,
+                        frozenTally = c.tally,
+                        ops = held.ops + me.lakko.app.chat.ContentOpRecord(
+                            me.lakko.app.chat.ContentOpKind.PollClose, row.cursor, row.tsMs, CHANNEL_PUBLISHER_KEY, true,
+                        ),
+                    )
+                }
+            }
+            is ChannelRowContent.ChecklistOp -> {
+                val held = posts[c.target]
+                if (held != null && held.content is uniffi.lakko_ffi_uniffi.MessageContent.Checklist && !held.closed) {
+                    posts[c.target] = held.copy(
+                        ops = held.ops + me.lakko.app.chat.ContentOpRecord(
+                            kind = if (c.add) me.lakko.app.chat.ContentOpKind.ChecklistAdd else me.lakko.app.chat.ContentOpKind.ChecklistTick,
+                            opId = row.cursor,
+                            createdAtMs = row.tsMs,
+                            sender = CHANNEL_PUBLISHER_KEY,
+                            privileged = true,
+                            item = c.item,
+                            done = c.done,
+                            text = c.text,
+                        ),
+                    )
+                }
             }
             is ChannelRowContent.Edit -> {
                 val held = posts[c.target]

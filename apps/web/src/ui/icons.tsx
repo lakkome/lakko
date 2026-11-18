@@ -104,6 +104,11 @@ const PATHS = {
   music: `<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>`,
   camera: `<path d="M3 9a2 2 0 0 1 2-2h2.2l1.3-2h7l1.3 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/>`,
   flag: `<path d="M5 21V4M5 4.5c4-2 7 2 11 0v8.5c-4 2-7-2-11 0"/>`,
+  image: `<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="9.5" r="1.6"/><path d="m4 17 5-5 4 4 2.5-2.5L20 18"/>`,
+  document: `<path d="M6.5 3.5h7l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-9.5A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M13.5 3.5v4h4"/>`,
+  chart: `<path d="M5 20V11M10 20V5M15 20v-7M20 20v-4M3.5 20.5h17"/>`,
+  checklist: `<path d="m4 7 1.5 1.5L8.5 5.5M4 13.5 5.5 15l3-3M11 7h9M11 13.5h9M11 19h9M4.5 19h3"/>`,
+  page: `<path d="M6.5 3.5h11A1.5 1.5 0 0 1 19 5v14a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4.5"/>`,
 } as const;
 
 /** Every icon name the set knows. */

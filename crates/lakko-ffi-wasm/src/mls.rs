@@ -4102,6 +4102,13 @@ impl HistoryAttachmentInput {
         self.media_val.height = height;
     }
 
+    /// ADR-0090 audio title and artist tags (kept on kind `"audio"` only).
+    #[wasm_bindgen(js_name = setAudioTags)]
+    pub fn set_audio_tags(&mut self, title: Option<String>, artist: Option<String>) {
+        self.media_val.title = title;
+        self.media_val.artist = artist;
+    }
+
     /// ADR-0047 poster frame. `blobId` / `key` MUST be 32 bytes, `nonce`
     /// 12 bytes.
     #[wasm_bindgen(js_name = setThumb)]
@@ -4138,6 +4145,8 @@ fn bound_history_media(
         waveform: a.waveform.take(),
         width: a.width,
         height: a.height,
+        title: a.title.take(),
+        artist: a.artist.take(),
         thumb: a
             .thumb
             .as_ref()
@@ -4154,6 +4163,8 @@ fn bound_history_media(
     a.waveform = raw.waveform;
     a.width = raw.width;
     a.height = raw.height;
+    a.title = raw.title;
+    a.artist = raw.artist;
     a.thumb = match (a.thumb.take(), raw.thumb) {
         (Some(mut t), Some(bounded)) => {
             t.mime = bounded.mime;
@@ -4180,7 +4191,9 @@ fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue
 
 /// Encode a placeholder to the canonical `payload_bytes` wire
 /// bytes. `direction` is 0 = outgoing, 1 = incoming, 2 = system.
-/// `attachments` is an `Array<HistoryAttachmentInput>`.
+/// `attachments` is an `Array<HistoryAttachmentInput>`. `content` (ADR-0090)
+/// is the `ContentMessage` of a poll / checklist / location / contact card /
+/// article message, or `undefined`.
 #[wasm_bindgen(js_name = encodeHistoryPlaceholder)]
 pub fn encode_history_placeholder(
     message_id: u64,
@@ -4188,6 +4201,7 @@ pub fn encode_history_placeholder(
     created_at: &str,
     text: &str,
     attachments: Vec<HistoryAttachmentInput>,
+    content: Option<crate::content::JsContentMessage>,
 ) -> Result<Vec<u8>, JsValue> {
     use lakko_mls::history_placeholder::{
         HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
@@ -4221,14 +4235,27 @@ pub fn encode_history_placeholder(
             width: media.width,
             height: media.height,
             thumb,
+            title: media.title,
+            artist: media.artist,
         }));
     }
+    let content = match content {
+        None => None,
+        Some(c) => crate::content::content_message_from_js(&c)?.map(|(kind, payload, state)| {
+            lakko_mls::history_placeholder::HistoryContentPlaceholder {
+                kind,
+                payload,
+                state,
+            }
+        }),
+    };
     let msg = HistoryMessagePlaceholder {
         message_id,
         direction: dir,
         created_at: created_at.to_string(),
         text: text.to_string(),
         attachments: atts,
+        content,
     };
     msg.encode().map_err(mls_err)
 }
@@ -4250,6 +4277,8 @@ pub struct OpenedHistoryAttachment {
     width_val: Option<u32>,
     height_val: Option<u32>,
     thumb_val: Option<OpenedHistoryThumb>,
+    title_val: Option<String>,
+    artist_val: Option<String>,
 }
 
 /// A decoded poster frame (ADR-0047) — flat getters.
@@ -4351,6 +4380,16 @@ impl OpenedHistoryAttachment {
     pub fn thumb(&self) -> Option<OpenedHistoryThumb> {
         self.thumb_val.clone()
     }
+    /// ADR-0090 audio title tag.
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        self.title_val.clone()
+    }
+    /// ADR-0090 audio artist tag.
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> {
+        self.artist_val.clone()
+    }
 }
 
 /// A decoded placeholder — flat getters for the JS caller.
@@ -4363,6 +4402,7 @@ pub struct OpenedHistoryPlaceholder {
     created_at_val: String,
     text_val: String,
     attachments_val: Vec<OpenedHistoryAttachment>,
+    content_val: JsValue,
 }
 
 #[wasm_bindgen]
@@ -4389,6 +4429,13 @@ impl OpenedHistoryPlaceholder {
     pub fn attachments(&self) -> Vec<OpenedHistoryAttachment> {
         self.attachments_val.clone()
     }
+    /// ADR-0090 — the `ContentMessage` of a content message, or
+    /// `undefined` (also when its payload does not decode; a state that does
+    /// not belong to the content is dropped).
+    #[wasm_bindgen(getter, unchecked_return_type = "ContentMessage | undefined")]
+    pub fn content(&self) -> JsValue {
+        self.content_val.clone()
+    }
 }
 
 /// Decode canonical `payload_bytes` (produced by
@@ -4398,8 +4445,13 @@ impl OpenedHistoryPlaceholder {
 pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsValue> {
     let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
         .map_err(mls_err)?;
+    let mimes: Vec<Option<String>> = msg.attachments.iter().map(|a| a.mime.clone()).collect();
+    let content_val = msg.content.as_ref().map_or(JsValue::UNDEFINED, |c| {
+        crate::content::content_message_to_js(c.kind, &c.payload, &c.state, &mimes)
+    });
     Ok(OpenedHistoryPlaceholder {
         message_id_val: msg.message_id,
+        content_val,
         direction_val: msg.direction.tag(),
         created_at_val: msg.created_at,
         text_val: msg.text,
@@ -4428,6 +4480,8 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
                     width_val: t.width,
                     height_val: t.height,
                 }),
+                title_val: a.title,
+                artist_val: a.artist,
             })
             .collect(),
     })

@@ -213,6 +213,9 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
 /// recovery email again. Recovery tickets in flight go with it. The
 /// `recovery_emails` row (the password route) is kept by a reset and deleted
 /// by a recall.
+///
+/// ADR-0090 section 4.2: the anonymous-credential commitment and the
+/// issuance rows go too; the person's new seed registers a new commitment.
 pub(crate) async fn delete_superseded_state(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     account_id: &[u8; 16],
@@ -226,6 +229,10 @@ pub(crate) async fn delete_superseded_state(
         "DELETE FROM webauthn_action_grants WHERE account_id = ?",
         "DELETE FROM device_grants WHERE account_id = ?",
         "DELETE FROM device_requests WHERE account_id = ?",
+        // ADR-0090 section 4.2: the new seed gives a new credential secret,
+        // which registers a new commitment.
+        "DELETE FROM anon_credential_commitments WHERE account_id = ?",
+        "DELETE FROM anon_credential_issued WHERE account_id = ?",
     ] {
         sqlx::query(statement)
             .bind(account_id.as_slice())

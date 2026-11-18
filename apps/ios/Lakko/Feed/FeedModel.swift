@@ -77,6 +77,8 @@ struct FeedMessage: Equatable {
     let deleted: Bool
     /// The original author's name when forwarded.
     let forwardAuthor: String?
+    /// ADR-0090 — the content of a content message or post, `nil` for none.
+    let content: PersistedContent?
 
     init(
         messageId: Int64,
@@ -90,8 +92,10 @@ struct FeedMessage: Equatable {
         attachments: [AttachmentRef] = [],
         edited: Bool = false,
         deleted: Bool = false,
-        forwardAuthor: String? = nil
+        forwardAuthor: String? = nil,
+        content: PersistedContent? = nil
     ) {
+        self.content = content
         self.messageId = messageId
         self.direction = direction
         self.text = text
@@ -117,6 +121,7 @@ struct FeedMessage: Equatable {
             && lhs.attachments == rhs.attachments
             && lhs.edited == rhs.edited && lhs.deleted == rhs.deleted
             && lhs.forwardAuthor == rhs.forwardAuthor
+            && lhs.content == rhs.content
     }
 }
 
@@ -240,6 +245,7 @@ enum FeedModel {
                 continue
             }
             let id = Int64(p.cursor)
+            let attachments = p.attachmentRefs
             let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(p.text, $0) } == true
             candidates.append(
                 FeedCandidate(
@@ -252,7 +258,7 @@ enum FeedModel {
                     mentionsMe: mentionsMe,
                     repliesToMe: false,
                     reactionsDistinct: 0,
-                    hasMedia: false,
+                    hasMedia: !attachments.isEmpty,
                     text: p.text
                 ))
             refs.append(
@@ -262,7 +268,12 @@ enum FeedModel {
                         messageId: id,
                         direction: fromSelf ? .outgoing : .incoming,
                         text: p.text,
-                        timeMs: p.serverTsMs),
+                        timeMs: p.serverTsMs,
+                        attachmentLabels: attachments.map {
+                            ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
+                        },
+                        attachments: attachments,
+                        content: p.content),
                     mentionsMe: mentionsMe,
                     repliesToMe: false))
         }
@@ -331,6 +342,11 @@ enum FeedCopy {
 
     /// What stands in for text when a message carries only attachments.
     static func attachmentLine(_ message: FeedMessage) -> String? {
+        // ADR-0090 — a content message with no text says what it is.
+        if let content = message.content, message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let line = ContentPreview.line(content: ContentModel.content(content)) {
+            return line
+        }
         let n = message.attachmentLabels.count
         if n == 0 { return nil }
         if n > 1 { return Localization.text("feed.attachments.count", counts: ["count": UInt64(n)]) }
@@ -365,6 +381,7 @@ enum FeedCopy {
     ) -> String {
         let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { return message.text }
+        if message.content != nil { return attachmentLine(message) ?? "" }
         if mediaRefs(message, allowlist: allowlist).isEmpty { return attachmentLine(message) ?? "" }
         let files = zip(message.attachments, message.attachmentLabels)
             .filter { InlineMedia.decision(for: $0.0, allowlist: allowlist).bubble == .file }

@@ -66,7 +66,18 @@ public fun repliesLabel(count: Int): UiText =
 /** The text a row with no bubbles shows (a folded reply, the editor's
  *  preview): its words, else what its attachments are. */
 public fun bodyOf(ref: FeedCandidateRef, strings: Strings): String =
-    if (ref.message.text.isNotBlank()) ref.message.text else attachmentLine(ref.message)?.renderWith(strings).orEmpty()
+    when {
+        ref.message.text.isNotBlank() -> ref.message.text
+        ref.message.content != null -> contentLine(ref.message.content, strings)
+        else -> attachmentLine(ref.message)?.renderWith(strings).orEmpty()
+    }
+
+/** ADR-0090 — the one line a poll, checklist, location, contact card or
+ *  article shows in the feed (the chat list's summary, `contentSummary`). */
+public fun contentLine(content: uniffi.lakko_ffi_uniffi.MessageContent, strings: Strings): String {
+    val (key, args) = me.lakko.app.chat.contentSummary(content)
+    return UiText(key, args).renderWith(strings)
+}
 
 /** Whether [attachment] draws as a media bubble, by the timeline's own rule
  *  ([renderDecision]: the MIME allowlist decides, ADR-0047 section 1). */
@@ -77,7 +88,8 @@ private fun drawsAsBubble(attachment: FeedAttachment, allowlist: MediaAllowlist)
 /** The attachments an item draws as media bubbles, in message order. A file
  *  is not one: it stays the one-line text (UX spec section 3). */
 public fun mediaRefsOf(message: FeedMessage, allowlist: MediaAllowlist): List<AttachmentRef> =
-    message.attachments.filter { drawsAsBubble(it, allowlist) }.mapNotNull(FeedAttachment::ref)
+    // An article's images are its own, drawn inside it when it is opened.
+    if (message.content != null) emptyList() else message.attachments.filter { drawsAsBubble(it, allowlist) }.mapNotNull(FeedAttachment::ref)
 
 /**
  * The text line of an item that draws its media ([mediaRefsOf]): its words,
@@ -87,6 +99,7 @@ public fun mediaRefsOf(message: FeedMessage, allowlist: MediaAllowlist): List<At
 public fun itemBodyOf(ref: FeedCandidateRef, strings: Strings, allowlist: MediaAllowlist): String {
     val message = ref.message
     if (message.text.isNotBlank()) return message.text
+    message.content?.let { return contentLine(it, strings) }
     val files = message.attachments.filterNot { drawsAsBubble(it, allowlist) }
     return attachmentLine(message.copy(attachments = files))?.renderWith(strings).orEmpty()
 }

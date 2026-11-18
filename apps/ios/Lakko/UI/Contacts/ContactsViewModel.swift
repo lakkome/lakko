@@ -59,6 +59,36 @@ public final class ContactsViewModel: ObservableObject {
             invited, oneToOnePeerKeys: Set(repositoryState.accepted.map(\.request.fromPubkey)))
     }
 
+    // MARK: - ADR-0090 section 7: a contact card's Add contact
+
+    /// What `Add contact` on a contact card came to (UX section 10.2).
+    public enum ContactCardAddResult: Equatable {
+        /// The request went out.
+        case sent
+        /// The username now resolves to another key: nothing was sent.
+        case otherKey
+        /// The username does not resolve under the person's setting.
+        case notFound
+        /// The lookup or the send failed.
+        case failed
+    }
+
+    /// The ordinary username lookup, accepted only when the discovered key is
+    /// the card's; then the ordinary contact request.
+    public func addFromContactCard(username: String, accountKey: Data) async -> ContactCardAddResult {
+        let ports = repository.peopleSearchPorts()
+        do {
+            let canonical = normalizeUsername(input: username)
+            let oprf = try await ports.usernameOprf(canonical)
+            guard let hit = try await ports.lookupUsername(oprf.lookupKey) else { return .notFound }
+            guard let key = try await ports.identityKey(hit.accountId), key == accountKey else { return .otherKey }
+            _ = try await repository.sendContactRequest(recipientUsername: canonical, introMessage: "")
+            return .sent
+        } catch {
+            return .failed
+        }
+    }
+
     // MARK: - Wiring
 
     private let repository: ContactsRepository

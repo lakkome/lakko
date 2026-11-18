@@ -676,6 +676,31 @@ public class AuthRepository(
                 )
             }
         }
+        // ADR-0090 section 4 - the channel-poll credential: one per account
+        // and period, from the LINEAGE seed, asked of auth with the session.
+        me.lakko.app.channels.ChannelPollCredentials.active = me.lakko.app.channels.ChannelPollCredentials(
+            context = applicationContext,
+            accountIdB64 = { identitySecrets.value?.let { base64Encode(it.accountId) } },
+            bearer = { identitySecrets.value?.sessionToken },
+            // The credential secret takes the 32-byte Ed25519 seed of the
+            // lineage identity (what web and iOS pass), not the 64-byte
+            // phrase seed the identity is built from.
+            lineageSeed = {
+                identitySecrets.value?.let { secrets ->
+                    me.lakko.app.devices.DeviceGroupLifecycle.lineageSeed(
+                        applicationContext,
+                        base64Encode(secrets.accountId),
+                        secrets.accountIdentitySeed,
+                    )
+                }?.let { seed ->
+                    try {
+                        uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.ed25519Seed() }
+                    } finally {
+                        seed.fill(0)
+                    }
+                }
+            },
+        )
         // ADR-0078 section 8 - the pool refills on its own schedule from the
         // moment a session is bound, never because something was spent.
         pushScope.launch {

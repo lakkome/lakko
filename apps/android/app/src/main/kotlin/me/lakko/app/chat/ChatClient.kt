@@ -308,6 +308,25 @@ public class ChatClient(
      * journal, so an id alone names a row in every group at once and would
      * silence an unrelated chat's next row of that number.
      */
+    /**
+     * ADR-0090 section 3.6 — post an anonymous ballot row to the group journal.
+     * It is not an MLS message: the DS proof is the epoch access key every
+     * member holds, so the row names no member. The id is remembered as own.
+     */
+    public suspend fun publishBallotRow(groupId: ByteArray, row: ByteArray): SendMessageResult {
+        val publish = try {
+            ds.publishGroup(groupId, row, wake = null)
+        } catch (e: DsClientArgError) {
+            throw ChatError("DS publish failed", e)
+        } catch (e: DsHttpError) {
+            throw ChatError(dsErrorMessage(e, "DS publish failed"), e)
+        } catch (e: DsNetworkError) {
+            throw ChatError("DS publish failed", e)
+        }
+        ownPublished.remember(DsClient.pseudonymHex(groupId), publish.id)
+        return SendMessageResult(messageId = publish.id, createdAt = publish.createdAt)
+    }
+
     public fun markOwnPublishedCommit(groupIdHex: String, messageId: Long) {
         ownPublished.remember(groupIdHex, messageId)
     }
@@ -423,6 +442,13 @@ public class ChatClient(
                 continue
             }
 
+            // ADR-0090 section 3.6 — an anonymous ballot is a journal row
+            // that is NOT an MLS message; it never reaches the MLS group.
+            if (isPollBallotRowSafe(message.payload)) {
+                events.add(IncomingChatEvent.PollBallotRow(message.id, message.payload, message.createdAt))
+                continue
+            }
+
             // Marked BEFORE the call, not after — see
             // [PollMessagesResult.touchedMlsState].
             touchedMlsState = true
@@ -462,14 +488,28 @@ public class ChatClient(
             // ROW and never hoisted out of the loop: a Commit row in the middle
             // of this same batch renumbers leaves, and the rows after it must
             // resolve against the roster that commit produced.
+            val event = toEvent(
+                messageId = message.id,
+                createdAt = message.createdAt,
+                processed = processed,
+                resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
+                resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(rosterOf(group), leaf) },
+            )
+            // ADR-0090 section 3.4 — an anonymous poll's ring version 0 is the
+            // roster at the epoch the poll was sealed, which is this row's.
             events.add(
-                toEvent(
-                    messageId = message.id,
-                    createdAt = message.createdAt,
-                    processed = processed,
-                    resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
-                    resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(rosterOf(group), leaf) },
-                ),
+                if (event is IncomingChatEvent.Application && event.content.isAnonymousPoll()) {
+                    event.copy(rosterAccountKeys = rosterAccountKeysOf(group))
+                } else if (processed is ProcessedMessage.Commit) {
+                    IncomingChatEvent.System(
+                        messageId = message.id,
+                        systemKind = SystemKind.Commit,
+                        createdAt = message.createdAt,
+                        rosterAccountKeys = rosterAccountKeysOf(group),
+                    )
+                } else {
+                    event
+                },
             )
         }
 
@@ -1043,6 +1083,16 @@ internal fun toEvent(
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
+            } else if (isOpenItemsOrBallotsEnvelope(processed.data)) {
+                // ADR-0090 section 3.9 — the open-items hand-over (or its old
+                // ballot rows) a committer posts for a newcomer. Never a
+                // bubble; the repository assembles, checks and adopts it.
+                IncomingChatEvent.OpenItems(
+                    messageId = messageId,
+                    envelope = processed.data,
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
             } else {
                 // ADR-0023 — feed the application bytes through
                 // the structured body parser, which surfaces the
@@ -1171,6 +1221,50 @@ internal fun toEvent(
                     // version. A real message the person should know exists,
                     // so it IS a timeline row; its words are the client's own
                     // catalog sentence, never text from the core.
+                    // ADR-0090 — a content message: a bubble of its own kind.
+                    MessageBodyKind.POLL,
+                    MessageBodyKind.CHECKLIST,
+                    MessageBodyKind.LOCATION,
+                    MessageBodyKind.CONTACT_CARD,
+                    MessageBodyKind.ARTICLE,
+                    -> IncomingChatEvent.Application(
+                        messageId = messageId,
+                        text = body.text,
+                        attachments = body.attachments,
+                        plaintext = body.text,
+                        senderLeaf = senderLeaf,
+                        senderKey = senderKey,
+                        createdAt = createdAt,
+                        reply = body.replyTo?.let { target ->
+                            ReplyRef(target = target, author = body.replyAuthor, excerpt = body.replyExcerpt)
+                        },
+                        forward = forwardRefFrom(
+                            forwardedFrom = body.forwardedFrom,
+                            originGroupB64 = body.forwardOriginGroupB64,
+                            originMessageId = body.forwardOriginMessageId,
+                        ),
+                        content = body.content,
+                    )
+                    // ADR-0090 — ops on a poll or checklist; never a bubble.
+                    MessageBodyKind.POLL_VOTE,
+                    MessageBodyKind.POLL_CLOSE,
+                    MessageBodyKind.CHECKLIST_TICK,
+                    MessageBodyKind.CHECKLIST_ADD,
+                    MessageBodyKind.EDIT_CHECKLIST,
+                    MessageBodyKind.EDIT_ARTICLE,
+                    -> IncomingChatEvent.ContentOp(
+                        messageId = messageId,
+                        op = contentOpKindOf(body.kind),
+                        target = body.target ?: 0L,
+                        senderKey = senderKey,
+                        createdAt = createdAt,
+                        choices = body.pollChoices,
+                        item = body.checklistItem,
+                        done = body.checklistDone,
+                        text = body.text,
+                        content = body.content,
+                        attachments = body.attachments,
+                    )
                     MessageBodyKind.UNSUPPORTED -> IncomingChatEvent.Application(
                         messageId = messageId,
                         text = "",
@@ -1305,6 +1399,46 @@ public sealed interface IncomingChatEvent {
          *  (`chat.message.unsupported`), never core prose. `null` for every
          *  readable message. */
         val unsupportedVersion: Long? = null,
+        /** ADR-0090 — the poll, checklist, location, contact card or article
+         *  this message carries, as the core parsed it; `null` for an
+         *  ordinary message. A poll or checklist's author signature is checked
+         *  by the repository against [senderKey] before it is kept. */
+        val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+        /** ADR-0090 section 3.4 — the distinct account keys of the roster at
+         *  receipt, set only for an anonymous poll (its ring version 0). */
+        val rosterAccountKeys: List<ByteArray>? = null,
+    ) : IncomingChatEvent
+
+    /** ADR-0090 — an op on a poll or checklist (vote, close, tick, add, an
+     *  edit of a checklist or article). Folded into the target row by the
+     *  repository, never a bubble. */
+    public data class ContentOp(
+        val messageId: Long,
+        val op: ContentOpKind,
+        val target: Long,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+        val choices: ByteArray? = null,
+        val item: uniffi.lakko_ffi_uniffi.ChecklistItemRef? = null,
+        val done: Boolean? = null,
+        val text: String = "",
+        val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+        val attachments: List<AttachmentRef> = emptyList(),
+    ) : IncomingChatEvent
+
+    /** ADR-0090 section 3.9 — an open-items or poll-ballots hand-over row. */
+    public data class OpenItems(
+        val messageId: Long,
+        val envelope: ByteArray,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0090 section 3.6 — an anonymous ballot row (not MLS). */
+    public data class PollBallotRow(
+        val messageId: Long,
+        val row: ByteArray,
+        val createdAt: String,
     ) : IncomingChatEvent
 
     /** ADR-0023 — an edit / delete / reaction op carried in the
@@ -1408,6 +1542,10 @@ public sealed interface IncomingChatEvent {
         val messageId: Long,
         val systemKind: SystemKind,
         val createdAt: String,
+        /** ADR-0090 section 3.4 — for a merged commit, the distinct account
+         *  keys of the roster it produced: open anonymous polls extend their
+         *  rings with the accounts it added. */
+        val rosterAccountKeys: List<ByteArray>? = null,
     ) : IncomingChatEvent
 
     /** Phase 3a10 — call-signaling event lifted out of an

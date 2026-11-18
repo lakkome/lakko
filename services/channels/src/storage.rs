@@ -40,6 +40,7 @@ use crate::feedback::{
     CommentReactionCounts, Label, MemoryFeedback, PostReactionCounts, StoredComment, WriterKey,
     WRITE_NONCE_LEN,
 };
+use crate::votes::{PostVoteCounts, Tag, VoteOutcome};
 
 /// Prune a per-subscriber `epoch -> envelope` map down to its
 /// highest `keep_n` epochs, dropping the lowest first
@@ -1219,6 +1220,36 @@ pub trait ChannelStore: Send + Sync {
         post_cursor: u64,
         comment_cursors: &[u64],
     ) -> Result<Vec<CommentReactionCounts>, StorageError>;
+
+    /// Store, replace (non-empty `labels`, sorted) or retract (empty) the
+    /// channel poll vote of `tag` under the post, when `at_ms` is strictly
+    /// greater than the stored one (ADR-0090 section 4.3); the per-label
+    /// counters and the voter count move in the same transaction. A retract
+    /// keeps the row with no labels so its `at_ms` still orders.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownPost`] when the channel holds no post at
+    /// `post_cursor`.
+    async fn apply_vote(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        tag: Tag,
+        labels: Vec<Label>,
+        at_ms: u64,
+    ) -> Result<VoteOutcome, StorageError>;
+
+    /// The vote counts of each post in `post_cursors`, in that order.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn vote_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostVoteCounts>, StorageError>;
 
     /// Delete the channel (ADR-0087 phase B, 2026-11-05): every row of it
     /// goes, and a tombstone stays so its reads answer `410 channel-deleted`
@@ -2512,6 +2543,38 @@ impl ChannelStore for InMemoryChannelStore {
             post_cursor,
             comment_cursors,
         ))
+    }
+
+    async fn apply_vote(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        tag: Tag,
+        labels: Vec<Label>,
+        at_ms: u64,
+    ) -> Result<VoteOutcome, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.has_post(channel, post_cursor) {
+            return Err(StorageError::UnknownPost);
+        }
+        Ok(guard
+            .feedback
+            .votes
+            .apply(channel, post_cursor, tag, labels, at_ms))
+    }
+
+    async fn vote_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostVoteCounts>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .votes
+            .counts(channel, post_cursors))
     }
 
     async fn delete_channel(&self, channel: ChannelId, now_ms: u64) -> Result<bool, StorageError> {

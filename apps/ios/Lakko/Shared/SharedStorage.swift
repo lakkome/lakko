@@ -123,6 +123,21 @@ public enum SharedStorage {
         "chat.media.video_message",
         "chat.message.unsupported",
         "notification.message.new",
+        // ADR-0090 — the bare kind words of a content message's preview.
+        "attach.menu.poll",
+        "attach.menu.checklist",
+        "attach.menu.location",
+        "attach.menu.contact",
+        "attach.menu.article",
+    ]
+
+    /// ADR-0090 section 1 — the content preview lines, rendered by the app
+    /// with the marker `{text}` in place of the item's own text.
+    public static let notificationContentLineKeys: [String] = [
+        "chat.content.preview.poll",
+        "chat.content.preview.checklist",
+        "chat.content.preview.contact",
+        "chat.content.preview.article",
     ]
 
     /// The one plural the extension shows ("Sent 3 attachments"). The

@@ -467,7 +467,8 @@ public enum StateBundle {
             accountId: claim.accountId,
             usernameCertificate: claim.username == nil ? nil : claim.usernameCertificate,
             grants: [],
-            avatar: claim.avatar?.ffi)
+            avatar: claim.avatar?.ffi,
+            cardShareable: claim.cardShareable)
         if let envelope = try? composeProfileEnvelope(profile: full) { return envelope }
         let nameOnly = FfiProfile(
             displayName: claim.displayName,
@@ -476,7 +477,8 @@ public enum StateBundle {
             accountId: claim.accountId,
             usernameCertificate: nil,
             grants: [],
-            avatar: claim.avatar?.ffi)
+            avatar: claim.avatar?.ffi,
+            cardShareable: claim.cardShareable)
         return try? composeProfileEnvelope(profile: nameOnly)
     }
 
@@ -716,7 +718,8 @@ public enum StateBundle {
                 updatedAtMs: decoded.updatedAtMs,
                 accountId: decoded.accountId,
                 usernameCertificate: decoded.usernameCertificate,
-                avatar: ProfileAvatar(decoded.avatar))
+                avatar: ProfileAvatar(decoded.avatar),
+                cardShareable: decoded.cardShareable)
             return (personKeyB64: entry.personKeyB64, claim: claim)
         }
     }

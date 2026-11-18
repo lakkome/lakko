@@ -53,6 +53,12 @@ export interface NotificationWords {
   senderPrefixed: string;
   /** The `Reactions` switch is off on this device. */
   reactionsOff: boolean;
+  /** ADR-0090 — content previews, U+0001 = the question, title or name. */
+  pollPreview: string;
+  checklistPreview: string;
+  locationPreview: string;
+  contactPreview: string;
+  articlePreview: string;
 }
 
 /** The words, rendered now. */
@@ -73,6 +79,11 @@ export function renderNotificationStrings(): NotificationWords {
     reactedToYourMessage: t("notification.reaction.body", { name: "\u0001", emoji: "\u0002" }),
     senderPrefixed: t("chats.preview.sender", { name: "\u0001", text: "\u0002" }),
     reactionsOff: !reactionNotificationsOn(),
+    pollPreview: t("preview.poll", { question: "\u0001" }),
+    checklistPreview: t("preview.checklist", { title: "\u0001" }),
+    locationPreview: t("preview.location"),
+    contactPreview: t("preview.contact", { name: "\u0001" }),
+    articlePreview: t("preview.article", { title: "\u0001" }),
   };
 }
 

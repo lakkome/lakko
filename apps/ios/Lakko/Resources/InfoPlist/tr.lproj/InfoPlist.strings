@@ -15,3 +15,5 @@
 "NSFaceIDUsageDescription" = "Lakko, kurtarma ifadenizi göstermeden önce siz olduğunuzu doğrulamak için Face ID kullanır.";
 
 "NSSpeechRecognitionUsageDescription" = "Lakko, istediğinizde sesli mesajları ve video mesajları metne dönüştürür. Bu işlem cihazınızda yapılır; kayıtlar metne dönüştürülmek için hiçbir yere gönderilmez.";
+
+"NSLocationWhenInUseUsageDescription" = "Lakko uses your location only when you choose to send where you are in a conversation. Nothing is sent before you tap Send.";

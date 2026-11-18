@@ -408,6 +408,8 @@ public data class PersistedMessage(
      */
     val membershipJoined: List<String> = emptyList(),
     val membershipLeft: List<String> = emptyList(),
+    /** ADR-0090 — a content message's body and the ops it collected. */
+    val content: PersistedContent? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -590,6 +592,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         lastOpId = msg.lastOpId,
         membershipJoined = msg.membershipJoined,
         membershipLeft = msg.membershipLeft,
+        content = persistContent(msg),
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -645,7 +648,10 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         lastOpId = lastOpId,
         membershipJoined = membershipJoined,
         membershipLeft = membershipLeft,
-    )
+    ).let { m ->
+        val restored = content?.let(::restoreContent) ?: return@let m
+        m.copy(content = restored.first, contentExtras = restored.second)
+    }
 }
 
 /** `null` for an unrecognised outcome — see [PersistedMessage.toChatMessage]. */

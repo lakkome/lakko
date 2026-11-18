@@ -192,7 +192,8 @@ public final class ProfileDirectory: ObservableObject {
         }
         let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
         let saved = ownStore.save(
-            displayName: normalized, avatar: avatar, accountIdB64: account, nowMs: nowMs)
+            displayName: normalized, avatar: avatar, accountIdB64: account, nowMs: nowMs,
+            cardShareable: account == self.accountIdB64 ? ownCardShareable : nil)
         // The backup carries the name and the photo.
         AutoBackupStore.markDirty(accountIdB64: account, nowMs: Int64(nowMs))
         gate.leave()
@@ -231,7 +232,8 @@ public final class ProfileDirectory: ObservableObject {
             accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
             usernameCertificate: nil,
             grants: [],
-            avatar: own.avatar?.ffi
+            avatar: own.avatar?.ffi,
+            cardShareable: ownCardShareable
         )
         do {
             return try composeProfileEnvelope(profile: profile)
@@ -289,7 +291,7 @@ public final class ProfileDirectory: ObservableObject {
         // devices: the newer profile carries both.
         let adopted = OwnProfile(
             displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs,
-            avatar: ProfileAvatar(incoming.avatar))
+            avatar: ProfileAvatar(incoming.avatar), cardShareable: incoming.cardShareable)
         ownStore.store(adopted, accountIdB64: accountIdB64)
         ownProfile = adopted
         bump()
@@ -311,7 +313,8 @@ public final class ProfileDirectory: ObservableObject {
             accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
             usernameCertificate: username == nil ? nil : ReachCenter.shared.ownUsernameCertificate,
             grants: [],
-            avatar: own.avatar?.ffi
+            avatar: own.avatar?.ffi,
+            cardShareable: accountIdB64 == self.accountIdB64 ? ownCardShareable : (own.cardShareable ?? true)
         )
         do {
             return try composeProfileEnvelope(profile: profile)
@@ -340,7 +343,7 @@ public final class ProfileDirectory: ObservableObject {
         else { return .notNewer }
         let adopted = OwnProfile(
             displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs,
-            avatar: ProfileAvatar(incoming.avatar))
+            avatar: ProfileAvatar(incoming.avatar), cardShareable: incoming.cardShareable)
         ownStore.store(adopted, accountIdB64: accountIdB64)
         if accountIdB64 == self.accountIdB64 {
             ownProfile = adopted
@@ -421,8 +424,58 @@ public final class ProfileDirectory: ObservableObject {
             accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
             usernameCertificate: username == nil ? nil : cert,
             grants: [],
-            avatar: ownProfile?.avatar?.ffi
+            avatar: ownProfile?.avatar?.ffi,
+            cardShareable: ownCardShareable
         )
+    }
+
+    // MARK: - Sharing the own contact card (ADR-0090 section 7)
+
+    /// Whether this account lets others share its contact card: off exactly
+    /// when its "who can find me" setting is `Nobody`. Every own profile
+    /// envelope carries it.
+    var ownCardShareable: Bool {
+        Self.cardShareable(for: ReachCenter.shared.setting)
+    }
+
+    /// The one rule: a card may be shared unless the setting is `Nobody`.
+    nonisolated static func cardShareable(for setting: FfiVisibilitySetting) -> Bool {
+        setting.mode != .nobody
+    }
+
+    /// The setting moved to or from `Nobody` since the stored own profile was
+    /// stamped: give it a new stamp (name and photo unchanged) so receivers,
+    /// which keep a profile only when it is strictly newer, take the new
+    /// flag; and hand it to the account's other devices. Returns whether it
+    /// did. Called before the profiles are republished after a setting
+    /// change, and at session start (a setting changed in an older build).
+    @discardableResult
+    func restampIfCardShareableChanged() -> Bool {
+        guard let accountIdB64 else { return false }
+        let current = ownCardShareable
+        let stored = ownProfile ?? ownStore.load(accountIdB64: accountIdB64)
+        guard (stored?.cardShareable ?? true) != current else { return false }
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return false }
+        let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+        let saved = ownStore.save(
+            displayName: stored?.displayName, avatar: stored?.avatar, accountIdB64: accountIdB64,
+            nowMs: nowMs, cardShareable: current)
+        AutoBackupStore.markDirty(accountIdB64: accountIdB64, nowMs: Int64(nowMs))
+        gate.leave()
+        ownProfile = saved
+        bump()
+        if let envelope = ownDeviceEnvelope() {
+            onOwnDeviceEnvelope?(envelope)
+        }
+        return true
+    }
+
+    /// The person holding `signatureKeyB64` lets others share their contact
+    /// card, by the newest profile this device holds from them. `true` when
+    /// nothing is held (ADR-0090 section 7: a person who never sent a profile
+    /// counts as shareable).
+    func cardShareable(signatureKeyB64: String) -> Bool {
+        storedProfile(signatureKeyB64: signatureKeyB64)?.cardShareable ?? true
     }
 
     // MARK: - Received profiles

@@ -389,6 +389,12 @@ enum FeedForward {
         cursor > 0 && UInt64(cursor) > (newestRead ?? 0)
     }
 
+    /// ADR-0090 — Forward is offered unless the item is a poll, a checklist,
+    /// or a contact card whose person does not let others share it.
+    static func canForward(_ message: FeedMessage, cardShareable: (Data) -> Bool) -> Bool {
+        ForwardPayload.isForwardable(content: message.content, cardShareable: cardShareable)
+    }
+
     /// Copy is offered only when there is text to copy.
     static func canCopy(_ message: FeedMessage) -> Bool {
         !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

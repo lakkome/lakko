@@ -1911,6 +1911,134 @@ pub fn suggest_handle(name: String, kind: HandleKind, private: bool, random: u64
     rust_suggest_handle(&name, kind, private, random)
 }
 
+// ============================================================================
+// ADR-0090 — the paperclip menu and the poll editor's anonymity switch
+// ============================================================================
+
+/// One row of the paperclip menu, in UX order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AttachmentMenuItem {
+    /// The system photo picker.
+    PhotoOrVideo,
+    /// Lakko's capture screen.
+    Camera,
+    /// The system document picker.
+    File,
+    /// The document picker filtered to audio.
+    Audio,
+    /// The poll editor.
+    Poll,
+    /// The checklist editor.
+    Checklist,
+    /// The location screen.
+    Location,
+    /// The contact picker.
+    Contact,
+    /// The article editor.
+    Article,
+}
+
+/// Why a menu row is shown disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AttachmentMenuDisabled {
+    /// `No camera on this device`.
+    NoCamera,
+    /// `Unavailable during a call`.
+    CameraInCall,
+    /// `Location isn't available on this device`.
+    NoLocation,
+}
+
+/// One menu row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentMenuRow {
+    /// Which row.
+    pub item: AttachmentMenuItem,
+    /// Its group (0 files, 1 things people answer, 2 things people share,
+    /// 3 long text); a separator goes between rows whose sections differ.
+    pub section: u8,
+    /// Shown disabled with this reason, or enabled when `None`.
+    pub disabled: Option<AttachmentMenuDisabled>,
+}
+
+/// The paperclip menu (`docs/ux/attachments.md` section 2.4). Empty means
+/// no paperclip (a channel subscriber).
+#[uniffi::export]
+#[must_use]
+pub fn attachment_menu(
+    kind: ConversationKind,
+    role: ConversationRole,
+    has_camera: bool,
+    has_location: bool,
+    call_holds_camera: bool,
+) -> Vec<AttachmentMenuRow> {
+    use lakko_ui_rules::attachment_menu as am;
+    let role = match role {
+        ConversationRole::Owner => RustConversationRole::Owner,
+        ConversationRole::Admin => RustConversationRole::Admin,
+        ConversationRole::Member => RustConversationRole::Member,
+    };
+    am::attachment_menu(
+        kind.into(),
+        role,
+        has_camera,
+        has_location,
+        call_holds_camera,
+    )
+    .into_iter()
+    .map(|r| AttachmentMenuRow {
+        item: match r.item {
+            am::AttachmentMenuItem::PhotoOrVideo => AttachmentMenuItem::PhotoOrVideo,
+            am::AttachmentMenuItem::Camera => AttachmentMenuItem::Camera,
+            am::AttachmentMenuItem::File => AttachmentMenuItem::File,
+            am::AttachmentMenuItem::Audio => AttachmentMenuItem::Audio,
+            am::AttachmentMenuItem::Poll => AttachmentMenuItem::Poll,
+            am::AttachmentMenuItem::Checklist => AttachmentMenuItem::Checklist,
+            am::AttachmentMenuItem::Location => AttachmentMenuItem::Location,
+            am::AttachmentMenuItem::Contact => AttachmentMenuItem::Contact,
+            am::AttachmentMenuItem::Article => AttachmentMenuItem::Article,
+        },
+        section: r.item.section(),
+        disabled: r.disabled.map(|d| match d {
+            am::AttachmentMenuDisabled::NoCamera => AttachmentMenuDisabled::NoCamera,
+            am::AttachmentMenuDisabled::CameraInCall => AttachmentMenuDisabled::CameraInCall,
+            am::AttachmentMenuDisabled::NoLocation => AttachmentMenuDisabled::NoLocation,
+        }),
+    })
+    .collect()
+}
+
+/// What the poll editor shows for anonymity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PollAnonymity {
+    /// No switch; not anonymous.
+    NotOffered,
+    /// The switch, on by default.
+    SwitchDefaultOn,
+    /// No switch; always anonymous (a channel).
+    AlwaysAnonymous,
+}
+
+/// The anonymity a poll editor offers in a conversation of `kind` with
+/// `accounts` distinct accounts (account keys, not leaves).
+#[uniffi::export]
+#[must_use]
+pub fn poll_anonymity(kind: ConversationKind, accounts: u32) -> PollAnonymity {
+    use lakko_ui_rules::attachment_menu as am;
+    match am::poll_anonymity(kind.into(), accounts as usize) {
+        am::PollAnonymity::NotOffered => PollAnonymity::NotOffered,
+        am::PollAnonymity::SwitchDefaultOn => PollAnonymity::SwitchDefaultOn,
+        am::PollAnonymity::AlwaysAnonymous => PollAnonymity::AlwaysAnonymous,
+    }
+}
+
+/// A sent photo's longest side at most, pixels.
+#[uniffi::export]
+#[must_use]
+pub fn photo_max_longest_side_px() -> u32 {
+    lakko_ui_rules::attachment_menu::PHOTO_MAX_LONGEST_SIDE_PX
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

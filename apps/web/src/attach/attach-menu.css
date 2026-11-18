@@ -1,0 +1,83 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* SPDX-FileCopyrightText: 2026 Lakko Contributors */
+
+/* docs/ux/attachments.md section 2.1 — a popover above the paperclip, opening
+   upwards, aligned to its start edge; a bottom sheet at phone width. */
+.lk-attach-anchor {
+  position: relative;
+  display: inline-flex;
+}
+.lk-attach-menu {
+  position: absolute;
+  inset-inline-start: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  min-width: 232px;
+  padding: 6px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-attach-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--surface-fg);
+  font: inherit;
+  font-weight: 500;
+  text-align: start;
+  cursor: pointer;
+}
+.lk-attach-menu-row:hover:not(.disabled),
+.lk-attach-menu-row:focus-visible {
+  background: var(--surface-hover);
+  outline: none;
+}
+.lk-attach-menu-row.disabled {
+  cursor: default;
+  color: var(--surface-muted);
+}
+.lk-attach-menu-icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+.lk-attach-menu-row.disabled .lk-attach-menu-icon {
+  color: var(--surface-muted);
+}
+.lk-attach-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-attach-menu-reason {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--surface-muted);
+}
+.lk-attach-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--surface-border);
+}
+@media (max-width: 599px) {
+  .lk-attach-menu {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    top: auto;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+  }
+  .lk-attach-menu-row {
+    min-height: 52px;
+  }
+}

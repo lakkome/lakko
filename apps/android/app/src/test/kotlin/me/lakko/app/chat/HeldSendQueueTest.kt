@@ -85,4 +85,24 @@ class HeldSendQueueTest {
         assertEquals(0L, REPLY_NO_JUMP_TARGET)
         assertEquals(7L, replyTargetForSend(7, "same", "same"))
     }
+
+    // ADR-0090 / docs/ux/attachments.md section 11a — a forwarded location,
+    // contact card or article held for a one-to-one's successor.
+
+    @Test
+    fun `a held content forward with no text survives a restart with its content and forward`() {
+        val held = row("", 6).copy(
+            contentEnvelopeB64 = "eyJ2IjoxfQ==",
+            forward = PersistedForward(author = "B", originGroupIdHex = "cd", originMessageId = 4),
+        )
+        assertTrue(heldRowUsable(held))
+        assertEquals(listOf(held), decodeHeldSends(encodeHeldSends(listOf(held))))
+    }
+
+    @Test
+    fun `a row stored before the content field reads as carrying none`() {
+        val raw = """[{"conversationHex":"aa","groupIdHex":"aa","heldAtMs":5,"text":"t"}]"""
+        assertEquals(null, decodeHeldSends(raw).single().contentEnvelopeB64)
+        assertFalse(heldRowUsable(row("").copy(contentEnvelopeB64 = "")))
+    }
 }

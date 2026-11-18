@@ -329,6 +329,11 @@ targets:
         # ADR-0047 — the microphone also records voice messages and the
         # sound of video notes, so the string no longer claims the mic is
         # only used during calls.
+        # ADR-0090 — the location screen asks for one fix while it is open;
+        # nothing leaves the device before Send. Text: `ios.permission.location`.
+        NSLocationWhenInUseUsageDescription: >-
+          Lakko uses your location only when you choose to send where you are
+          in a conversation. Nothing is sent before you tap Send.
         NSMicrophoneUsageDescription: >-
           Lakko uses the microphone for end-to-end-encrypted calls
           and to record voice messages and video messages you

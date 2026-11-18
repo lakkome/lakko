@@ -283,6 +283,9 @@ public object ChannelMemberCards {
         public val usernameCertificate: ByteArray?,
         /** ADR-0084 — the own profile photo, or `null`. */
         public val avatar: me.lakko.app.profile.AvatarRefs? = null,
+        /** ADR-0090 section 7 — the own profile's card-sharing flag. A
+         *  change moves [updatedAtMs], so the card is uploaded again. */
+        public val cardShareable: Boolean = true,
     )
 
     /** Upload this device's card for [input]'s epoch when one is due. Never
@@ -329,6 +332,7 @@ public object ChannelMemberCards {
                         usernameCertificate = if (content.username == null) null else input.usernameCertificate,
                         grants = listOfNotNull(grant),
                         avatar = input.avatar?.toFfi(),
+                        cardShareable = input.cardShareable,
                     ),
                 )
                 // The card is bound to the account: without a reach session
@@ -420,6 +424,7 @@ public object ChannelMemberCards {
             accountId = accountId.takeIf { it.size == 16 },
             usernameCertificate = username?.let { ReachManager.get(context).usernameCertificate() },
             avatar = own?.avatar,
+            cardShareable = own?.cardShareable ?: true,
         )
     }
 

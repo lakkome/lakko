@@ -82,7 +82,7 @@ export function encodeProfileRow(
   renames: ReadonlyMap<string, string>,
   labels: ReadonlyMap<string, string> = new Map(),
 ): string {
-  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown }> = {};
+  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown; ns?: boolean }> = {};
   for (const [key, prof] of row.profiles) {
     p[key] = {
       d: prof.displayName,
@@ -95,6 +95,8 @@ export function encodeProfileRow(
       // ADR-0084 — the photo references (blob keys inside: this payload is
       // only ever written encrypted). Absent for no photo.
       ...(prof.avatar === undefined || prof.avatar === null ? {} : { av: prof.avatar }),
+      // ADR-0090 section 7 — present only when the card may not be shared.
+      ...(prof.cardShareable === false ? { ns: true } : {}),
     };
   }
   const vf: Record<string, { s: string; c: number }> = {};
@@ -151,6 +153,7 @@ export function decodeProfileRow(json: string): ProfileRow | null {
         accountIdHex,
         usernameCertificateB64,
         ...(avatar === null ? {} : { avatar }),
+        ...((raw as { ns?: unknown }).ns === true ? { cardShareable: false } : {}),
       });
     }
   }

@@ -1146,6 +1146,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         }
     }
 

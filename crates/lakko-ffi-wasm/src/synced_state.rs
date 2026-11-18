@@ -1718,6 +1718,71 @@ impl SyncedState {
         self.with(|s| u32::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u32::MAX))
     }
 
+    /// ADR-0090 — record this account's choice in a poll, stamped `hlc`;
+    /// empty `choices` retracts. `setVersion` is the ring version of the
+    /// account's anonymity set (0 in a channel). `pollMessageId` is the poll
+    /// row's DS id (or the post cursor in a channel), a `bigint`. Returns the
+    /// envelope to send, or `undefined` when the held register is newer or
+    /// identical. Throws a bounds message for bad choices or a full set.
+    #[wasm_bindgen(js_name = setPollChoice)]
+    pub fn set_poll_choice(
+        &self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        poll_message_id: i64,
+        choices: &[u8],
+        set_version: u32,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let conversation = cref(ref_kind, ref_id)?;
+        self.with(|s| s.set_poll_choice(hlc, &conversation, poll_message_id, choices, set_version))?
+            .map_err(js)
+    }
+
+    /// The held own-choice register of a poll, or `undefined`.
+    #[wasm_bindgen(js_name = pollChoice)]
+    pub fn poll_choice(
+        &self,
+        ref_kind: u8,
+        ref_id: &[u8],
+        poll_message_id: i64,
+    ) -> Result<Option<PollChoice>, JsError> {
+        let conversation = cref(ref_kind, ref_id)?;
+        self.with(|s| {
+            s.poll_choice(&conversation, poll_message_id)
+                .map(|p| PollChoice {
+                    hlc: p.hlc,
+                    choices: p.value.choices,
+                    set_version: p.value.set_version,
+                })
+        })
+    }
+
+    /// Every held own-choice register as envelopes.
+    #[wasm_bindgen(js_name = pollChoiceEnvelopes)]
+    pub fn poll_choice_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.poll_choice_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Fold in a poll-choice envelope. Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyPollChoiceEnvelope)]
+    pub fn apply_poll_choice_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_poll_choice_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Drop the own-choice registers of ended conversations; returns how
+    /// many went.
+    #[wasm_bindgen(js_name = prunePollChoices)]
+    pub fn prune_poll_choices(&self) -> Result<u32, JsError> {
+        self.with(|s| u32::try_from(s.prune_poll_choices()).unwrap_or(u32::MAX))
+    }
+
     /// Record that the person has seen the "a device was added to your
     /// account" warning (identity-recovery 17.5) for each device whose
     /// 32-byte signature key is in `device_keys` (flat-concatenated),
@@ -2152,6 +2217,45 @@ fn comment_nonce16(bytes: &[u8]) -> Result<[u8; core::CHANNEL_COMMENT_NONCE_LEN]
 #[must_use]
 pub fn is_quick_reaction_envelope(bytes: &[u8]) -> bool {
     core::is_quick_reaction_envelope(bytes)
+}
+
+/// ADR-0090 — this account's held choice in one poll.
+#[wasm_bindgen]
+pub struct PollChoice {
+    hlc: u64,
+    choices: Vec<u8>,
+    set_version: u32,
+}
+
+#[wasm_bindgen]
+impl PollChoice {
+    /// The register's stamp (`bigint`).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn hlc(&self) -> u64 {
+        self.hlc
+    }
+
+    /// The choices; empty = retracted.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn choices(&self) -> Vec<u8> {
+        self.choices.clone()
+    }
+
+    /// The ring version of the anonymity set (0 in a channel).
+    #[wasm_bindgen(getter, js_name = setVersion)]
+    #[must_use]
+    pub fn set_version(&self) -> u32 {
+        self.set_version
+    }
+}
+
+/// Whether `bytes` is an own-poll-choice envelope.
+#[wasm_bindgen(js_name = isPollChoiceEnvelope)]
+#[must_use]
+pub fn is_poll_choice_envelope(bytes: &[u8]) -> bool {
+    core::is_poll_choice_envelope(bytes)
 }
 
 /// Whether `bytes` is an own-channel-reaction envelope.

@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-ballot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Anonymous group-poll ballots (ADR-0090 section 3): a log-size linkable one-out-of-many proof, the per-poll tag, ring versions, the sealed ballot row and the tally fold"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# HKDF-SHA256 for the row seal key, the zeroizing secret container and OS
+# randomness. No new primitive enters through it.
+lakko-crypto.workspace = true
+
+# The group arithmetic of the proof: Edwards25519, scalars, multiscalar
+# multiplication. Already in the tree (4.1.3 through ed25519-dalek, x25519-dalek
+# and voprf); no new crate. Default features: alloc, precomputed tables,
+# zeroize.
+curve25519-dalek = "4"
+
+# The Ed25519 seed -> signing scalar expansion (SHA-512, clamp), so the witness
+# is computed exactly as an Ed25519 signer computes it. Already in the tree
+# (2.2.0 through lakko-crypto).
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+
+# The Fiat-Shamir transcript, the ring hash and hash-to-point. Already in the
+# tree through lakko-crypto, used directly for its streaming and XOF modes.
+blake3 = "1"
+
+# XChaCha20-Poly1305 for the ballot row (ADR-0090 section 3.6). Already in the
+# tree through lakko-crypto, which exposes only the 12-byte-nonce variant.
+chacha20poly1305 = "0.10"
+
+zeroize = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `lakko-crypto` pulls `rand_core`'s `getrandom`, which needs its WebCrypto
+# backend on wasm32 (the same pin `lakko-circle` and `lakko-anon-token` carry).
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+proptest = "1"

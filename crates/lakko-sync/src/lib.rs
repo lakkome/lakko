@@ -116,6 +116,11 @@ pub mod fuzz_api {
     /// * `decode_device_ack_envelope` — the device-acknowledgement registers
     ///   (identity-recovery 17.5), reached the same way: canonical, folding
     ///   to exactly its keys, not applying twice.
+    /// * `decode_poll_choice_envelope` — the account's own poll choices
+    ///   (ADR-0090 section 3.6), reached the same way: canonical, within its
+    ///   bounds, folding to exactly its registers, carried back by
+    ///   `poll_choice_envelopes`, not applying twice, and pruned once every
+    ///   conversation it names has ended.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
     ///   must persist to bytes that read back as the same state, its
@@ -134,6 +139,7 @@ pub mod fuzz_api {
             && device_ack_envelope_holds(bytes)
             && channel_reaction_envelope_holds(bytes)
             && channel_comment_envelope_holds(bytes)
+            && poll_choice_envelope_holds(bytes)
             && persisted_state_holds(bytes)
     }
 
@@ -167,6 +173,55 @@ pub mod fuzz_api {
         held && {
             let n = state.len();
             state.prune_channel_activity(u64::MAX) == n && state.is_empty()
+        }
+    }
+
+    /// The own poll-choice envelope (ADR-0090 section 3.6): canonical,
+    /// within its bounds, folds to exactly its registers, is carried back by
+    /// `poll_choice_envelopes`, does not apply twice, survives a prune while
+    /// no conversation has ended, and is gone after every conversation it
+    /// names has ended.
+    fn poll_choice_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_poll_choice_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let held = crate::synced::compose_poll_choice_envelope(&entries).as_deref() == Ok(bytes)
+            && bytes.len() <= crate::synced::POLL_CHOICE_ENVELOPE_MAX_LEN
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_poll_choice_envelope(bytes) == Ok(true)
+            && state.poll_choice_envelopes() == vec![bytes.to_vec()]
+            && state.apply_poll_choice_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state
+                    .poll_choice(&e.value.conversation, e.value.poll_message_id)
+                    .as_ref()
+                    == Some(e)
+            })
+            && state.prune_poll_choices() == 0;
+        held && {
+            let n = state.len();
+            for e in &entries {
+                if state
+                    .apply(
+                        u64::MAX,
+                        SyncEntry::ConversationEnd(ConversationEnd {
+                            conversation: e.value.conversation.clone(),
+                            state: crate::synced::entry::ConversationEndState::Ended,
+                            epoch: u64::MAX,
+                        }),
+                    )
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            state.prune_poll_choices() == n
+                && entries.iter().all(|e| {
+                    state
+                        .poll_choice(&e.value.conversation, e.value.poll_message_id)
+                        .is_none()
+                })
         }
     }
 
@@ -348,13 +403,20 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        for envelope in state.poll_choice_envelopes() {
+            if rebuilt.apply_poll_choice_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
         let reactions = |s: &SyncedState| {
             s.entries()
                 .into_iter()
                 .filter(|(_, e)| {
                     matches!(
                         e,
-                        SyncEntry::ChannelReaction(_) | SyncEntry::ChannelComment(_)
+                        SyncEntry::ChannelReaction(_)
+                            | SyncEntry::ChannelComment(_)
+                            | SyncEntry::PollChoice(_)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -540,6 +602,37 @@ pub mod fuzz_api {
 #[cfg(test)]
 mod fuzz_api_tests {
     use crate::fuzz_api::{decode_synced_and_check, replay_and_check};
+
+    #[test]
+    fn the_synced_decode_oracle_holds_on_poll_choices() {
+        let mut state = crate::SyncedState::new();
+        let group = crate::synced::ConversationRef {
+            kind: crate::synced::entry::ConversationRefKind::Group,
+            id: vec![1; 32],
+        };
+        let channel = crate::synced::ConversationRef {
+            kind: crate::synced::entry::ConversationRefKind::Channel,
+            id: vec![2; 16],
+        };
+        let live = state
+            .set_poll_choice(3, &group, 9, &[0, 4], 7)
+            .unwrap()
+            .unwrap();
+        state
+            .set_poll_choice(4, &channel, 120, &[], 7)
+            .unwrap()
+            .unwrap();
+        assert!(decode_synced_and_check(&live));
+        for envelope in state.poll_choice_envelopes() {
+            assert!(decode_synced_and_check(&envelope));
+            let mut damaged = envelope.clone();
+            if let Some(last) = damaged.last_mut() {
+                *last ^= 0xFF;
+            }
+            assert!(decode_synced_and_check(&damaged));
+        }
+        assert!(decode_synced_and_check(&state.to_bytes()));
+    }
 
     #[test]
     fn the_synced_decode_oracle_holds_on_valid_and_damaged_input() {

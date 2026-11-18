@@ -2457,6 +2457,7 @@ private fun SessionRoot(
                     val id = entry.arguments?.getString("channelId") ?: return@composable
                     // ADR-0087 section 12 — a channel opens where a group opens.
                     ChannelConversationScreen(
+                        contactsRepository = contactsRepository,
                         channelId = id,
                         state = channelsState,
                         client = channelsClient,
@@ -2493,6 +2494,7 @@ private fun SessionRoot(
                 ) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
                     ChannelConversationScreen(
+                        contactsRepository = contactsRepository,
                         channelId = id,
                         state = channelsState,
                         client = channelsClient,

@@ -2057,6 +2057,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // ADR-0090 section 3.6 — the account's own poll choices, the same
+            // way.
+            if isPollChoiceEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyPollChoiceEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                        pollChoiceRevision &+= 1
+                    }
+                } catch {
+                    NSLog("poll-choice: envelope refused")
+                }
+                return
+            }
             // Reactions-and-emoji spec section 6 (D3) — the quick reaction,
             // the same way.
             if isQuickReactionEnvelope(bytes: envelope) {
@@ -2243,6 +2257,46 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.deviceAckEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0090 section 3.6 — and the own poll choices.
+        for envelope in (try? syncedState.pollChoiceEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
+    }
+
+    // MARK: - ADR-0090: the own poll-choice register
+
+    /// Bumped whenever a poll-choice register changes (a poll card re-reads).
+    @Published public private(set) var pollChoiceRevision: UInt64 = 0
+
+    /// The account's own recorded choice in a poll; `nil` when none.
+    public func pollChoice(conversation: FolderConversationRef, pollMessageId: Int64) -> PollChoice? {
+        (try? syncedState.pollChoice(conversation: conversation, pollMessageId: pollMessageId)) ?? nil
+    }
+
+    /// Record the account's choice (empty = retracted) and send it to the
+    /// account's other devices. `false` when refused or not ready.
+    @discardableResult
+    public func setPollChoice(
+        conversation: FolderConversationRef, pollMessageId: Int64, choices: [UInt8], setVersion: UInt32
+    ) async -> Bool {
+        guard !deviceRemoved else { return false }
+        let envelope: Data?
+        do {
+            envelope = try syncedState.setPollChoice(
+                hlc: Hlc.mint(), conversation: conversation, pollMessageId: pollMessageId,
+                choices: Data(choices), setVersion: setVersion)
+        } catch {
+            NSLog("poll-choice: register refused")
+            return false
+        }
+        guard let envelope else { return true }
+        stateChanged()
+        pollChoiceRevision &+= 1
+        persistSyncState()
+        // Best effort: an unsent register reaches the other devices at the
+        // next growth re-send.
+        try? await sendLineageEnvelopes([envelope])
+        return true
     }
 
     // MARK: - ADR-0079: the link-record register

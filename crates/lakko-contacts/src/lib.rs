@@ -149,7 +149,9 @@ pub mod link_refusal;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
+pub mod open_items;
 pub mod pin;
+pub mod poll_ballots;
 pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
@@ -359,9 +361,25 @@ pub use media_state::{
     MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_FLAG_CAMERA, MEDIA_STATE_FLAG_MICROPHONE,
     MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V2,
 };
+pub use open_items::{
+    assemble_open_items, compose_open_items, decode_open_items, is_open_items_envelope,
+    open_items_handover_due, open_items_sender_trusted, plan_open_items_rows,
+    try_unwrap_open_items, AssembledContent, AssembledItem, HandoverAdded, HandoverItemRef,
+    HandoverTick, HandoverVote, OpenItem, OpenItemContent, OpenItemEntry, OpenItemHeader,
+    OpenItemPart, OpenItems, OpenItemsError, ReceivedOpenItems, OPEN_ITEMS_ENVELOPE_DOMAIN_V1,
+    OPEN_ITEMS_ENVELOPE_MAX_LEN, OPEN_ITEMS_ENVELOPE_MIN_LEN, OPEN_ITEMS_MAX_BODY_LEN,
+    OPEN_ITEMS_MAX_ITEMS, OPEN_ITEMS_VERSION_V1,
+};
 pub use pin::{
     compose_pin, decode_pin, pin_is_newer, try_unwrap_pin, PinAction, PinError, PinOp,
     PIN_ENVELOPE_DOMAIN_V1, PIN_ENVELOPE_LEN, PIN_VERSION_V1,
+};
+pub use poll_ballots::{
+    ballot_needs_handover, compose_poll_ballots, decode_poll_ballots, is_poll_ballots_envelope,
+    plan_poll_ballots_rows, try_unwrap_poll_ballots, PollBallots, PollBallotsError,
+    BALLOT_HANDOVER_MARGIN_MS, JOURNAL_RETENTION_MS, POLL_BALLOTS_ENVELOPE_DOMAIN_V1,
+    POLL_BALLOTS_ENVELOPE_MAX_LEN, POLL_BALLOTS_ENVELOPE_MIN_LEN, POLL_BALLOTS_MAX_ROW_LEN,
+    POLL_BALLOTS_VERSION_V1,
 };
 pub use profile::{
     check_display_name, compose_profile, decode_profile, is_format_char, is_profile_grant_class,
@@ -591,6 +609,61 @@ pub mod fuzz_api {
         let dispatched = matches!(
             crate::incoming_envelope::dispatch_incoming_envelope(bytes),
             Ok(crate::incoming_envelope::IncomingEnvelope::LinkFounded(n)) if n == note
+        );
+        Some(recomposed && within && dispatched)
+    }
+
+    /// `None` when `bytes` is not a well-formed open-items envelope
+    /// (ADR-0090 section 3.9); else `Some(true)` when it re-composes to
+    /// exactly `bytes` within the length bounds, the dispatcher classifies it
+    /// the same, and assembling it never panics; `Some(false)` on a
+    /// disagreement (a bug).
+    #[must_use]
+    pub fn open_items_decode(bytes: &[u8]) -> Option<bool> {
+        let items = crate::open_items::decode_open_items(bytes).ok()?;
+        let recomposed = crate::open_items::compose_open_items(&items)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::open_items::OPEN_ITEMS_ENVELOPE_MIN_LEN
+            ..=crate::open_items::OPEN_ITEMS_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::OpenItems(ref d)) if *d == items
+        );
+        let received = [crate::open_items::ReceivedOpenItems {
+            sender_account_key: [1; 32],
+            items: &items,
+        }];
+        let assembled =
+            crate::open_items::assemble_open_items(&received, &std::collections::BTreeSet::new());
+        let refs_known = assembled.iter().all(|a| {
+            items
+                .items
+                .iter()
+                .any(|e| e.header.poll_ref == a.header.poll_ref)
+        });
+        Some(recomposed && within && dispatched && refs_known)
+    }
+
+    /// `None` when `bytes` is not a well-formed poll-ballots envelope
+    /// (ADR-0090 section 3.9); else `Some(true)` when it re-composes to
+    /// exactly `bytes` within the bounds and the dispatcher classifies it
+    /// the same, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn poll_ballots_decode(bytes: &[u8]) -> Option<bool> {
+        let ballots = crate::poll_ballots::decode_poll_ballots(bytes).ok()?;
+        let recomposed = crate::poll_ballots::compose_poll_ballots(&ballots)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::poll_ballots::POLL_BALLOTS_ENVELOPE_MIN_LEN
+            ..=crate::poll_ballots::POLL_BALLOTS_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::PollBallots(ref d)) if *d == ballots
         );
         Some(recomposed && within && dispatched)
     }

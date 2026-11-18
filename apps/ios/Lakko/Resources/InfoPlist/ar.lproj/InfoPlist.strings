@@ -15,3 +15,5 @@
 "NSFaceIDUsageDescription" = "يستخدم Lakko Face ID للتأكد من أنك أنت قبل عرض عبارة الاسترداد.";
 
 "NSSpeechRecognitionUsageDescription" = "يحوّل Lakko الرسائل الصوتية ورسائل الفيديو إلى نص عندما تطلب ذلك. يتم ذلك على جهازك، ولا تُرسل التسجيلات إلى أي مكان لتحويلها إلى نص.";
+
+"NSLocationWhenInUseUsageDescription" = "Lakko uses your location only when you choose to send where you are in a conversation. Nothing is sent before you tap Send.";

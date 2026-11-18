@@ -89,12 +89,16 @@ import {
   Role,
   type Group as WasmGroup,
   type Identity as WasmIdentity,
+  type ContentState,
+  type MessageContent,
 } from "../../wasm/lakko_ffi_wasm";
+import { attachReceiveHook } from "../attach/receive-hook";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type { MembershipChange } from "./membership-rows";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
+  type ContentOp,
   type ForwardOrigin,
   type ForwardRef,
   type ReplyRef,
@@ -210,6 +214,32 @@ export type IncomingChatEvent =
        *  version. `text` is empty and there are no attachments; every screen
        *  draws `chat.message.unsupported` in its place. */
       unsupportedVersion?: number;
+      /** ADR-0090 — a poll, checklist, location, contact card or article;
+       *  `text` is empty and `attachments` are an article's images. */
+      content?: MessageContent;
+      /** ADR-0090 section 3.11 — a restored poll's or checklist's state. */
+      contentState?: ContentState;
+    }
+  | {
+      /** ADR-0090 — an op on a poll or checklist (a vote, a close, a tick, an
+       *  added item, an edit). Filed by the receive loop in the attachment
+       *  store (`attach/receive.ts`); never a row. */
+      kind: "contentOp";
+      messageId: number;
+      op: ContentOp;
+      senderLeaf: number | undefined;
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0090 section 3.9 — an open-items hand-over or old-ballot rows;
+       *  consumed by the receive loop, never a row. */
+      kind: "openItems";
+      messageId: number;
+      envelope: Uint8Array;
+      ballots: boolean;
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -1532,6 +1562,12 @@ export class ChatClient {
         matchedEchoes.push(message.id);
         continue;
       }
+      // ADR-0090 section 3.6 — an anonymous ballot is NOT an MLS message: a
+      // journal row sealed under its poll's secret. Never fed to OpenMLS.
+      if (attachReceiveHook().isBallotRow(message.payload)) {
+        await attachReceiveHook().ballotRow(group, groupIdB64, message.id, message.createdAt, message.payload);
+        continue;
+      }
       // Marked BEFORE the call, not after. A throw is not proof that nothing
       // durable changed — `process_message` decrypts and ratchets before the
       // ADR-0022 role gate can refuse a commit or the ADR-0045 receipt gate can
@@ -1591,6 +1627,25 @@ export class ChatClient {
       }
       // Never shown, never persisted, never previewed.
       if (event.kind === "serviceEnvelope") continue;
+      // ADR-0090 — polls and checklists: their ops, the hand-over and the
+      // electorate's growth are filed here, at receipt (C-68), for an open
+      // chat and a closed one alike.
+      if (event.kind === "contentOp") {
+        await attachReceiveHook().contentOp(group, groupIdB64, event);
+        continue;
+      }
+      if (event.kind === "openItems") {
+        for (const adopted of await attachReceiveHook().openItems(group, groupIdB64, event)) {
+          events.push(adopted);
+        }
+        continue;
+      }
+      if (event.kind === "application" && event.content !== undefined) {
+        await attachReceiveHook().content(group, groupIdB64, event);
+      }
+      if (processed.kind === "Commit") {
+        await attachReceiveHook().commit(group, groupIdB64);
+      }
       events.push(event);
     }
 
@@ -2022,6 +2077,23 @@ export async function toEvent(
     // degrades to `chat` with the raw text) returns an
     // `application` event; an op returns the `op` event the UI
     // folds into the target message.
+    // ADR-0090 section 3.9 — the open-items hand-over and the old-ballot rows
+    // are service envelopes the receive loop consumes.
+    {
+      let items = false;
+      let ballots = false;
+      try {
+        const w = await loadWasm();
+        items = w.isOpenItemsEnvelope(bytes);
+        ballots = !items && w.isPollBallotsEnvelope(bytes);
+      } catch {
+        // A core without the recognisers: the envelope reads as a service
+        // envelope below and is dropped.
+      }
+      if (items || ballots) {
+        return { kind: "openItems", messageId, envelope: bytes, ballots, senderKey, createdAt };
+      }
+    }
     const body = await parseBodyEnvelope(bytes);
     // A service envelope the sniffers above did not recognise (a v3 profile
     // from a newer build reached every client as a chat bubble reading
@@ -2042,6 +2114,24 @@ export async function toEvent(
         senderKey,
         createdAt,
         unsupportedVersion: body.version,
+      };
+    }
+    if (body.kind === "content-op") {
+      return { kind: "contentOp", messageId, op: body.op, senderLeaf, senderKey, createdAt };
+    }
+    if (body.kind === "content") {
+      return {
+        kind: "application",
+        messageId,
+        text: "",
+        attachments: body.attachments,
+        plaintext: "",
+        senderLeaf,
+        senderKey,
+        createdAt,
+        content: body.content,
+        ...(body.reply === undefined ? {} : { reply: body.reply }),
+        ...(body.forward === undefined ? {} : { forward: body.forward }),
       };
     }
     if (body.kind === "chat") {

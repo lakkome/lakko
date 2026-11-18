@@ -180,6 +180,38 @@ internal fun previewKindOf(kind: MessageBodyKind): ProcessedKind? = when (kind) 
     MessageBodyKind.READ_RECEIPT -> ProcessedKind.READ_RECEIPT
     MessageBodyKind.SERVICE_ENVELOPE -> null
     MessageBodyKind.UNSUPPORTED -> ProcessedKind.UNSUPPORTED
+    // ADR-0090 section 1 — a content message previews as one line
+    // (`Poll: {question}`, never JSON); see [contentPreviewText].
+    MessageBodyKind.POLL,
+    MessageBodyKind.CHECKLIST,
+    MessageBodyKind.LOCATION,
+    MessageBodyKind.CONTACT_CARD,
+    MessageBodyKind.ARTICLE,
+    -> ProcessedKind.CHAT
+    // Ops on a poll or checklist, and edits of one, are suppressed like
+    // reactions: an older real message stays the preview.
+    MessageBodyKind.POLL_VOTE,
+    MessageBodyKind.POLL_CLOSE,
+    MessageBodyKind.CHECKLIST_TICK,
+    MessageBodyKind.CHECKLIST_ADD,
+    MessageBodyKind.EDIT_CHECKLIST,
+    MessageBodyKind.EDIT_ARTICLE,
+    -> null
+}
+
+/**
+ * ADR-0090 section 1 — the one-line preview of a content message in the
+ * notification language, or [fallback] (the envelope's text) for anything
+ * else.
+ */
+internal fun contentPreviewText(content: uniffi.lakko_ffi_uniffi.MessageContent?, fallback: String): String {
+    if (content == null) return fallback
+    val (key, args) = me.lakko.app.chat.contentSummary(content)
+    return try {
+        me.lakko.app.l10n.Localization.strings.value.format(key, args)
+    } catch (_: Throwable) {
+        fallback
+    }
 }
 
 /** Classify one decrypted MLS Application plaintext. See [isServiceEnvelope]

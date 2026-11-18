@@ -589,6 +589,12 @@ pub struct VaultAttachment {
     pub height: Option<u32>,
     /// Poster frame.
     pub thumb: Option<VaultThumb>,
+    /// ADR-0090 audio title tag.
+    #[uniffi(default = None)]
+    pub title: Option<String>,
+    /// ADR-0090 audio artist tag.
+    #[uniffi(default = None)]
+    pub artist: Option<String>,
 }
 
 impl std::fmt::Debug for VaultAttachment {
@@ -687,6 +693,11 @@ pub struct VaultMessage {
     /// Set when the message was of a wire version the saving device could
     /// not read: that version.
     pub unsupported_version: Option<u32>,
+    /// ADR-0090 — the content of a poll, checklist, location, contact card
+    /// or article message and its saved state. On decode a payload that does
+    /// not decode is `None` and a state that does not belong is dropped.
+    #[uniffi(default = None)]
+    pub content: Option<crate::content::ContentMessage>,
 }
 
 /// One person in a conversation, as shown at save time. Never a device leaf.
@@ -852,6 +863,8 @@ fn attachment_to_core(a: VaultAttachment) -> Result<rec::VaultAttachment, FfiErr
         width: a.width,
         height: a.height,
         thumb: thumb_meta,
+        title: a.title,
+        artist: a.artist,
     }
     .bounded();
     let thumb = match (thumb_refs, media.thumb) {
@@ -881,6 +894,8 @@ fn attachment_to_core(a: VaultAttachment) -> Result<rec::VaultAttachment, FfiErr
         width: narrow(media.width),
         height: narrow(media.height),
         thumb,
+        title: media.title.unwrap_or_default(),
+        artist: media.artist.unwrap_or_default(),
     })
 }
 
@@ -899,6 +914,8 @@ fn attachment_from_core(a: rec::VaultAttachment) -> VaultAttachment {
             width: t.width.map(u32::from),
             height: t.height.map(u32::from),
         }),
+        title: some_text(a.title),
+        artist: some_text(a.artist),
     }
     .bounded();
     let thumb = match (a.thumb, media.thumb) {
@@ -926,10 +943,24 @@ fn attachment_from_core(a: rec::VaultAttachment) -> VaultAttachment {
         width: media.width,
         height: media.height,
         thumb,
+        title: media.title,
+        artist: media.artist,
     }
 }
 
 fn message_to_core(m: VaultMessage) -> Result<rec::VaultMessage, FfiError> {
+    let content = m
+        .content
+        .map(|c| {
+            crate::content::content_message_to_core(c).map(|(kind, payload, state)| {
+                rec::VaultContent {
+                    kind,
+                    payload,
+                    state,
+                }
+            })
+        })
+        .transpose()?;
     let author = m
         .author
         .map(|a| fixed::<32>(&a, "accountKeyLength", "author account key"))
@@ -978,10 +1009,19 @@ fn message_to_core(m: VaultMessage) -> Result<rec::VaultMessage, FfiError> {
             duration_secs: c.duration_secs,
         }),
         unsupported_version: m.unsupported_version,
+        content,
     })
 }
 
 fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
+    let mimes: Vec<Option<String>> = m
+        .attachments
+        .iter()
+        .map(|a| some_text(a.mime.clone()))
+        .collect();
+    let content = m.content.as_ref().and_then(|c| {
+        crate::content::content_message_from_core(c.kind, &c.payload, &c.state, &mimes)
+    });
     VaultMessage {
         message_id: m.message_id,
         direction: m.direction.into(),
@@ -1022,8 +1062,22 @@ fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
             duration_secs: c.duration_secs,
         }),
         unsupported_version: m.unsupported_version,
+        content,
     }
 }
+
+// The vault's content bounds must equal the content codec's.
+const _: () = assert!(
+    rec::MAX_CONTENT_PAYLOAD_BYTES == lakko_attachments::content_state::MAX_CONTENT_PAYLOAD_BYTES
+);
+const _: () = assert!(
+    rec::MAX_CONTENT_STATE_BYTES == lakko_attachments::content_state::MAX_CONTENT_STATE_BYTES
+);
+const _: () = assert!(rec::MAX_AUDIO_TAG_BYTES == lakko_attachments::MAX_AUDIO_TAG_BYTES);
+const _: () = assert!(
+    *rec::CONTENT_KINDS.start() == lakko_attachments::content_state::CONTENT_KIND_POLL
+        && *rec::CONTENT_KINDS.end() == lakko_attachments::content_state::CONTENT_KIND_ARTICLE
+);
 
 fn messages_to_core(messages: Vec<VaultMessage>) -> Result<Vec<rec::VaultMessage>, FfiError> {
     messages.into_iter().map(message_to_core).collect()
@@ -1368,6 +1422,8 @@ mod tests {
                 width: Some(240),
                 height: Some(180),
             }),
+            title: None,
+            artist: None,
         }
     }
 
@@ -1405,6 +1461,7 @@ mod tests {
                 duration_secs: 61,
             }),
             unsupported_version: Some(7),
+            content: None,
         }
     }
 
@@ -1424,6 +1481,7 @@ mod tests {
             reactions: vec![],
             call: None,
             unsupported_version: None,
+            content: None,
         }
     }
 
@@ -1665,7 +1723,7 @@ mod tests {
             "truncated"
         );
         assert_eq!(
-            code(&decode_history_chunk(vec![0x02, 0, 0]).unwrap_err()),
+            code(&decode_history_chunk(vec![0x01, 0, 0]).unwrap_err()),
             "unknownVersion"
         );
         let mut trailing = encode_devices_head(vec![]).unwrap();
@@ -1855,6 +1913,8 @@ mod tests {
                 width: Some(240),
                 height: Some(0),
             }),
+            title: String::new(),
+            artist: String::new(),
         };
         let message = rec::VaultMessage {
             message_id: 1,
@@ -1875,6 +1935,7 @@ mod tests {
             reactions: vec![],
             call: None,
             unsupported_version: None,
+            content: None,
         };
         rec::HistoryChunk {
             messages: vec![message],

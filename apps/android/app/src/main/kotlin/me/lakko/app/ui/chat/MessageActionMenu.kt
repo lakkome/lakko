@@ -177,10 +177,16 @@ internal data class MessageActions(
     /** ADR-0087 section 13 — a publisher's `Ban from comments` on someone
      *  else's comment, in the destructive group under Delete. */
     val canBan: Boolean = false,
+    /** ADR-0090 — the rows a content message adds (Retract vote, Close poll,
+     *  Edit checklist, Close checklist, Copy coordinates), in order. */
+    val contentRows: List<ContentMenuRow> = emptyList(),
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan || contentRows.isNotEmpty()
 }
+
+/** One row a content message adds to its menu (ADR-0090). */
+internal data class ContentMenuRow(val label: String, val onClick: () -> Unit)
 
 /**
  * Section 3's actions for [msg] as seen by this device. [menuAvailable] is the
@@ -649,6 +655,13 @@ internal fun MessageActionCard(
                     label = t(if (actions.saved) "chat.message.unsave" else "chat.message.save"),
                     icon = if (actions.saved) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
                     onClick = onSave,
+                )
+            }
+            for (row in actions.contentRows) {
+                ActionRow(
+                    label = row.label,
+                    icon = Icons.Filled.Edit,
+                    onClick = row.onClick,
                 )
             }
             if (actions.canEdit) {

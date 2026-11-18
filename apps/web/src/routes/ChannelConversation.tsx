@@ -20,15 +20,19 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { useProfiles } from "../profile/ProfileContext";
 import {
+  composeContentEnvelope,
   composeDeleteEnvelope,
   composeForwardEnvelope,
+  contentPartsOfForward,
   parseBodyEnvelopeWith,
   reencryptAttachmentRef,
   type AttachmentRefBytes,
 } from "../chat/attachments";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
+import { canForwardContent } from "../chat/forward";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ForwardPicker } from "../chat/ForwardPicker";
 import type { ForwardPickerRow } from "../chat/forward-picker";
@@ -81,6 +85,13 @@ import { PushedScreen } from "../ui/PushedScreen";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
+import { Portal } from "solid-js/web";
+import { ArticleReader } from "../attach/ArticleReader";
+import { composeChannelPollClose } from "../attach/ChannelContent";
+import { requestConfirm } from "../ui/confirm-dialog";
+import { displayLocale } from "../l10n/display-locale";
+import type { Article, MessageContent } from "../../wasm/lakko_ffi_wasm";
+import type { AttachEditRequest } from "../attach/AttachComposer";
 
 /** What a search card or a link page may hand the route: how to subscribe
  *  when the person has not yet. */
@@ -106,6 +117,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   const id = untrack(() => props.id);
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   const navigate = useNavigate();
   const location = useLocation<ChannelRouteState>();
 
@@ -364,15 +376,26 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     const fresh: AttachmentRefBytes[] = [];
     for (const a of post.attachments) fresh.push(await reencryptAttachmentRef(a));
     const forward = { author: facts().name };
-    const envelope = await composeForwardEnvelope(post.text, fresh, forward);
+    // ADR-0090 / UX `attachments.md` section 11a — a location, contact card
+    // or article travels as the same content (an article's images are the
+    // post's attachments, re-encrypted above, in their order).
+    const content = post.content;
+    if (!canForwardContent(content, (k) => profiles.cardShareableOf(k))) {
+      throw new KeyedError("chat.forward.error.generic");
+    }
+    const envelope =
+      content === undefined
+        ? await composeForwardEnvelope(post.text, fresh, forward)
+        : await composeContentEnvelope(content, fresh, contentPartsOfForward(forward));
     await sendTextToConversation({
       chat: outside,
       accountId: s.account.accountId,
       entry,
-      text: post.text,
+      text: content === undefined ? post.text : "",
       envelope,
       attachments: fresh,
       forward,
+      ...(content === undefined ? {} : { content }),
     });
     setForwarding(null);
     if (here()) {
@@ -391,6 +414,72 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   }
 
   // Delete for everyone, as a chat's Delete is: no dialog (UX 13).
+  /** ADR-0090 — an article post open in the reader. */
+  const [articleOpen, setArticleOpen] = createSignal<{
+    article: Article;
+    attachments: readonly AttachmentRefBytes[];
+    atMs: number;
+  } | null>(null);
+
+  /** ADR-0090 — `Edit checklist` / `Edit` on an article post, handed to the
+   *  composer's editor. */
+  const [contentEdit, setContentEdit] = createSignal<AttachEditRequest | null>(null);
+  async function editContent(cursor: number, content: MessageContent, attachments: readonly AttachmentRefBytes[]): Promise<void> {
+    if (content.kind !== "article" || attachments.length === 0) {
+      setContentEdit({ messageId: cursor, content });
+      return;
+    }
+    const images: Blob[] = [];
+    for (const ref of attachments) {
+      try {
+        images.push(await (await fetch(await hub.load(ref))).blob());
+      } catch {
+        setOpError(t("chat.attachment.error.download"));
+        return;
+      }
+    }
+    setContentEdit({ messageId: cursor, content, images });
+  }
+
+  /** UX 8.2 — `Close checklist`: asked first, final. */
+  async function closeChecklist(cursor: number): Promise<void> {
+    const ok = await requestConfirm({
+      title: t("checklist.close_confirm"),
+      body: null,
+      confirmLabel: t("checklist.close"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setOpError(null);
+    try {
+      const w = await loadWasm();
+      await publish(w.composePollCloseEnvelope(BigInt(cursor)));
+    } catch (err) {
+      setOpError(channelErrorText(err, () => t("channels.publish.error.generic")));
+    }
+  }
+
+  /** UX 7.7 — `Close poll`: asked first; the close freezes the results this
+   *  app reads now into the post. */
+  async function closePoll(post: TimelinePost): Promise<void> {
+    if (post.content?.kind !== "poll") return;
+    const ok = await requestConfirm({
+      title: t("poll.close_confirm"),
+      body: null,
+      confirmLabel: t("poll.close"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setOpError(null);
+    try {
+      await publish(await composeChannelPollClose(id, epochs().get(post.cursor), post.cursor, post.content.poll.body));
+    } catch (err) {
+      setOpError(channelErrorText(err, () => t("channels.publish.error.generic")));
+    }
+  }
+
   async function deletePost(cursor: number): Promise<void> {
     setOpError(null);
     try {
@@ -544,6 +633,13 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
                       onForward={() => setForwarding(post)}
                       saved={isSaved(post.cursor)}
                       onToggleSaved={() => void toggleSaved(post)}
+                      onClosePoll={() => void closePoll(post)}
+                      publish={publish}
+                      onEditContent={(cursor, content, attachments) => void editContent(cursor, content, attachments)}
+                      onCloseChecklist={(cursor) => void closeChecklist(cursor)}
+                      onOpenArticle={(article, attachments) =>
+                        setArticleOpen({ article, attachments, atMs: post.serverTsMs })
+                      }
                     />
                     </>
                   )}
@@ -559,10 +655,40 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             )}
           </Show>
           <Show when={canPublish()}>
-            <ChannelComposer publish={publish} editing={editing()} onCancelEdit={() => setEditing(null)} hub={hub} />
+            <ChannelComposer
+              publish={publish}
+              editing={editing()}
+              onCancelEdit={() => setEditing(null)}
+              hub={hub}
+              contentEdit={contentEdit}
+              clearContentEdit={() => setContentEdit(null)}
+            />
           </Show>
         </Show>
       </div>
+            <Show when={articleOpen()}>
+              {(a) => (
+                <Portal>
+                  <ArticleReader
+                    article={a().article}
+                    imageUrl={async (index) => {
+                      const ref = a().attachments[index];
+                      if (ref === undefined) return null;
+                      try {
+                        return await hub.load(ref);
+                      } catch {
+                        return null;
+                      }
+                    }}
+                    author={channelFacts(id)?.name ?? ""}
+                    dateText={new Date(a().atMs).toLocaleString(displayLocale())}
+                    onClose={() => setArticleOpen(null)}
+                    onMenu={() => setArticleOpen(null)}
+                    onLink={(url) => window.open(url, "_blank", "noopener,noreferrer")}
+                  />
+                </Portal>
+              )}
+            </Show>
     </article>
   );
 }

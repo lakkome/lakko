@@ -38,17 +38,21 @@ use lakko_mls::{
 };
 
 pub mod account_statement;
+pub mod anon_cred;
 pub mod anon_token;
 pub mod attachments;
 pub mod auth;
 pub mod background;
 pub mod backup;
+pub mod ballot;
 pub mod call_relay;
 pub mod channel_access;
 pub mod channel_feedback;
+pub mod channel_poll;
 pub mod channels;
 pub mod circle;
 pub mod contacts;
+pub mod content;
 pub mod conversation_meta;
 pub mod device_card;
 pub mod device_link;
@@ -70,6 +74,7 @@ pub mod link_founded;
 pub mod link_refusal;
 pub mod mailbox;
 pub mod mnemonic;
+pub mod open_items;
 pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;
@@ -792,6 +797,42 @@ pub enum FfiError {
     /// know which journal to read. Nothing else is ever in it.
     #[error("{0}")]
     MembershipGroupStillActive(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0090 attachment kinds - APPENDED last: a `flat_error` lowers by
+    // ordinal.
+    // ------------------------------------------------------------------
+    /// An ADR-0090 content payload or op was refused (`content.rs`). The
+    /// message is `"<code>: <reason>"`; the code is
+    /// `lakko_attachments::ContentError::code` (`truncated`, `wrongDomain`,
+    /// `<field>.tooLong`, `<field>.outOfRange`, `signatureMissing`,
+    /// `signatureInvalid`, `<what>.malformed`, ...), `<field>.badLength` for a
+    /// byte argument of the wrong length, or `state.mismatch`.
+    #[error("{0}")]
+    Content(String),
+
+    /// An anonymous poll ballot was refused (`ballot.rs`). The message is
+    /// `"<code>: <reason>"` with the kebab codes of
+    /// `lakko_ballot::BallotError::code` (`malformed`, `unknown-ring-version`,
+    /// `not-in-ring`, `row-did-not-open`, `wrong-poll`, `proof-rejected`,
+    /// ...) or `bad-length`. `unknown-ring-version` means: keep the row and
+    /// retry after the next commit.
+    #[error("{0}")]
+    Ballot(String),
+
+    /// A channel-poll credential operation was refused (`anon_cred.rs`). The
+    /// message is `"<code>: <reason>"` with the kebab codes of
+    /// `lakko_anon_cred::AnonCredError::code` (`malformed`, `wrong-period`,
+    /// `bad-proof`, `message-too-long`, ...) or `bad-length`.
+    #[error("{0}")]
+    AnonCred(String),
+
+    /// An open-items or poll-ballots hand-over (ADR-0090 section 3.9) was
+    /// refused (`open_items.rs`). The message is `"<code>: <reason>"` with
+    /// the codes of `lakko_contacts::OpenItemsError` / `PollBallotsError` /
+    /// `lakko_open_items::BuildError` / `AdoptError`, or `badLength`.
+    #[error("{0}")]
+    OpenItems(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -4398,6 +4439,12 @@ pub struct HistoryAttachment {
     /// ADR-0047 poster frame.
     #[uniffi(default = None)]
     pub thumb: Option<HistoryThumb>,
+    /// ADR-0090 audio title tag.
+    #[uniffi(default = None)]
+    pub title: Option<String>,
+    /// ADR-0090 audio artist tag.
+    #[uniffi(default = None)]
+    pub artist: Option<String>,
 }
 
 /// A poster-frame blob on a [`HistoryAttachment`] (ADR-0047).
@@ -4435,6 +4482,8 @@ fn bound_history_media(
         waveform: a.waveform.take(),
         width: a.width,
         height: a.height,
+        title: a.title.take(),
+        artist: a.artist.take(),
         thumb: a
             .thumb
             .as_ref()
@@ -4451,6 +4500,8 @@ fn bound_history_media(
     a.waveform = raw.waveform;
     a.width = raw.width;
     a.height = raw.height;
+    a.title = raw.title;
+    a.artist = raw.artist;
     a.thumb = match (a.thumb.take(), raw.thumb) {
         (Some(mut t), Some(bounded)) => {
             t.mime = bounded.mime;
@@ -4478,6 +4529,12 @@ pub struct HistoryPlaceholder {
     pub text: String,
     /// Attachment references.
     pub attachments: Vec<HistoryAttachment>,
+    /// ADR-0090 — the content of a poll, checklist, location, contact card
+    /// or article message (the latest edit) and, for a poll or checklist,
+    /// its saved state. On decode a payload that does not decode is `None`
+    /// and a state that does not belong to the content is dropped.
+    #[uniffi(default = None)]
+    pub content: Option<crate::content::ContentMessage>,
 }
 
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], FfiError> {
@@ -4532,14 +4589,29 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
             width: a.width,
             height: a.height,
             thumb,
+            title: a.title,
+            artist: a.artist,
         }));
     }
+    let content = placeholder
+        .content
+        .map(|m| {
+            crate::content::content_message_to_core(m).map(|(kind, payload, state)| {
+                lakko_mls::history_placeholder::HistoryContentPlaceholder {
+                    kind,
+                    payload,
+                    state,
+                }
+            })
+        })
+        .transpose()?;
     let msg = HistoryMessagePlaceholder {
         message_id: placeholder.message_id,
         direction: placeholder.direction.into(),
         created_at: placeholder.created_at,
         text: placeholder.text,
         attachments,
+        content,
     };
     Ok(msg.encode()?)
 }
@@ -4556,6 +4628,10 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
 #[uniffi::export]
 pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, FfiError> {
     let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(&bytes)?;
+    let mimes: Vec<Option<String>> = msg.attachments.iter().map(|a| a.mime.clone()).collect();
+    let content = msg.content.as_ref().and_then(|c| {
+        crate::content::content_message_from_core(c.kind, &c.payload, &c.state, &mimes)
+    });
     Ok(HistoryPlaceholder {
         message_id: msg.message_id,
         direction: msg.direction.into(),
@@ -4586,10 +4662,32 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
                     width: t.width,
                     height: t.height,
                 }),
+                title: a.title,
+                artist: a.artist,
             })
             .collect(),
+        content,
     })
 }
+
+// The history-placeholder content bounds must equal the content codec's.
+const _: () = assert!(
+    lakko_mls::history_placeholder::MAX_CONTENT_PAYLOAD_BYTES
+        == lakko_attachments::content_state::MAX_CONTENT_PAYLOAD_BYTES
+);
+const _: () = assert!(
+    lakko_mls::history_placeholder::MAX_CONTENT_STATE_BYTES
+        == lakko_attachments::content_state::MAX_CONTENT_STATE_BYTES
+);
+const _: () = assert!(
+    lakko_mls::history_placeholder::MAX_AUDIO_TAG_BYTES == lakko_attachments::MAX_AUDIO_TAG_BYTES
+);
+const _: () = assert!(
+    *lakko_mls::history_placeholder::CONTENT_KINDS.start()
+        == lakko_attachments::content_state::CONTENT_KIND_POLL
+        && *lakko_mls::history_placeholder::CONTENT_KINDS.end()
+            == lakko_attachments::content_state::CONTENT_KIND_ARTICLE
+);
 
 #[cfg(test)]
 mod history_placeholder_media_tests {
@@ -4617,6 +4715,8 @@ mod history_placeholder_media_tests {
                 width: Some(240),
                 height: Some(99_999),
             }),
+            title: None,
+            artist: None,
         }
     }
 
@@ -4627,6 +4727,7 @@ mod history_placeholder_media_tests {
             created_at: "2026-09-14T12:00:00Z".into(),
             text: String::new(),
             attachments: vec![att],
+            content: None,
         })
         .expect("encodes");
         decode_history_placeholder(bytes)

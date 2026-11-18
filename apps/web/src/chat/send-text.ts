@@ -19,6 +19,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { groupIdHex } from "../devices/sync/state";
 import { composeEnvelope, type AttachmentRefBytes, type ForwardRef } from "./attachments";
 import { persistedFromForwardRef } from "./forward";
+import type { MessageContent } from "../../wasm/lakko_ffi_wasm";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
 import { authorIdentityToPersisted, resolveMemberIdentity, type RosterMember } from "./author-identity";
 import type { ActiveGroup } from "./ChatContext";
@@ -42,6 +43,8 @@ export async function sendTextToConversation(deps: {
    *  forwarded out of a channel, ADR-0087 section 12). */
   readonly attachments?: readonly AttachmentRefBytes[];
   readonly forward?: ForwardRef;
+  /** ADR-0090 — a forwarded content message's content, for the sent row. */
+  readonly content?: MessageContent;
 }): Promise<void> {
   const bytes = deps.envelope ?? (await composeEnvelope(deps.text, []));
   const result = await deps.chat.sendMessage(null, deps.entry.group, bytes);
@@ -67,6 +70,7 @@ export async function sendTextToConversation(deps: {
     text: deps.text,
     attachments: (deps.attachments ?? []).map((a) => persistedFromAttachmentRef(a)),
     ...(deps.forward === undefined ? {} : { forward: persistedFromForwardRef(deps.forward) }),
+    ...(deps.content === undefined ? {} : { content: deps.content }),
     createdAt: result.createdAt,
     authorKeyB64: authorIdentityToPersisted(author),
   };

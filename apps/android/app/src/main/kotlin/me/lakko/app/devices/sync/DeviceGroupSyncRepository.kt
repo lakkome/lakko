@@ -1246,6 +1246,60 @@ public class DeviceGroupSyncRepository(
         }
     }
 
+    /**
+     * ADR-0090 section 3.6 — record this account's own choice in a poll in the
+     * synced register and tell the other devices, so every device of the
+     * account shows the same own vote and a re-vote draws the same anonymity
+     * set ([setVersion]). A send that fails is owed like any other write.
+     */
+    public fun recordPollChoice(
+        conversation: FolderConversationRef,
+        pollMessageId: Long,
+        choices: ByteArray,
+        setVersion: UInt,
+    ) {
+        scope.launch {
+            val envelope = synchronized(stateLock) {
+                val state = syncedState ?: return@launch
+                try {
+                    state.setPollChoice(Hlc.mint(), conversation, pollMessageId, choices, setVersion)
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "poll choice refused (${cause.javaClass.simpleName})")
+                    null
+                }
+            } ?: return@launch
+            republish()
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "poll choice not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+    }
+
+    /** This account's recorded choice in a poll, from any of its devices. */
+    public fun pollChoice(conversation: FolderConversationRef, pollMessageId: Long): uniffi.lakko_ffi_uniffi.PollChoice? =
+        synchronized(stateLock) {
+            runCatching { syncedState?.pollChoice(conversation, pollMessageId) }.getOrNull()
+        }
+
+    /** A received own poll choice from another device of the account. */
+    private fun applyPollChoice(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyPollChoiceEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "poll choice envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
     /** A received device acknowledgement, folded write-once. */
     private fun applyDeviceAck(envelope: ByteArray) {
         val changed = synchronized(stateLock) {
@@ -1925,6 +1979,11 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.deviceAckEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in deviceAckEnvelopes) sendServiceEnvelope(envelope)
+        // ADR-0090 section 3.6 - nor are the own poll choices.
+        val pollChoiceEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.pollChoiceEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in pollChoiceEnvelopes) sendServiceEnvelope(envelope)
         // ADR-0079 - nor are the link records; each goes with its own stamp.
         val linkRecordEnvelopes = synchronized(stateLock) {
             runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
@@ -2194,6 +2253,12 @@ public class DeviceGroupSyncRepository(
                             )
                             val body = parsed.body
                             if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isPollChoiceEnvelope(body.envelope)
+                            ) {
+                                // ADR-0090 section 3.6 - this account's own
+                                // poll choice from another of its devices.
+                                applyPollChoice(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isDeviceAckEnvelope(body.envelope)
                             ) {
                                 // UX 17.6 - another device of the account saw

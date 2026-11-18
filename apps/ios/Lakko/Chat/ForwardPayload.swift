@@ -66,6 +66,50 @@ public enum ForwardPayload {
         )
     }
 
+    // MARK: - Content messages (ADR-0090, forwarding amended 2026-11-18)
+
+    /// Whether `message` may be forwarded, by what it holds. A plain message
+    /// may. A location and an article may, sent again as the same content. A
+    /// contact card may unless the newest profile this device holds from the
+    /// person on the card says their card may not be shared
+    /// (`cardShareable(accountKey)`, `true` when nothing is held). A poll or a
+    /// checklist may not: its votes and ticks belong to the conversation it
+    /// was posted in. Content this build cannot read may not either.
+    public static func isForwardable(
+        _ message: ChatMessage, cardShareable: (Data) -> Bool
+    ) -> Bool {
+        isForwardable(content: message.content, cardShareable: cardShareable)
+    }
+
+    /// The same rule over the stored content alone (`nil` = a plain message).
+    public static func isForwardable(
+        content stored: PersistedContent?, cardShareable: (Data) -> Bool
+    ) -> Bool {
+        guard let stored else { return true }
+        switch ContentModel.content(stored) {
+        case .location?, .article?: return true
+        case .contactCard(let card)?: return cardShareable(card.accountKey)
+        case .poll?, .checklist?, nil: return false
+        }
+    }
+
+    /// The content a forward of `message` sends again, or `nil` for a plain
+    /// message (and for content that is never forwarded, which
+    /// ``isForwardable(_:cardShareable:)`` already keeps out).
+    public static func forwardedContent(of message: ChatMessage) -> ContentDraft? {
+        forwardedContent(message.content)
+    }
+
+    public static func forwardedContent(_ stored: PersistedContent?) -> ContentDraft? {
+        guard let stored else { return nil }
+        switch ContentModel.content(stored) {
+        case .location(let location)?: return .location(location)
+        case .contactCard(let card)?: return .contactCard(card)
+        case .article(let article)?: return .article(article)
+        case .poll?, .checklist?, nil: return nil
+        }
+    }
+
     /// The ``ForwardRef`` a received envelope becomes, or `nil` when it
     /// carried no forward field at all (an ordinary message).
     ///

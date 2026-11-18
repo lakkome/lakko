@@ -750,16 +750,12 @@ public fun FeedScreen(
                 authorLabel = authorOf(ref),
             )
         } else {
-            // A channel post is not a group message: it travels as its words
-            // under the channel's name, with no origin to jump to.
+            // A channel post is not a group message: it travels as its words,
+            // its files (re-encrypted by the sender) and its content under the
+            // channel's name, with no origin to jump to.
             me.lakko.app.chat.ForwardRequest(
                 sourceGroupIdHex = ref.source.idHex,
-                message = ChatMessage(
-                    messageId = 0L,
-                    direction = Direction.Incoming,
-                    text = ref.message.text,
-                    createdAt = ref.message.createdAt,
-                ),
+                message = channelPostForwardMessage(ref.message),
                 authorLabel = ref.source.title,
             )
         }
@@ -1153,6 +1149,17 @@ private fun fullyVisibleKeys(state: LazyListState): Set<String> {
 
 private fun parseTime(ref: FeedCandidateRef): Long? = me.lakko.app.feed.parseFeedTimeMs(ref.message.createdAt)
 
+/** A channel post from the feed as the message a forward is composed from:
+ *  its words, its files and its content (UX 11a). */
+internal fun channelPostForwardMessage(m: FeedMessage): ChatMessage = ChatMessage(
+    messageId = 0L,
+    direction = Direction.Incoming,
+    text = m.text,
+    attachments = m.attachments.mapNotNull { it.ref },
+    createdAt = m.createdAt,
+    content = m.content,
+)
+
 internal fun feedMessageOf(m: ChatMessage): FeedMessage = FeedMessage(
     messageId = m.messageId,
     direction = when (m.direction) {
@@ -1169,6 +1176,7 @@ internal fun feedMessageOf(m: ChatMessage): FeedMessage = FeedMessage(
     reactions = m.reactions.map { FeedReaction(it.reactor, it.emoji) },
     replyTarget = m.reply?.target,
     forwardAuthor = m.forward?.author,
+    content = m.content,
 )
 
 private fun hexToBytes(hex: String): ByteArray? {
@@ -1440,10 +1448,20 @@ internal fun FeedItemCard(
                             menu.copy(ref)
                         },
                     )
-                    DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
-                        closeMenu()
-                        menu.forward(ref)
-                    })
+                    // ADR-0090 / attachments UX 11a — no Forward on a poll or
+                    // checklist, nor on a card of a person who does not let
+                    // others share it.
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    if (me.lakko.app.chat.isForwardableContent(ref.message.content) { key ->
+                            me.lakko.app.profile.ProfileDirectory.get(context)
+                                .isCardShareable(java.util.Base64.getEncoder().encodeToString(key))
+                        }
+                    ) {
+                        DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
+                            closeMenu()
+                            menu.forward(ref)
+                        })
+                    }
                     DropdownMenuItem(text = { Text(t("feed.action.hide")) }, onClick = {
                         closeMenu()
                         menu.hide(ref)

@@ -35,7 +35,8 @@ public const val CHANNEL_POST_PAGE: Int = 100
  *  loop; the rest arrives on the next sync. */
 public const val CHANNEL_POST_MAX_PAGES: Int = 5
 
-/** One decrypted text post. */
+/** One decrypted post: its words, its files, and (a location, contact card
+ *  or article) its content. */
 @Serializable
 public data class PersistedChannelPost(
     /** The server's per-channel cursor, the post's id in the feed. */
@@ -43,6 +44,13 @@ public data class PersistedChannelPost(
     /** Server receive time, unix ms. */
     val serverTsMs: Long,
     val text: String,
+    /** The post's attachment references (the blobs stay on storage). Absent
+     *  in a row written before them: a text-only post. */
+    val attachments: List<me.lakko.app.chat.PersistedAttachment> = emptyList(),
+    /** ADR-0090 — the post's chat envelope, standard base64, when it carries
+     *  a location, contact card or article (re-parsed when read). Absent in
+     *  a row written before it. */
+    val contentEnvelopeB64: String? = null,
 )
 
 /** One channel's slice of the log. */
@@ -108,8 +116,13 @@ public fun retainChannels(log: ChannelPostLog, keep: Set<String>): ChannelPostLo
 
 /** What one post decoded to, as far as the log cares. */
 public sealed interface PostOutcome {
-    /** A text post: kept. */
-    public data class Text(val text: String) : PostOutcome
+    /** A post the feed shows: kept, with its files and, for a location,
+     *  contact card or article, its envelope. */
+    public data class Text(
+        val text: String,
+        val attachments: List<me.lakko.app.chat.PersistedAttachment> = emptyList(),
+        val contentEnvelopeB64: String? = null,
+    ) : PostOutcome
 
     /** Read and not a feed item (a metadata record, a malformed record, a post
      *  that failed to open under its epoch's seed): passed over. */
@@ -157,7 +170,13 @@ public suspend fun syncChannelSlot(
                     blocked = true
                 }
                 is PostOutcome.Text -> {
-                    fresh += PersistedChannelPost(p.cursor, p.serverTsMs, outcome.text)
+                    fresh += PersistedChannelPost(
+                        p.cursor,
+                        p.serverTsMs,
+                        outcome.text,
+                        outcome.attachments,
+                        outcome.contentEnvelopeB64,
+                    )
                     cursor = p.cursor
                 }
                 PostOutcome.Skip -> cursor = p.cursor

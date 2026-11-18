@@ -3,6 +3,7 @@
 
 package me.lakko.app.devices
 
+import me.lakko.app.chat.toAttachmentRef
 import android.content.Context
 import android.util.Base64
 import android.util.Log
@@ -305,6 +306,9 @@ public object HistoryBundleCodec {
             createdAt = m.createdAt,
             text = m.text,
             attachments = attachments,
+            // ADR-0090 section 3.11 — a content row carries its content and
+            // folded state, so the new device draws the card, not a blank.
+            content = me.lakko.app.chat.historyContentOf(m),
         )
         return encodeHistoryPlaceholder(placeholder)
     }
@@ -346,6 +350,9 @@ public object HistoryBundleCodec {
             text = placeholder.text,
             attachments = attachments,
             createdAt = placeholder.createdAt,
+            content = placeholder.content?.let { c ->
+                me.lakko.app.chat.persistedContentOf(c, attachments.mapNotNull { it.toAttachmentRef() })
+            },
         )
     }
 

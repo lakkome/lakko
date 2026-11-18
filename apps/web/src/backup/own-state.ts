@@ -23,6 +23,8 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { avatarFromWasm, type AvatarData } from "../profile/avatar-model";
 import { adoptOwnProfile, loadOwnProfile } from "../profile/own-profile";
 import { composeOwnProfileForDevices } from "../profile/own-profile-sync";
+import { ownCardShareable } from "../profile/card-share";
+import { visibilitySetting } from "../reach/visibility-store";
 import { loadReachRow, saveReachRow } from "../reach/reach-store";
 import { loadWasm, type Wasm } from "../wasm";
 
@@ -55,6 +57,7 @@ export function ownProfileForBackup(
       loadOwnProfile(accountIdB64),
       accountIdBytes,
       usernameSource?.(accountIdB64) ?? null,
+      ownCardShareable(visibilitySetting()),
     );
   } catch (err) {
     // A record that does not compose must not cost the whole backup.

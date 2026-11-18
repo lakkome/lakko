@@ -109,6 +109,12 @@ export const NOTIFICATION_STRINGS_EN = Object.freeze({
   reactedToYourMessage: "\u0001 reacted \u0002 to your message",
   /** A group message's body, "{name}: {text}", U+0001 = name, U+0002 = text. */
   senderPrefixed: "\u0001: \u0002",
+  /** ADR-0090 — content previews, U+0001 = the question, title or name. */
+  pollPreview: "Poll: \u0001",
+  checklistPreview: "Checklist: \u0001",
+  locationPreview: "Location",
+  contactPreview: "Contact: \u0001",
+  articlePreview: "Article: \u0001",
   /** @type {readonly string[]} */
   attachments: Object.freeze([]),
 });
@@ -155,6 +161,18 @@ const MAX_NOTIFICATION_STRING = 200;
  *
  * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, reactedToYourMessage: string, senderPrefixed: string, reactionsOff: boolean, attachments: string[] }}
  */
+/** ADR-0090 — a stored template with exactly one U+0001 place, else English. */
+function templateWithOne(v, fallback) {
+  return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING && v.includes("\u0001")
+    ? v
+    : fallback;
+}
+
+/** ADR-0090 — a stored word, else English. */
+function plainWord(v, fallback) {
+  return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING ? v : fallback;
+}
+
 export function notificationStrings(raw) {
   /** @type {Record<string, unknown>} */
   const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
@@ -182,6 +200,11 @@ export function notificationStrings(raw) {
       const v = pick("senderPrefixed");
       return v.includes("\u0001") && v.includes("\u0002") ? v : NOTIFICATION_STRINGS_EN.senderPrefixed;
     })(),
+    pollPreview: templateWithOne(source.pollPreview, NOTIFICATION_STRINGS_EN.pollPreview),
+    checklistPreview: templateWithOne(source.checklistPreview, NOTIFICATION_STRINGS_EN.checklistPreview),
+    locationPreview: plainWord(source.locationPreview, NOTIFICATION_STRINGS_EN.locationPreview),
+    contactPreview: templateWithOne(source.contactPreview, NOTIFICATION_STRINGS_EN.contactPreview),
+    articlePreview: templateWithOne(source.articlePreview, NOTIFICATION_STRINGS_EN.articlePreview),
     reactionsOff: source.reactionsOff === true,
     attachments: Array.isArray(source.attachments)
       ? source.attachments

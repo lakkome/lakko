@@ -67,6 +67,8 @@ export function boundedDuration(kind: string | undefined, v: unknown): number | 
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return undefined;
   if (kind === "voice") return v <= MAX_VOICE_DURATION_MS ? v : undefined;
   if (kind === "video_note") return v <= MAX_VIDEO_NOTE_DURATION_MS ? v : undefined;
+  // ADR-0090 section 2 — an audio file, `1..=86_400_000`.
+  if (kind === "audio") return v >= 1 && v <= 86_400_000 ? v : undefined;
   return undefined;
 }
 
@@ -127,6 +129,8 @@ export function persistedFromAttachmentRef(
     ...(a.width === undefined ? {} : { width: a.width }),
     ...(a.height === undefined ? {} : { height: a.height }),
     ...(a.thumb === undefined ? {} : { thumb: persistedThumb(a.thumb) }),
+    ...(a.title === undefined ? {} : { title: a.title }),
+    ...(a.artist === undefined ? {} : { artist: a.artist }),
     ...(played ? { played: true } : {}),
   };
 }
@@ -156,6 +160,8 @@ export function attachmentRefFromPersisted(a: PersistedAttachment): RestoredAtta
       width: dimension(a.width),
       height: dimension(a.height),
       thumb: thumbFromPersisted(a.thumb),
+      ...(typeof a.title === "string" ? { title: a.title } : {}),
+      ...(typeof a.artist === "string" ? { artist: a.artist } : {}),
     },
     played: a.played === true,
   };

@@ -513,13 +513,19 @@ final class ChannelConversationModel: ObservableObject {
 
     /// Encrypt and upload one picked file into the tray. Channel files live
     /// 45 days idle (ADR-0087 section 13).
-    func stageAttachment(bytes: Data, mime: String?, name: String?, media: MediaAttachmentMeta? = nil) async {
+    func stageAttachment(
+        bytes: Data, mime: String?, name: String?, media: MediaAttachmentMeta? = nil,
+        title: String? = nil, artist: String? = nil
+    ) async {
         uploading = true
         sendError = nil
         defer { uploading = false }
         do {
-            let ref = try await AttachmentBridge.encryptAndUpload(
+            var ref = try await AttachmentBridge.encryptAndUpload(
                 bytes: bytes, mime: mime, name: name, media: media, idleDays: Self.fileIdleDays)
+            // ADR-0090 section 2 — an audio file's own tags.
+            ref.title = title
+            ref.artist = artist
             MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
             pendingAttachments.append(ref)
         } catch let err as AttachmentBridgeError {
@@ -611,6 +617,10 @@ final class ChannelConversationModel: ObservableObject {
                 channelIdHex: channelId, posts: chunk.map(\.cursor)) else { return }
             for post in answer {
                 if let count = post.comments { comments[post.cursor] = count }
+                // ADR-0090 section 4.3 — a poll post's votes, per option.
+                if let item = chunk.first(where: { $0.cursor == post.cursor }), item.contentEnvelopeB64 != nil {
+                    pollCounts[post.cursor] = pollCountsOf(item, voters: post.voters ?? 0, labels: post.votes)
+                }
                 guard let item = chunk.first(where: { $0.cursor == post.cursor }),
                       let key = reactionKey(item) else { continue }
                 next[post.cursor] = key.resolveCounts(
@@ -618,6 +628,105 @@ final class ChannelConversationModel: ObservableObject {
             }
         }
         countsByPost = next
+    }
+
+    // MARK: - ADR-0090 section 4: polls in channels
+
+    /// Votes per option of each poll post, read with the reaction counts.
+    @Published private(set) var pollCounts: [UInt64: ChannelPollCounts] = [:]
+    /// A vote on its way, or one that did not go out.
+    @Published private(set) var pollSendState: [UInt64: BallotSendState] = [:]
+
+    private func pollOf(_ item: ChannelTimelineItem) -> SignedPoll? {
+        guard let b64 = item.contentEnvelopeB64,
+              case .poll(let poll)? = ContentModel.content(PersistedContent(envelopeB64: b64)) else { return nil }
+        return poll
+    }
+
+    private func pollCountsOf(_ item: ChannelTimelineItem, voters: UInt64, labels: [FfiReactionLabelCount])
+        -> ChannelPollCounts? {
+        guard let poll = pollOf(item), let key = reactionKey(item),
+              let options = try? channelPollOptionLabels(
+                key: key, postCursor: item.cursor, optionCount: UInt8(clamping: poll.body.options.count)),
+              let tally = try? channelPollTallyFromCounts(optionLabels: options, labelCounts: labels, voters: voters)
+        else { return nil }
+        return ChannelPollCounts(
+            counts: tally.counts.map { UInt32(clamping: $0) }, voters: UInt32(clamping: tally.voters), frozen: false)
+    }
+
+    private var pollConversation: FolderConversationRef? {
+        channelIdBytes.map { FolderConversationRef(kind: .channel, id: $0) }
+    }
+
+    /// What the poll card of `item` shows: the frozen tally of a close, else
+    /// the service's counts; the own choice from the synced register.
+    func pollView(_ item: ChannelTimelineItem) -> PollView? {
+        guard let poll = pollOf(item) else { return nil }
+        let own = pollConversation.flatMap {
+            sync?.pollChoice(conversation: $0, pollMessageId: Int64(clamping: item.cursor))
+        }.map { [UInt8]($0.choices) }
+        let counts = item.frozenTally.map {
+            ChannelPollCounts(counts: $0.counts.map { UInt32(clamping: $0) }, voters: UInt32(clamping: $0.voters), frozen: true)
+        } ?? pollCounts[item.cursor]
+        return PollView.channel(
+            poll: poll, counts: counts, closedByOp: item.closedByOp, own: own, nowMs: ChatRepository.nowMs())
+    }
+
+    /// Vote (or retract with no choices): the credential is fetched in the
+    /// background the first time in a period; the own choice is recorded in
+    /// the synced register once the service took the vote.
+    func votePoll(_ item: ChannelTimelineItem, choices: [UInt8]) async {
+        guard let poll = pollOf(item), let id = channelIdBytes, let key = reactionKey(item),
+              let writer = writerIdentity, let account = AcceptedContactsStore.boundAccountIdB64 else { return }
+        pollSendState[item.cursor] = .sending
+        do {
+            let options = try channelPollOptionLabels(
+                key: key, postCursor: item.cursor, optionCount: UInt8(clamping: poll.body.options.count))
+            let labels = choices.compactMap { Int($0) < options.count ? options[Int($0)] : nil }
+            let credential = try await ChannelPollCredentials.shared.current(writer: writer, accountIdB64: account)
+            try await client.sendPollVote(
+                channelIdHex: channelId, channelId: id, postCursor: item.cursor, labels: labels, credential: credential)
+            if let ref = pollConversation {
+                _ = await sync?.setPollChoice(
+                    conversation: ref, pollMessageId: Int64(clamping: item.cursor), choices: choices, setVersion: 0)
+            }
+            pollSendState[item.cursor] = nil
+            await refreshCounts()
+        } catch {
+            NSLog("ADR-0090: channel vote not sent")
+            pollSendState[item.cursor] = .failed
+        }
+    }
+
+    /// A publisher's `Close poll`: freeze the tally this app reads now into
+    /// the post (ADR-0090 section 4.3).
+    func closePoll(_ item: ChannelTimelineItem) async {
+        await refreshCounts()
+        let counts = pollCounts[item.cursor]
+        let tally = counts.flatMap {
+            try? encodeChannelPollTally(tally: ChannelPollTally(
+                voters: UInt64($0.voters), counts: $0.counts.map { UInt64($0) }))
+        }
+        guard let bytes = try? ContentFFI.composeClose(target: Int64(clamping: item.cursor), tally: tally) else { return }
+        _ = await publish(bytes)
+    }
+
+    /// A publisher's tick, added item or edit on a checklist post (ADR-0090
+    /// section 5: signed post ops, publishers only).
+    func publishContentOp(_ bytes: Data) async {
+        guard isPublisher else { return }
+        _ = await publish(bytes)
+    }
+
+    /// A publisher's poll, checklist, location, contact card or article post.
+    func publishContent(_ draft: ContentDraft, attachments: [AttachmentRef] = []) async {
+        guard let content = draft.unsigned(),
+              let bytes = try? composeContentEnvelope(
+                content: content, attachments: attachments, parts: ContentModel.emptyParts) else {
+            sendError = .key("channels.publish.error.generic")
+            return
+        }
+        _ = await publish(bytes)
     }
 
     private func reactionKey(_ item: ChannelTimelineItem) -> ChannelReactionKey? {

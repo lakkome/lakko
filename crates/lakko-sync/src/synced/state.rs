@@ -107,6 +107,20 @@
 //! nothing a stale register could show or take back, so a register a late
 //! envelope brings back changes nothing and goes at the next prune.
 //!
+//! ## Own poll choices (ADR-0090 section 3.6)
+//!
+//! One register per `(conversation, poll message id)` the account voted in,
+//! holding its choices (an empty list is a retraction, kept), folded by the
+//! rule above. One register serves group and channel polls. Carried by
+//! [`SyncedState::poll_choice_envelopes`] /
+//! [`SyncedState::apply_poll_choice_envelope`], persisted with the rest (so
+//! the backup carries it), never in [`StateSnapshot`]. **Pruned** by
+//! [`SyncedState::prune_poll_choices`]: every register of a conversation whose
+//! end register reads ended goes, for the reason the channel-activity prune is
+//! safe (a gone conversation shows nothing, and a register a late envelope
+//! brings back goes at the next prune). [`super::poll_choice::POLL_CHOICES_MAX_CLIENT`]
+//! bounds the writer, not the fold.
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -183,6 +197,10 @@ use super::link_record::{
 use super::own_username::{
     compose_own_username_envelope, decode_own_username_envelope, OwnUsernameEnvelopeError,
 };
+use super::poll_choice::{
+    compose_poll_choice_envelope, decode_poll_choice_envelope, PollChoiceEntry,
+    PollChoiceEnvelopeError, POLL_CHOICES_MAX_CLIENT, POLL_CHOICE_ENVELOPE_MAX_ENTRIES,
+};
 use super::quick_reaction::{
     compose_quick_reaction_envelope, decode_quick_reaction_envelope, QuickReactionEntry,
     QuickReactionEnvelopeError,
@@ -208,11 +226,13 @@ use super::recovery_email::{
 /// since a link record carries group and channel links (ADR-0087 phase B,
 /// 2026-11-05: target, invite seed, admission version, capability), `12`
 /// since an own reaction may name a comment (ADR-0087 phase B, 2026-11-06:
-/// target and comment cursor). Older
+/// target and comment cursor), `13` since the own poll-choice register
+/// (ADR-0090 section 3.6), `14` since that register carries the set
+/// version (the same section, as amended 2026-11-15). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 12;
+const STATE_VERSION: u8 = 14;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,7 +453,8 @@ impl SyncedState {
                 | SyncEntry::DeviceAck(_)
                 | SyncEntry::ChannelReaction(_)
                 | SyncEntry::ChannelComment(_)
-                | SyncEntry::QuickReaction(_) => {},
+                | SyncEntry::QuickReaction(_)
+                | SyncEntry::PollChoice(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -1218,6 +1239,137 @@ impl SyncedState {
         self.registers.retain(|_, h| match &h.entry {
             SyncEntry::ChannelReaction(r) => !r.expired_at(now_ms),
             SyncEntry::ChannelComment(c) => !c.expired_at(now_ms),
+            _ => true,
+        });
+        before - self.registers.len()
+    }
+
+    // -----------------------------------------------------------------
+    // Own poll choices (ADR-0090 section 3.6).
+    // -----------------------------------------------------------------
+
+    /// Record the account's choice in a poll, stamped `hlc`: `choices` empty
+    /// retracts the vote. `set_version` is the ring version of the account's
+    /// anonymity set in the poll (ADR-0090 section 3.6): the version the first
+    /// vote drew from, which the client reads back with [`Self::poll_choice`]
+    /// and passes to every later vote; 0 for a channel poll. Returns the envelope to send when the register
+    /// changed, `None` when the held register is newer or identical.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RefIdLength`],
+    /// [`super::entry::BoundsError::PollChoices`], or
+    /// [`super::entry::BoundsError::TooManyPollChoices`] when a new register would pass
+    /// [`POLL_CHOICES_MAX_CLIENT`] (an update of a held one is always written).
+    pub fn set_poll_choice(
+        &mut self,
+        hlc: u64,
+        conversation: &ConversationRef,
+        poll_message_id: i64,
+        choices: &[u8],
+        set_version: u32,
+    ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
+        let value = PollChoiceEntry {
+            conversation: conversation.clone(),
+            poll_message_id,
+            choices: choices.to_vec(),
+            set_version,
+        };
+        value.validate()?;
+        if self.poll_choice(conversation, poll_message_id).is_none()
+            && self.poll_choice_count() >= POLL_CHOICES_MAX_CLIENT
+        {
+            return Err(super::entry::BoundsError::TooManyPollChoices);
+        }
+        if self.apply(hlc, SyncEntry::PollChoice(value.clone()))? != ApplyOutcome::Applied {
+            return Ok(None);
+        }
+        Ok(compose_poll_choice_envelope(&[Stamped { hlc, value }]).ok())
+    }
+
+    /// The held own-choice register of a poll, a retraction included.
+    #[must_use]
+    pub fn poll_choice(
+        &self,
+        conversation: &ConversationRef,
+        poll_message_id: i64,
+    ) -> Option<Stamped<PollChoiceEntry>> {
+        match self.registers.get(&RegisterKey::PollChoice(
+            conversation.clone(),
+            poll_message_id,
+        )) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::PollChoice(p),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: p.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn poll_choice_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::PollChoice(..)))
+            .count()
+    }
+
+    /// Every held own-choice register (retractions included) with its
+    /// original stamp, as envelopes of at most
+    /// [`POLL_CHOICE_ENVELOPE_MAX_ENTRIES`] entries: the catch-up a device
+    /// sends on DeviceGroup growth, and the re-send it owes when a live send
+    /// did not go out.
+    #[must_use]
+    pub fn poll_choice_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<PollChoiceEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::PollChoice(p) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: p.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(POLL_CHOICE_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_poll_choice_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a poll-choice envelope and fold every register in with its
+    /// original stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`PollChoiceEnvelopeError`].
+    pub fn apply_poll_choice_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, PollChoiceEnvelopeError> {
+        let entries = decode_poll_choice_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::PollChoice(s.value))),
+        ))
+    }
+
+    /// Drop every own-choice register of a conversation whose
+    /// conversation-end register reads ended. Returns how many went. The
+    /// client calls it when it loads the state and after applying envelopes,
+    /// as it calls [`Self::prune_channel_activity`].
+    pub fn prune_poll_choices(&mut self) -> usize {
+        let ended: std::collections::BTreeSet<ConversationRef> = self
+            .ended_conversations()
+            .into_iter()
+            .map(|e| e.value.conversation)
+            .collect();
+        let before = self.registers.len();
+        self.registers.retain(|_, h| match &h.entry {
+            SyncEntry::PollChoice(p) => !ended.contains(&p.conversation),
             _ => true,
         });
         before - self.registers.len()
@@ -2532,15 +2684,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 12);
-        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
+        assert_eq!(old[0], 14);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![12, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![14, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2891,6 +3043,87 @@ mod tests {
             5
         );
         assert!(c.is_empty());
+    }
+
+    fn poll_choice(c: u8, message: i64, choices: &[u8]) -> SyncEntry {
+        SyncEntry::PollChoice(PollChoiceEntry {
+            conversation: cref(c),
+            poll_message_id: message,
+            choices: choices.to_vec(),
+            set_version: 2,
+        })
+    }
+
+    #[test]
+    fn a_poll_choice_round_trips_retracts_and_goes_with_its_ended_conversation() {
+        let mut s = SyncedState::new();
+        let sent = s
+            .set_poll_choice(5, &cref(1), 42, &[0, 2], 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.poll_choice(&cref(1), 42).unwrap().value.choices,
+            vec![0, 2]
+        );
+        // An older write does not replace it; a newer retraction does.
+        assert_eq!(s.set_poll_choice(4, &cref(1), 42, &[1], 2).unwrap(), None);
+        s.set_poll_choice(6, &cref(1), 42, &[], 2).unwrap().unwrap();
+        assert!(s
+            .poll_choice(&cref(1), 42)
+            .unwrap()
+            .value
+            .choices
+            .is_empty());
+        // Another device folds the first envelope in, then the catch-up.
+        let mut other = SyncedState::new();
+        assert_eq!(other.apply_poll_choice_envelope(&sent), Ok(true));
+        assert_eq!(other.apply_poll_choice_envelope(&sent), Ok(false));
+        for envelope in s.poll_choice_envelopes() {
+            other.apply_poll_choice_envelope(&envelope).unwrap();
+        }
+        assert_eq!(other.poll_choice(&cref(1), 42), s.poll_choice(&cref(1), 42));
+        // The set version survives a retraction and is what a revote from
+        // any device reads back.
+        assert_eq!(
+            other.poll_choice(&cref(1), 42).unwrap().value.set_version,
+            2
+        );
+        // Persisted, and not in the snapshot.
+        assert_eq!(SyncedState::from_bytes(&s.to_bytes()).unwrap(), s);
+        assert!(s.snapshot().stamped_entries().is_empty());
+        // Bad choices are refused.
+        assert_eq!(
+            s.set_poll_choice(7, &cref(2), 1, &[3, 3], 2),
+            Err(super::super::entry::BoundsError::PollChoices)
+        );
+        // Kept while the conversation lives, gone once it has ended.
+        s.set_poll_choice(8, &cref(2), 1, &[1], 2).unwrap();
+        assert_eq!(s.prune_poll_choices(), 0);
+        s.apply(9, conversation_end(1, 3, true)).unwrap();
+        assert_eq!(s.prune_poll_choices(), 1);
+        assert!(s.poll_choice(&cref(1), 42).is_none());
+        assert!(s.poll_choice(&cref(2), 1).is_some());
+        // A conversation joined again keeps its choices.
+        s.set_poll_choice(10, &cref(1), 43, &[0], 2).unwrap();
+        s.apply(11, conversation_end(1, 4, false)).unwrap();
+        assert_eq!(s.prune_poll_choices(), 0);
+    }
+
+    #[test]
+    fn the_poll_choice_cap_bounds_new_registers_only() {
+        let mut s = SyncedState::new();
+        for i in 0..POLL_CHOICES_MAX_CLIENT {
+            s.apply(1, poll_choice(0, i64::try_from(i).unwrap(), &[0]))
+                .unwrap();
+        }
+        assert_eq!(
+            s.set_poll_choice(2, &cref(0), -1, &[0], 2),
+            Err(super::super::entry::BoundsError::TooManyPollChoices)
+        );
+        assert!(s
+            .set_poll_choice(2, &cref(0), 0, &[1], 2)
+            .unwrap()
+            .is_some());
     }
 
     fn channel_comment(c: u8, cursor: u64, nonce: u8, deleted: bool) -> SyncEntry {
@@ -3504,6 +3737,9 @@ mod tests {
     // The key property: order does not matter.
     // -----------------------------------------------------------------
 
+    // One arm per register kind; splitting it would hide that every kind is
+    // in the property.
+    #[allow(clippy::too_many_lines)]
     fn arb_entry() -> impl Strategy<Value = (u64, SyncEntry)> {
         // A small space of folders, conversations and stamps so ties,
         // tombstones and overwrites collide often.
@@ -3608,6 +3844,18 @@ mod tests {
                     h,
                     channel_reaction(c, cursor, e, reacted)
                 )),
+            // Own poll choices: two polls, choices and retractions meeting
+            // on one stamp often.
+            (
+                hlc.clone(),
+                c.clone(),
+                0i64..2,
+                prop::collection::btree_set(0u8..3, 0..3)
+            )
+                .prop_map(|(h, c, m, set)| (
+                    h,
+                    poll_choice(c, m, &set.into_iter().collect::<Vec<u8>>())
+                )),
             // Own channel comments: two posts x two nonces, a comment and its
             // deletion meeting on one stamp often.
             (hlc, c, 0u64..2, 0u8..2, any::<bool>())
@@ -3636,6 +3884,9 @@ mod tests {
         }
         for envelope in from.channel_comment_envelopes() {
             into.apply_channel_comment_envelope(&envelope).unwrap();
+        }
+        for envelope in from.poll_choice_envelopes() {
+            into.apply_poll_choice_envelope(&envelope).unwrap();
         }
     }
 

@@ -165,11 +165,14 @@ final class InlineMediaTests: XCTestCase {
         return out as Data
     }
 
-    func testPreparePngKeepsBytesAndAddsSizeAndThumb() throws {
+    /// ADR-0090 / attachments UX section 3 — every photo but a GIF is
+    /// re-encoded as JPEG (longest side at most 2560 px), which drops its
+    /// metadata; a PNG is no longer sent as picked.
+    func testPreparePngIsReencodedAsJpegWithSizeAndThumb() throws {
         let png = try XCTUnwrap(encodedImage(type: .png, width: 1200, height: 800))
         let prepared = try XCTUnwrap(PhotoVideoPrep.preparePhoto(png, stamp: "t"))
-        XCTAssertEqual(prepared.mime, "image/png")
-        XCTAssertEqual(prepared.bytes, png)
+        XCTAssertEqual(prepared.mime, "image/jpeg")
+        XCTAssertEqual(PhotoVideoPrep.sniffInlineImageMime(try XCTUnwrap(prepared.bytes)), "image/jpeg")
         XCTAssertEqual(prepared.width, 1200)
         XCTAssertEqual(prepared.height, 800)
         let thumb = try XCTUnwrap(prepared.thumb)

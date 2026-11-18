@@ -172,6 +172,14 @@ public object AccountLocalWipe {
         // ADR-0080: the cards of the account's devices, this device's own
         // card, its city answer and its "Show my city" switch.
         Step("device-cards") { ctx, acct -> me.lakko.app.devices.DeviceCardCenter.deleteAccountRows(ctx, acct) },
+        // ADR-0090: the channel-poll credentials, who admitted this device into
+        // each group, and the article drafts. Pending anonymous ballots live
+        // in the message log, wiped with it.
+        Step("attachment-kinds") { ctx, acct ->
+            me.lakko.app.channels.ChannelPollCredentials.deleteAccountRows(ctx, acct)
+            me.lakko.app.chat.AdmittingAccounts.deleteAccountRows(ctx, acct)
+            me.lakko.app.ui.chat.ArticleDrafts.deleteAccountRows(ctx, acct)
+        },
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         // A guest account's phrase is kept under a key of its own
         // (`auth/GuestAccount.kt`), so it has a step of its own.

@@ -3593,6 +3593,8 @@ public final class AuthRepository: ObservableObject {
     /// device in the session if it is not named yet, then record the account
     /// key at auth if that never succeeded for the key this device holds.
     private func sessionLanded(accountIdB64: String) {
+        // ADR-0090 section 3.4a — ballots may be posted from here on.
+        BallotGate.sessionLandedThisRun = true
         // ADR-0074 part 3 — a kept device's pending rotations age out, and
         // the "keys were changed" line survives a relaunch until dismissed.
         pruneKeyRotationPending(accountIdB64: accountIdB64)

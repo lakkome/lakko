@@ -15,3 +15,5 @@
 "NSFaceIDUsageDescription" = "Lakko משתמשת ב-Face ID כדי לוודא שזה אתם לפני הצגת ביטוי השחזור.";
 
 "NSSpeechRecognitionUsageDescription" = "Lakko הופכת הודעות קוליות והודעות וידאו לטקסט כשמבקשים ממנה. זה קורה במכשיר שלך; ההקלטות אף פעם לא נשלחות לשום מקום לתמלול.";
+
+"NSLocationWhenInUseUsageDescription" = "Lakko uses your location only when you choose to send where you are in a conversation. Nothing is sent before you tap Send.";

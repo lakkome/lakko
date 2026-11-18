@@ -77,6 +77,11 @@ public struct MessageSelection: Equatable {
     /// Section 8 — `Forward` is enabled when the selection is not empty.
     public var forwardEnabled: Bool { !isEmpty }
 
+    /// ADR-0090 — `Forward` for a selection: not empty, and every selected
+    /// message may be forwarded (``ForwardPayload/isForwardable(_:cardShareable:)``,
+    /// read once for the whole selection by the caller).
+    public func forwardEnabled(allForwardable: Bool) -> Bool { forwardEnabled && allForwardable }
+
     /// Section 8 — `Delete` is enabled when the selection is not empty and
     /// every selected message is the person's own: Lakko has no "delete for
     /// me", a delete goes to everyone and peers accept it only from the author

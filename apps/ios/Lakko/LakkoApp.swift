@@ -370,6 +370,12 @@ struct LakkoApp: App {
         BlobLifecycle.shared.chat = chat
         BlobLifecycle.shared.sync = sync
         SavedMessagesCenter.shared.bind(sync: sync, chat: chat)
+        // ADR-0090 section 3.6 — the own poll choices and the ballot queue,
+        // which resumes every queued ballot (posted once the session landed).
+        PollChoiceCenter.shared.bind(sync: sync, chat: chat)
+        if let secrets = auth.identitySecrets {
+            BallotQueue.shared.bind(chat: chat, accountIdB64: base64Encode(secrets.accountId))
+        }
         // ADR-0075 — at every landing of a session with keys: what protects
         // the account (the recovery email, a saved phrase) and what its
         // devices are to be told.

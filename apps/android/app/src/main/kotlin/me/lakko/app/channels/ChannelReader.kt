@@ -150,6 +150,21 @@ public class ChannelReader(
             MessageBodyKind.CHAT -> ChannelRowContent.Post(body.text, body.attachments, body.channelInvite)
             MessageBodyKind.EDIT -> body.target?.let { ChannelRowContent.Edit(it, body.text) } ?: ChannelRowContent.Hidden
             MessageBodyKind.DELETE -> body.target?.let { ChannelRowContent.Delete(it) } ?: ChannelRowContent.Hidden
+            // ADR-0090 — content posts, and a publisher's close of a poll with
+            // its frozen tally.
+            MessageBodyKind.POLL,
+            MessageBodyKind.CHECKLIST,
+            MessageBodyKind.LOCATION,
+            MessageBodyKind.CONTACT_CARD,
+            MessageBodyKind.ARTICLE,
+            -> ChannelRowContent.Post(body.text, body.attachments, null, body.content)
+            MessageBodyKind.POLL_CLOSE -> body.target?.let { ChannelRowContent.Close(it, body.pollTally) } ?: ChannelRowContent.Hidden
+            MessageBodyKind.CHECKLIST_TICK -> body.target?.let {
+                ChannelRowContent.ChecklistOp(it, add = false, item = body.checklistItem, done = body.checklistDone ?: false, text = "")
+            } ?: ChannelRowContent.Hidden
+            MessageBodyKind.CHECKLIST_ADD -> body.target?.let {
+                ChannelRowContent.ChecklistOp(it, add = true, item = null, done = false, text = body.text)
+            } ?: ChannelRowContent.Hidden
             // Section 13 — no typing, no read marks, no reply and no
             // in-band reactions in a channel; a service envelope is never
             // a post.

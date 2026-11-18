@@ -69,17 +69,21 @@
 #![warn(missing_docs)]
 
 pub mod account_statement;
+pub mod anon_cred;
 pub mod anon_token;
 pub mod attachments;
 pub mod auth;
 pub mod background;
 pub mod backup;
+pub mod ballot;
 pub mod call_relay;
 pub mod channel_access;
 pub mod channel_feedback;
+pub mod channel_poll;
 pub mod channels;
 pub mod circle;
 pub mod contacts;
+pub mod content;
 pub mod conversation_meta;
 pub mod device_card;
 pub mod device_link;
@@ -102,6 +106,7 @@ pub mod link_refusal;
 pub mod mailbox;
 pub mod mls;
 pub mod mnemonic;
+pub mod open_items;
 pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;

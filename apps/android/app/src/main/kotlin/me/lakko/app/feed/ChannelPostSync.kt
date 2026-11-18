@@ -17,6 +17,8 @@ import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.ClassifiedPost
 import me.lakko.app.channels.classifyChannelPlaintext
+import me.lakko.app.chat.PersistedAttachment
+import me.lakko.app.chat.from
 
 /**
  * Channels join the foreground poll (ADR-0063 section 4): while the app is in
@@ -222,10 +224,13 @@ public class ChannelPostSync(
                 if (body == null) {
                     // Without the core (a host test) the text is the post.
                     PostOutcome.Text(c.text)
-                } else if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT && body.text.isNotEmpty()) {
-                    PostOutcome.Text(body.text)
                 } else {
-                    PostOutcome.Skip
+                    feedPostOutcome(
+                        kind = body.kind,
+                        text = body.text,
+                        attachments = body.attachments.map { PersistedAttachment.from(it) },
+                        envelope = c.text.toByteArray(Charsets.UTF_8),
+                    )
                 }
             }
             is ClassifiedPost.Meta -> {
@@ -241,4 +246,26 @@ public class ChannelPostSync(
     private companion object {
         const val TAG = "ChannelPostSync"
     }
+}
+
+/**
+ * What the feed keeps of a decoded channel post (ADR-0063 / ADR-0090): a chat
+ * post with words or files; a location, contact card or article with its
+ * envelope (and an article's images, which are its attachments). A poll or a
+ * checklist, an edit, a delete or anything else is passed over: votes and
+ * ticks belong to the channel view.
+ */
+internal fun feedPostOutcome(
+    kind: uniffi.lakko_ffi_uniffi.MessageBodyKind,
+    text: String,
+    attachments: List<me.lakko.app.chat.PersistedAttachment>,
+    envelope: ByteArray,
+): PostOutcome = when (kind) {
+    uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT ->
+        if (text.isNotEmpty() || attachments.isNotEmpty()) PostOutcome.Text(text, attachments) else PostOutcome.Skip
+    uniffi.lakko_ffi_uniffi.MessageBodyKind.LOCATION,
+    uniffi.lakko_ffi_uniffi.MessageBodyKind.CONTACT_CARD,
+    uniffi.lakko_ffi_uniffi.MessageBodyKind.ARTICLE,
+    -> PostOutcome.Text(text, attachments, java.util.Base64.getEncoder().encodeToString(envelope))
+    else -> PostOutcome.Skip
 }

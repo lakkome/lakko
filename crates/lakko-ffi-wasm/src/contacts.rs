@@ -292,6 +292,7 @@ fn prepare_profile(
     username_certificate: Option<Vec<u8>>,
     grants: Option<Vec<ReachGrant>>,
     avatar: Option<ProfileAvatar>,
+    card_shareable: Option<bool>,
 ) -> Result<RustProfile, JsValue> {
     let account_id = match account_id {
         None => None,
@@ -326,6 +327,7 @@ fn prepare_profile(
             .map(|g| g.rust().clone())
             .collect(),
         avatar: avatar.map(|a| a.inner),
+        card_shareable: card_shareable.unwrap_or(true),
     })
 }
 
@@ -881,6 +883,7 @@ pub struct WasmProfile {
     username_certificate: Option<Vec<u8>>,
     grants: Vec<ReachGrant>,
     avatar: Option<ProfileAvatar>,
+    card_shareable: bool,
 }
 
 impl From<RustProfile> for WasmProfile {
@@ -893,6 +896,7 @@ impl From<RustProfile> for WasmProfile {
             username_certificate: p.username_certificate,
             grants: p.grants.into_iter().map(ReachGrant::from_rust).collect(),
             avatar: p.avatar.map(|inner| ProfileAvatar { inner }),
+            card_shareable: p.card_shareable,
         }
     }
 }
@@ -946,6 +950,14 @@ impl WasmProfile {
     pub fn avatar(&self) -> Option<ProfileAvatar> {
         self.avatar.clone()
     }
+
+    /// `false` when the person does not let others share their contact card
+    /// (ADR-0090 section 7, profile v5 flags bit 0): a contact picker and
+    /// the forward of a contact-card message refuse that person.
+    #[wasm_bindgen(getter, js_name = cardShareable)]
+    pub fn card_shareable(&self) -> bool {
+        self.card_shareable
+    }
 }
 
 /// Compose a profile envelope (ADR-0048) — the inner plaintext to publish as
@@ -971,6 +983,10 @@ impl WasmProfile {
 /// `avatar` (ADR-0084) is optional: `undefined` means no photo. Its bounds
 /// throw `"avatar.notSquare"`, `"avatar.dimensions"`, `"avatar.size"`,
 /// `"avatar.duration"`.
+///
+/// `cardShareable` (ADR-0090 section 7), the last argument, is optional:
+/// `undefined` means `true`. Pass `false` exactly when this device's "who
+/// can find me" setting is `Nobody`.
 #[wasm_bindgen(js_name = composeProfileEnvelope)]
 pub fn compose_profile_envelope(
     display_name: Option<String>,
@@ -980,6 +996,7 @@ pub fn compose_profile_envelope(
     username_certificate: Option<Vec<u8>>,
     grants: Option<Vec<ReachGrant>>,
     avatar: Option<ProfileAvatar>,
+    card_shareable: Option<bool>,
 ) -> Result<Vec<u8>, JsValue> {
     let profile = prepare_profile(
         display_name,
@@ -989,6 +1006,7 @@ pub fn compose_profile_envelope(
         username_certificate,
         grants,
         avatar,
+        card_shareable,
     )?;
     rust_compose_profile(&profile).map_err(profile_error_value)
 }
@@ -2576,6 +2594,15 @@ pub enum WasmIncomingEnvelopeKind {
     /// PublisherGroup and the MLS sender is a current publisher; requests
     /// before the next rotation collapse into it. Never render it.
     ChannelRotateRequest = 30,
+    /// ADR-0090 section 3.9 — open polls and checklists handed to a
+    /// newcomer. `payload` is the whole envelope: keep it with the sender's
+    /// account key when `openItemsSenderTrusted` says so, then
+    /// `assembleOpenItems` and `adoptOpenItem`. Never render it.
+    OpenItems = 31,
+    /// ADR-0090 section 3.9 — old ballot rows of one anonymous poll.
+    /// `payload` is the whole envelope; read it with
+    /// `decodePollBallotsEnvelope`. Never render it.
+    PollBallots = 32,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2945,6 +2972,14 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::GroupPhoto(photo) => WasmIncomingEnvelope {
             group_photo: Some(photo.into()),
             ..WasmIncomingEnvelope::of(K::GroupPhoto)
+        },
+        IncomingEnvelope::OpenItems(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::OpenItems)
+        },
+        IncomingEnvelope::PollBallots(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::PollBallots)
         },
         IncomingEnvelope::GroupReactions(value) => WasmIncomingEnvelope {
             group_reactions: Some(value.into()),
@@ -4644,9 +4679,11 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let decoded = decode_profile_envelope(&envelope).unwrap();
+        assert!(decoded.card_shareable(), "undefined means shareable");
         assert_eq!(decoded.display_name(), Some("Alice Petrova".to_string()));
         assert_eq!(decoded.username(), Some("alice".to_string()));
         assert_eq!(decoded.updated_at_ms(), 42);
@@ -4711,8 +4748,10 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            Some(false),
         )
         .unwrap();
+        assert!(!decode_profile_envelope(&envelope).unwrap().card_shareable());
         assert_eq!(
             decode_profile_envelope(&envelope)
                 .unwrap()
@@ -4728,7 +4767,7 @@ mod tests {
         // The ADR-0060 bounds refuse before any bytes exist.
         let mut too_many = grants.clone();
         too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[], 1).unwrap());
-        let p = prepare_profile(None, None, 1, None, None, Some(too_many), None).unwrap();
+        let p = prepare_profile(None, None, 1, None, None, Some(too_many), None, None).unwrap();
         assert!(matches!(
             rust_compose_profile(&p),
             Err(ProfileError::TooManyGrants { count: 3 })

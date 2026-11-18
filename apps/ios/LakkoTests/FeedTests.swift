@@ -391,4 +391,73 @@ final class FeedTests: XCTestCase {
         intake.handle(try XCTUnwrap(URL(string: "https://lakko.me/feed/import#@@")))
         XCTAssertEqual(intake.takeFeedImport()?.refused, true)
     }
+
+    // MARK: - ADR-0090 — channel posts keep their files and content
+
+    private func photo() throws -> AttachmentRef {
+        AttachmentRef(
+            blobId: Data(repeating: 1, count: 32), key: Data(count: 32), nonce: Data(count: 12),
+            mime: "image/jpeg", size: 10, name: nil, kind: nil, durationMs: nil, waveform: nil,
+            width: nil, height: nil, thumb: nil)
+    }
+
+    func testAnOldPostRowReadsWithNoFilesAndNoContent() throws {
+        let old = Data(#"{"cursor":3,"serverTsMs":5,"text":"hi"}"#.utf8)
+        let post = try JSONDecoder().decode(PersistedChannelPost.self, from: old)
+        XCTAssertNil(post.attachments)
+        XCTAssertNil(post.content)
+        XCTAssertEqual(post.text, "hi")
+    }
+
+    func testSyncKeepsAPostsFilesAndContent() async throws {
+        let ref = try photo()
+        let card = SharedContactCard(name: "Anna", username: "anna", accountKey: Data(repeating: 9, count: 32))
+        let envelope = try composeContentEnvelope(
+            content: .contactCard(card: card), attachments: [], parts: ContentModel.emptyParts).base64EncodedString()
+        let page = ChannelPostLog.Page(posts: [
+            (cursor: 1, serverTsMs: now, payloadB64: "photo"),
+            (cursor: 2, serverTsMs: now, payloadB64: "card"),
+        ])
+        let slot = try await ChannelPostLog.syncSlot(
+            nil,
+            fetchPage: { after, _ in after == 0 ? page : ChannelPostLog.Page(posts: []) },
+            decode: { payload in
+                payload == "photo"
+                    ? .post(text: "", attachments: [ref], contentEnvelopeB64: nil)
+                    : .post(text: "Contact", attachments: [], contentEnvelopeB64: envelope)
+            },
+            nowMs: now)
+        let round = try JSONDecoder().decode(ChannelPostSlot.self, from: JSONEncoder().encode(slot))
+        XCTAssertEqual(round.posts[0].attachmentRefs, [ref])
+        XCTAssertNil(round.posts[0].content)
+        XCTAssertEqual(round.posts[1].content?.envelopeB64, envelope)
+
+        let input = FeedModel.buildInput(context(groupMessages: [], posts: round.posts))
+        let shown = input.refs.map(\.message)
+        XCTAssertEqual(shown.first?.attachments, [ref], "the feed draws the post's file")
+        XCTAssertTrue(input.candidates.first?.hasMedia == true)
+        XCTAssertEqual(shown.last?.content?.envelopeB64, envelope)
+    }
+
+    func testForwardFromTheFeedFollowsTheContentRules() throws {
+        let card = SharedContactCard(name: "Anna", username: "anna", accountKey: Data(repeating: 9, count: 32))
+        let cardEnvelope = try composeContentEnvelope(
+            content: .contactCard(card: card), attachments: [], parts: ContentModel.emptyParts)
+        let carded = FeedMessage(
+            messageId: 1, direction: .incoming, text: "Contact", timeMs: now,
+            content: PersistedContent(envelopeB64: cardEnvelope.base64EncodedString()))
+        XCTAssertTrue(FeedForward.canForward(carded) { _ in true })
+        XCTAssertFalse(FeedForward.canForward(carded) { _ in false })
+        let body = ChecklistBody(title: "T", othersAdd: false, othersMark: false, items: [ChecklistItem(id: 1, text: "a")])
+        let listEnvelope = try composeContentEnvelope(
+            content: .checklist(checklist: SignedChecklist(body: body, authorSig: nil)), attachments: [],
+            parts: ContentModel.emptyParts)
+        let listed = FeedMessage(
+            messageId: 2, direction: .incoming, text: "", timeMs: now,
+            content: PersistedContent(envelopeB64: listEnvelope.base64EncodedString()))
+        XCTAssertFalse(FeedForward.canForward(listed) { _ in true })
+        XCTAssertTrue(FeedForward.canForward(msg(3)) { _ in false })
+        XCTAssertFalse(FeedCopy.body(listed).isEmpty, "a content message with no text says what it is")
+    }
 }
+

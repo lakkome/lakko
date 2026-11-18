@@ -30,6 +30,10 @@
  * the chat envelope parser; for the MVP the opaque round-trip
  * is enough to prove the catch-up path.
  */
+import { contentFromPersisted } from "../attach/preview";
+import { contentOf } from "../attach/content-store";
+import { foldChecklistEntry, foldPollEntry } from "../attach/ContentBubble";
+import type { ContentMessage, ContentState } from "../../wasm/lakko_ffi_wasm";
 import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import type { Wasm } from "../wasm";
@@ -133,7 +137,7 @@ export async function buildHistoryBundleFromLog(args: {
       // is the 8-byte big-endian u64 (the native convention),
       // replacing the old web-only UTF-8-of-decimal encoding so
       // a web-scanner -> native-joiner pairing interoperates.
-      const placeholder = encodeMessagePlaceholder(wasm, m);
+      const placeholder = encodeMessagePlaceholder(wasm, m, base64Encode(groupIdBytes));
       const createdMs = (() => {
         if (m.createdAt === undefined || m.createdAt === null) return 0;
         const v = Date.parse(m.createdAt);
@@ -267,7 +271,7 @@ function tagToDirection(tag: number): PersistedMessage["direction"] {
  *  cross-platform placeholder bytes (version 2, which carries the ADR-0047
  *  media metadata, so a voice message, video note or GIF restores as itself
  *  on the new device). The local-only `played` marker is never transferred. */
-function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
+function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage, groupIdB64: string): Uint8Array {
   const messageId = safeBigInt(m.messageId) ?? 0n;
   const attachments: HistoryAttachmentInput[] = m.attachments.map((a) => {
     const size = safeBigInt(a.sizeStr) ?? 0n;
@@ -282,6 +286,10 @@ function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
     const { media, thumb } = historyMediaFromPersisted(a);
     if (media !== null) {
       input.setMedia(media.kind, media.durationMs, media.waveform, media.width, media.height);
+    }
+    // ADR-0090 section 3.11 — an audio file's tags travel too.
+    if (typeof a.title === "string" || typeof a.artist === "string") {
+      input.setAudioTags(a.title ?? null, a.artist ?? null);
     }
     if (thumb !== null) {
       input.setThumb(
@@ -302,7 +310,52 @@ function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
     m.createdAt,
     m.text,
     attachments,
+    // ADR-0090 section 3.11 — the content and, for a poll or checklist, its
+    // state as this device folded it.
+    contentMessageForBundle(wasm, m.content, groupIdB64, Number(messageId)),
   );
+}
+
+/** How a poll is closed, for the bundle's snapshot. */
+function closedStateOf(
+  closes: readonly { messageId: number; closer: string; closerIsAdmin: boolean }[],
+  authorKeyB64: string,
+  closed: boolean,
+): { kind: "open" } | { kind: "byTime" } | { kind: "byOp"; messageId: number } {
+  const ops = closes.filter((c) => c.closer === authorKeyB64 || c.closerIsAdmin).map((c) => c.messageId);
+  if (ops.length > 0) return { kind: "byOp", messageId: Math.min(...ops) };
+  return closed ? { kind: "byTime" } : { kind: "open" };
+}
+
+/** ADR-0090 section 3.11 — the bundle's content field for one message. */
+function contentMessageForBundle(
+  wasm: Wasm,
+  raw: unknown,
+  groupIdB64: string,
+  messageId: number,
+): ContentMessage | undefined {
+  const content = contentFromPersisted(raw);
+  if (content === undefined) return undefined;
+  const entry = contentOf(groupIdB64)?.entries[String(messageId)];
+  let state: ContentState | null = null;
+  try {
+    if (entry?.kind === "poll") {
+      const tally = foldPollEntry(entry, Date.now());
+      if (tally !== null) {
+        state = wasm.pollStateFromCounts(
+          Uint32Array.from(tally.counts),
+          tally.voters,
+          closedStateOf(entry.closes, entry.authorKeyB64, tally.closed),
+        );
+      }
+    } else if (entry?.kind === "checklist") {
+      const folded = foldChecklistEntry(entry);
+      if (folded !== null) state = wasm.checklistStateSnapshot(folded);
+    }
+  } catch {
+    state = null;
+  }
+  return { content, ...(state === null ? {} : { state }) };
 }
 
 /** Decode canonical placeholder bytes back into a local-store
@@ -327,13 +380,19 @@ function decodeMessagePlaceholder(
     sizeStr: a.size.toString(),
     name: a.name ?? null,
     ...persistedMediaFromOpened(a),
+    ...(a.title === undefined ? {} : { title: a.title }),
+    ...(a.artist === undefined ? {} : { artist: a.artist }),
   }));
+  const content = opened.content?.content;
+  const contentState = opened.content?.state ?? undefined;
   return {
     messageId: opened.messageId.toString(),
     direction: tagToDirection(opened.direction),
     text: opened.text,
     attachments,
     createdAt: opened.createdAt,
+    ...(content === undefined ? {} : { content }),
+    ...(contentState === undefined || contentState === null ? {} : { contentState }),
   };
 }
 

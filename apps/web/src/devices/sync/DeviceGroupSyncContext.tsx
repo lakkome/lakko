@@ -135,6 +135,7 @@ import {
   publishHeldAddress,
 } from "../../auth/protect/address-register";
 import { installUsernameRegister, publishRegisterUsername } from "../../auth/username-register";
+import { installPollChoicePort, pollChoicesChanged, type ChoiceRefKind } from "../../attach/poll-choice-register";
 import { installQuickReactionRegister, publishQuickReaction } from "../../chat/quick-reaction-register";
 import {
   installOwnFeedbackRegister,
@@ -524,6 +525,7 @@ export function DeviceGroupSyncProvider(props: {
   let wasmSync: Awaited<ReturnType<typeof loadWasm>> | null = null;
   let uninstallAddressRegister: (() => void) | null = null;
   let uninstallUsernameRegister: (() => void) | null = null;
+  let uninstallPollChoicePort: (() => void) | null = null;
   let uninstallQuickReactionRegister: (() => void) | null = null;
   /** ADR-0087 section 13a: the own channel reactions and comments. */
   let uninstallOwnFeedbackRegister: (() => void) | null = null;
@@ -937,6 +939,10 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentOwnFeedback();
     uninstallOwnFeedbackRegister?.();
     uninstallOwnFeedbackRegister = installOwnFeedbackRegister(ownFeedbackPortFor(accountIdB64));
+    // ADR-0090 section 3.6 - the own poll-choice register, the same way.
+    void flushUnsentPollChoices();
+    uninstallPollChoicePort?.();
+    uninstallPollChoicePort = installPollChoicePort(pollChoicePortFor(accountIdB64));
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
@@ -1110,6 +1116,8 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister = null;
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = null;
+    uninstallPollChoicePort?.();
+    uninstallPollChoicePort = null;
     uninstallQuickReactionRegister?.();
     uninstallQuickReactionRegister = null;
     uninstallOwnFeedbackRegister?.();
@@ -1241,6 +1249,8 @@ export function DeviceGroupSyncProvider(props: {
       if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
+      // ADR-0090 section 3.6 - and every own poll choice, the same way.
+      await sendLineageEnvelopes(synced.pollChoiceEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -1472,6 +1482,80 @@ export function DeviceGroupSyncProvider(props: {
       return;
     }
     await sendOwnFeedbackEnvelopes(account, envelopes);
+  }
+
+  // ----- ADR-0090 section 3.6: the own poll-choice register ---------
+
+  const pollChoiceUnsentKey = (account: string): string => `lakko.poll-choice.unsent.v1.${account}`;
+
+  async function sendPollChoiceEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      localStorage.setItem(pollChoiceUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: this send is the only attempt */
+    }
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(pollChoiceUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("poll choice register send failed; retried at the next start", err instanceof Error ? err.name : "unknown");
+    }
+  }
+
+  async function flushUnsentPollChoices(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(pollChoiceUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.pollChoiceEnvelopes();
+    } catch {
+      return;
+    }
+    await sendPollChoiceEnvelopes(account, envelopes);
+  }
+
+  function pollChoicePortFor(accountIdB64: string) {
+    return {
+      accountIdB64,
+      choiceOf: (refKind: ChoiceRefKind, refId: Uint8Array, pollMessageId: number) => {
+        if (synced === null) return undefined;
+        const c = synced.pollChoice(refKind, refId, BigInt(pollMessageId));
+        if (c === undefined) return undefined;
+        try {
+          return { choices: Array.from(c.choices), setVersion: c.setVersion };
+        } finally {
+          c.free();
+        }
+      },
+      setChoice: async (
+        refKind: ChoiceRefKind,
+        refId: Uint8Array,
+        pollMessageId: number,
+        choices: readonly number[],
+        setVersion: number,
+      ): Promise<boolean> => {
+        if (synced === null) throw new Error("synced state not loaded");
+        const envelope = synced.setPollChoice(
+          mintHlc(),
+          refKind,
+          refId,
+          BigInt(pollMessageId),
+          Uint8Array.from(choices),
+          setVersion,
+        );
+        if (envelope === undefined) return false;
+        refresh();
+        pollChoicesChanged();
+        if (activeAccountIdB64 === accountIdB64) await sendPollChoiceEnvelopes(accountIdB64, [envelope]);
+        return true;
+      },
+    };
   }
 
   /** The port the channel screens write their own reactions and comments
@@ -2776,6 +2860,19 @@ export function DeviceGroupSyncProvider(props: {
           if (synced?.applyDeviceAckEnvelope(parsed.serviceEnvelope) === true) {
             observeHlc(synced.maxHlc());
             refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // ADR-0090 section 3.6 - the own poll-choice register, the same way.
+      if (wasmSync !== null && wasmSync.isPollChoiceEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyPollChoiceEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+            pollChoicesChanged();
           }
         } catch {
           // A malformed register is dropped, never folded.

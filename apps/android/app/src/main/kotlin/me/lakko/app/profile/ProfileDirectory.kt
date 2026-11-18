@@ -322,6 +322,14 @@ public class ProfileDirectory internal constructor(
      */
     public fun accountIdsByKey(): Map<String, String> = profiles.accountIdsByKey()
 
+    /**
+     * ADR-0090 section 7 — whether the newest profile held from
+     * [signatureKeyB64] lets others share the person's contact card. A person
+     * who never sent a profile counts as shareable.
+     */
+    public fun isCardShareable(signatureKeyB64: String): Boolean =
+        profiles.get(signatureKeyB64)?.cardShareable ?: true
+
     /** Forget every profile and verification learned by [accountIdB64]
      *  (forget device). Other accounts' names stay. */
     public fun forgetAccount(accountIdB64: String) {

@@ -21,7 +21,7 @@
  * button, so pressing play paused it. They are now `MessageMenu.tsx`, opened
  * on a deliberate gesture and rendered outside the bubble.
  */
-import { createEffect, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createResource, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
 
@@ -88,6 +88,11 @@ import { useProfiles } from "../profile/ProfileContext";
 import { ownAvatarLabel } from "../profile/member-label";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
+import type { ContentState, MessageContent } from "../../wasm/lakko_ffi_wasm";
+import { ContentBubble, contentMenuActions, type ContentHost } from "../attach/ContentBubble";
+import { canForwardContent } from "./forward";
+import { AudioBubble } from "../attach/AudioBubble";
+import { registerMessageMenu } from "./message-menu-registry";
 import { Icon } from "../ui/icons";
 import { joinList, t } from "../l10n";
 import { displayLocale } from "../l10n/display-locale";
@@ -99,6 +104,10 @@ import type { TranscriptHost } from "../translation/Transcript";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
+  /** ADR-0090 — what a poll, checklist, location, contact card or article
+   *  bubble needs from the conversation. Absent: content renders read-only
+   *  as the unsupported sentence. */
+  contentHost?: ContentHost | undefined;
   /** ADR-0082 — the conversation a translation or transcript is filed
    *  under (the group id, standard base64). Absent: no translation. */
   conversationId?: string | undefined;
@@ -342,9 +351,10 @@ export function TimelineBubble(
       // Defensive.
       return null;
     }
-    if (ev.kind === "serviceEnvelope") {
-      // An unrecognised `lakko/…` service envelope, dropped at receipt by the
-      // chat client and never a bubble. Defensive.
+    if (ev.kind === "serviceEnvelope" || ev.kind === "contentOp" || ev.kind === "openItems") {
+      // An unrecognised `lakko/…` service envelope, or an ADR-0090 op or
+      // hand-over: consumed at receipt by the chat client and never a bubble.
+      // Defensive.
       return null;
     }
     if (ev.kind === "membershipProposal") {
@@ -382,6 +392,10 @@ export function TimelineBubble(
         reply={ev.reply}
         forward={ev.forward}
         unsupported={ev.unsupportedVersion !== undefined}
+        content={ev.content}
+        contentState={ev.contentState}
+        authorKeyB64={ev.senderKey}
+        createdAt={ev.createdAt}
         {...props}
       />
     );
@@ -418,6 +432,10 @@ export function TimelineBubble(
       mediaLocalKey={live().mediaLocalKey}
       reply={live().reply}
       forward={live().forward}
+      content={live().content}
+      contentState={live().contentState}
+      authorKeyB64={live().authorKey}
+      createdAt={live().createdAt}
       {...props}
     />
   );
@@ -492,6 +510,12 @@ function ChatBubbleBody(
      *  read: the bubble says so in the catalog's words, in the language
      *  current when drawn. */
     unsupported?: boolean | undefined;
+    /** ADR-0090 — a poll, checklist, location, contact card or article. */
+    content?: MessageContent | undefined;
+    contentState?: ContentState | undefined;
+    /** The author's key (base64), for a content bubble's attribution. */
+    authorKeyB64?: string | undefined;
+    createdAt?: string | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -595,6 +619,9 @@ function ChatBubbleBody(
   };
   /** Copy is "the text I see" (UX 3.2): the translation while it is shown. */
   const copyableText = (): string | null => {
+    // ADR-0090 — a content message has no text to copy (a location's
+    // coordinates are its own row).
+    if (props.content !== undefined) return null;
     const ref = messageRef();
     if (displayText().length > 0) return shownText();
     const tr = openTranscript();
@@ -689,6 +716,19 @@ function ChatBubbleBody(
     });
   }
 
+  // ADR-0090 / UX attachments 11.3 — the article reader opens this bubble's
+  // menu directly through the registry.
+  createEffect(() => {
+    const id = props.messageId;
+    const conv = props.conversationId;
+    if (id === undefined || conv === undefined) return;
+    const off = registerMessageMenu(conv, id, () => {
+      const rect = bubbleEl?.getBoundingClientRect();
+      openMenu((rect?.left ?? 0) + 12, (rect?.top ?? 0) + 12);
+    });
+    onCleanup(off);
+  });
+
   // A touch screen has no right-click, so the deliberate act is a long press.
   // Tracked here rather than in the menu because the gesture belongs to the
   // bubble and must be abandoned the moment the finger starts scrolling.
@@ -752,10 +792,16 @@ function ChatBubbleBody(
 
   // ADR-0047 — media attachments render as their own bubbles; anything the
   // hub does not accept as media stays a file chip.
+  // ADR-0090 — an article's images are its own; an audio file has its own
+  // bubble (title, artist, cover).
+  const plainRefs = (): AttachmentRefBytes[] =>
+    props.content !== undefined ? [] : props.attachments.filter((a) => a.kind !== "audio");
+  const audioRefs = (): AttachmentRefBytes[] =>
+    props.content !== undefined ? [] : props.attachments.filter((a) => a.kind === "audio");
   const mediaRefs = (): AttachmentRefBytes[] =>
-    props.attachments.filter((a) => props.hub.decision(a).bubble !== "file");
+    plainRefs().filter((a) => props.hub.decision(a).bubble !== "file");
   const fileRefs = (): AttachmentRefBytes[] =>
-    props.attachments.filter((a) => props.hub.decision(a).bubble === "file");
+    plainRefs().filter((a) => props.hub.decision(a).bubble === "file");
   /**
    * The bubble of a message that is nothing but one piece of media, and where
    * its meta line goes — ONE rule, in `inline-media.ts`, rather than the
@@ -1134,6 +1180,58 @@ function ChatBubbleBody(
                     </Index>
                   </div>
                 </Show>
+                <Show when={props.content !== undefined && props.contentHost !== undefined ? props.content : null}>
+                  {(content) => (
+                    <ContentBubble
+                      host={props.contentHost!}
+                      content={content()}
+                      snapshot={props.contentState}
+                      messageId={props.messageId}
+                      attachments={props.attachments}
+                      own={props.isOwn}
+                      authorKeyB64={props.authorKeyB64}
+                      createdAt={props.createdAt}
+                      onOpenMenu={() => {
+                        const rect = bubbleEl?.getBoundingClientRect();
+                        openMenu((rect?.left ?? 0) + 12, (rect?.top ?? 0) + 12);
+                      }}
+                    />
+                  )}
+                </Show>
+                <Show when={props.content !== undefined && props.contentHost === undefined}>
+                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                </Show>
+                <For each={audioRefs()}>
+                  {(ref) => {
+                    const [cover] = createResource(
+                      () => ref.thumb,
+                      async (thumb) => {
+                        try {
+                          return (await props.hub.loadThumb(thumb)) ?? undefined;
+                        } catch {
+                          return undefined;
+                        }
+                      },
+                    );
+                    return (
+                    <AudioBubble
+                      title={ref.title ?? ref.name ?? t("attach.menu.audio")}
+                      artist={ref.artist}
+                      durationMs={ref.durationMs}
+                      coverUrl={cover()}
+                      playable={props.hub.inlineType(ref.mime) === "audio"}
+                      src={async () => {
+                        try {
+                          return await props.hub.load(ref);
+                        } catch {
+                          return null;
+                        }
+                      }}
+                      onSave={() => void props.onDownload(ref)}
+                    />
+                    );
+                  }}
+                </For>
                 <Show when={fileRefs().length > 0}>
                   <AttachmentChips
                     hub={props.hub}
@@ -1365,7 +1463,13 @@ function ChatBubbleBody(
               /* Section 5.1 — offered once the send is complete. An incoming
                  row is always complete; an own row is once acked. The id gate
                  is the menu's own (it never opens without one). */
-              canForward={props.messageId !== undefined && props.ack === "sent"}
+              canForward={
+                props.messageId !== undefined &&
+                props.ack === "sent" &&
+                // UX `attachments.md` section 11a: never a poll or checklist,
+                // a contact card only while its person lets it be shared.
+                canForwardContent(props.content, (k) => profiles.cardShareableOf(k))
+              }
               onForward={() => {
                 if (props.messageId !== undefined) props.onForward(props.messageId);
               }}
@@ -1406,6 +1510,19 @@ function ChatBubbleBody(
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);
               }}
               onClose={() => setMenuAnchor(null)}
+              canEdit={props.content === undefined}
+              extraActions={
+                props.content !== undefined && props.contentHost !== undefined
+                  ? contentMenuActions({
+                      host: props.contentHost,
+                      content: props.content,
+                      messageId: props.messageId,
+                      attachments: props.attachments,
+                      own: props.isOwn,
+                      authorKeyB64: props.authorKeyB64,
+                    })
+                  : []
+              }
             />
           )}
         </Show>

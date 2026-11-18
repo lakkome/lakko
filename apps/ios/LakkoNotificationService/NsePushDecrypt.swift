@@ -158,6 +158,45 @@ public enum NseProcessedKind: Equatable {
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
     case callEnd
+    /// ADR-0090 — a poll, checklist, location, contact card or article. `text`
+    /// is the finished preview line (`Poll: {question}`, ...), built by
+    /// ``nseContentPreviewLine(kind:text:)``; never JSON.
+    case content
+    /// ADR-0090 — a vote, close, tick, added item or edit of a poll,
+    /// checklist or article. Never a notification, like a reaction.
+    case contentOp
+}
+
+/// ADR-0090 — which content kind a ``NseProcessedKind/content`` row carried.
+public enum NseContentKind: Equatable {
+    case poll, checklist, location, contactCard, article
+}
+
+/// ADR-0090 section 1 — the notification line of a content message:
+/// `Poll: {question}`, `Checklist: {title}`, `Location`, `Contact: {name}`,
+/// `Article: {title}`. The words come from the app's mirror of the catalog
+/// (English fallback per word); the item's own text is substituted, never
+/// interpreted. An empty item text falls back to the bare kind word.
+public func nseContentPreviewLine(kind: NseContentKind, text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    func line(_ key: String, _ english: String, _ bareKey: String, _ bareEnglish: String) -> String {
+        if trimmed.isEmpty { return nseWord(bareKey, english: bareEnglish) }
+        return nseWord(key, english: english).replacingOccurrences(of: "{text}", with: trimmed)
+    }
+    switch kind {
+    case .poll:
+        return line("chat.content.preview.poll", "Poll: {text}", "attach.menu.poll", "Poll")
+    case .checklist:
+        return line("chat.content.preview.checklist", "Checklist: {text}", "attach.menu.checklist", "Checklist")
+    case .location:
+        // The catalog word only: a place name is the sender's text, and the
+        // spec previews a location by its kind (ADR-0090 section 1).
+        return nseWord("attach.menu.location", english: "Location")
+    case .contactCard:
+        return line("chat.content.preview.contact", "Contact: {text}", "attach.menu.contact", "Contact")
+    case .article:
+        return line("chat.content.preview.article", "Article: {text}", "attach.menu.article", "Article")
+    }
 }
 
 /// A decoded application row (post MLS-decrypt + envelope-parse).
@@ -1242,6 +1281,12 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // A call is not a message preview — it is its own outcome, decided by the
     // caller before this function is reached.
     case .callOffer, .callEnd:
+        return nil
+    // ADR-0090 — a content message previews by its finished line; an op on
+    // one (vote, close, tick, add, edit) is never a notification.
+    case .content:
+        return row.text.isEmpty ? nil : truncate(row.text)
+    case .contentOp:
         return nil
     }
 }

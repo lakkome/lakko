@@ -115,6 +115,17 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// ``offered(canReply:canForward:canEditOrDelete:hasText:pin:canSelect:save:translate:)``.
     case ban
 
+    /// ADR-0090 / UX 7.3 — back to the unvoted card (a poll not closed).
+    case retractVote
+    /// UX 7.3 — the creator, or an owner / admin: close a poll (final).
+    case closePoll
+    /// UX 8.2 — the creator edits a checklist.
+    case editChecklist
+    /// UX 8.2 — the creator closes a checklist (final).
+    case closeChecklist
+    /// UX 9.3 — a location's coordinates to the clipboard.
+    case copyCoordinates
+
     public var id: String { rawValue }
 
     public var title: String {
@@ -132,6 +143,11 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .edit: return Localization.text("chat.message.edit")
         case .delete: return Localization.text("common.delete")
         case .ban: return Localization.text("channels.moderation.ban")
+        case .retractVote: return Localization.text("poll.retract")
+        case .closePoll: return Localization.text("poll.close")
+        case .editChecklist: return Localization.text("checklist.edit")
+        case .closeChecklist: return Localization.text("checklist.close")
+        case .copyCoordinates: return Localization.text("location.copy")
         }
     }
 
@@ -150,6 +166,10 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .edit: return "pencil"
         case .delete: return "trash"
         case .ban: return "nosign"
+        case .retractVote: return "arrow.uturn.backward"
+        case .closePoll, .closeChecklist: return "lock"
+        case .editChecklist: return "pencil"
+        case .copyCoordinates: return "doc.on.doc"
         }
     }
 

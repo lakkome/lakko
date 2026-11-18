@@ -197,6 +197,10 @@ extension ChannelsClient {
         /// The post's comment count (ADR-0087 phase B, the service's own
         /// count); `nil` from a service that does not send it.
         public var comments: UInt64? = nil
+        /// ADR-0090 section 4.3 — a poll post's distinct voters and votes per
+        /// opaque option label; `nil` when the post has no votes field.
+        public var voters: UInt64? = nil
+        public var votes: [FfiReactionLabelCount] = []
     }
 
     /// `GET /v1/channels/:id/reactions?posts=` — up to 50 posts a call, no
@@ -205,9 +209,14 @@ extension ChannelsClient {
         struct Resp: Decodable {
             struct Post: Decodable {
                 struct Label: Decodable { let label_hex: String; let count: UInt64 }
+                struct Votes: Decodable {
+                    let voters: UInt64
+                    let labels: [Label]
+                }
                 let cursor: UInt64
                 let labels: [Label]
                 let comments: UInt64?
+                let votes: Votes?
             }
             let posts: [Post]
         }
@@ -230,7 +239,13 @@ extension ChannelsClient {
                         FfiReactionLabelCount(label: $0, count: label.count)
                     }
                 },
-                comments: post.comments)
+                comments: post.comments,
+                voters: post.votes?.voters,
+                votes: (post.votes?.labels ?? []).compactMap { label in
+                    ChannelsClient.hexToData(label.label_hex).map {
+                        FfiReactionLabelCount(label: $0, count: label.count)
+                    }
+                })
         }
     }
 

@@ -23,6 +23,9 @@ pub mod internal;
 pub mod owner_auth;
 pub mod sql_store;
 pub mod storage;
+pub mod votes;
+pub mod votes_api;
+mod votes_sql;
 
 pub use api::{router, AppState};
 pub use config::{Config, ConfigError};

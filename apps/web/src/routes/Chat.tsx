@@ -31,6 +31,24 @@
  * surface) is also a follow-up — current composer is a plain
  * `<input>`, no edit history.
  */
+import { contentFromPersisted } from "../attach/preview";
+import { Portal } from "solid-js/web";
+import { openMessageMenu } from "../chat/message-menu-registry";
+import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
+import type { ContentHost } from "../attach/ContentBubble";
+import { ArticleReader } from "../attach/ArticleReader";
+import { checklistContentOf, contentRetryAllowed, pollContentOf } from "../attach/actions";
+import { receiveContent } from "../attach/receive";
+import { loadContent as loadAttachContent, updateContent as updateAttachContent, withArticleEdit, withOp as withAttachOp } from "../attach/content-store";
+import { heldOpOf } from "../attach/receive";
+import { persistedFromAttachmentRef as persistedAttachmentOf } from "../chat/persisted-attachment";
+import { reencodePhoto } from "../attach/photo-encode";
+import { readAudioTags } from "../attach/audio-tags";
+import { addContactFromCard } from "../attach/contact-card-add";
+import type { ArticleDraftOut, ChecklistDraft, PollDraft, PreviewResult, ShareableContact } from "../attach/types";
+import type { Article, ContentState, MessageContent, SharedContactCard } from "../../wasm/lakko_ffi_wasm";
+import { loadWasm as loadAttachWasm } from "../wasm";
+import { openHostUrl } from "../platform/host";
 import {
   createEffect,
   createMemo,
@@ -65,6 +83,7 @@ import {
   forwardJumpRow,
   forwardJumpTarget,
   forwardPayloadOf,
+  canForwardContent,
   forwardRefFromPersisted,
   persistedFromForwardRef,
 } from "../chat/forward";
@@ -282,6 +301,9 @@ import { markReactionsSeen, markUnseenReaction, unseenReactionIds } from "../cha
 import { colonQueryAt, replaceColonQuery, type ColonQuery } from "../chat/colon-query";
 import { MAX_GIF_FULL_BYTES, fetchGifMedia, type GifItem } from "../media/gif-client";
 import {
+  composeArticleEditEnvelope,
+  composeContentEnvelope,
+  contentPartsOfForward,
   composeEnvelope,
   composeForwardEnvelope,
   composeReplyEnvelope,
@@ -303,7 +325,6 @@ import {
   type AttachmentRefBytes,
   type ThumbRefBytes,
   AttachmentSizeError,
-  MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
@@ -1237,6 +1258,17 @@ function ChatView(props: {
    * picker's state are the callers'. A throw means nothing was sent for THIS
    * message.
    */
+  /** UX `attachments.md` section 11a — whether the message `messageId` may be
+   *  forwarded by its content (the bulk Forward button; the single one is the
+   *  bubble's). A message this timeline does not hold reads as forwardable:
+   *  `forwardOne` refuses it as gone. */
+  function messageForwardable(messageId: number): boolean {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined) return true;
+    const content =
+      row.kind === "outgoing" ? row.content : row.event.kind === "application" ? row.event.content : undefined;
+    return canForwardContent(content, (k) => profiles.cardShareableOf(k));
+  }
   async function forwardOne(messageId: number, entry: ActiveGroup): Promise<void> {
     const row = rows().find((r) => rowMessageId(r) === messageId);
     if (row === undefined) throw new KeyedError("chat.error.message_gone");
@@ -1250,6 +1282,14 @@ function ChatView(props: {
           : [];
     const carried =
       row.kind === "outgoing" ? row.forward : row.event.kind === "application" ? row.event.forward : undefined;
+    // ADR-0090 / UX `attachments.md` section 11a — the content travels too;
+    // a poll, a checklist or a card its person does not let be shared is
+    // never forwarded (the menu does not offer it; this is the backstop).
+    const content =
+      row.kind === "outgoing" ? row.content : row.event.kind === "application" ? row.event.content : undefined;
+    if (!canForwardContent(content, (k) => profiles.cardShareableOf(k))) {
+      throw new KeyedError("chat.forward.error.generic");
+    }
     const payload = forwardPayloadOf(
       {
         text: original,
@@ -1257,6 +1297,7 @@ function ChatView(props: {
         attachments,
         messageId,
         forward: carried,
+        content,
       },
       forwardAuthorLabelOf(row),
       props.entry.groupIdB64,
@@ -1268,7 +1309,10 @@ function ChatView(props: {
     // uploaded and orphaned, and a forward is rarely more than a few files.
     const fresh: AttachmentRefBytes[] = [];
     for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(a));
-    const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
+    const bytes =
+      payload.content === undefined
+        ? await composeForwardEnvelope(payload.text, fresh, payload.forward)
+        : await composeContentEnvelope(payload.content, fresh, contentPartsOfForward(payload.forward));
     let result: Awaited<ReturnType<typeof chat.sendMessage>>;
     try {
       result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
@@ -1280,7 +1324,13 @@ function ChatView(props: {
       if (err instanceof HeldForSuccessor) {
         heldSends.hold(
           lineageView.conversationHexOf(entry.group.groupId),
-          { text: payload.text, attached: fresh, reply: undefined, forward: payload.forward },
+          {
+            text: payload.text,
+            attached: fresh,
+            reply: undefined,
+            forward: payload.forward,
+            ...(payload.content === undefined ? {} : { content: payload.content }),
+          },
           Date.now(),
         );
         void persistHeldSends(accountIdB64ForLog());
@@ -1313,6 +1363,7 @@ function ChatView(props: {
           createdAt: result.createdAt,
           authorKey,
           forward: payload.forward,
+          ...(payload.content === undefined ? {} : { content: payload.content }),
         },
       ]);
       return;
@@ -1335,6 +1386,8 @@ function ChatView(props: {
           createdAt: result.createdAt,
           authorKeyB64: authorIdentityToPersisted(authorKey),
           forward: persistedFromForwardRef(payload.forward),
+          // ADR-0090 — the content object, verbatim (as a sent row persists).
+          ...(payload.content === undefined ? {} : { content: payload.content }),
         };
         await updateMessageLog(s.account.accountId, deviceKey, (existing) => {
           const groups = existing?.groups ?? {};
@@ -2708,6 +2761,8 @@ function ChatView(props: {
     }
     if (outcome === null) return null;
     if (outcome.kind !== "committed") return outcome;
+    // ADR-0090 section 3.9 — an admission that added a leaf hands the open
+    // polls and checklists over, sealed at the new epoch.
 
     setMemberCount(peopleCountOf(props.entry.group));
     setMembersVersion(membersVersion() + 1);
@@ -4919,8 +4974,21 @@ function ChatView(props: {
       // Empty refs ⇒ pure-text envelope; non-empty ⇒ multi-
       // attachment envelope via the wasm EnvelopeBuilder. A reply is the
       // same envelope plus the reference (ADR-0052).
+      // ADR-0090 — a poll, checklist, location, contact card or article.
+      const contentRow = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+      const content = contentRow?.kind === "outgoing" ? contentRow.content : undefined;
       const envelopeBytes =
-        forward !== undefined
+        content !== undefined
+          ? await composeContentEnvelope(
+              content,
+              attached,
+              forward !== undefined
+                ? contentPartsOfForward(forward)
+                : reply === undefined
+                  ? undefined
+                  : { replyTo: reply.target, replyAuthor: reply.author ?? null, replyExcerpt: reply.excerpt ?? null },
+            )
+          : forward !== undefined
           ? await composeForwardEnvelope(text, attached, forward)
           : reply === undefined
             ? await composeEnvelope(text, attached)
@@ -4943,6 +5011,12 @@ function ChatView(props: {
             : r,
         ),
       );
+      // ADR-0090 — our own poll or checklist never comes back to us (the
+      // echo is filtered), so it is filed here.
+      const own = ownSignatureKeyB64();
+      if (content !== undefined && own !== undefined) {
+        await receiveContent(props.entry.group, props.entry.groupIdB64, result.messageId, result.createdAt, own, content);
+      }
     } catch (err) {
       // The publish itself refused the superseded session (a reset accepted
       // between the route above and the send): held, exactly as if the
@@ -5623,23 +5697,6 @@ function ChatView(props: {
     };
   }
 
-  /**
-   * Handle the composer's `<input type="file">` change event.
-   * Delegates to [`processFiles`] then resets the input so the
-   * same file can be re-picked (browsers suppress the change
-   * event when the value is identical).
-   */
-  async function onFilesPicked(e: Event): Promise<void> {
-    const target = e.currentTarget as HTMLInputElement;
-    const files = target.files;
-    if (files === null) return;
-    try {
-      await processFiles(files);
-    } finally {
-      target.value = "";
-    }
-  }
-
   // Drag-drop polish (1.x): a drop anywhere on the chat surface
   // queues the dropped files into the pending-attachments list
   // — same flow as clicking the 📎 button. Tracks `isDragOver`
@@ -5694,6 +5751,355 @@ function ChatView(props: {
     );
     // ADR-0065 section 6 — removed from the composer: never sent, so gone.
     if (removed !== undefined) deleteUnsent([removed]);
+  }
+
+  // ----- ADR-0090 attachment kinds ---------------------------------------
+  //
+  // The paperclip opens one menu (`attach/AttachComposer.tsx`); this view
+  // sends what its screens return. Photos, videos, files and audio go one
+  // message each (the caption on the first); a poll, checklist, location,
+  // contact card or article is a content message whose row carries the
+  // content object, so Retry re-sends the same thing (`publishOutgoing`).
+
+  const [attachEdit, setAttachEdit] = createSignal<AttachEditRequest | null>(null);
+  const [articleOpen, setArticleOpen] = createSignal<
+    | {
+        messageId: number;
+        article: Article;
+        attachments: readonly AttachmentRefBytes[];
+        authorKeyB64: string | undefined;
+        createdAt: string | undefined;
+        own: boolean;
+      }
+    | null
+  >(null);
+
+  /** The 32-byte Ed25519 seed of the key this account's leaf is bound to
+   *  (ADR-0074 section 3.5): what signs a poll or checklist and casts a
+   *  ballot. */
+  function conversationSeed32(): Uint8Array | null {
+    const identity = chats.conversationAccountIdentity();
+    if (identity === null) return null;
+    try {
+      return identity.ed25519Seed;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every account in the conversation now (the ring of an anonymous poll). */
+  function rosterAccountKeysNow(): string[] {
+    return members().map((m) => base64Encode(m.sigPubkey));
+  }
+
+  /** One content message: an optimistic row, then the ordinary publish. */
+  async function sendContentMessage(content: MessageContent, refs: AttachmentRefBytes[] = []): Promise<void> {
+    setError(null);
+    const reply = takeArmedReply();
+    const tempId = nextTempId++;
+    setRows([
+      ...rows(),
+      {
+        kind: "outgoing",
+        tempId,
+        plaintext: "",
+        attachments: refs,
+        ack: "pending",
+        authorKey: ownSignatureKeyB64(),
+        content,
+        ...(reply === undefined ? {} : { reply }),
+      },
+    ]);
+    await publishOutgoing(tempId, "", refs, reply);
+  }
+
+  /** Upload one file and return its ref (media preview and audio tags
+   *  included). `null` when it could not be sent; the error is shown. */
+  async function uploadForSend(
+    original: File,
+    mode: "media" | "file" | "audio",
+    asFile: boolean,
+  ): Promise<AttachmentRefBytes | null> {
+    let file = original;
+    const wasm = await loadAttachWasm();
+    // UX section 3 — a photo is re-encoded (longest side at most the core's
+    // constant, metadata dropped); GIFs keep their animation.
+    if (mode === "media" && !asFile && file.type.startsWith("image/") && file.type !== "image/gif") {
+      try {
+        file = await reencodePhoto(file, wasm.photoMaxLongestSidePx());
+      } catch {
+        setError(() => t("attach.preview.photo_unreadable"));
+        return null;
+      }
+    }
+    try {
+      const inline = asFile ? null : hub.inlineType(file.type.length > 0 ? file.type : undefined);
+      let preview: VisualPreview | null = null;
+      if (inline === "image" || inline === "video") {
+        preview = inline === "image" ? await describeImage(file) : await describeVideo(file);
+      }
+      let ref = await encryptAndUploadFile(file);
+      if (preview !== null) ref = await withVisualPreview(ref, file, preview);
+      if (mode === "audio") {
+        const tags = await readAudioTags(file);
+        let thumb: ThumbRefBytes | undefined;
+        if (tags.cover !== undefined) {
+          try {
+            const bytes = new Uint8Array(await tags.cover.arrayBuffer());
+            const up = await encryptAndUploadBytes(bytes, { mime: "image/jpeg", name: undefined });
+            thumb = { blobId: up.blobId, key: up.key, nonce: up.nonce, mime: "image/jpeg", size: bytes.length, width: undefined, height: undefined };
+          } catch {
+            thumb = undefined;
+          }
+        }
+        ref = {
+          ...ref,
+          kind: "audio",
+          title: tags.title,
+          ...(tags.artist === undefined ? {} : { artist: tags.artist }),
+          ...(tags.durationMs === undefined ? {} : { durationMs: tags.durationMs }),
+          ...(thumb === undefined ? {} : { thumb }),
+        };
+      }
+      return ref;
+    } catch (err) {
+      if (err instanceof AttachmentSizeError) {
+        setError(() => t("attach.preview.file_too_big"));
+      } else if (isSendLimit(err)) {
+        setError(() => sendLimitText());
+      } else {
+        console.warn("[chat] attachment upload failed", err);
+        setError(() => t("chat.attachment.error.upload", { name: file.name }));
+      }
+      return null;
+    }
+  }
+
+  /** UX sections 3, 4, 6 — the send preview's result: one message per item,
+   *  in the order shown, the caption on the first. */
+  async function sendPreviewFiles(r: PreviewResult, mode: "media" | "file" | "audio"): Promise<void> {
+    setError(null);
+    setUploading(true);
+    try {
+      let first = true;
+      for (const file of r.files) {
+        const ref = await uploadForSend(file, mode, r.asFile);
+        if (ref === null) continue;
+        const text = first ? r.caption : "";
+        first = false;
+        const reply = takeArmedReply();
+        const tempId = nextTempId++;
+        setRows([
+          ...rows(),
+          {
+            kind: "outgoing",
+            tempId,
+            plaintext: text,
+            attachments: [ref],
+            ack: "pending",
+            authorKey: ownSignatureKeyB64(),
+            ...(reply === undefined ? {} : { reply }),
+          },
+        ]);
+        await publishOutgoing(tempId, text, [ref], reply);
+      }
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function sendPollDraft(d: PollDraft): Promise<void> {
+    const seed = conversationSeed32();
+    if (seed === null) {
+      setError(() => t("chat.send.failed"));
+      return;
+    }
+    const content = await pollContentOf(d, props.entry.group.groupId, seed, rosterAccountKeysNow(), Date.now());
+    await sendContentMessage(content);
+  }
+
+  async function sendChecklistDraft(d: ChecklistDraft, editTarget: number | undefined): Promise<void> {
+    const seed = conversationSeed32();
+    if (seed === null) {
+      setError(() => t("chat.send.failed"));
+      return;
+    }
+    const content = await checklistContentOf(d, props.entry.group.groupId, seed);
+    if (editTarget === undefined) {
+      await sendContentMessage(content);
+      return;
+    }
+    // `Edit checklist` (UX 8.2): the author's signed replacement; ticks stay
+    // with item ids.
+    try {
+      const wasm = await loadAttachWasm();
+      const sent = await publishQuiet(wasm.composeChecklistEditEnvelope(BigInt(editTarget), content.checklist));
+      const own = ownSignatureKeyB64();
+      const op = own === undefined
+        ? null
+        : heldOpOf({ op: "edit-checklist", target: editTarget, checklist: content.checklist }, sent.messageId, Date.now(), own, false);
+      if (op !== null) {
+        await updateAttachContent(props.entry.groupIdB64, (c) => {
+          const next = withAttachOp(c, op);
+          const e = next.entries[String(editTarget)];
+          return e?.kind === "checklist"
+            ? { ...next, entries: { ...next.entries, [String(editTarget)]: { ...e, currentSigned: content.checklist } } }
+            : next;
+        });
+      }
+    } catch (err) {
+      setError(errorText(err, "chat.error.edit"));
+    }
+  }
+
+  async function sendArticleDraft(out: ArticleDraftOut, editTarget: number | undefined): Promise<void> {
+    setUploading(true);
+    try {
+      const wasm = await loadAttachWasm();
+      const refs: AttachmentRefBytes[] = [];
+      for (const image of out.images) {
+        const asFile = image instanceof File ? image : new File([image], "image.jpg", { type: image.type || "image/jpeg" });
+        const ref = await uploadForSend(asFile, "media", false);
+        if (ref === null) return;
+        refs.push(ref);
+      }
+      try {
+        wasm.validateArticle(out.article);
+      } catch {
+        setError(() => t("article.at_limit"));
+        return;
+      }
+      if (editTarget === undefined) {
+        await sendContentMessage({ kind: "article", article: out.article }, refs);
+        return;
+      }
+      // UX 11.3 — the edit replaces the whole article.
+      const sent = await publishQuiet(await composeArticleEditEnvelope(editTarget, out.article, refs));
+      const own = ownSignatureKeyB64();
+      if (own !== undefined) {
+        await updateAttachContent(props.entry.groupIdB64, (c) =>
+          withArticleEdit(c, editTarget, {
+            messageId: sent.messageId,
+            editor: own,
+            article: out.article,
+            attachments: refs.map((r) => persistedAttachmentOf(r)),
+          }),
+        );
+      }
+    } catch (err) {
+      setError(errorText(err, "chat.error.edit"));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  /** UX section 10 — the contacts this person may share: every accepted
+   *  contact, its verified username when there is one. */
+  function shareableContacts(): ShareableContact[] {
+    return loadAccepted().map((c) => {
+      const resolved = profiles.resolve(c.signaturePubkeyB64);
+      const username = resolved.username?.replace(/^@/, "") ?? undefined;
+      return {
+        name: resolved.name,
+        accountKeyB64: c.signaturePubkeyB64,
+        ...(username === undefined || username.length === 0 ? {} : { username }),
+        // ADR-0090 section 7 — the newest profile held from them decides.
+        ...(profiles.cardShareableOf(c.signaturePubkeyB64) ? {} : { cardShareable: false }),
+      };
+    });
+  }
+
+  /** What a content bubble needs from this conversation. */
+  const contentHost: ContentHost = {
+    groupIdB64: props.entry.groupIdB64,
+    groupId: () => props.entry.group.groupId,
+    oneToOne: () => !isGroupChat(),
+    isAdmin: () => ownRole() === "owner" || ownRole() === "admin",
+    canAct: () => messageActionsAvailable(),
+    ownKeyB64: () => ownSignatureKeyB64(),
+    nameOf: (k) => profiles.resolve(k).name,
+    hub,
+    async sendOp(bytes) {
+      const sent = await publishQuiet(bytes);
+      return { messageId: sent.messageId, createdAt: new Date().toISOString() };
+    },
+    voterSeed: async () => conversationSeed32(),
+    contactRelation(card: SharedContactCard) {
+      const own = ownSignatureKeyB64();
+      if (own !== undefined && sameB64(own, card.accountKey)) return "self";
+      return loadAccepted().some((c) => sameB64(c.signaturePubkeyB64, card.accountKey)) ? "contact" : "other";
+    },
+    async addContact(card: SharedContactCard, senderName: string) {
+      const discovery = new DiscoveryClient(undefined, {
+        sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+      });
+      try {
+        const outcome = await addContactFromCard(card, {
+          lookup: async (u) => (await discovery.lookup(u)).account,
+          identity: async (account) => {
+            const b = await discovery.identityFetch(account);
+            return b === null ? null : { signaturePubkeyB64: b.signature_pubkey, x25519PubkeyB64: b.x25519_pubkey };
+          },
+          send: async (account, sig, x) => {
+            await contacts.sendContactRequestToBundle(auth.identitySecrets(), account, sig, x, new Uint8Array(0));
+          },
+        });
+        if (outcome === "sent") return null;
+        if (outcome === "changed") return t("contact.username_changed");
+        return t("contact.not_findable", { name: card.name, sender: senderName });
+      } catch (err) {
+        console.warn("[chat] contact card add failed", err instanceof Error ? err.name : "unknown");
+        return t("chat.send.failed");
+      }
+    },
+    openChat(card: SharedContactCard) {
+      const contact = loadAccepted().find((c) => sameB64(c.signaturePubkeyB64, card.accountKey));
+      const target = chats.groups().find((g) => g.groupIdB64 === contact?.groupIdB64);
+      if (target !== undefined) navigate(hrefOfConversation(target));
+    },
+    openArticle(args) {
+      setArticleOpen({ ...args });
+    },
+    editContent(messageId, content, attachments) {
+      if (content.kind !== "article" || attachments.length === 0) {
+        setAttachEdit({ messageId, content });
+        return;
+      }
+      void (async () => {
+        const images: Blob[] = [];
+        for (const ref of attachments) {
+          try {
+            const url = await hub.load(ref);
+            images.push(await (await fetch(url)).blob());
+          } catch {
+            setError(() => t("chat.attachment.error.download"));
+            return;
+          }
+        }
+        setAttachEdit({ messageId, content, images });
+      })();
+    },
+    copyText(text) {
+      void copyMessageText(text);
+    },
+    rosterKeys: () => rosterAccountKeysNow(),
+    openUrl(url) {
+      if (isDesktop()) void openHostUrl(url);
+      else window.open(url, "_blank", "noopener,noreferrer");
+    },
+    onError(text) {
+      setError(() => text);
+    },
+  };
+  void loadAttachContent(props.entry.groupIdB64);
+
+  /** Two standard-base64 keys name the same bytes. */
+  function sameB64(a: string, b: string): boolean {
+    try {
+      return base64Encode(base64Decode(a)) === base64Encode(base64Decode(b));
+    } catch {
+      return false;
+    }
   }
 
   // ----- ADR-0047 media messages ----------------------------------------
@@ -5942,7 +6348,17 @@ function ChatView(props: {
     const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
     if (row === undefined || row.kind !== "outgoing") return;
     setError(null);
-    void publishOutgoing(tempId, row.plaintext, row.attachments, row.reply);
+    // `publishOutgoing` re-reads the row's content (ADR-0090) and sends it
+    // with its files; the forward line is passed here, so a failed forward
+    // is re-sent as the same forward. An anonymous poll whose roster changed
+    // cannot be re-sent as it is and is refused (`contentRetryAllowed`).
+    void (async () => {
+      if (!(await contentRetryAllowed(row.content, rosterAccountKeysNow()))) {
+        setError(() => t("poll.resend_refused"));
+        return;
+      }
+      await publishOutgoing(tempId, row.plaintext, row.attachments, row.reply, Date.now(), row.forward);
+    })();
   }
 
   /** A finished recording the user chose to send. */
@@ -7107,8 +7523,14 @@ function ChatView(props: {
   /** Hold one outgoing row until the successor exists (the row stays in the
    *  ordinary sending state). The give-up puts it in the ordinary failed
    *  state, whose Retry enters the same path again. */
-  function holdOutgoing(tempId: number, payload: HeldMessage, heldAtMs: number): void {
+  function holdOutgoing(tempId: number, given: HeldMessage, heldAtMs: number): void {
     const key = conversationHex();
+    // ADR-0090 — a held content message keeps its content (the row holds
+    // it), so the release sends the same message.
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    const rowContent = row?.kind === "outgoing" ? row.content : undefined;
+    const payload: HeldMessage =
+      given.content === undefined && rowContent !== undefined ? { ...given, content: rowContent } : given;
     heldSends.hold(key, payload, heldAtMs);
     // Mirrored into the message log, so a reload does not lose it.
     void persistHeldSends(accountIdB64ForLog());
@@ -7162,6 +7584,7 @@ function ChatView(props: {
           authorKey: ownSignatureKeyB64(),
           ...(reply === undefined ? {} : { reply }),
           ...(held.payload.forward === undefined ? {} : { forward: held.payload.forward }),
+          ...(held.payload.content === undefined ? {} : { content: held.payload.content }),
         },
       ]);
       void publishOutgoing(
@@ -8033,6 +8456,7 @@ function ChatView(props: {
               <Show when={entry.kind === "message" ? entry.row : undefined}>
                 {(row) => (
               <TimelineBubble
+                contentHost={contentHost}
                 conversationId={props.entry.groupIdB64}
                 row={row()}
                 isGroup={isGroupChat()}
@@ -8474,7 +8898,7 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-select-action"
-              disabled={!forwardEnabled(selection())}
+              disabled={!forwardEnabled(selection(), messageForwardable)}
               onClick={() => setBulkForwardOpen(true)}
             >
               <Icon name="forward" size={18} />
@@ -8571,31 +8995,56 @@ function ChatView(props: {
           when={!recorderBusy(recorder)}
           fallback={<RecordingBar recorder={recorder} />}
         >
-        {/* 1.19c2 — Attach button. The hidden `<input
-            type="file" multiple>` is keyed by uploading() so
-            the same file can be re-picked after a failed
-            upload, and the label drives the click for a tidy
-            chrome-less control. */}
-        <label
-          class="lk-icon-button"
-          style={{
-            cursor: uploading() ? "wait" : "pointer",
-            opacity: uploading() ? 0.6 : 1,
-          }}
-          aria-label={t("chat.composer.attach")}
-          title={t("chat.composer.attach_limit", { limit: formatAttachmentSize(MAX_ATTACHMENT_BYTES) })}
-        >
-          <Icon name="clip" size={20} />
-          <input
-            type="file"
-            multiple
-            disabled={uploading()}
-            onChange={(e) => {
-              void onFilesPicked(e);
-            }}
-            style={{ display: "none" }}
-          />
-        </label>
+        {/* docs/ux/attachments.md section 2 — the paperclip opens one menu;
+            Photo or Video, File and Audio open the system pickers behind
+            the send preview, the rest are Lakko's own screens. Hidden while
+            the composer edits a message (section 2.4). */}
+        <AttachComposer
+          conversation={() => (isGroupChat() ? "group" : "chat")}
+          role={() => ownRole() ?? "member"}
+          accounts={() => members().length}
+          callHoldsCamera={() => callOwnsCapture()}
+          hidden={() => uploading() || editingId() !== null}
+          draftKey={props.entry.groupIdB64}
+          contacts={shareableContacts}
+          editRequest={attachEdit}
+          clearEditRequest={() => setAttachEdit(null)}
+          sendFiles={sendPreviewFiles}
+          sendPoll={sendPollDraft}
+          sendChecklist={sendChecklistDraft}
+          sendLocation={(l) => sendContentMessage({ kind: "location", location: l })}
+          sendContact={(c) => sendContentMessage({ kind: "contactCard", card: c })}
+          sendArticle={sendArticleDraft}
+        />
+        <Show when={articleOpen()}>
+          {(a) => (
+            <Portal>
+              <ArticleReader
+                article={a().article}
+                imageUrl={async (index) => {
+                  const ref = a().attachments[index];
+                  if (ref === undefined) return null;
+                  try {
+                    return await hub.load(ref);
+                  } catch {
+                    return null;
+                  }
+                }}
+                author={a().own ? t("chat.author.you") : a().authorKeyB64 === undefined ? "" : profiles.resolve(a().authorKeyB64!).name}
+                dateText={a().createdAt === undefined ? "" : new Date(a().createdAt!).toLocaleString(displayLocale())}
+                onClose={() => setArticleOpen(null)}
+                onMenu={() => {
+                  // UX 11.3 — the message menu from the reader: close the
+                  // reader and open the bubble's menu.
+                  const id = a().messageId;
+                  setArticleOpen(null);
+                  openMessageMenu(props.entry.groupIdB64, id);
+                }}
+                onLink={(url) => contentHost.openUrl(url)}
+              />
+            </Portal>
+          )}
+        </Show>
         {/* docs/ux section 5.2 — attach, the field, the emoji / GIF button,
             then the trailing microphone-or-send. The field is a textarea that
             grows to five lines; Enter sends, Shift+Enter breaks the line. */}
@@ -10255,6 +10704,9 @@ function timelineRowToPersisted(
       ...(row.reply === undefined ? {} : { reply: persistedFromReplyRef(row.reply) }),
       // ADR-0052 decision 2 — the forward attribution, verbatim.
       ...(row.forward === undefined ? {} : { forward: persistedFromForwardRef(row.forward) }),
+      // ADR-0090 — the content object, verbatim.
+      ...(row.content === undefined ? {} : { content: row.content }),
+      ...(row.contentState === undefined ? {} : { contentState: row.contentState }),
     };
   }
   // Incoming: split application vs system.
@@ -10347,9 +10799,10 @@ function timelineRowToPersisted(
     // sealed contact request.
     return null;
   }
-  if (row.event.kind === "serviceEnvelope") {
-    // An unrecognised `lakko/…` service envelope: never a row, never
-    // persisted, so it can never become the chat-list preview line.
+  if (row.event.kind === "serviceEnvelope" || row.event.kind === "contentOp" || row.event.kind === "openItems") {
+    // An unrecognised `lakko/…` service envelope, or an ADR-0090 op or
+    // hand-over: never a row, never persisted, so it can never become the
+    // chat-list preview line.
     return null;
   }
   if (row.event.kind === "membershipProposal") {
@@ -10398,6 +10851,9 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   const reply = replyRefFromPersisted(m.reply);
   // ADR-0052 decision 2 — absent unless forwarded, and on a row before v5.
   const forward = forwardRefFromPersisted(m.forward);
+  // ADR-0090 — a stored content object; anything not shaped like one is
+  // dropped.
+  const restoredContent = contentFromPersisted(m.content);
   if (m.direction === "outgoing") {
     restoredTempId -= 1;
     return {
@@ -10416,6 +10872,10 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
       // than falling back to our CURRENT key (which a self-update
       // may since have rotated).
       authorKey: persistedAuthorIdentity(m.authorKeyB64),
+      ...(restoredContent === undefined ? {} : { content: restoredContent }),
+      ...(restoredContent === undefined || m.contentState === undefined || m.contentState === null
+        ? {}
+        : { contentState: m.contentState as ContentState }),
     };
   }
   if (m.direction === "incoming") {
@@ -10444,6 +10904,10 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         ...(forward === undefined ? {} : { forward }),
         // ADR-0061 section 6 — a message from a newer Lakko stays one.
         ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
+        ...(restoredContent === undefined ? {} : { content: restoredContent }),
+        ...(restoredContent === undefined || m.contentState === undefined || m.contentState === null
+          ? {}
+          : { contentState: m.contentState as ContentState }),
       },
     };
   }

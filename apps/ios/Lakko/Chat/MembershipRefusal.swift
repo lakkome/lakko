@@ -467,7 +467,10 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // ADR-0078 sealed mailbox rows and bindings; section 2 the
                 // sealed call relay and peer announcements; section 3 sealed
                 // push wakes and subscriptions.
-                .Mailbox, .CallRelay, .PushWake:
+                .Mailbox, .CallRelay, .PushWake,
+                // ADR-0090 content kinds, poll ballots, the channel-poll
+                // credential and the open-items hand-over.
+                .Content, .Ballot, .AnonCred, .OpenItems:
                 return nil
             }
         }

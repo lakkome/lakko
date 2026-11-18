@@ -858,6 +858,10 @@ final class MultiJoinerCall {
             // ADR-0087 — group and channel settings ride the conversation's
             // journal, never the SFU signal-relay. Out of place here — drop.
             break
+        case .openItems, .pollBallots:
+            // ADR-0090 — the open-items hand-over and old ballot rows ride the
+            // group journal, never the SFU signal-relay; dropped.
+            break
         }
     }
 

@@ -427,7 +427,8 @@ final class FeedViewModel: ObservableObject {
             attachments: m.attachments,
             edited: m.edited,
             deleted: m.deleted,
-            forwardAuthor: m.forward?.author)
+            forwardAuthor: m.forward?.author,
+            content: m.content)
     }
 
     private func rebuild() {
@@ -583,14 +584,33 @@ final class FeedViewModel: ObservableObject {
     /// fresh keys, the original author's name and its origin; a channel post
     /// carries its text and the channel's name and no origin. Returns `true`
     /// when it was sent; a failure is said once, here.
+    /// ADR-0090 — Forward is offered on a feed item unless it is a poll, a
+    /// checklist or a card its person does not let others share.
+    static func canForward(_ message: FeedMessage) -> Bool {
+        FeedForward.canForward(message) {
+            ProfileDirectory.shared.cardShareable(signatureKeyB64: $0.base64EncodedString())
+        }
+    }
+
     func forward(_ ref: FeedCandidateRef, to targetGroupIdHex: String) async -> Bool {
         forwarding = nil
         do {
             switch ref.source.kind {
             case .channel:
+                // ADR-0090 — the post's files, re-encrypted, and its content
+                // under the forwarding rules.
+                guard Self.canForward(ref.message) else { throw ContentSendError.notAllowed }
                 let payload = FeedForward.channelPayload(text: ref.message.text, channelTitle: ref.source.title)
-                try await chatRepository.sendMessage(
-                    groupIdHex: targetGroupIdHex, plaintext: payload.text, forward: payload.forward)
+                let refs = try await ForwardAttachments.reencryptAll(ref.message.attachments)
+                if let content = ForwardPayload.forwardedContent(ref.message.content) {
+                    try await chatRepository.sendContent(
+                        groupIdHex: targetGroupIdHex, content: content, attachments: refs,
+                        forward: payload.forward)
+                } else {
+                    try await chatRepository.sendMessage(
+                        groupIdHex: targetGroupIdHex, plaintext: payload.text,
+                        attachments: refs, forward: payload.forward)
+                }
             case .group:
                 guard let message = chatRepository.state.threads
                     .first(where: { $0.groupIdHex == ref.source.idHex })?
@@ -602,10 +622,17 @@ final class FeedViewModel: ObservableObject {
                     originGroupIdHex: ref.source.idHex,
                     // The feed never holds a one-to-one (UX spec section 3).
                     sourceIsOneToOne: false)
+                guard ChatViewModel.isForwardable(message) else { throw ContentSendError.notAllowed }
                 let refs = try await ForwardAttachments.reencryptAll(message.attachments)
-                try await chatRepository.sendMessage(
-                    groupIdHex: targetGroupIdHex, plaintext: payload.text,
-                    attachments: refs, forward: payload.forward)
+                if let content = ForwardPayload.forwardedContent(of: message) {
+                    try await chatRepository.sendContent(
+                        groupIdHex: targetGroupIdHex, content: content, attachments: refs,
+                        forward: payload.forward)
+                } else {
+                    try await chatRepository.sendMessage(
+                        groupIdHex: targetGroupIdHex, plaintext: payload.text,
+                        attachments: refs, forward: payload.forward)
+                }
             }
             return true
         } catch {

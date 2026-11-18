@@ -1109,6 +1109,8 @@ public class ChatRepository(
             canonicalIdentity.set(identity)
             accountIdentity.getAndSet(account)?.close()
             currentAccountIdB64.set(newAccountIdB64)
+            AdmittingAccounts.bind(applicationContext, newAccountIdB64)
+            me.lakko.app.ui.chat.ArticleDrafts.bind(applicationContext, newAccountIdB64)
             UnseenReactions.bind(applicationContext, newAccountIdB64)
             feedRefresh.bind(newAccountIdB64)
             seedGroupCalls(persistedGroupCalls)
@@ -2329,6 +2331,11 @@ public class ChatRepository(
             // grant is retried the moment one for that person arrives.
             reach.onGrantHeld = { ownerKey -> retryOwedWelcomesFor(ownerKey) }
             reach.bind(accountIdB64, account)
+            // ADR-0090 section 7 — a setting chosen while this device was
+            // away (or restored with a backup) reaches the stored flag here.
+            reach.currentVisibility()?.let { setting ->
+                if (reconcileOwnCardShareable(setting, accountIdB64)) publishOwnProfileToAllGroups()
+            }
             // ADR-0074 3.5a rule 3 — a re-send the key change left owed (a
             // kept device right after adopting; any device after a restart).
             if (reach.profileResendOwed()) {
@@ -2403,8 +2410,29 @@ public class ChatRepository(
      * everywhere. The mailbox was already reconciled by the manager.
      */
     private suspend fun onVisibilityChanged(setting: uniffi.lakko_ffi_uniffi.FfiVisibilitySetting) {
+        // ADR-0090 section 7 — the profile's "my card may be shared" flag
+        // follows the setting, under a newer stamp so receivers take it; the
+        // republish below carries it.
+        reconcileOwnCardShareable(setting)
         publishOwnProfileToAllGroups()
         visibilityListener?.invoke(setting)
+    }
+
+    /** ADR-0090 section 7 — the stored own profile's card-sharing flag made
+     *  to follow [setting]; `true` when it changed (the caller republishes). */
+    private fun reconcileOwnCardShareable(
+        setting: uniffi.lakko_ffi_uniffi.FfiVisibilitySetting,
+        accountIdB64: String? = currentAccountIdB64.get(),
+    ): Boolean {
+        val accountId = accountIdB64
+            ?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+            ?: return false
+        return try {
+            me.lakko.app.profile.OwnProfileStore.reconcileCardShareable(applicationContext, accountId, setting)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0090: card-sharing flag not updated: ${cause.javaClass.simpleName}")
+            false
+        }
     }
 
     /** The account id of the contact holding a one-to-one peer's key, when
@@ -2518,6 +2546,14 @@ public class ChatRepository(
         // before a run or after it, never between its delete and its drop.
         val groupIdHex = membershipEndRun.sessionLock {
             val joinedHex = providerLock.sessionLock {
+                // ADR-0090 section 3.9 — the account that admitted this device
+                // (the Welcome's sender, resolved to its account key) is the one
+                // whose open-items hand-over this device trusts.
+                val admitting = try {
+                    uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcomeBytes, identity).founderAccountKey
+                } catch (_: Throwable) {
+                    null
+                }
                 val group = try {
                     Group.joinFromWelcome(welcomeBytes, identity)
                 } catch (e: FfiException) {
@@ -2525,6 +2561,9 @@ public class ChatRepository(
                 }
                 val groupId = group.groupId()
                 val groupIdHex = DsClient.pseudonymHex(groupId)
+                currentAccountIdB64.get()?.let { acct ->
+                    AdmittingAccounts.record(applicationContext, acct, groupIdHex, admitting)
+                }
                 // ADR-0087 section 9 — a Welcome replaces an ended group. What it
                 // replaces decides what the new record starts with.
                 val old = groups[groupIdHex]
@@ -4706,6 +4745,8 @@ public class ChatRepository(
         /** ADR-0087 section 14 — a channel invitation card beside the text
          *  (the text is the link, so a reader without cards still has it). */
         channelInvite: ByteArray? = null,
+        /** ADR-0090 — a poll, checklist, location, contact card or article. */
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     ): Unit =
         forSession {
             sendMessageOnMlsThread(
@@ -4716,6 +4757,7 @@ public class ChatRepository(
                 forward = forward,
                 onRowShown = onRowShown,
                 channelInvite = channelInvite,
+                content = content,
             )
         }
 
@@ -4727,6 +4769,7 @@ public class ChatRepository(
         forward: ForwardRef? = null,
         onRowShown: () -> Unit = {},
         channelInvite: ByteArray? = null,
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -4735,7 +4778,7 @@ public class ChatRepository(
         // row shows the ordinary sending state and goes out when the
         // conversation's successor exists on this device.
         if (deadOneToOne(groupIdHex)) {
-            holdForSuccessor(groupIdHex, plaintext, attachments, reply, forward)
+            holdForSuccessor(groupIdHex, plaintext, attachments, reply, forward, content)
             return
         }
         val record = groups[groupIdHex]
@@ -4762,7 +4805,14 @@ public class ChatRepository(
             reply = reply,
             forward = forward,
             channelInvite = channelInvite,
+            content = content,
         )
+        // ADR-0090 section 3.4 — an own anonymous poll's ring version 0 is
+        // the roster it is sealed under, which is the current one.
+        if (content.isAnonymousPoll()) {
+            val anon = (content as uniffi.lakko_ffi_uniffi.MessageContent.Poll).poll.body.anonymous!!
+            record.setRing(localId, ringBytesIfMatches(rosterAccountKeysOf(record.group), anon.ring0Hash))
+        }
         publishThreadList()
         onRowShown()
         try {
@@ -4776,6 +4826,7 @@ public class ChatRepository(
                 reply = reply,
                 forward = forward,
                 channelInvite = channelInvite,
+                content = content,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -4823,6 +4874,12 @@ public class ChatRepository(
             )
         val row = record.snapshot().firstOrNull { it.localId == localId } ?: return
         if (row.ack != Ack.FAILED) return
+        // ADR-0090 section 3.4 — an anonymous poll sealed under a roster that
+        // has since changed cannot go as it is: the row stays failed and the
+        // retry is refused, never sent without its content.
+        if (!retryableAsIs(row.content) { hash -> ringBytesIfMatches(rosterAccountKeysOf(record.group), hash) != null }) {
+            throw anonymousPollResendRefused()
+        }
         record.markPending(localId)
         publishThreadList()
         try {
@@ -4838,6 +4895,7 @@ public class ChatRepository(
                 reply = row.reply,
                 forward = row.forward,
                 channelInvite = row.channelInvite,
+                content = row.content,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -4857,6 +4915,7 @@ public class ChatRepository(
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
         channelInvite: ByteArray? = null,
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     ) {
         flushOwedProfileBeforeSend(groupIdHex)
         groupLock(groupIdHex).sessionLock {
@@ -4876,7 +4935,24 @@ public class ChatRepository(
             // crosses as STANDARD base64 of the raw id, while the app keys
             // groups on hex, so the conversion happens here, once.
             val envelopeBytes = try {
-                if (channelInvite != null) {
+                if (content != null) {
+                    // ADR-0090 — a content message; a reply's quote (or, for a
+                    // forward, the attribution) rides beside it.
+                    uniffi.lakko_ffi_uniffi.composeContentEnvelope(
+                        content,
+                        attachments,
+                        uniffi.lakko_ffi_uniffi.ContentEnvelopeParts(
+                            replyTo = reply?.let { if (it.target < 0) REPLY_NO_JUMP_TARGET else it.target },
+                            replyAuthor = reply?.author,
+                            replyExcerpt = reply?.excerpt,
+                            // ADR-0090 / UX 11a — a forwarded location, card
+                            // or article carries the ordinary forward line.
+                            forwardedFrom = forward?.author,
+                            forwardOriginGroupB64 = forward?.originGroupIdHex?.let(::forwardOriginGroupIdB64From),
+                            forwardOriginMessageId = forward?.originMessageId,
+                        ),
+                    )
+                } else if (channelInvite != null) {
                     // ADR-0087 section 14 — the card rides beside the text.
                     uniffi.lakko_ffi_uniffi.composeChannelInviteEnvelope(plaintext, channelInvite)
                 } else if (forward != null) {
@@ -4953,6 +5029,174 @@ public class ChatRepository(
             publishThreadList()
         }
     }
+
+    // ---------------------------------------------------------- ADR-0090 ops
+
+    /**
+     * ADR-0090 — publish an op on a poll or checklist (vote, close, tick, add,
+     * edit) and fold it into the target row at once: the DS never echoes an
+     * own application message back.
+     */
+    public suspend fun sendContentOp(
+        groupIdHex: String,
+        target: Long,
+        kind: ContentOpKind,
+        envelope: ByteArray,
+        choices: ByteArray? = null,
+        item: uniffi.lakko_ffi_uniffi.ChecklistItemRef? = null,
+        done: Boolean? = null,
+        text: String = "",
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+    ): Unit = forSession {
+        if (target <= 0) return@forSession
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        val record = groups[groupIdHex]
+            ?: throw ChatError("no live Group handle for $groupIdHex", IllegalStateException("unknown group"))
+        if (deadOneToOne(groupIdHex)) throw deadSessionError()
+        groupLock(groupIdHex).sessionLock {
+            val (prepared, ownKey) = providerLock.sessionLock {
+                val prepared = chatClient.prepareSend(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelope,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+                prepared to ownIdentity(record.group)
+            }
+            val result = chatClient.publishPreparedSend(prepared, wake = null)
+            val sender = ownKey ?: return@sessionLock
+            record.addContentOp(
+                target,
+                ContentOpRecord(
+                    kind = kind,
+                    opId = result.messageId,
+                    createdAtMs = isoToMs(result.createdAt),
+                    sender = sender,
+                    privileged = record.ownIsPrivileged(),
+                    choices = choices,
+                    item = item,
+                    done = done,
+                    text = text,
+                    content = content,
+                    attachments = attachments,
+                ),
+            )
+            persistMessageLogBestEffort()
+            publishThreadList()
+        }
+    }
+
+    /** The current row of [messageId] in [groupIdHex], or `null`. */
+    public fun contentRow(groupIdHex: String, messageId: Long): ChatMessage? =
+        groups[groupIdHex]?.messageById(messageId)
+
+    /** The raw group id of [groupIdHex], for the content folds. */
+    public fun groupIdOf(groupIdHex: String): ByteArray? = groups[groupIdHex]?.groupId
+
+    /** This device's account identity as a member key, for the content folds. */
+    public fun ownMemberKey(groupIdHex: String): MemberIdentity? = groups[groupIdHex]?.let { r ->
+        try {
+            ownIdentity(r.group)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** The account seed the own conversation leaves are bound to (signs polls, checklists). */
+    internal fun conversationSeed(): ByteArray? = canonicalIdentity.get()?.ed25519Seed()
+
+    /** The distinct account keys of [groupIdHex]'s roster, for a new anonymous poll's ring. */
+    public fun rosterAccountKeys(groupIdHex: String): List<ByteArray> =
+        groups[groupIdHex]?.let { rosterAccountKeysOf(it.group) } ?: emptyList()
+
+    /**
+     * ADR-0090 section 3.6 / UX 7.5 — cast an anonymous vote. The vote shows
+     * as cast at once ("Sending your vote..."); the proof is computed off the
+     * UI thread and the row leaves after a uniform random wait of 0..=10 s
+     * ([BallotSchedule]). A failure leaves the vote marked failed, offered
+     * again with Try again and at the next open.
+     */
+    public fun castAnonymousVote(
+        groupIdHex: String,
+        pollMessageId: Long,
+        choices: ByteArray,
+        /** The set version this account recorded at its first vote (any device). */
+        recordedSetVersion: UInt? = null,
+        onSent: (UInt) -> Unit = {},
+    ) {
+        val record = groups[groupIdHex] ?: return
+        val previous = record.messageById(pollMessageId)?.contentExtras?.ownBallot
+        val knownVersion = recordedSetVersion ?: previous?.setVersion
+        record.setOwnBallot(pollMessageId, OwnBallot(choices, OwnBallotStatus.Sending, knownVersion))
+        publishThreadList()
+        ballotScope.launch {
+            val outcome = runCatching {
+                kotlinx.coroutines.delay(BallotSchedule.delayMs())
+                forSession { postBallot(groupIdHex, pollMessageId, choices, knownVersion) }
+            }
+            outcome.getOrNull()?.let(onSent)
+            val rec = groups[groupIdHex] ?: return@launch
+            val setVersion = outcome.getOrNull()
+            rec.setOwnBallot(
+                pollMessageId,
+                OwnBallot(
+                    choices,
+                    if (outcome.isSuccess) OwnBallotStatus.Sent else OwnBallotStatus.Failed,
+                    setVersion ?: knownVersion,
+                ),
+            )
+            persistMessageLogBestEffort()
+            publishThreadList()
+        }
+    }
+
+    /** Re-send every own anonymous vote left failed (UX 7.5, at the next open). */
+    public fun retryFailedBallots(groupIdHex: String) {
+        val record = groups[groupIdHex] ?: return
+        for (m in record.snapshot()) {
+            val own = m.contentExtras.ownBallot ?: continue
+            if (own.status == OwnBallotStatus.Failed) {
+                castAnonymousVote(groupIdHex, m.messageId, own.choices, own.setVersion)
+            }
+        }
+    }
+
+    private suspend fun postBallot(
+        groupIdHex: String,
+        pollMessageId: Long,
+        choices: ByteArray,
+        setVersion: UInt?,
+    ): UInt {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val row = record.messageById(pollMessageId) ?: throw IllegalStateException("unknown poll")
+        val body = (row.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body
+            ?: throw IllegalStateException("not a poll")
+        val anon = body.anonymous ?: throw IllegalStateException("not anonymous")
+        val ringBytes = row.contentExtras.ring ?: throw IllegalStateException("no ring")
+        val seed = conversationSeed() ?: throw IllegalStateException("no identity")
+        val cast = try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                uniffi.lakko_ffi_uniffi.PollBallotKeys(record.groupId, body.id, anon.secret).use { keys ->
+                    uniffi.lakko_ffi_uniffi.PollRing.decode(ringBytes).use { ring ->
+                        uniffi.lakko_ffi_uniffi.PollVoterKey.fromEd25519Seed(seed).use { voter ->
+                            uniffi.lakko_ffi_uniffi.castPollBallot(keys, ring, voter, choices, setVersion)
+                        }
+                    }
+                }
+            }
+        } finally {
+            seed.fill(0)
+        }
+        val result = groupLock(groupIdHex).sessionLock {
+            chatClient.publishBallotRow(record.groupId, cast.row)
+        }
+        record.attachBallot(result.messageId, result.createdAt, cast.row)
+        return cast.setVersion
+    }
+
+    private val ballotScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * ADR-0023 — edit one of OUR OWN messages: compose an EDIT op
@@ -6266,8 +6510,116 @@ public class ChatRepository(
             // ADR-0059 section 6 — and this person's shared channel list,
             // verbatim with its original stamp, where the switch is on.
             sharedChannels.groupGrew(groupIdHex)
+            // ADR-0090 section 3.9 — the committer of an admission hands every
+            // open poll and checklist to the newcomer.
+            if (ownAdd) {
+                val added = (currentMemberKeys.orEmpty().toSet() - previousMemberKeys.orEmpty().toSet()).size
+                handOverOpenItemsBestEffort(groupIdHex, added)
+            }
         }
     }
+
+    /**
+     * ADR-0090 section 3.9 — after this device committed an admission that
+     * added a leaf: post every open poll and checklist this device holds as
+     * open-items envelopes (signed bodies, results or ring, ticks), then the
+     * stored ballot rows the journal may no longer hold. Best effort: a
+     * failure is logged; the newcomer then sees only what arrives later.
+     */
+    private fun handOverOpenItemsBestEffort(groupIdHex: String, addedLeaves: Int) {
+        val record = groups[groupIdHex] ?: return
+        ballotScope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val open = record.snapshot().filter { m ->
+                    m.messageId > 0 && !m.deleted && when (m.content) {
+                        is uniffi.lakko_ffi_uniffi.MessageContent.Poll -> pollViewOf(m, record.groupId, null, now)?.closed == false
+                        is uniffi.lakko_ffi_uniffi.MessageContent.Checklist -> checklistViewOf(m)?.closed == false
+                        else -> false
+                    }
+                }
+                if (!uniffi.lakko_ffi_uniffi.openItemsHandoverDue(addedLeaves.toUInt(), open.size.toUInt())) return@launch
+                val items = open.mapNotNull { m -> openItemOf(m) }
+                val envelopes = uniffi.lakko_ffi_uniffi.planOpenItemsRows(items)
+                items.forEach { runCatching { it.close() } }
+                for (envelope in envelopes) {
+                    publishApplicationMessage(groupIdHex, envelope, me.lakko.app.calls.CallSignalingWake.NONE)
+                }
+                for (m in open) {
+                    if (!m.content.isAnonymousPoll()) continue
+                    val rows = m.contentExtras.ballots
+                        .filter { uniffi.lakko_ffi_uniffi.ballotNeedsHandover(it.createdAtMs, now) }
+                        .map { it.row }
+                    if (rows.isEmpty()) continue
+                    for (envelope in uniffi.lakko_ffi_uniffi.planPollBallotsRows(m.messageId, rows)) {
+                        publishApplicationMessage(groupIdHex, envelope, me.lakko.app.calls.CallSignalingWake.NONE)
+                    }
+                }
+            } catch (cause: Throwable) {
+                me.lakko.app.rethrowIfCancelled(cause)
+                android.util.Log.w("ChatRepository", "open-items hand-over not sent (${cause.javaClass.simpleName})")
+            }
+        }
+    }
+
+    /** The hand-over item of one open poll or checklist row, or `null`. */
+    private fun openItemOf(m: ChatMessage): uniffi.lakko_ffi_uniffi.OpenItem? {
+        val author = identityBytes(m.authorKey) ?: return null
+        return try {
+            when (val c = m.content) {
+                is uniffi.lakko_ffi_uniffi.MessageContent.Poll -> {
+                    val ring = m.contentExtras.ring?.let { uniffi.lakko_ffi_uniffi.PollRing.decode(it) }
+                    val votes = if (ring != null) {
+                        emptyList()
+                    } else {
+                        m.contentExtras.ops.filter { it.kind == ContentOpKind.PollVote }.mapNotNull { op ->
+                            identityBytes(op.sender)?.let {
+                                uniffi.lakko_ffi_uniffi.PollVoteRecord(op.opId, op.createdAtMs, it, op.choices ?: ByteArray(0))
+                            }
+                        }
+                    }
+                    try {
+                        uniffi.lakko_ffi_uniffi.openItemForPoll(m.messageId, c.poll, author, ring, votes)
+                    } finally {
+                        ring?.close()
+                    }
+                }
+                is uniffi.lakko_ffi_uniffi.MessageContent.Checklist -> {
+                    val latest = m.contentExtras.ops
+                        .filter { it.kind == ContentOpKind.EditChecklist && it.sender == m.authorKey }
+                        .maxByOrNull { it.opId }
+                        ?.let { (it.content as? uniffi.lakko_ffi_uniffi.MessageContent.Checklist)?.checklist }
+                        ?: c.checklist
+                    val state = uniffi.lakko_ffi_uniffi.foldChecklist(
+                        c.checklist.body,
+                        author,
+                        m.messageId,
+                        m.contentExtras.ops.filter { it.kind == ContentOpKind.EditChecklist }.mapNotNull { op ->
+                            val body = (op.content as? uniffi.lakko_ffi_uniffi.MessageContent.Checklist)?.checklist?.body
+                            identityBytes(op.sender)?.let { k -> body?.let { uniffi.lakko_ffi_uniffi.ChecklistEditRecord(op.opId, k, it) } }
+                        },
+                        m.contentExtras.ops.filter { it.kind == ContentOpKind.ChecklistAdd }.mapNotNull { op ->
+                            identityBytes(op.sender)?.let { uniffi.lakko_ffi_uniffi.ChecklistAddRecord(op.opId, it, op.privileged, op.text) }
+                        },
+                        ticksOf(m),
+                        emptyList(),
+                    )
+                    uniffi.lakko_ffi_uniffi.openItemForChecklist(m.messageId, latest, author, state, ticksOf(m))
+                }
+                else -> null
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "open item skipped (${cause.javaClass.simpleName})")
+            null
+        }
+    }
+
+    private fun ticksOf(m: ChatMessage): List<uniffi.lakko_ffi_uniffi.ChecklistTickRecord> =
+        m.contentExtras.ops.filter { it.kind == ContentOpKind.ChecklistTick }.mapNotNull { op ->
+            val k = identityBytes(op.sender) ?: return@mapNotNull null
+            val item = op.item ?: return@mapNotNull null
+            uniffi.lakko_ffi_uniffi.ChecklistTickRecord(op.opId, k, op.privileged, item, op.done ?: false)
+        }
 
     // -----------------------------------------------------------------
     // ADR-0059 section 6 — channels shared inside a group
@@ -8105,6 +8457,8 @@ public class ChatRepository(
         val attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
         val reply: ReplyRef?,
         val forward: ForwardRef?,
+        /** ADR-0090 — the content the message carries, kept while it waits. */
+        val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     )
 
     /**
@@ -8315,6 +8669,9 @@ public class ChatRepository(
                             originMessageId = it.originMessageId,
                         )
                     },
+                    contentEnvelopeB64 = h.content?.let { c ->
+                        composeContentBytes(c, h.attachments)?.let { java.util.Base64.getEncoder().encodeToString(it) }
+                    },
                 )
             }
         }
@@ -8355,7 +8712,10 @@ public class ChatRepository(
                 continue
             }
             val attachments = row.attachments.mapNotNull { it.toAttachmentRef() }
-            if (row.text.isEmpty() && attachments.isEmpty()) continue
+            val content = row.contentEnvelopeB64
+                ?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+                ?.let(::parseContentBytes)
+            if (row.text.isEmpty() && attachments.isEmpty() && content == null) continue
             val reply = row.reply?.let { ReplyRef(target = it.target, author = it.author, excerpt = it.excerpt) }
             val forward = row.forward?.let {
                 ForwardRef(author = it.author, originGroupIdHex = it.originGroupIdHex, originMessageId = it.originMessageId)
@@ -8370,9 +8730,10 @@ public class ChatRepository(
                 authorKey = null,
                 reply = reply,
                 forward = forward,
+                content = content,
             )
             enqueueHeld(
-                HeldMessage(row.groupIdHex, localId, row.heldAtMs, row.text, attachments, reply, forward),
+                HeldMessage(row.groupIdHex, localId, row.heldAtMs, row.text, attachments, reply, forward, content),
                 persist = false,
             )
         }
@@ -8436,6 +8797,7 @@ public class ChatRepository(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
         reply: ReplyRef?,
         forward: ForwardRef?,
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     ) {
         val record = groups[groupIdHex] ?: return
         val localId = record.nextLocalId()
@@ -8447,9 +8809,10 @@ public class ChatRepository(
             authorKey = null,
             reply = reply,
             forward = forward,
+            content = content,
         )
         publishThreadList()
-        enqueueHeld(HeldMessage(groupIdHex, localId, System.currentTimeMillis(), text, attachments, reply, forward))
+        enqueueHeld(HeldMessage(groupIdHex, localId, System.currentTimeMillis(), text, attachments, reply, forward, content))
     }
 
     /** The ordinary Retry of a held message that gave up: held again. */
@@ -8460,7 +8823,7 @@ public class ChatRepository(
         record.markPending(localId)
         publishThreadList()
         enqueueHeld(
-            HeldMessage(groupIdHex, localId, System.currentTimeMillis(), row.text, row.attachments, row.reply, row.forward),
+            HeldMessage(groupIdHex, localId, System.currentTimeMillis(), row.text, row.attachments, row.reply, row.forward, row.content),
         )
     }
 
@@ -8516,6 +8879,7 @@ public class ChatRepository(
                                 r.copy(target = replyTargetForSend(r.target, held.groupIdHex, target) ?: REPLY_NO_JUMP_TARGET)
                             },
                             forward = held.forward,
+                            content = held.content,
                         )
                         // It went out in the successor: the held row of the
                         // old segment is not a second copy of it.
@@ -16359,6 +16723,11 @@ public data class ChatMessage(
     val membershipJoined: List<MemberIdentity> = emptyList(),
     /** The same, for the person keys that left. */
     val membershipLeft: List<MemberIdentity> = emptyList(),
+    /** ADR-0090 — the poll, checklist, location, contact card or article this
+     *  row carries; `null` for an ordinary message. */
+    val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+    /** ADR-0090 — the ops, ballots and ring the row's content collected. */
+    val contentExtras: ContentExtras = ContentExtras(),
 ) {
     /** Whether this is a read-only row of an older segment. */
     val isHistory: Boolean get() = historyOf != null
@@ -16618,9 +16987,11 @@ private class GroupRecord(
         forward: ForwardRef? = null,
         /** ADR-0087 section 14 — a channel invitation card, likewise. */
         channelInvite: ByteArray? = null,
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     ) {
         messages.add(
             ChatMessage(
+                content = content,
                 messageId = 0,
                 direction = Direction.Outgoing,
                 text = text,
@@ -16814,7 +17185,9 @@ private class GroupRecord(
         val membershipRowIndex = membershipRowIndex(events, membershipChange, suppressCommitRows)
         for ((eventIndex, event) in events.withIndex()) {
             when (event) {
-                is IncomingChatEvent.Application -> if (heldResend?.invoke(event) != true) addUnlessFromBundle(
+                is IncomingChatEvent.Application -> if (heldResend?.invoke(event) != true &&
+                    contentAdmissible(event)
+                ) addUnlessFromBundle(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = if (event.senderKey != null && event.senderKey == ownPersonKey) {
@@ -16841,8 +17214,15 @@ private class GroupRecord(
                         unsupportedVersion = event.unsupportedVersion,
                         // ADR-0087 section 14 — a channel invitation card.
                         channelInvite = event.channelInvite,
+                        // ADR-0090 — a content message and, for an anonymous
+                        // poll, its ring version 0 as this device derived it.
+                        content = event.content,
+                        contentExtras = ContentExtras(ring = ringForIncomingPoll(event)),
                     ),
                 )
+                is IncomingChatEvent.ContentOp -> applyContentOp(event)
+                is IncomingChatEvent.OpenItems -> acceptOpenItems(event)
+                is IncomingChatEvent.PollBallotRow -> attachBallot(event.messageId, event.createdAt, event.row)
                 is IncomingChatEvent.Op -> applyOpInternal(
                     op = event.op,
                     target = event.target,
@@ -16861,7 +17241,9 @@ private class GroupRecord(
                     sender = event.senderKey,
                     upTo = event.upTo,
                 )
-                is IncomingChatEvent.System -> if (!(suppressCommitRows && event.systemKind == SystemKind.Commit)) messages.add(
+                is IncomingChatEvent.System -> {
+                    event.rosterAccountKeys?.let(::extendOpenPollRings)
+                    if (!(suppressCommitRows && event.systemKind == SystemKind.Commit)) messages.add(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = Direction.System,
@@ -16879,6 +17261,7 @@ private class GroupRecord(
                         },
                     ),
                 )
+                }
                 is IncomingChatEvent.ServiceEnvelope -> {
                     // An unrecognised or undecodable `lakko/` envelope (for
                     // example a newer profile version from another build). Not
@@ -17034,6 +17417,309 @@ private class GroupRecord(
             }
         }
     }
+
+    // ------------------------------------------------------------ ADR-0090
+
+    /** Whether this device's account is the owner or an admin of the live role table. */
+    fun ownIsPrivileged(): Boolean = privilegedNow(
+        try {
+            ownIdentity(group)
+        } catch (_: Throwable) {
+            null
+        },
+    )
+
+    /** Whether the account [sender] is the owner or an admin of the live role table. */
+    private fun privilegedNow(sender: MemberIdentity?): Boolean {
+        if (sender == null) return false
+        return try {
+            val roles = group.groupRoles() ?: return false
+            outboxB64(roles.owner) == sender || roles.admins.any { outboxB64(it) == sender }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * ADR-0090 sections 3.1 and 5 — a poll or checklist is kept only when its
+     * author signature verifies against the account the MLS sender resolved
+     * to at receipt (C-68); an anonymous poll is refused in a one-to-one. Any
+     * other row is admissible.
+     */
+    private fun contentAdmissible(event: IncomingChatEvent.Application): Boolean {
+        val content = event.content ?: return true
+        val author = identityBytes(event.senderKey)
+        return try {
+            when (content) {
+                is uniffi.lakko_ffi_uniffi.MessageContent.Poll -> {
+                    if (author == null) return false
+                    if (content.poll.body.anonymous != null &&
+                        group.groupKind() == uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE
+                    ) {
+                        return false
+                    }
+                    uniffi.lakko_ffi_uniffi.verifyPoll(content.poll, groupId, author)
+                    true
+                }
+                is uniffi.lakko_ffi_uniffi.MessageContent.Checklist -> {
+                    if (author == null) return false
+                    uniffi.lakko_ffi_uniffi.verifyChecklist(content.checklist, groupId, author)
+                    true
+                }
+                else -> true
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * ADR-0090 section 3.4 — version 0 of an anonymous poll's ring: the roster
+     * at receipt, kept only when its hash is the one the author signed. A
+     * mismatch leaves the poll unverifiable (no ring), fail-closed.
+     */
+    private fun ringForIncomingPoll(event: IncomingChatEvent.Application): ByteArray? {
+        val anon = (event.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body?.anonymous
+            ?: return null
+        val keys = event.rosterAccountKeys ?: return null
+        return ringBytesIfMatches(keys, anon.ring0Hash)
+    }
+
+    /** Commit order — every open anonymous poll appends the accounts a commit added. */
+    private fun extendOpenPollRings(rosterKeys: List<ByteArray>) {
+        if (rosterKeys.isEmpty()) return
+        val now = System.currentTimeMillis()
+        synchronized(messages) {
+            for ((i, m) in messages.withIndex()) {
+                val ringBytes = m.contentExtras.ring ?: continue
+                if (!m.content.isAnonymousPoll()) continue
+                val view = pollViewOf(m, groupId, null, now)
+                if (view?.closed == true) continue
+                val next = extendRing(ringBytes, rosterKeys) ?: continue
+                messages[i] = m.copy(contentExtras = m.contentExtras.copy(ring = next))
+            }
+        }
+    }
+
+    /** ADR-0090 — fold an op into its target row. Unknown target: dropped. */
+    fun applyContentOp(event: IncomingChatEvent.ContentOp) {
+        val sender = event.senderKey ?: return
+        val record = ContentOpRecord(
+            kind = event.op,
+            opId = event.messageId,
+            createdAtMs = isoToMs(event.createdAt),
+            sender = sender,
+            privileged = privilegedNow(sender),
+            choices = event.choices,
+            item = event.item,
+            done = event.done,
+            text = event.text,
+            content = event.content,
+            attachments = event.attachments,
+        )
+        addContentOp(event.target, record)
+    }
+
+    /** Add [op] to the row [target] (own ops included), once per op id. */
+    fun addContentOp(target: Long, op: ContentOpRecord) {
+        synchronized(messages) {
+            val idx = messages.indexOfFirst { it.messageId == target }
+            if (idx < 0) return
+            val current = messages[idx]
+            if (current.content == null || current.deleted) return
+            if (current.contentExtras.ops.any { it.opId == op.opId && it.kind == op.kind }) return
+            // An edit replaces the whole checklist or article: kept only from
+            // the author, with a valid signature for a checklist.
+            if (op.kind == ContentOpKind.EditChecklist || op.kind == ContentOpKind.EditArticle) {
+                if (op.sender != current.authorKey) return
+                val signed = (op.content as? uniffi.lakko_ffi_uniffi.MessageContent.Checklist)?.checklist
+                if (op.kind == ContentOpKind.EditChecklist) {
+                    val author = identityBytes(op.sender) ?: return
+                    try {
+                        uniffi.lakko_ffi_uniffi.verifyChecklist(signed ?: return, groupId, author)
+                    } catch (_: Throwable) {
+                        return
+                    }
+                }
+            }
+            messages[idx] = current.copy(
+                contentExtras = current.contentExtras.copy(ops = current.contentExtras.ops + op),
+                lastOpId = maxOf(current.lastOpId, op.opId),
+            )
+        }
+    }
+
+    /**
+     * ADR-0090 section 3.6 — a ballot row is kept on the open anonymous poll
+     * whose keys open it (the poll id is inside the sealed ballot).
+     */
+    fun attachBallot(messageId: Long, createdAt: String, row: ByteArray) {
+        synchronized(messages) {
+            for ((i, m) in messages.withIndex()) {
+                val anon = (m.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body ?: continue
+                val secret = anon.anonymous?.secret ?: continue
+                val opened = try {
+                    uniffi.lakko_ffi_uniffi.PollBallotKeys(groupId, anon.id, secret).use { keys ->
+                        uniffi.lakko_ffi_uniffi.openPollBallotRow(keys, row)
+                        true
+                    }
+                } catch (_: Throwable) {
+                    false
+                }
+                if (!opened) continue
+                if (m.contentExtras.ballots.any { it.messageId == messageId }) return
+                messages[i] = m.copy(
+                    contentExtras = m.contentExtras.copy(
+                        ballots = m.contentExtras.ballots + BallotRecord(messageId, isoToMs(createdAt), row),
+                    ),
+                )
+                return
+            }
+        }
+    }
+
+    /** ADR-0090 section 3.9 — the account that admitted this device into this group. */
+    private val admittingAccount: ByteArray?
+        get() = AdmittingAccounts.current(me.lakko.app.ds.DsClient.pseudonymHex(groupId))
+
+    /** ADR-0090 section 3.9 — open-items rows received so far, assembled when whole. */
+    private val openItemsRows = mutableListOf<uniffi.lakko_ffi_uniffi.ReceivedOpenItemsRow>()
+
+    /**
+     * ADR-0090 section 3.9 — a newcomer's side of the hand-over: keep a row
+     * only from an owner or admin (the admitting account is not tracked on
+     * this client, so a self-service admission by a plain member is not
+     * trusted), assemble the rows into whole items, adopt each and add it to
+     * the conversation at its place; old ballot rows go onto their poll.
+     */
+    fun acceptOpenItems(event: IncomingChatEvent.OpenItems) {
+        val sender = identityBytes(event.senderKey) ?: return
+        val trusted = try {
+            uniffi.lakko_ffi_uniffi.openItemsSenderTrusted(sender, admittingAccount, privilegedNow(event.senderKey))
+        } catch (_: Throwable) {
+            false
+        }
+        if (!trusted) return
+        val ballots = try {
+            if (uniffi.lakko_ffi_uniffi.isPollBallotsEnvelope(event.envelope)) {
+                uniffi.lakko_ffi_uniffi.decodePollBallotsEnvelope(event.envelope)
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+        if (ballots != null) {
+            val createdAt = isoToMs(event.createdAt)
+            for ((i, row) in ballots.rows.withIndex()) {
+                attachBallotTo(ballots.pollRef, ballots.pollRef + 1 + i, createdAt, row)
+            }
+            return
+        }
+        synchronized(messages) {
+            openItemsRows.add(uniffi.lakko_ffi_uniffi.ReceivedOpenItemsRow(sender, event.envelope))
+            val held = messages.filter { it.content != null }.map { it.messageId }
+            val assembled = try {
+                uniffi.lakko_ffi_uniffi.assembleOpenItems(openItemsRows.toList(), held)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            for (item in assembled) {
+                val adopted = try {
+                    uniffi.lakko_ffi_uniffi.adoptOpenItem(groupId, item)
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    item.close()
+                }
+                when (adopted) {
+                    is uniffi.lakko_ffi_uniffi.AdoptedOpenItem.Poll -> insertAdopted(
+                        adopted.pollRef,
+                        adopted.author,
+                        uniffi.lakko_ffi_uniffi.MessageContent.Poll(adopted.poll),
+                        ContentExtras(
+                            ops = adopted.votes.map {
+                                ContentOpRecord(ContentOpKind.PollVote, it.messageId, it.createdAtMs, outboxB64(it.voter), false, choices = it.choices)
+                            },
+                            ring = adopted.ring?.encode(),
+                        ),
+                    )
+                    is uniffi.lakko_ffi_uniffi.AdoptedOpenItem.Checklist -> insertAdopted(
+                        adopted.pollRef,
+                        adopted.author,
+                        uniffi.lakko_ffi_uniffi.MessageContent.Checklist(adopted.checklist),
+                        ContentExtras(
+                            ops = adopted.adds.map {
+                                ContentOpRecord(ContentOpKind.ChecklistAdd, it.messageId, 0, outboxB64(it.adder), it.privileged, text = it.text)
+                            } + adopted.ticks.map {
+                                ContentOpRecord(ContentOpKind.ChecklistTick, it.messageId, 0, outboxB64(it.ticker), it.privileged, item = it.item, done = it.done)
+                            },
+                        ),
+                    )
+                    null -> Unit
+                }
+            }
+            // Rows of adopted items stay until the app stops (assembleOpenItems
+            // skips held items); bounded by what one hand-over carries.
+            if (openItemsRows.size > MAX_HELD_OPEN_ITEMS_ROWS) openItemsRows.subList(0, openItemsRows.size - MAX_HELD_OPEN_ITEMS_ROWS).clear()
+        }
+    }
+
+    private fun insertAdopted(pollRef: Long, author: ByteArray, content: uniffi.lakko_ffi_uniffi.MessageContent, extras: ContentExtras) {
+        if (messages.any { it.messageId == pollRef }) return
+        val own = try {
+            ownIdentity(group)
+        } catch (_: Throwable) {
+            null
+        }
+        val authorKey = outboxB64(author)
+        val row = ChatMessage(
+            messageId = pollRef,
+            direction = if (authorKey == own) Direction.Outgoing else Direction.Incoming,
+            text = "",
+            createdAt = java.time.Instant.EPOCH.toString(),
+            authorKey = authorKey,
+            content = content,
+            contentExtras = extras,
+        )
+        val at = messages.indexOfFirst { it.messageId > pollRef && it.messageId > 0 }
+        if (at < 0) messages.add(row) else messages.add(at, row)
+    }
+
+    private fun attachBallotTo(pollRef: Long, messageId: Long, createdAtMs: Long, row: ByteArray) {
+        synchronized(messages) {
+            val idx = messages.indexOfFirst { it.messageId == pollRef }
+            if (idx < 0) return
+            val m = messages[idx]
+            if (m.contentExtras.ballots.any { it.row.contentEquals(row) }) return
+            messages[idx] = m.copy(
+                contentExtras = m.contentExtras.copy(ballots = m.contentExtras.ballots + BallotRecord(messageId, createdAtMs, row)),
+            )
+        }
+    }
+
+    /** Replace a row's own anonymous vote state (UX 7.5). */
+    fun setOwnBallot(target: Long, ballot: OwnBallot?) {
+        synchronized(messages) {
+            val idx = messages.indexOfFirst { it.messageId == target }
+            if (idx < 0) return
+            val m = messages[idx]
+            messages[idx] = m.copy(contentExtras = m.contentExtras.copy(ownBallot = ballot))
+        }
+    }
+
+    /** Record the ring of an own anonymous poll once it has its DS id. */
+    fun setRing(localOrMessageId: Long, ring: ByteArray?) {
+        synchronized(messages) {
+            val idx = messages.indexOfFirst { it.messageId == localOrMessageId || it.localId == localOrMessageId }
+            if (idx < 0) return
+            val m = messages[idx]
+            messages[idx] = m.copy(contentExtras = m.contentExtras.copy(ring = ring))
+        }
+    }
+
+    fun messageById(messageId: Long): ChatMessage? =
+        synchronized(messages) { messages.firstOrNull { it.messageId == messageId } }
 
     /**
      * ADR-0023 — fold an edit / delete / reaction op into the

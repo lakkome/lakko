@@ -23,6 +23,8 @@ import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import {
   AttachmentSizeError,
+  composeArticleEditEnvelope,
+  composeContentEnvelope,
   composeEditEnvelope,
   composeEnvelope,
   encryptAndUploadBytes,
@@ -43,6 +45,13 @@ import { fetchGifMedia, MAX_GIF_FULL_BYTES, type GifItem } from "../media/gif-cl
 import { t } from "../l10n";
 import { Icon } from "../ui/icons";
 import { channelErrorText } from "./channel-error-copy";
+import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
+import { checklistBodyOf, pollBodyOf } from "../attach/actions";
+import { reencodePhoto } from "../attach/photo-encode";
+import { readAudioTags } from "../attach/audio-tags";
+import type { PreviewResult } from "../attach/types";
+import type { MessageContent } from "../../wasm/lakko_ffi_wasm";
+import { loadWasm } from "../wasm";
 
 export interface ChannelComposerProps {
   /** Publishes one plaintext; resolves once the post is on the server. */
@@ -52,6 +61,9 @@ export interface ChannelComposerProps {
   readonly onCancelEdit: () => void;
   /** The timeline's media hub: a take's object URLs are filed there. */
   readonly hub: MediaHub;
+  /** ADR-0090 — an `Edit checklist` / article `Edit` the timeline asked for. */
+  readonly contentEdit?: () => AttachEditRequest | null;
+  readonly clearContentEdit?: () => void;
 }
 
 export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
@@ -62,7 +74,6 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
   const [error, setError] = createSignal<string | null>(null);
   const [emojiOpen, setEmojiOpen] = createSignal(false);
   let field: HTMLTextAreaElement | undefined;
-  let picker: HTMLInputElement | undefined;
   let lastEditCursor: number | null = null;
   // ADR-0087 section 13 — a channel file asks for its shorter idle life.
   const storage = new StorageClient(DEFAULT_BASE_URL, CHANNEL_FILE_IDLE_DAYS);
@@ -187,6 +198,91 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
     }
   }
 
+  /** The draft key of this composer (one channel per mounted composer). */
+  const draftKeyOf = (): string => "post";
+
+  /** ADR-0090 — a poll, checklist, location, contact card or article post. */
+  async function publishContent(content: MessageContent, refs: AttachmentRefBytes[] = []): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await props.publish(await composeContentEnvelope(content, refs));
+    } catch (err) {
+      setError(channelErrorText(err, () => t("channels.publish.error.generic")));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** An op post (an edit of a content post). */
+  async function publishOp(bytes: Uint8Array): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await props.publish(bytes);
+    } catch (err) {
+      setError(channelErrorText(err, () => t("channels.publish.error.generic")));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** One file of the send preview, uploaded with the channel file life. */
+  async function uploadOne(original: File, mode: "media" | "file" | "audio", asFile: boolean): Promise<AttachmentRefBytes | null> {
+    let file = original;
+    try {
+      if (mode === "media" && !asFile && file.type.startsWith("image/") && file.type !== "image/gif") {
+        const w = await loadWasm();
+        try {
+          file = await reencodePhoto(file, w.photoMaxLongestSidePx());
+        } catch {
+          setError(t("attach.preview.photo_unreadable"));
+          return null;
+        }
+      }
+      let ref = await encryptAndUploadFile(file, storage);
+      if (mode === "audio") {
+        const tags = await readAudioTags(file);
+        ref = {
+          ...ref,
+          kind: "audio",
+          title: tags.title,
+          ...(tags.artist === undefined ? {} : { artist: tags.artist }),
+          ...(tags.durationMs === undefined ? {} : { durationMs: tags.durationMs }),
+        };
+      }
+      return ref;
+    } catch (err) {
+      setError(
+        err instanceof AttachmentSizeError
+          ? t("attach.preview.file_too_big")
+          : channelErrorText(err, () => t("channels.publish.error.generic")),
+      );
+      return null;
+    }
+  }
+
+  /** UX sections 3, 4, 6 — one post per item, the caption on the first. */
+  async function sendPreviewFiles(r: PreviewResult, mode: "media" | "file" | "audio"): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      let first = true;
+      for (const f of r.files) {
+        const ref = await uploadOne(f, mode, r.asFile);
+        if (ref === null) continue;
+        await props.publish(await composeEnvelope(first ? r.caption.trim() : "", [ref]));
+        first = false;
+      }
+    } catch (err) {
+      setError(channelErrorText(err, () => t("channels.publish.error.generic")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** ADR-0047 — a GIF picked in the composer goes out as its own post: the
    *  proxy's bytes, re-encrypted as an ordinary attachment of kind gif. */
   async function sendGif(item: GifItem): Promise<void> {
@@ -275,25 +371,50 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
       >
         <Show when={!recorderBusy(recorder)} fallback={<RecordingBar recorder={recorder} />}>
         <Show when={editing() === null}>
-          <button
-            type="button"
-            class="lk-icon-button"
-            title={t("chat.composer.attach")}
-            aria-label={t("chat.composer.attach")}
-            disabled={busy()}
-            onClick={() => picker?.click()}
-          >
-            <Icon name="clip" size={20} />
-          </button>
-          <input
-            ref={picker}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              const picked = Array.from(e.currentTarget.files ?? []);
-              e.currentTarget.value = "";
-              if (picked.length > 0) setFiles([...files(), ...picked]);
+          {/* docs/ux/attachments.md section 2 — the owner's and publishers'
+              paperclip: the same menu as a chat (the core gives a channel's
+              publishers all nine rows; a subscriber has no composer). */}
+          <AttachComposer
+            conversation={() => "channel"}
+            role={() => "admin"}
+            accounts={() => 0}
+            callHoldsCamera={() => callOwnsCaptureNow(uiRules(), callHost)}
+            hidden={() => busy()}
+            draftKey={`channel:${draftKeyOf()}`}
+            contacts={() => []}
+            editRequest={() => props.contentEdit?.() ?? null}
+            clearEditRequest={() => props.clearContentEdit?.()}
+            sendFiles={sendPreviewFiles}
+            sendPoll={async (d) => {
+              const body = await pollBodyOf({ ...d, anonymous: false }, [], Date.now());
+              await publishContent({ kind: "poll", poll: { body, authorSig: null } });
+            }}
+            sendChecklist={async (d, editTarget) => {
+              const body = checklistBodyOf({ ...d, othersAdd: false, othersMark: false });
+              if (editTarget === undefined) {
+                await publishContent({ kind: "checklist", checklist: { body, authorSig: null } });
+                return;
+              }
+              // UX 8.2 — the edit is a post naming the checklist's cursor.
+              const w = await loadWasm();
+              await publishOp(w.composeChecklistEditEnvelope(BigInt(editTarget), { body, authorSig: null }));
+            }}
+            sendLocation={(l) => publishContent({ kind: "location", location: l })}
+            sendContact={(c) => publishContent({ kind: "contactCard", card: c })}
+            sendArticle={async (out, editTarget) => {
+              const refs: AttachmentRefBytes[] = [];
+              for (const image of out.images) {
+                const file = image instanceof File ? image : new File([image], "image.jpg", { type: image.type || "image/jpeg" });
+                const ref = await uploadOne(file, "media", false);
+                if (ref === null) return;
+                refs.push(ref);
+              }
+              if (editTarget === undefined) {
+                await publishContent({ kind: "article", article: out.article }, refs);
+                return;
+              }
+              // UX 11.3 — the edit replaces the whole article.
+              await publishOp(await composeArticleEditEnvelope(editTarget, out.article, refs));
             }}
           />
         </Show>

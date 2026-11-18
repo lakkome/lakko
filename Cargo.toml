@@ -30,11 +30,14 @@ members = [
     "crates/lakko-pow-server",
     "crates/lakko-anon-token",
     "crates/lakko-anon-token-server",
+    "crates/lakko-anon-cred",
     "crates/lakko-mnemonic",
     "crates/lakko-ui-rules",
     "crates/lakko-feed",
     "crates/lakko-vault",
     "crates/lakko-circle",
+    "crates/lakko-ballot",
+    "crates/lakko-open-items",
     "crates/lakko-l10n",
     "crates/lakko-log-hygiene",
     "crates/lakko-noise",
@@ -194,6 +197,7 @@ lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-pow-server = { path = "crates/lakko-pow-server", version = "0.0.0" }
 lakko-anon-token = { path = "crates/lakko-anon-token", version = "0.0.0" }
 lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "0.0.0" }
+lakko-anon-cred = { path = "crates/lakko-anon-cred", version = "0.0.0" }
 lakko-log-hygiene = { path = "crates/lakko-log-hygiene", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
@@ -202,6 +206,8 @@ lakko-segment = { path = "crates/lakko-segment", version = "0.0.0", default-feat
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
 lakko-vault = { path = "crates/lakko-vault", version = "0.0.0" }
 lakko-circle = { path = "crates/lakko-circle", version = "0.0.0" }
+lakko-ballot = { path = "crates/lakko-ballot", version = "0.0.0" }
+lakko-open-items = { path = "crates/lakko-open-items", version = "0.0.0" }
 lakko-l10n = { path = "crates/lakko-l10n", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 

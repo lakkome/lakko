@@ -344,6 +344,7 @@ mod tests {
             anon_tokens: Some(Arc::new(crate::anon_tokens::AnonTokenIssuer::for_test(
                 server,
             ))),
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),

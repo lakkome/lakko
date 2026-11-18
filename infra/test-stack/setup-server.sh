@@ -57,6 +57,7 @@ LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)
+LAKKO_ANON_CRED_MASTER_SECRET=$(openssl rand -hex 32)
 LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)
 
 LAKKO_WEBAUTHN_RP_ID=${DOMAIN}
@@ -141,6 +142,14 @@ fi
 if ! grep -q '^LAKKO_ANON_TOKEN_MASTER_SECRET=' $ENV_FILE; then
   echo "LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
   echo "anonymous-token master secret added to the env file"
+fi
+
+# Channel-poll credentials (ADR-0090 section 4) arrived later: an older env
+# file gains their master secret here, generated once and then kept
+# (regenerating it invalidates every credential issued on this stack).
+if ! grep -q '^LAKKO_ANON_CRED_MASTER_SECRET=' $ENV_FILE; then
+  echo "LAKKO_ANON_CRED_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "anonymous-credential master secret added to the env file"
 fi
 
 # Sign-in by name (ADR-0054 S5) arrived later: an older env file gains the

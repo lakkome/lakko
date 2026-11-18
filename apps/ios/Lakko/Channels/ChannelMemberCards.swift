@@ -29,7 +29,10 @@ enum ChannelMemberCards {
         // The profile's stamp is part of the key: a new name or photo is a new
         // card for the same epoch (ADR-0084).
         let stamp = ProfileDirectory.shared.ownProfile?.updatedAtMs ?? 0
-        let uploadKey = "\(channelId)|\(epoch)|\(grant.map { String($0.version) } ?? "-")|\(stamp)"
+        // The sharing flag too (ADR-0090 section 7): a switch to or from
+        // `Nobody` changes what the card says without a new name.
+        let shareable = ProfileDirectory.shared.ownCardShareable
+        let uploadKey = "\(channelId)|\(epoch)|\(grant.map { String($0.version) } ?? "-")|\(stamp)|\(shareable)"
         guard !uploaded.contains(uploadKey),
               var profile = ProfileDirectory.shared.ownProfileForRequest() else { return }
         profile.grants = grant.map { [$0] } ?? []
@@ -228,7 +231,8 @@ enum ChannelMemberCards {
                     displayName: profile.displayName, username: username,
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
                     usernameCertificate: username == nil ? nil : profile.usernameCertificate,
-                    avatar: ProfileAvatar(profile.avatar))
+                    avatar: ProfileAvatar(profile.avatar),
+                    cardShareable: profile.cardShareable)
                 names.append(Member(subscriberPk: member.subscriberPk, claim: claim))
                 if channelGrant != nil {
                     ProfileDirectory.shared.acceptReceived(

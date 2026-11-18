@@ -1926,6 +1926,10 @@ public final class ChatRepository: ObservableObject {
                 "ChatRepository not bootstrapped — call bootstrap() first"
             )
         }
+        // ADR-0090 section 3.9 — the account that committed this admission
+        // (the Welcome's sender), read before the join: a hand-over from it
+        // is taken even when it is not an owner or admin.
+        let admitter = try? LakkoCore.peekWelcomeFounder(welcome: welcomeBytes, identity: identity)
         let group: Group
         do {
             group = try Group.joinFromWelcome(
@@ -1940,6 +1944,9 @@ public final class ChatRepository: ObservableObject {
         }
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
+        if let admitter, let account = currentAccountIdB64 {
+            ContentAdmitters.save(accountIdB64: account, groupIdHex: groupIdHex, key: admitter.founderAccountKey)
+        }
         let record = GroupRecord(group: group, groupId: groupId)
         // ADR-0087 section 9 — what this Welcome replaced, if anything.
         closeReplacedGroup(groupIdHex: groupIdHex, joined: record)
@@ -4407,7 +4414,8 @@ public final class ChatRepository: ObservableObject {
         if sendRoute(groupIdHex: groupIdHex) == .hold {
             guard holdMessage(
                 groupIdHex: groupIdHex, text: row.text, attachments: row.attachments,
-                reply: row.reply, forward: row.forward, existingLocalId: localId)
+                reply: row.reply, forward: row.forward,
+                content: row.content.flatMap(ContentModel.content), existingLocalId: localId)
             else { throw ChatError.argument("the message could not be kept for sending") }
             return
         }
@@ -4419,13 +4427,7 @@ public final class ChatRepository: ObservableObject {
             conversationIdHex: groupIdHex, messageId: localId, accountIdB64: currentAccountIdB64)
         let envelopeBytes: Data
         do {
-            envelopeBytes = try Self.composeChatEnvelope(
-                text: row.text,
-                attachments: row.attachments,
-                reply: row.reply,
-                forward: row.forward,
-                channelInviteCard: card
-            )
+            envelopeBytes = try Self.retryEnvelope(row: row, channelInviteCard: card)
         } catch {
             record.markFailed(localId: localId)
             state = state.with(threads: buildThreadList())
@@ -4433,8 +4435,16 @@ public final class ChatRepository: ObservableObject {
         }
         let result: SendMessageResult
         do {
+            let retried = row.content.flatMap(ContentModel.content)
             result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-                try await sealAndPublishLocked(
+                // ADR-0090 — an anonymous poll goes again only while the
+                // roster is the one its first ring was hashed over, read
+                // under the lock its seal runs in.
+                if let live = groups[groupIdHex],
+                   !ContentRing.retryAllowed(content: retried, rosterKeys: ContentRing.accountKeys(of: live.group)) {
+                    throw ContentSendError.pollRingChanged
+                }
+                return try await sealAndPublishLocked(
                     groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message)
             }
         } catch {
@@ -4451,6 +4461,24 @@ public final class ChatRepository: ObservableObject {
         }
         persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
+    }
+
+    /// What Retry sends for a failed row: a content message as the envelope
+    /// it was composed as (its forward line included), never as an empty
+    /// chat message; anything else as the chat envelope of its text, files,
+    /// reply and forward line. An anonymous poll's roster check is the
+    /// caller's, under the lock.
+    static func retryEnvelope(row: ChatMessage, channelInviteCard: Data? = nil) throws -> Data {
+        if let stored = row.content, let bytes = Data(base64Encoded: stored.envelopeB64) {
+            return bytes
+        }
+        return try composeChatEnvelope(
+            text: row.text,
+            attachments: row.attachments,
+            reply: row.reply,
+            forward: row.forward,
+            channelInviteCard: channelInviteCard
+        )
     }
 
     /// The chat envelope for a message, a reply or not.
@@ -4765,7 +4793,7 @@ public final class ChatRepository: ObservableObject {
     /// and the edit would silently vanish. So the record is re-read here, the
     /// way every other `…Locked` body re-reads it — and the caller no longer
     /// looks one up at all.
-    private func publishMessageOpLocked(
+    func publishMessageOpLocked(
         groupIdHex: String,
         envelopeBytes: Data,
         wake: DsWake.Kind? = nil,
@@ -5676,6 +5704,11 @@ public final class ChatRepository: ObservableObject {
             },
             reactionToOwnSink: { [weak self] messageId in
                 self?.noteUnseenReaction(groupIdHex: groupIdHex, messageId: messageId)
+            },
+            // ADR-0090 section 3.9 — synchronous: judge the sender against the
+            // live group, assemble, adopt what this device does not hold.
+            contentHandoverSink: { [weak self] event in
+                self?.receiveContentHandover(groupIdHex: groupIdHex, event: event)
             }
         )
         // Membership rows — before the log is written below.
@@ -7231,7 +7264,14 @@ public final class ChatRepository: ObservableObject {
                     // commit back, so it writes the row itself (the roster
                     // before the merge against the roster after it).
                     let personKeysBeforeMerge = Self.personKeysB64(of: record.group)
+                    let leavesBefore = Set(((try? record.group.members()) ?? []).map(\.signaturePublicKey))
                     _ = try record.group.mergeStagedSweep(identity: identity)
+                    // ADR-0090 section 3.9 — an admission that added a leaf
+                    // (a new member, or a new device of a member) is followed
+                    // by the open-items hand-over, sealed at the new epoch.
+                    let added = ((try? record.group.members()) ?? [])
+                        .filter { !leavesBefore.contains($0.signaturePublicKey) }.count
+                    self?.scheduleContentHandover(groupIdHex: groupIdHex, addedLeaves: UInt32(added))
                     self?.noteOwnCommitMembershipChange(
                         groupIdHex: groupIdHex, record: record,
                         personKeysBefore: personKeysBeforeMerge,
@@ -7259,6 +7299,13 @@ public final class ChatRepository: ObservableObject {
                     // reach `adjudicate`, which skips the row exactly as the poll
                     // loop does, and a skipped row must surface nothing.
                     // Membership rows — the people before this row's apply.
+                    // ADR-0090 section 3.6 — a ballot is a non-MLS row: filed,
+                    // never fed to MLS.
+                    if isPollBallotRow(row: row.payload) {
+                        record.consumeEvents([.pollBallotRow(
+                            messageId: row.id, row: row.payload, createdAt: row.createdAt)])
+                        return
+                    }
                     let personKeysBeforeRow = Self.personKeysB64(of: record.group)
                     let firstNewRow = record.messages.count
                     let processed = try record.group.processIncomingVerifyingRoles(
@@ -9456,6 +9503,9 @@ public final class ChatRepository: ObservableObject {
         // carry: republish them.
         ReachCenter.shared.onGrantsChanged = { [weak self] in
             Task { @MainActor in
+                // ADR-0090 section 7 — a move to or from `Nobody` changes the
+                // card-sharing flag: a new stamp, or receivers keep the old one.
+                ProfileDirectory.shared.restampIfCardShareableChanged()
                 await self?.publishOwnProfileToAllGroups()
                 await self?.sendIntroductions()
             }
@@ -9480,6 +9530,12 @@ public final class ChatRepository: ObservableObject {
             // this account's reach keys on it right after the claim, so the
             // people it handed keys to can write to it.
             await MainActor.run { ReachCenter.shared.sync() }
+            // ADR-0090 section 7 — a setting this device holds that the own
+            // profile's stamp does not reflect yet (changed in an older build,
+            // or restored): re-stamp and republish once.
+            if await MainActor.run(body: { ProfileDirectory.shared.restampIfCardShareableChanged() }) {
+                await self.publishOwnProfileToAllGroups()
+            }
             await self.sendIntroductions()
         }
     }
@@ -10285,7 +10341,13 @@ public struct ChatMessage: Equatable, Identifiable {
     public let messageId: Int64
     public let direction: Direction
     public internal(set) var text: String
-    public let attachments: [AttachmentRef]
+    /// `var` since ADR-0090: an article edit replaces its images.
+    public internal(set) var attachments: [AttachmentRef]
+    /// ADR-0090 — a poll, checklist, location, contact card or article, and
+    /// the ops folded into it (votes, closes, ticks, added items, edits,
+    /// ballots). `nil` for every other message. Read through
+    /// ``ContentModel`` (`Chat/ContentMessages.swift`).
+    public internal(set) var content: PersistedContent?
     public let createdAt: String
     /// ADR-0023 — the original author's IDENTITY: their Ed25519 signature
     /// public key, base64. Set on arrival from the identity the receive loop
@@ -10399,9 +10461,11 @@ public struct ChatMessage: Equatable, Identifiable {
         reply: ReplyRef? = nil,
         forward: ForwardRef? = nil,
         unsupportedVersion: UInt64? = nil,
-        lastOpId: Int64? = nil
+        lastOpId: Int64? = nil,
+        content: PersistedContent? = nil
     ) {
         self.lastOpId = lastOpId
+        self.content = content
         self.messageId = messageId
         self.direction = direction
         self.text = text
@@ -10810,8 +10874,40 @@ final class GroupRecord {
             localId: localId,
             reply: old.reply,
             forward: old.forward,
-            lastOpId: old.lastOpId
+            lastOpId: old.lastOpId,
+            content: old.content
         )
+    }
+
+    /// ADR-0090 — mutate one message in place (by DS id), the one write path
+    /// the content fold uses. `false` when the record holds no such message.
+    @discardableResult
+    func mutateMessage(messageId: Int64, _ change: (inout ChatMessage) -> Void) -> Bool {
+        guard let idx = messages.firstIndex(where: { $0.messageId == messageId }) else { return false }
+        change(&messages[idx])
+        return true
+    }
+
+    /// ADR-0090 — mutate an unsent row by its local id.
+    func mutateLocalRow(localId: Int64, _ change: (inout ChatMessage) -> Void) {
+        guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        change(&messages[idx])
+    }
+
+    /// ADR-0090 — append a content message (received, or this device's own
+    /// pending one when `localId` is non-zero).
+    func appendContentRow(_ message: ChatMessage) {
+        if message.messageId > 0, heldFromBundle(message.messageId) { return }
+        if message.messageId > 0, messages.contains(where: { $0.messageId == message.messageId }) { return }
+        messages.append(message)
+    }
+
+    /// ADR-0090 section 3.9 — a handed-over open item, at its place: before
+    /// the first held row with a higher DS id.
+    func insertHandedOver(_ message: ChatMessage) {
+        guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
+        let at = messages.firstIndex(where: { $0.messageId > message.messageId }) ?? messages.count
+        messages.insert(message, at: at)
     }
 
     /// Trying again: back to "Sending...".
@@ -10930,7 +11026,8 @@ final class GroupRecord {
         sharedChannelsSink: ((FfiSharedChannels, MemberIdentity?) -> Void)? = nil,
         groupClosedSink: ((Int64, Data?, UInt32?) -> Void)? = nil,
         groupSettingSink: ((GroupSettingEnvelope, UInt32?) -> Void)? = nil,
-        reactionToOwnSink: ((Int64) -> Void)? = nil
+        reactionToOwnSink: ((Int64) -> Void)? = nil,
+        contentHandoverSink: ((IncomingChatEvent) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -11017,6 +11114,14 @@ final class GroupRecord {
                         reactionToOwnSink?(target)
                     }
                 }
+            case .content, .contentOp, .pollBallotRow, .commitRoster:
+                // ADR-0090 — content messages and the ops, ballots and ring
+                // extensions folded into them (`Chat/ContentMessages.swift`).
+                applyContentEvent(event, ownAuthorKey: ownAuthorKey)
+            case .openItems, .pollBallots:
+                // ADR-0090 section 3.9 — the hand-over; the repository judges
+                // the sender and adopts (`Chat/ContentHandover.swift`).
+                contentHandoverSink?(event)
             case .system(let messageId, let systemKind, let createdAt):
                 if heldFromBundle(messageId) { continue }
                 messages.append(

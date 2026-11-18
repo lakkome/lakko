@@ -744,6 +744,11 @@ class MultiJoinerCall private constructor(
             // chat receive loop), never the SFU signal-relay. A peer that
             // relays one here is off-contract — fail-closed drop.
             FfiIncomingEnvelopeKind.PUSH_ROUTING_SECRET -> Unit
+            // ADR-0090 section 3.9 — the open-items hand-over and its ballot
+            // rows ride the GROUP JOURNAL, never the SFU relay. Dropped.
+            FfiIncomingEnvelopeKind.OPEN_ITEMS,
+            FfiIncomingEnvelopeKind.POLL_BALLOTS,
+            -> Unit
             // ADR-0045 — a committer-liveness beacon likewise rides the GROUP
             // JOURNAL as an MLS application message, never the SFU
             // signal-relay, and it says nothing about a CALL committer (the

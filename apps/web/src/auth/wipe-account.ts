@@ -349,6 +349,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // ADR-0087 section 13a: own channel reactions and comments not yet sent
     // to the account's other devices.
     { name: "channel-feedback-unsent", run: () => removeLocal(`lakko.channel-feedback.unsent.v1.${accountIdB64}`) },
+    // ADR-0090 section 3.6 — the own poll-choice register's unsent marker.
+    { name: "poll-choice-unsent", run: () => removeLocal(`lakko.poll-choice.unsent.v1.${accountIdB64}`) },
     { name: "unseen-reactions", run: () => removeLocal(`lakko.unseen-reactions.v1:${accountIdB64}`) },
     // ADR-0080: the cards of the account's devices, this device's own card,
     // its city answer and its "Show my city" switch.

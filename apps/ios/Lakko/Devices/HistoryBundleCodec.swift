@@ -255,15 +255,21 @@ public enum HistoryBundleCodec {
                 waveform: a.waveformB64.flatMap { Data(base64Encoded: $0) },
                 width: a.width,
                 height: a.height,
-                thumb: a.thumb.flatMap(Self.historyThumb(from:))
+                thumb: a.thumb.flatMap(Self.historyThumb(from:)),
+                title: a.title,
+                artist: a.artist
             )
         }
+        // ADR-0090 section 3.11 — a content message travels with its content
+        // and the state this device folded.
+        let content = m.toChatMessage().flatMap { ContentModel.bundleContent($0, nowMs: ChatRepository.nowMs()) }
         let placeholder = HistoryPlaceholder(
             messageId: UInt64(bitPattern: m.messageId),
             direction: Self.directionFromString(m.direction),
             createdAt: m.createdAt,
             text: m.text,
-            attachments: attachments
+            attachments: attachments,
+            content: content
         )
         return try encodeHistoryPlaceholder(placeholder: placeholder)
     }
@@ -298,15 +304,21 @@ public enum HistoryBundleCodec {
                         width: t.width,
                         height: t.height
                     )
-                }
+                },
+                title: a.title,
+                artist: a.artist
             )
+        }
+        let restored = placeholder.content.flatMap { content in
+            ContentModel.restored(content, attachments: attachments.compactMap { $0.toAttachmentRef() })
         }
         return PersistedMessage(
             messageId: Int64(bitPattern: placeholder.messageId),
             direction: Self.directionToString(placeholder.direction),
             text: placeholder.text,
             attachments: attachments,
-            createdAt: placeholder.createdAt
+            createdAt: placeholder.createdAt,
+            content: restored
         )
     }
 

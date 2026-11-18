@@ -27,6 +27,210 @@
       "text": "Reloading...",
       "comment": "Update banner button while the page is reloading."
     },
+    "article.at_limit": {
+      "text": "This article is at its length limit.",
+      "comment": "Shown under the format bar when the article reaches a limit."
+    },
+    "article.body": {
+      "text": "Write your article",
+      "comment": "Placeholder of the article body."
+    },
+    "article.caption": {
+      "text": "Caption",
+      "comment": "Placeholder of an image caption in the article editor."
+    },
+    "article.discard": {
+      "text": "Discard this article?",
+      "comment": "Dialog when leaving the article editor with something typed."
+    },
+    "article.editor.edit_title": {
+      "text": "Edit article",
+      "comment": "Heading of the article editor when editing."
+    },
+    "article.editor.title": {
+      "text": "New article",
+      "comment": "Heading of the article editor."
+    },
+    "article.format.bold": {
+      "text": "Bold",
+      "comment": "Format bar button."
+    },
+    "article.format.bullets": {
+      "text": "Bulleted list",
+      "comment": "Format bar button."
+    },
+    "article.format.divider": {
+      "text": "Divider",
+      "comment": "Format bar button that adds a divider line."
+    },
+    "article.format.heading": {
+      "text": "Heading",
+      "comment": "Format bar: makes the paragraph a heading."
+    },
+    "article.format.image": {
+      "text": "Image",
+      "comment": "Format bar button that adds an image; also the accessible name of an image without a caption."
+    },
+    "article.format.italic": {
+      "text": "Italic",
+      "comment": "Format bar button."
+    },
+    "article.format.link": {
+      "text": "Link",
+      "comment": "Format bar button that adds a link."
+    },
+    "article.format.numbers": {
+      "text": "Numbered list",
+      "comment": "Format bar button."
+    },
+    "article.format.quote": {
+      "text": "Quote",
+      "comment": "Format bar button."
+    },
+    "article.format.subheading": {
+      "text": "Subheading",
+      "comment": "Format bar: makes the paragraph a subheading."
+    },
+    "article.format.text": {
+      "text": "Text",
+      "comment": "Format bar: makes the paragraph ordinary text."
+    },
+    "article.link.insert": {
+      "text": "Add link",
+      "comment": "Button of the link dialog."
+    },
+    "article.link.invalid": {
+      "text": "Links must start with https://",
+      "comment": "Shown in the link dialog for an address that is not allowed."
+    },
+    "article.link.text": {
+      "text": "Text",
+      "comment": "Field of the link dialog: the words shown for the link."
+    },
+    "article.link.url": {
+      "text": "Address",
+      "comment": "Field of the link dialog; must start with https://."
+    },
+    "article.more": {
+      "text": "More",
+      "comment": "Accessible name of the reader's menu button."
+    },
+    "article.publish": {
+      "text": "Publish",
+      "comment": "Button that sends the article."
+    },
+    "article.read": {
+      "text": "Read article",
+      "comment": "Row at the bottom of an article card."
+    },
+    "article.save_draft": {
+      "text": "Save draft",
+      "comment": "Button that keeps the article on this device and closes the editor."
+    },
+    "article.title": {
+      "text": "Title",
+      "comment": "Placeholder of the article title field."
+    },
+    "attach.error.not_sent": {
+      "text": "Couldn't send. Try again.",
+      "comment": "Composer error line when a poll, checklist, location, contact card, article or a vote / tick on one could not be sent (ADR-0090)."
+    },
+    "attach.menu.article": {
+      "text": "Article",
+      "comment": "Row of the paperclip menu that opens the article editor (a long formatted post)."
+    },
+    "attach.menu.audio": {
+      "text": "Audio",
+      "comment": "Row of the paperclip menu that picks music or audio files (not a voice message)."
+    },
+    "attach.menu.camera": {
+      "text": "Camera",
+      "comment": "Row of the paperclip menu that opens Lakko's camera."
+    },
+    "attach.menu.camera_in_call": {
+      "text": "Unavailable during a call",
+      "comment": "Reason under the disabled Camera row while a call uses the camera."
+    },
+    "attach.menu.checklist": {
+      "text": "Checklist",
+      "comment": "Row of the paperclip menu that opens the checklist editor."
+    },
+    "attach.menu.contact": {
+      "text": "Contact",
+      "comment": "Row of the paperclip menu that shares one of the person's contacts."
+    },
+    "attach.menu.file": {
+      "text": "File",
+      "comment": "Row of the paperclip menu that opens the file picker."
+    },
+    "attach.menu.label": {
+      "text": "Attach",
+      "comment": "Accessible name of the paperclip button that opens the attachment menu."
+    },
+    "attach.menu.location": {
+      "text": "Location",
+      "comment": "Row of the paperclip menu that sends where the person is now."
+    },
+    "attach.menu.no_camera": {
+      "text": "No camera on this device",
+      "comment": "Reason under the disabled Camera row of the paperclip menu."
+    },
+    "attach.menu.no_location": {
+      "text": "Location isn't available on this device",
+      "comment": "Reason under the disabled Location row of the paperclip menu."
+    },
+    "attach.menu.photo_video": {
+      "text": "Photo or Video",
+      "comment": "Row of the paperclip menu that opens the photo and video picker."
+    },
+    "attach.menu.poll": {
+      "text": "Poll",
+      "comment": "Row of the paperclip menu that opens the poll editor."
+    },
+    "attach.preview.caption": {
+      "text": "Add a caption",
+      "comment": "Placeholder of the caption field on the send preview."
+    },
+    "attach.preview.file_too_big": {
+      "text": "Files up to 50 MB can be sent.",
+      "comment": "Shown when a picked file is over the size limit; the file is removed from the preview."
+    },
+    "attach.preview.photo_unreadable": {
+      "text": "Couldn't read this photo",
+      "comment": "Shown on one picked photo that could not be decoded."
+    },
+    "attach.preview.remove": {
+      "text": "Remove {name}",
+      "comment": "Accessible name of the control that removes one item from the send preview; {name} is the file name."
+    },
+    "attach.preview.send": {
+      "text": "Send",
+      "comment": "Button on the send preview that sends the picked items."
+    },
+    "attach.preview.send_as_file": {
+      "text": "Send as file",
+      "comment": "Switch on the send preview: send photos and videos as their original files."
+    },
+    "attach.preview.title": {
+      "text": "Send",
+      "comment": "Heading of the send preview screen."
+    },
+    "attach.preview.video_refused": {
+      "text": "This video can't be sent. Videos must be MP4 and up to 50 MB. Send it as a file instead.",
+      "comment": "Shown on a picked video that cannot be sent as a video."
+    },
+    "audio.pause": {
+      "text": "Pause {title}",
+      "comment": "Accessible name of the pause button on an audio message."
+    },
+    "audio.play": {
+      "text": "Play {title}",
+      "comment": "Accessible name of the play button on an audio message."
+    },
+    "audio.unplayable": {
+      "text": "Couldn't play this file",
+      "comment": "Shown on an audio message that could not be played."
+    },
     "auth.brand.body": {
       "text": "Chats, groups, channels and calls, end-to-end encrypted by default.",
       "comment": "Text under the headline on the brand panel beside the sign-in and sign-up forms.",
@@ -1510,6 +1714,46 @@
       "comment": "Screen reader label of the 'Can't decrypt' badge when the participant has no name.",
       "security_critical": true
     },
+    "camera.allow_browser": {
+      "text": "Allow camera access in your browser's site settings",
+      "comment": "Second line in the camera screen on web when camera access was refused."
+    },
+    "camera.denied": {
+      "text": "Lakko needs camera access to take photos",
+      "comment": "Shown in the camera screen when camera access was refused."
+    },
+    "camera.photo": {
+      "text": "Photo",
+      "comment": "Switch in the camera screen: the shutter takes a photo."
+    },
+    "camera.retake": {
+      "text": "Retake",
+      "comment": "Button on the preview after a capture: take it again."
+    },
+    "camera.shutter_photo": {
+      "text": "Take photo",
+      "comment": "Accessible name of the shutter in photo mode."
+    },
+    "camera.shutter_record": {
+      "text": "Start recording",
+      "comment": "Accessible name of the shutter in video mode before recording."
+    },
+    "camera.shutter_stop": {
+      "text": "Stop recording",
+      "comment": "Accessible name of the shutter while recording."
+    },
+    "camera.switch": {
+      "text": "Switch camera",
+      "comment": "Button that switches between front and back cameras."
+    },
+    "camera.video": {
+      "text": "Video",
+      "comment": "Switch in the camera screen: the shutter records a video."
+    },
+    "camera.video_unsupported": {
+      "text": "Video can't be recorded in this browser",
+      "comment": "Shown in the camera screen when this browser cannot record MP4 video."
+    },
     "channel_reactions.all_sub": {
       "text": "Subscribers can react with any emoji.",
       "comment": "Channel Reactions screen, under All reactions."
@@ -2628,6 +2872,22 @@
     "chat.composer.send": {
       "text": "Send",
       "comment": "Button that sends the message or the recording."
+    },
+    "chat.content.preview.article": {
+      "text": "Article: {text}",
+      "comment": "Conversation list and notification preview of an article message; {text} is its title (ADR-0090 section 1)."
+    },
+    "chat.content.preview.checklist": {
+      "text": "Checklist: {text}",
+      "comment": "Conversation list and notification preview of a checklist message; {text} is its title (ADR-0090 section 1)."
+    },
+    "chat.content.preview.contact": {
+      "text": "Contact: {text}",
+      "comment": "Conversation list and notification preview of a shared contact card; {text} is the contact's name (ADR-0090 section 1)."
+    },
+    "chat.content.preview.poll": {
+      "text": "Poll: {text}",
+      "comment": "Conversation list and notification preview of a poll message; {text} is the poll question (ADR-0090 section 1)."
     },
     "chat.day.today": {
       "text": "Today",
@@ -4297,6 +4557,74 @@
       "text": "Synchronizing...",
       "comment": "Status at the top of the conversation list while a newly added or restored device is still being admitted to the account's chats."
     },
+    "checklist.add_item": {
+      "text": "Add item",
+      "comment": "Row at the bottom of a checklist that adds an item."
+    },
+    "checklist.close": {
+      "text": "Close checklist",
+      "comment": "Message-menu item and dialog button that closes a checklist for good."
+    },
+    "checklist.close_confirm": {
+      "text": "Close this checklist? Nobody will be able to tick or add items any more.",
+      "comment": "Dialog before closing a checklist."
+    },
+    "checklist.done_of": {
+      "text": "{done} of {total} done",
+      "comment": "Line under a checklist's title."
+    },
+    "checklist.edit": {
+      "text": "Edit checklist",
+      "comment": "Message-menu item on the creator's checklist."
+    },
+    "checklist.editor.create": {
+      "text": "Create",
+      "comment": "Button that sends the checklist."
+    },
+    "checklist.editor.discard": {
+      "text": "Discard this checklist?",
+      "comment": "Dialog when leaving the checklist editor with something typed."
+    },
+    "checklist.editor.edit_title": {
+      "text": "Edit checklist",
+      "comment": "Heading of the checklist editor when editing an existing checklist."
+    },
+    "checklist.editor.item": {
+      "text": "Item {n}",
+      "comment": "Placeholder of an item field; {n} is its number."
+    },
+    "checklist.editor.name": {
+      "text": "Title",
+      "comment": "Label of the checklist title field."
+    },
+    "checklist.editor.remove_item": {
+      "text": "Remove item {n}",
+      "comment": "Accessible name of the control that removes an item."
+    },
+    "checklist.editor.save": {
+      "text": "Save",
+      "comment": "Button that sends the edited checklist."
+    },
+    "checklist.editor.title": {
+      "text": "New checklist",
+      "comment": "Heading of the checklist editor."
+    },
+    "checklist.item_done": {
+      "text": "{text}, done by {name}",
+      "comment": "Accessible text of a done checklist item."
+    },
+    "checklist.item_not_done": {
+      "text": "{text}, not done",
+      "comment": "Accessible text of a checklist item not done."
+    },
+    "checklist.others_add": {
+      "text": "Others can add items",
+      "comment": "Switch in the checklist editor."
+    },
+    "checklist.others_mark": {
+      "text": "Others can mark items done",
+      "comment": "Switch in the checklist editor."
+    },
     "common.adding": {
       "text": "Adding...",
       "comment": "Add button while the item is being added."
@@ -4588,6 +4916,55 @@
     "common.unknown": {
       "text": "unknown",
       "comment": "Shown in place of a date or value that could not be read."
+    },
+    "contact.add": {
+      "text": "Add contact",
+      "comment": "Button on a shared contact card."
+    },
+    "contact.no_username": {
+      "text": "No username to share",
+      "comment": "Reason under a contact that cannot be shared."
+    },
+    "contact.not_findable": {
+      "text": "{name} can't be found by username. Ask {sender} to introduce you, or ask {name} for an invite link.",
+      "comment": "Shown when a shared contact cannot be found by username."
+    },
+    "contact.not_shareable": {
+      "text": "{name} doesn't let others share their contact",
+      "comment": "Reason under a contact that cannot be shared as a card: their 'Who can find me' setting is Nobody. {name} is the contact's display name."
+    },
+    "contact.open_chat": {
+      "text": "Open chat",
+      "comment": "Button on a shared contact card for someone already a contact."
+    },
+    "contact.picker.empty": {
+      "text": "No contacts yet",
+      "comment": "Shown in the contact picker when the person has no contacts."
+    },
+    "contact.picker.search": {
+      "text": "Search contacts",
+      "comment": "Placeholder of the search field in the contact picker."
+    },
+    "contact.picker.title": {
+      "text": "Share a contact",
+      "comment": "Heading of the contact picker."
+    },
+    "contact.request_sent": {
+      "text": "Request sent",
+      "comment": "Line on a shared contact card after Add contact sent a contact request (docs/ux/attachments.md section 10.2)."
+    },
+    "contact.send": {
+      "text": "Send",
+      "comment": "Button that sends the chosen contact."
+    },
+    "contact.this_is_you": {
+      "text": "This is you",
+      "comment": "Line on a shared contact card that describes the person themselves."
+    },
+    "contact.username_changed": {
+      "text": "This username now belongs to someone else.",
+      "comment": "Shown when the username on a shared card now names a different account; nothing is sent.",
+      "security_critical": true
     },
     "contacts.accept.error.old_version": {
       "text": "This request came from an older version of Lakko. Ask them to update and send it again.",
@@ -5929,6 +6306,14 @@
     "ds.clock_skew": {
       "text": "Check this device's date and time.",
       "comment": "Shown when the server refused a request because this device's clock is wrong."
+    },
+    "editor.discard": {
+      "text": "Discard",
+      "comment": "Danger button of a discard dialog in an editor."
+    },
+    "editor.keep_editing": {
+      "text": "Keep editing",
+      "comment": "Button of a discard dialog that returns to the editor."
     },
     "feed.action.hide": {
       "text": "Hide from feeds",
@@ -7581,6 +7966,10 @@
       "text": "Lakko uses Face ID to confirm it is you before it shows your recovery phrase.",
       "comment": "iOS system permission prompt for Face ID (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
     },
+    "ios.permission.location": {
+      "text": "Lakko uses your location only when you choose to send where you are in a conversation. Nothing is sent before you tap Send.",
+      "comment": "iOS system permission prompt for location access while using the app (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
+    },
     "ios.permission.microphone": {
       "text": "Lakko uses the microphone for end-to-end-encrypted calls and to record voice messages and video messages you choose to send. The mic is only on while you are in a call or recording a message, and everything it captures is encrypted on your device before it is sent.",
       "comment": "iOS system permission prompt for microphone access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
@@ -7636,6 +8025,54 @@
     "language.name.zh-hans": {
       "text": "Chinese (Simplified)",
       "comment": "Name of Simplified Chinese, shown under its own name in the language list."
+    },
+    "location.a11y": {
+      "text": "Location, {coordinates}, accurate to {distance}",
+      "comment": "Accessible text of a location card."
+    },
+    "location.accuracy": {
+      "text": "Accurate to {distance}",
+      "comment": "Accuracy of a location; {distance} is formatted for the locale."
+    },
+    "location.allow_browser": {
+      "text": "Allow location access in your browser's site settings",
+      "comment": "Second line on web when location access was refused."
+    },
+    "location.approximate": {
+      "text": "Approximate location",
+      "comment": "Shown when only an approximate location is available."
+    },
+    "location.copy": {
+      "text": "Copy coordinates",
+      "comment": "Message-menu item that copies a location's coordinates."
+    },
+    "location.denied": {
+      "text": "Lakko needs location access to send where you are",
+      "comment": "Shown when location access was refused."
+    },
+    "location.finding": {
+      "text": "Finding your location…",
+      "comment": "Shown while waiting for the first location fix."
+    },
+    "location.name_place": {
+      "text": "Name this place",
+      "comment": "Optional field on the location screen."
+    },
+    "location.not_found": {
+      "text": "Couldn't find your location. Try again outdoors or near a window.",
+      "comment": "Shown when no location fix came."
+    },
+    "location.open_osm": {
+      "text": "Open in OpenStreetMap",
+      "comment": "Message-menu item that opens a location on openstreetmap.org."
+    },
+    "location.send": {
+      "text": "Send current location",
+      "comment": "Button that sends the current location."
+    },
+    "location.title": {
+      "text": "Location",
+      "comment": "Heading of the location screen."
     },
     "nav.calls": {
       "text": "Calls",
@@ -7788,6 +8225,197 @@
     "open_in_app.button": {
       "text": "Open in the app",
       "comment": "Button on the invite, call-link, group-invite and shared-feed web pages: opens the Lakko app installed on this computer, phone or tablet, on the same screen."
+    },
+    "poll.close": {
+      "text": "Close poll",
+      "comment": "Message-menu item and dialog button that closes a poll for good."
+    },
+    "poll.close_confirm": {
+      "text": "Close this poll? Nobody will be able to vote any more.",
+      "comment": "Dialog before closing a poll."
+    },
+    "poll.closed": {
+      "text": "Closed",
+      "comment": "Footer of a closed poll or checklist."
+    },
+    "poll.closes_in": {
+      "text": "Closes in {time}",
+      "comment": "Footer of a poll that closes automatically; {time} is a duration formatted for the locale."
+    },
+    "poll.editor.anonymous": {
+      "text": "Anonymous voting",
+      "comment": "Switch in the poll editor."
+    },
+    "poll.editor.anonymous_off": {
+      "text": "Everyone in this chat will see who voted for what.",
+      "comment": "Under the Anonymous voting switch when it is off.",
+      "security_critical": true
+    },
+    "poll.editor.anonymous_on": {
+      "text": "Nobody, including you, will see who voted for what. Everyone sees the totals.",
+      "comment": "Under the Anonymous voting switch when it is on. A promise about privacy; must not overstate it.",
+      "security_critical": true
+    },
+    "poll.editor.close_1d": {
+      "text": "1 day",
+      "comment": "Choice of when the poll closes."
+    },
+    "poll.editor.close_1h": {
+      "text": "1 hour",
+      "comment": "Choice of when the poll closes."
+    },
+    "poll.editor.close_1w": {
+      "text": "1 week",
+      "comment": "Choice of when the poll closes."
+    },
+    "poll.editor.close_auto": {
+      "text": "Close automatically",
+      "comment": "Switch in the poll editor that closes the poll after a time."
+    },
+    "poll.editor.correct": {
+      "text": "Correct answer",
+      "comment": "Accessible name of the radio that marks the correct option in a quiz."
+    },
+    "poll.editor.create": {
+      "text": "Create",
+      "comment": "Button that sends the poll."
+    },
+    "poll.editor.discard": {
+      "text": "Discard this poll?",
+      "comment": "Dialog when leaving the poll editor with something typed."
+    },
+    "poll.editor.explanation": {
+      "text": "Explanation",
+      "comment": "Optional field in quiz mode, shown after someone answers."
+    },
+    "poll.editor.move_down": {
+      "text": "Move down",
+      "comment": "Accessible name of the control that moves an option or item down."
+    },
+    "poll.editor.move_up": {
+      "text": "Move up",
+      "comment": "Accessible name of the control that moves an option or item up."
+    },
+    "poll.editor.multiple": {
+      "text": "Multiple answers",
+      "comment": "Switch in the poll editor."
+    },
+    "poll.editor.option": {
+      "text": "Option {n}",
+      "comment": "Placeholder of an option field in the poll editor; {n} is its number."
+    },
+    "poll.editor.options": {
+      "text": "Options",
+      "comment": "Heading above the option fields in the poll editor."
+    },
+    "poll.editor.question": {
+      "text": "Question",
+      "comment": "Label of the poll question field."
+    },
+    "poll.editor.quiz": {
+      "text": "Quiz mode",
+      "comment": "Switch in the poll editor: one option is the correct answer."
+    },
+    "poll.editor.remove_option": {
+      "text": "Remove option {n}",
+      "comment": "Accessible name of the control that removes an option."
+    },
+    "poll.editor.title": {
+      "text": "New poll",
+      "comment": "Heading of the poll editor."
+    },
+    "poll.kind.anonymous": {
+      "text": "Anonymous poll",
+      "comment": "Line under a poll's question."
+    },
+    "poll.kind.anonymous_quiz": {
+      "text": "Anonymous quiz",
+      "comment": "Line under an anonymous quiz's question."
+    },
+    "poll.kind.multiple": {
+      "text": "Multiple answers",
+      "comment": "Added to the line under a poll's question when several answers may be picked."
+    },
+    "poll.kind.public": {
+      "text": "Poll",
+      "comment": "Line under a poll's question."
+    },
+    "poll.kind.quiz": {
+      "text": "Quiz",
+      "comment": "Line under a quiz's question."
+    },
+    "poll.option_result": {
+      "text": "{option}, {percent} percent, {count, plural, one {# vote} other {# votes}}",
+      "comment": "Accessible text of an option after voting."
+    },
+    "poll.resend_refused": {
+      "text": "The group has changed since this poll was made. Create it again.",
+      "comment": "Under a failed anonymous poll whose re-send is refused: the people in the group changed, so the poll cannot be sent as it was made."
+    },
+    "poll.results.title": {
+      "text": "Results",
+      "comment": "Heading of the poll results screen."
+    },
+    "poll.retract": {
+      "text": "Retract vote",
+      "comment": "Message-menu item that takes back the person's vote."
+    },
+    "poll.sending_vote": {
+      "text": "Sending your vote…",
+      "comment": "Footer of a poll while an anonymous vote waits to be sent."
+    },
+    "poll.try_again": {
+      "text": "Try again",
+      "comment": "Button that sends a vote again."
+    },
+    "poll.unverifiable": {
+      "text": "This poll can't be checked on this device.",
+      "comment": "Shown on an anonymous poll whose voter list does not match what its author signed; nobody can vote in it here.",
+      "security_critical": true
+    },
+    "poll.view_results": {
+      "text": "View results",
+      "comment": "Link under a non-anonymous poll that opens who voted for what."
+    },
+    "poll.vote": {
+      "text": "Vote",
+      "comment": "Button under a multiple-answer poll that sends the ticked options."
+    },
+    "poll.vote_failed": {
+      "text": "Your vote wasn't sent",
+      "comment": "Footer of a poll whose vote could not be sent."
+    },
+    "poll.votes": {
+      "text": "{n, plural, =0 {No votes yet} one {# vote} other {# votes}}",
+      "comment": "Footer of a poll card."
+    },
+    "poll.your_choice": {
+      "text": "your choice",
+      "comment": "Added to the accessible text of the person's own choice."
+    },
+    "preview.article": {
+      "text": "Article: {title}",
+      "comment": "Chat list and notification preview of an article."
+    },
+    "preview.audio": {
+      "text": "{title}",
+      "comment": "Chat list preview of an audio file: its title."
+    },
+    "preview.checklist": {
+      "text": "Checklist: {title}",
+      "comment": "Chat list and notification preview of a checklist."
+    },
+    "preview.contact": {
+      "text": "Contact: {name}",
+      "comment": "Chat list and notification preview of a shared contact."
+    },
+    "preview.location": {
+      "text": "Location",
+      "comment": "Chat list and notification preview of a location."
+    },
+    "preview.poll": {
+      "text": "Poll: {question}",
+      "comment": "Chat list and notification preview of a poll."
     },
     "profile.avatar.change": {
       "text": "Change photo",

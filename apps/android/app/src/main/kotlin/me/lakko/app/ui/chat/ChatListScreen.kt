@@ -1120,9 +1120,15 @@ internal fun rowPreview(
     val inviteText = last.channelInvite?.takeIf { !last.deleted }
         ?.let { me.lakko.app.ui.channels.channelInviteSummary(it) }
         ?.let { me.lakko.app.ui.channels.channelInvitePreviewText(it, strings) }
+    // ADR-0090 section 1 — a poll, checklist, location, contact card or
+    // article reads as one line (`Poll: {question}`), never its attachments.
+    val contentText = last.content?.takeIf { !last.deleted }?.let { c ->
+        val (key, args) = me.lakko.app.chat.contentSummary(c)
+        strings.format(key, args)
+    }
     val line = previewLine(
-        text = inviteText ?: last.text,
-        attachments = last.attachments.map { PreviewAttachment(it.kind, it.mime) },
+        text = contentText ?: inviteText ?: last.text,
+        attachments = if (contentText != null) emptyList() else last.attachments.map { PreviewAttachment(it.kind, it.mime) },
         deleted = last.deleted,
         author = previewPrefix(last.direction, isGroup, senderName),
         strings = strings,

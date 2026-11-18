@@ -26,6 +26,7 @@ fn minimal(id: u64) -> VaultMessage {
         reactions: Vec::new(),
         call: None,
         unsupported_version: None,
+        content: None,
     }
 }
 
@@ -55,6 +56,8 @@ fn attachment() -> VaultAttachment {
         width: Some(3),
         height: Some(4),
         thumb: Some(thumb()),
+        title: "Song".into(),
+        artist: "Band".into(),
     }
 }
 
@@ -91,6 +94,11 @@ fn full(id: u64) -> VaultMessage {
             duration_secs: 60,
         }),
         unsupported_version: Some(9),
+        content: Some(VaultContent {
+            kind: 1,
+            payload: b"{}".to_vec(),
+            state: vec![1, 2],
+        }),
     }
 }
 
@@ -195,12 +203,13 @@ fn minimal_message_bytes(id: u64) -> Vec<u8> {
     b.extend_from_slice(&0u16.to_be_bytes()); // reaction_count
     b.push(0); // no call
     b.push(0); // no unsupported_version
+    b.push(0); // no content
     b
 }
 
 #[test]
 fn a_minimal_chunk_is_pinned() {
-    let mut expected = vec![0x01, 0x00, 0x01];
+    let mut expected = vec![0x02, 0x00, 0x01];
     expected.extend_from_slice(&minimal_message_bytes(12));
     assert_eq!(minimal_message_bytes(12).len(), MIN_MESSAGE_LEN);
     let chunk = chunk_of(minimal(12));
@@ -210,8 +219,8 @@ fn a_minimal_chunk_is_pinned() {
     let empty = HistoryChunk {
         messages: Vec::new(),
     };
-    assert_eq!(empty.encode().unwrap(), [0x01, 0x00, 0x00]);
-    assert_eq!(HistoryChunk::decode(&[0x01, 0x00, 0x00]).unwrap(), empty);
+    assert_eq!(empty.encode().unwrap(), [0x02, 0x00, 0x00]);
+    assert_eq!(HistoryChunk::decode(&[0x02, 0x00, 0x00]).unwrap(), empty);
 }
 
 fn full_attachment_bytes() -> Vec<u8> {
@@ -244,6 +253,10 @@ fn full_attachment_bytes() -> Vec<u8> {
     b.push(0); // no thumb width
     b.push(1); // thumb height present
     b.extend_from_slice(&8u16.to_be_bytes());
+    b.push(4); // title_len
+    b.extend_from_slice(b"Song");
+    b.push(4); // artist_len
+    b.extend_from_slice(b"Band");
     b
 }
 
@@ -283,12 +296,18 @@ fn full_message_bytes(id: u64) -> Vec<u8> {
     b.extend_from_slice(&60u32.to_be_bytes()); // duration_secs
     b.push(1); // unsupported_version present
     b.extend_from_slice(&9u32.to_be_bytes());
+    b.push(1); // content present
+    b.push(1); // kind: poll
+    b.extend_from_slice(&2u32.to_be_bytes()); // payload_len
+    b.extend_from_slice(b"{}");
+    b.extend_from_slice(&2u16.to_be_bytes()); // state_len
+    b.extend_from_slice(&[1, 2]);
     b
 }
 
 #[test]
 fn a_full_message_is_pinned() {
-    let mut expected = vec![0x01, 0x00, 0x01];
+    let mut expected = vec![0x02, 0x00, 0x01];
     expected.extend_from_slice(&full_message_bytes(40));
     let chunk = chunk_of(full(40));
     assert_eq!(chunk.encode().unwrap(), expected);
@@ -298,7 +317,7 @@ fn a_full_message_is_pinned() {
 
 #[test]
 fn a_head_is_pinned() {
-    let mut e = vec![0x01]; // version
+    let mut e = vec![0x02]; // version
     e.extend_from_slice(&[0x01, 0x02, 0x02, 0xC1, 0xC1]); // ref: group, 2-byte id
     e.push(2); // kind: group
     e.extend_from_slice(&[0, 1]); // title_len
@@ -352,7 +371,7 @@ fn a_devices_head_and_an_index_are_pinned() {
             },
         ],
     };
-    let mut e = vec![0x01, 0x02];
+    let mut e = vec![0x02, 0x02];
     e.extend_from_slice(&4u64.to_be_bytes());
     e.extend_from_slice(&1u32.to_be_bytes());
     e.push(0xA1);
@@ -364,10 +383,10 @@ fn a_devices_head_and_an_index_are_pinned() {
     let none = DevicesHead {
         reentry: Vec::new(),
     };
-    assert_eq!(none.encode().unwrap(), [0x01, 0x00]);
-    assert_eq!(DevicesHead::decode(&[0x01, 0x00]).unwrap(), none);
+    assert_eq!(none.encode().unwrap(), [0x02, 0x00]);
+    assert_eq!(DevicesHead::decode(&[0x02, 0x00]).unwrap(), none);
 
-    let mut e = vec![0x01];
+    let mut e = vec![0x02];
     e.extend_from_slice(&2u32.to_be_bytes()); // entry_count
     e.extend_from_slice(&[0x01, 0x02, 0x02, 0xC1, 0xC1]); // ref: group
     e.extend_from_slice(&7u64.to_be_bytes());
@@ -380,7 +399,7 @@ fn a_devices_head_and_an_index_are_pinned() {
     let empty = VaultIndex {
         entries: Vec::new(),
     };
-    assert_eq!(empty.encode().unwrap(), [0x01, 0, 0, 0, 0]);
+    assert_eq!(empty.encode().unwrap(), [0x02, 0, 0, 0, 0]);
 }
 
 // --- round trips ------------------------------------------------------
@@ -816,6 +835,8 @@ fn empty_attachment() -> VaultAttachment {
         width: None,
         height: None,
         thumb: None,
+        title: String::new(),
+        artist: String::new(),
     }
 }
 
@@ -938,7 +959,7 @@ fn versions_trailing_bytes_and_truncation() {
         assert_eq!(decode(good), Ok(()));
         assert_eq!(decode(&[]), Err(RecordError::Truncated));
 
-        for version in [0x00, 0x02, 0xFF] {
+        for version in [0x00, 0x01, 0x03, 0xFF] {
             let mut bytes = good.clone();
             bytes[0] = version;
             assert_eq!(decode(&bytes), Err(RecordError::UnknownVersion));
@@ -971,7 +992,7 @@ fn versions_trailing_bytes_and_truncation() {
         );
     }
     assert_eq!(
-        DevicesHead::decode(&[0x02, 0x00]),
+        DevicesHead::decode(&[0x01, 0x00]),
         Err(RecordError::UnknownVersion)
     );
 }
@@ -989,11 +1010,11 @@ fn unknown_flags_and_options_are_refused() {
     };
     // Minimal message offsets: direction 8, author presence 9, flags 26,
     // reply presence 32, forward presence 33, call presence 36,
-    // unsupported presence 37.
+    // unsupported presence 37, content presence 38.
     assert_eq!(patched(MSG + 8, 3), Err(RecordError::UnknownOption));
     assert_eq!(patched(MSG + 26, 0b100), Err(RecordError::UnknownFlag));
     assert_eq!(patched(MSG + 26, 0x80), Err(RecordError::UnknownFlag));
-    for presence in [9, 32, 33, 36, 37] {
+    for presence in [9, 32, 33, 36, 37, 38] {
         assert_eq!(
             patched(MSG + presence, 2),
             Err(RecordError::UnknownOption),
@@ -1008,10 +1029,13 @@ fn unknown_flags_and_options_are_refused() {
     }
 
     // A call's `video` and a shared pin's `pinned` are booleans.
-    let mut call = chunk_of(with(|m| m.unsupported_version = None))
-        .encode()
-        .unwrap();
-    let video = call.len() - 1 - 4 - 1;
+    let mut call = chunk_of(with(|m| {
+        m.unsupported_version = None;
+        m.content = None;
+    }))
+    .encode()
+    .unwrap();
+    let video = call.len() - 1 - 1 - 4 - 1;
     call[video] = 2;
     assert_eq!(HistoryChunk::decode(&call), Err(RecordError::UnknownOption));
 
@@ -1044,14 +1068,15 @@ fn text_that_is_not_utf8_is_refused() {
     bytes[text] = 0xFF;
     assert_eq!(HistoryChunk::decode(&bytes), Err(RecordError::NotUtf8));
 
-    // An emoji: the byte before the call presence, call and unsupported.
+    // An emoji: the byte before the call, unsupported and content presences.
     let mut bytes = chunk_of(with(|m| {
         m.call = None;
         m.unsupported_version = None;
+        m.content = None;
     }))
     .encode()
     .unwrap();
-    let emoji = bytes.len() - 3;
+    let emoji = bytes.len() - 4;
     assert_eq!(bytes[emoji], b'+');
     bytes[emoji] = 0xC0;
     assert_eq!(HistoryChunk::decode(&bytes), Err(RecordError::NotUtf8));
@@ -1068,27 +1093,27 @@ fn a_count_larger_than_the_input_is_refused_before_allocation() {
     // 512 messages declared, none present.
     let declared = u16::try_from(MAX_CHUNK_MESSAGES).unwrap().to_be_bytes();
     assert_eq!(
-        HistoryChunk::decode(&[0x01, declared[0], declared[1]]),
+        HistoryChunk::decode(&[0x02, declared[0], declared[1]]),
         Err(RecordError::Truncated)
     );
     // One past the bound reports the bound, with or without the bytes.
     let declared = u16::try_from(MAX_CHUNK_MESSAGES + 1).unwrap().to_be_bytes();
     assert_eq!(
-        HistoryChunk::decode(&[0x01, declared[0], declared[1]]),
+        HistoryChunk::decode(&[0x02, declared[0], declared[1]]),
         Err(RecordError::Messages)
     );
     assert_eq!(
-        HistoryChunk::decode(&[0x01, 0xFF, 0xFF]),
+        HistoryChunk::decode(&[0x02, 0xFF, 0xFF]),
         Err(RecordError::Messages)
     );
 
     // An index declaring 65536 entries in five bytes.
     let declared = u32::try_from(MAX_INDEX_ENTRIES).unwrap().to_be_bytes();
-    let mut bytes = vec![0x01];
+    let mut bytes = vec![0x02];
     bytes.extend_from_slice(&declared);
     assert_eq!(VaultIndex::decode(&bytes), Err(RecordError::Truncated));
     assert_eq!(
-        VaultIndex::decode(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF]),
+        VaultIndex::decode(&[0x02, 0xFF, 0xFF, 0xFF, 0xFF]),
         Err(RecordError::Entries)
     );
 
@@ -1217,4 +1242,53 @@ fn reason_codes_are_distinct() {
     let codes: BTreeSet<&str> = all.iter().map(|e| e.code()).collect();
     assert_eq!(codes.len(), all.len());
     assert!(codes.iter().all(|c| !c.is_empty()));
+}
+
+#[test]
+fn audio_tag_and_content_bounds() {
+    // The tag bound is the largest a one-byte length can name, so an
+    // over-long tag cannot be written at all; the encoder refuses it.
+    for (at, past) in [
+        (
+            with_attachment(|a| a.title = "t".repeat(MAX_AUDIO_TAG_BYTES)),
+            with_attachment(|a| a.title = "t".repeat(MAX_AUDIO_TAG_BYTES + 1)),
+        ),
+        (
+            with_attachment(|a| a.artist = "a".repeat(MAX_AUDIO_TAG_BYTES)),
+            with_attachment(|a| a.artist = "a".repeat(MAX_AUDIO_TAG_BYTES + 1)),
+        ),
+    ] {
+        let ok = chunk_of(at);
+        assert_eq!(HistoryChunk::decode(&ok.encode().unwrap()).unwrap(), ok);
+        assert_eq!(chunk_of(past).encode(), Err(RecordError::Attachment));
+    }
+    let content = |kind: u8, payload: usize, state: usize| {
+        with(|m| {
+            m.content = Some(VaultContent {
+                kind,
+                payload: vec![b'x'; payload],
+                state: vec![1; state],
+            });
+        })
+    };
+    message_bound(
+        content(5, MAX_CONTENT_PAYLOAD_BYTES, 0),
+        content(5, MAX_CONTENT_PAYLOAD_BYTES + 1, 0),
+        RecordError::Content,
+    );
+    message_bound(
+        content(2, 1, MAX_CONTENT_STATE_BYTES),
+        content(2, 1, MAX_CONTENT_STATE_BYTES + 1),
+        RecordError::Content,
+    );
+    for bad in [content(0, 1, 0), content(6, 1, 0), content(1, 0, 0)] {
+        assert_eq!(chunk_of(bad).encode(), Err(RecordError::Content));
+    }
+    // An unknown kind byte written by hand is refused on decode.
+    let mut bytes = chunk_of(full(1)).encode().unwrap();
+    // From the end: state(2), state_len(2), payload(2), payload_len(4), kind.
+    let kind = bytes.len() - (2 + 2 + 2 + 4 + 1);
+    assert_eq!(bytes[kind], 1);
+    bytes[kind] = 9;
+    assert_eq!(HistoryChunk::decode(&bytes), Err(RecordError::Content));
 }

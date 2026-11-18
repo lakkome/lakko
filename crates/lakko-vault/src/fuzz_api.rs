@@ -53,6 +53,21 @@ pub fn chunk_decode(data: &[u8]) {
     };
     assert!(data.len() <= MAX_RECORD_BYTES, "a decoded chunk is bounded");
     assert!(chunk.validate().is_ok(), "a decoded chunk validates");
+    // ADR-0090: a content block and the audio tags are within their bounds.
+    for message in &chunk.messages {
+        if let Some(c) = &message.content {
+            assert!(crate::record::CONTENT_KINDS.contains(&c.kind));
+            assert!(
+                !c.payload.is_empty()
+                    && c.payload.len() <= crate::record::MAX_CONTENT_PAYLOAD_BYTES
+            );
+            assert!(c.state.len() <= crate::record::MAX_CONTENT_STATE_BYTES);
+        }
+        for a in &message.attachments {
+            assert!(a.title.len() <= crate::record::MAX_AUDIO_TAG_BYTES);
+            assert!(a.artist.len() <= crate::record::MAX_AUDIO_TAG_BYTES);
+        }
+    }
     assert_eq!(
         chunk.encode().as_deref(),
         Ok(data),

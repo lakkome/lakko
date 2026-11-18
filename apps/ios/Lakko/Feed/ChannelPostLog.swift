@@ -3,6 +3,7 @@
 
 import CryptoKit
 import Foundation
+import LakkoCore
 
 /// The channel-post log (ADR-0063 section 3): the posts of subscribed and own
 /// channels this device has decrypted, kept so the feed can rank them without
@@ -60,6 +61,9 @@ enum ChannelPostLog {
     enum PostOutcome: Equatable {
         /// A text post: kept.
         case text(String)
+        /// A post with what the feed keeps of it: its text (the feed line for
+        /// content), its files, and its content envelope when it has one.
+        case post(text: String, attachments: [AttachmentRef], contentEnvelopeB64: String?)
         /// Read and not a feed item (a metadata record, a malformed record, a
         /// post that failed to open under its epoch's seed): passed over.
         case skip
@@ -96,9 +100,17 @@ enum ChannelPostLog {
                     blocked = true
                     break
                 }
-                if case .text(let text) = outcome {
+                switch outcome {
+                case .text(let text):
                     fresh.append(
                         PersistedChannelPost(cursor: p.cursor, serverTsMs: p.serverTsMs, text: text))
+                case .post(let text, let attachments, let content):
+                    fresh.append(PersistedChannelPost(
+                        cursor: p.cursor, serverTsMs: p.serverTsMs, text: text,
+                        attachments: attachments.map(PersistedAttachment.init(from:)),
+                        contentEnvelopeB64: content))
+                case .skip, .wait:
+                    break
                 }
                 cursor = p.cursor
             }
@@ -115,6 +127,33 @@ struct PersistedChannelPost: Codable, Equatable {
     /// Server receive time, unix ms.
     let serverTsMs: Int64
     let text: String
+    /// The post's files (ADR-0087 section 13: a post is a chat envelope),
+    /// `nil` for a row written before the log kept them.
+    let attachments: [PersistedAttachment]?
+    /// ADR-0090 — a content post (poll, checklist, location, card, article)
+    /// as its envelope; `text` is then its feed line. `nil` for a chat post
+    /// and for every row written before the log kept it.
+    let contentEnvelopeB64: String?
+
+    init(
+        cursor: UInt64, serverTsMs: Int64, text: String,
+        attachments: [PersistedAttachment]? = nil, contentEnvelopeB64: String? = nil
+    ) {
+        self.cursor = cursor
+        self.serverTsMs = serverTsMs
+        self.text = text
+        self.attachments = attachments.flatMap { $0.isEmpty ? nil : $0 }
+        self.contentEnvelopeB64 = contentEnvelopeB64.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The files as references; one that no longer decodes is left out.
+    var attachmentRefs: [AttachmentRef] {
+        (attachments ?? []).compactMap { $0.toAttachmentRef() }
+    }
+
+    var content: PersistedContent? {
+        contentEnvelopeB64.map { PersistedContent(envelopeB64: $0) }
+    }
 }
 
 /// One channel's slice of the log.

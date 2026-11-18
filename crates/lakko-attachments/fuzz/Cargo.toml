@@ -28,3 +28,22 @@ path = "fuzz_targets/message_body_parse.rs"
 test = false
 doc = false
 bench = false
+
+# ADR-0090 section 8: the article block format. An article rides in a chat
+# envelope any member or publisher writes; the decoder must never panic and
+# must accept only canonical bytes.
+[[bin]]
+name = "article_decode"
+path = "fuzz_targets/article_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0090: the content payload and state snapshot carried by history bundles
+# and vault records.
+[[bin]]
+name = "content_bundle_decode"
+path = "fuzz_targets/content_bundle_decode.rs"
+test = false
+doc = false
+bench = false

@@ -110,7 +110,17 @@ impl ReactionKey {
         let mut input = Vec::with_capacity(8 + emoji.len());
         input.extend_from_slice(&post_cursor.to_be_bytes());
         input.extend_from_slice(emoji.as_bytes());
-        let digest = hash::blake3_keyed(self.0.as_bytes(), &input);
+        self.keyed_label(&input)
+    }
+
+    /// `BLAKE3-keyed(reaction_key, input)[..16]`: the one keyed hash every
+    /// label under this key is. Shared with the channel poll option labels
+    /// ([`crate::poll`], ADR-0090 section 4.3). The reaction rule is a byte
+    /// length only, so a crafted "emoji" can equal an option label's input;
+    /// that buys nothing, since votes and reactions are counted in separate
+    /// tables at the service and resolved against separate candidate lists.
+    pub(crate) fn keyed_label(&self, input: &[u8]) -> ReactionLabel {
+        let digest = hash::blake3_keyed(self.0.as_bytes(), input);
         let mut label = [0u8; REACTION_LABEL_LEN];
         label.copy_from_slice(&digest[..REACTION_LABEL_LEN]);
         label

@@ -39,6 +39,11 @@ describe("notification words for the service worker", () => {
       reactedToYourMessage: expect.stringContaining("reacted"),
       senderPrefixed: expect.stringContaining(":"),
       reactionsOff: false,
+      pollPreview: "Poll: \u0001",
+      checklistPreview: "Checklist: \u0001",
+      locationPreview: "Location",
+      contactPreview: "Contact: \u0001",
+      articlePreview: "Article: \u0001",
     });
     expect(words.senderPrefixed).toContain("\u0001");
     expect(words.senderPrefixed).toContain("\u0002");

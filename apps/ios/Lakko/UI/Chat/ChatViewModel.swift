@@ -295,7 +295,7 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Wiring
 
-    private let repository: ChatRepository
+    let repository: ChatRepository
 
     /// ADR-0059 section 6 — the shared-channels runtime, for the group-info
     /// "Share my channels" switch.
@@ -1051,6 +1051,7 @@ public final class ChatViewModel: ObservableObject {
         }
         if DsClientError.clockSkewCopy(in: error) != nil { return .key("ds.clock_skew") }
         if AnonTokenUnavailable.isQuotaExhausted(error) { return .key("tokens.action_allowance_used") }
+        if (error as? ContentSendError) == .pollRingChanged { return .key("poll.resend_refused") }
         return .key(fallbackKey)
     }
 
@@ -2917,8 +2918,21 @@ public final class ChatViewModel: ObservableObject {
     /// forwarded (the menu withholds Forward there too): no id, a tombstone,
     /// or a send that has not completed.
     func beginForward(_ message: ChatMessage) {
-        guard message.messageId > 0, !message.deleted, message.ack == .sent else { return }
+        guard message.messageId > 0, !message.deleted, message.ack == .sent, isForwardable(message) else { return }
         forwardingMessage = message
+    }
+
+    /// ADR-0090 — whether `message` may be forwarded by what it holds
+    /// (``ForwardPayload/isForwardable(_:cardShareable:)``), the contact-card
+    /// check read from the newest profile this device holds.
+    func isForwardable(_ message: ChatMessage) -> Bool {
+        Self.isForwardable(message)
+    }
+
+    static func isForwardable(_ message: ChatMessage) -> Bool {
+        ForwardPayload.isForwardable(message) {
+            ProfileDirectory.shared.cardShareable(signatureKeyB64: $0.base64EncodedString())
+        }
     }
 
     /// Cancel (Back, the sheet swiped away) sends nothing.
@@ -2982,7 +2996,14 @@ public final class ChatViewModel: ObservableObject {
             originGroupIdHex: groupIdHex,
             // ADR-0053 section 6 — a forward out of a one-to-one carries no origin.
             sourceIsOneToOne: repository.conversationKind(groupIdHex: groupIdHex) == .chat)
+        guard isForwardable(message) else { throw ContentSendError.notAllowed }
+        // An article's images are its attachments, re-encrypted the same way.
         let refs = try await ForwardAttachments.reencryptAll(message.attachments)
+        if let content = ForwardPayload.forwardedContent(of: message) {
+            try await repository.sendContent(
+                groupIdHex: targetGroupIdHex, content: content, attachments: refs, forward: payload.forward)
+            return
+        }
         try await repository.sendMessage(
             groupIdHex: targetGroupIdHex,
             plaintext: payload.text,
@@ -3831,6 +3852,20 @@ public final class ChatViewModel: ObservableObject {
     /// in the composer's error line, nothing sent.
     public func reportAttachmentProblem(_ copy: UiText) {
         sendError = copy
+    }
+
+    /// ADR-0090 — an attachment prepared elsewhere (an audio file with its
+    /// tags) joins the composer tray.
+    /// ADR-0090 — the send preview takes what its upload put in the tray.
+    func takePendingAttachments() -> [AttachmentRef] {
+        let taken = pendingAttachments
+        pendingAttachments = []
+        return taken
+    }
+
+    func appendPendingAttachment(_ ref: AttachmentRef) {
+        sendError = nil
+        pendingAttachments.append(ref)
     }
 
     /// UX spec section 10 — encrypt and upload a picked photo or video with

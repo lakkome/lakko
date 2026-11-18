@@ -19,6 +19,9 @@ workspace = true
 # The canonical username rule, so "is this worth a lookup" is the SAME
 # predicate the blinder enforces rather than a third spelling of it.
 lakko-contacts.workspace = true
+# The message-link rule (`message_links`), defined once in lakko-attachments
+# so the article codec (ADR-0090) uses the same rule; re-exported here.
+lakko-attachments.workspace = true
 # The one-emoji rule (`emoji`, UX reactions-and-emoji D10): extended
 # grapheme clusters, and the Extended_Pictographic property that
 # unicode-segmentation uses but does not expose. Both justified at the

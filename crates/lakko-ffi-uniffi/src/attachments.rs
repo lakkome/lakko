@@ -45,7 +45,10 @@ use crate::FfiError;
 
 impl From<inner::AttachmentError> for FfiError {
     fn from(e: inner::AttachmentError) -> Self {
-        FfiError::Attachment(e.to_string())
+        match e {
+            inner::AttachmentError::Content(c) => crate::content::content_err(c),
+            other => FfiError::Attachment(other.to_string()),
+        }
     }
 }
 
@@ -117,6 +120,14 @@ pub struct AttachmentRef {
     /// ADR-0047 — the poster-frame blob (video note still).
     #[uniffi(default = None)]
     pub thumb: Option<ThumbRef>,
+    /// ADR-0090 — an `audio` attachment's title tag (<= 255 bytes); kept
+    /// only on kind `audio`.
+    #[uniffi(default = None)]
+    pub title: Option<String>,
+    /// ADR-0090 — an `audio` attachment's artist tag (<= 255 bytes); kept
+    /// only on kind `audio`.
+    #[uniffi(default = None)]
+    pub artist: Option<String>,
 }
 
 /// ADR-0047 — a poster-frame blob attached to an [`AttachmentRef`]: its
@@ -413,7 +424,9 @@ pub fn compose_chat_envelope(
 /// Convert FFI attachment refs to the wire shape: byte fields to base64,
 /// lengths checked up front so a wrong-shape input fails fast at the FFI
 /// rather than at JSON parse on the other side.
-fn refs_from_ffi(attachments: Vec<AttachmentRef>) -> Result<Vec<inner::AttachmentRef>, FfiError> {
+pub(crate) fn refs_from_ffi(
+    attachments: Vec<AttachmentRef>,
+) -> Result<Vec<inner::AttachmentRef>, FfiError> {
     attachments
         .into_iter()
         .map(|r| -> Result<inner::AttachmentRef, FfiError> {
@@ -452,6 +465,8 @@ fn refs_from_ffi(attachments: Vec<AttachmentRef>) -> Result<Vec<inner::Attachmen
                 width: r.width,
                 height: r.height,
                 thumb,
+                title: r.title,
+                artist: r.artist,
             })
         })
         .collect()
@@ -525,6 +540,34 @@ pub enum MessageBodyKind {
     /// catalog sentence, never core prose. Appended last so every earlier
     /// variant keeps its ordinal.
     Unsupported,
+    /// ADR-0090 — a poll in `content` (check its signature with
+    /// `verifyPoll` against the sender's account key, C-68). Appended.
+    Poll,
+    /// ADR-0090 — a checklist in `content` (`verifyChecklist`).
+    Checklist,
+    /// ADR-0090 — a location in `content`.
+    Location,
+    /// ADR-0090 — a contact card in `content`.
+    ContactCard,
+    /// ADR-0090 — an article in `content`; its images are `attachments`.
+    Article,
+    /// ADR-0090 — a non-anonymous vote on the poll `target`: `poll_choices`
+    /// (empty = retract). Never a bubble.
+    PollVote,
+    /// ADR-0090 — close the poll or checklist `target`. Never a bubble.
+    PollClose,
+    /// ADR-0090 — tick `checklist_item` of the checklist `target`, done =
+    /// `checklist_done`. Never a bubble.
+    ChecklistTick,
+    /// ADR-0090 — add an item (`text`) to the checklist `target`; the item's
+    /// id is this row's DS `messageId`. Never a bubble.
+    ChecklistAdd,
+    /// ADR-0090 — the author's edit of the checklist `target`, the
+    /// replacement in `content` (signature checked by the receiver).
+    EditChecklist,
+    /// ADR-0090 — an edit of the article `target`, the replacement in
+    /// `content` and its images in `attachments`.
+    EditArticle,
 }
 
 /// Output of [`parse_body_envelope`]: the classified message body
@@ -589,6 +632,75 @@ pub struct ParsedBody {
     /// (`Some` only for `Chat`). Open it with `openChannelInviteCard`.
     #[uniffi(default = None)]
     pub channel_invite: Option<Vec<u8>>,
+    /// ADR-0090 — the content of a `Poll` / `Checklist` / `Location` /
+    /// `ContactCard` / `Article` message, or the replacement of an
+    /// `EditChecklist` / `EditArticle`.
+    #[uniffi(default = None)]
+    pub content: Option<crate::content::MessageContent>,
+    /// ADR-0090 — a `PollVote`'s choices (empty = retract).
+    #[uniffi(default = None)]
+    pub poll_choices: Option<Vec<u8>>,
+    /// ADR-0090 — the item a `ChecklistTick` names.
+    #[uniffi(default = None)]
+    pub checklist_item: Option<crate::content::ChecklistItemRef>,
+    /// ADR-0090 — a `ChecklistTick`'s done state.
+    #[uniffi(default = None)]
+    pub checklist_done: Option<bool>,
+    /// ADR-0090 section 4.3 — a channel poll's frozen tally on a `PollClose`,
+    /// decoded; `None` in a group, or when it was absent or did not decode
+    /// (the close stands).
+    #[uniffi(default = None)]
+    pub poll_tally: Option<crate::channel_poll::ChannelPollTally>,
+}
+
+impl ParsedBody {
+    fn empty(kind: MessageBodyKind) -> Self {
+        Self {
+            kind,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
+            emoji: None,
+            is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
+            content: None,
+            poll_choices: None,
+            checklist_item: None,
+            checklist_done: None,
+            poll_tally: None,
+        }
+    }
+
+    fn with_reply_forward(
+        mut self,
+        reply: Option<inner::Reply>,
+        forward: Option<inner::Forward>,
+    ) -> Self {
+        self.reply_to = reply.as_ref().map(|r| r.target);
+        self.reply_author = reply.as_ref().and_then(|r| r.author.clone());
+        self.reply_excerpt = reply.and_then(|r| r.excerpt);
+        self.forwarded_from = forward.as_ref().and_then(|f| f.author.clone());
+        self.forward_origin_group_b64 = forward
+            .as_ref()
+            .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone()));
+        self.forward_origin_message_id = forward.and_then(|f| f.origin.map(|o| o.message_id));
+        self
+    }
+
+    fn with_content(mut self, content: inner::Content) -> Self {
+        self.content = Some(content.into());
+        self
+    }
 }
 
 /// Add or take off a reaction (UX reactions-and-emoji section 17).
@@ -716,174 +828,150 @@ pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, FfiError> {
 /// [`parse_envelope`].
 #[uniffi::export]
 #[must_use]
-#[allow(clippy::too_many_lines)] // one struct literal per body kind
+#[allow(clippy::too_many_lines)] // one arm per body kind
 pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
+    use inner::MessageBody as B;
+    use MessageBodyKind as K;
     match inner::parse_body(&bytes) {
-        inner::MessageBody::Chat {
+        B::Chat {
             text,
             attachments,
             reply,
             forward,
             resend,
             channel_invite,
-        } => ParsedBody {
-            kind: MessageBodyKind::Chat,
-            text,
-            attachments: refs_to_ffi(attachments),
-            target: None,
-            emoji: None,
-            is_typing: None,
-            reply_to: reply.as_ref().map(|r| r.target),
-            reply_author: reply.as_ref().and_then(|r| r.author.clone()),
-            reply_excerpt: reply.and_then(|r| r.excerpt),
-            forwarded_from: forward.as_ref().and_then(|f| f.author.clone()),
-            forward_origin_group_b64: forward
-                .as_ref()
-                .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone())),
-            forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
-            resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
-            resend_origin_message_id: resend.map(|r| r.message_id),
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite,
+        } => {
+            let mut p = ParsedBody::empty(K::Chat).with_reply_forward(reply, forward);
+            p.text = text;
+            p.attachments = refs_to_ffi(attachments);
+            p.resend_origin_group_b64 = resend.as_ref().map(|r| r.group_id_b64.clone());
+            p.resend_origin_message_id = resend.map(|r| r.message_id);
+            p.channel_invite = channel_invite;
+            p
         },
-        inner::MessageBody::Edit { target, text } => ParsedBody {
-            kind: MessageBodyKind::Edit,
-            text,
-            attachments: Vec::new(),
-            target: Some(target),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Edit { target, text } => {
+            let mut p = ParsedBody::empty(K::Edit);
+            p.text = text;
+            p.target = Some(target);
+            p
         },
-        inner::MessageBody::Delete { target } => ParsedBody {
-            kind: MessageBodyKind::Delete,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(target),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Delete { target } => {
+            let mut p = ParsedBody::empty(K::Delete);
+            p.target = Some(target);
+            p
         },
-        inner::MessageBody::Reaction {
+        B::Reaction {
             target,
             emoji,
             action,
             target_author,
-        } => ParsedBody {
-            kind: MessageBodyKind::Reaction,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(target),
-            emoji: Some(emoji),
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: Some(action.into()),
-            reaction_target_author: target_author.map(|k| k.to_vec()),
-            channel_invite: None,
+        } => {
+            let mut p = ParsedBody::empty(K::Reaction);
+            p.target = Some(target);
+            p.emoji = Some(emoji);
+            p.reaction_action = Some(action.into());
+            p.reaction_target_author = target_author.map(|k| k.to_vec());
+            p
         },
-        inner::MessageBody::Typing { is_typing } => ParsedBody {
-            kind: MessageBodyKind::Typing,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: None,
-            emoji: None,
-            is_typing: Some(is_typing),
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Typing { is_typing } => {
+            let mut p = ParsedBody::empty(K::Typing);
+            p.is_typing = Some(is_typing);
+            p
         },
-        inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
-            kind: MessageBodyKind::ReadReceipt,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(up_to),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::ReadReceipt { up_to } => {
+            let mut p = ParsedBody::empty(K::ReadReceipt);
+            p.target = Some(up_to);
+            p
         },
-        inner::MessageBody::Unsupported { version } => ParsedBody {
-            kind: MessageBodyKind::Unsupported,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(i64::from(version)),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Unsupported { version } => {
+            let mut p = ParsedBody::empty(K::Unsupported);
+            p.target = Some(i64::from(version));
+            p
         },
-        inner::MessageBody::ServiceEnvelope => ParsedBody {
-            kind: MessageBodyKind::ServiceEnvelope,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: None,
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::ServiceEnvelope => ParsedBody::empty(K::ServiceEnvelope),
+        B::Poll {
+            poll,
+            reply,
+            forward,
+        } => ParsedBody::empty(K::Poll)
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::Poll(poll)),
+        B::Checklist {
+            checklist,
+            reply,
+            forward,
+        } => ParsedBody::empty(K::Checklist)
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::Checklist(checklist)),
+        B::Location {
+            location,
+            reply,
+            forward,
+        } => ParsedBody::empty(K::Location)
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::Location(location)),
+        B::ContactCard {
+            card,
+            reply,
+            forward,
+        } => ParsedBody::empty(K::ContactCard)
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::ContactCard(card)),
+        B::Article {
+            article,
+            attachments,
+            reply,
+            forward,
+        } => {
+            let mut p = ParsedBody::empty(K::Article)
+                .with_reply_forward(reply, forward)
+                .with_content(inner::Content::Article(article));
+            p.attachments = refs_to_ffi(attachments);
+            p
+        },
+        B::PollVote { target, choices } => {
+            let mut p = ParsedBody::empty(K::PollVote);
+            p.target = Some(target);
+            p.poll_choices = Some(choices);
+            p
+        },
+        B::PollClose { target, tally } => {
+            let mut p = ParsedBody::empty(K::PollClose);
+            p.target = Some(target);
+            p.poll_tally = tally
+                .and_then(|t| lakko_channels::poll::decode_poll_tally(&t).ok())
+                .map(Into::into);
+            p
+        },
+        B::ChecklistTick { target, item, done } => {
+            let mut p = ParsedBody::empty(K::ChecklistTick);
+            p.target = Some(target);
+            p.checklist_item = Some(item.into());
+            p.checklist_done = Some(done);
+            p
+        },
+        B::ChecklistAdd { target, text } => {
+            let mut p = ParsedBody::empty(K::ChecklistAdd);
+            p.target = Some(target);
+            p.text = text;
+            p
+        },
+        B::EditChecklist { target, checklist } => {
+            let mut p = ParsedBody::empty(K::EditChecklist)
+                .with_content(inner::Content::Checklist(checklist));
+            p.target = Some(target);
+            p
+        },
+        B::EditArticle {
+            target,
+            article,
+            attachments,
+        } => {
+            let mut p =
+                ParsedBody::empty(K::EditArticle).with_content(inner::Content::Article(article));
+            p.target = Some(target);
+            p.attachments = refs_to_ffi(attachments);
+            p
         },
     }
 }
@@ -917,6 +1005,8 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 width: r.width,
                 height: r.height,
                 thumb,
+                title: r.title,
+                artist: r.artist,
             })
         })
         .collect()
@@ -1187,6 +1277,8 @@ mod tests {
             width: None,
             height: None,
             thumb: None,
+            title: None,
+            artist: None,
         }
     }
 
@@ -1220,6 +1312,8 @@ mod tests {
             width: Some(480),
             height: Some(480),
             thumb: Some(thumb.clone()),
+            title: None,
+            artist: None,
         };
         let bytes = compose_envelope("c".to_string(), vec![r.clone()]).unwrap();
         for got in [

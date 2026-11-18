@@ -33,6 +33,7 @@ import { foldChannelMeta } from "../channels/channel-meta";
 import { decodeAndDecryptPost } from "../channels/composer";
 import { toPostDecode, type PostDecode } from "../channels/post-decode";
 import { parseBodyEnvelopeWith } from "../chat/attachments";
+import { persistedFromAttachmentRef } from "../chat/persisted-attachment";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import {
@@ -148,7 +149,18 @@ export async function syncAll(
         (bytes) => parseBodyEnvelopeWith(wasm, bytes),
       );
       if (d.kind === "meta") metas.push(d);
-      return d.kind === "text" ? { kind: "text", text: d.text } : { kind: "skip" };
+      // A post's files and a content post's content are kept too, so the
+      // feed shows them and a forward from it carries them (UX
+      // `attachments.md` section 11a).
+      if (d.kind === "text") {
+        const files = (d.body?.attachments ?? []).map((a) => persistedFromAttachmentRef(a));
+        return { kind: "text", text: d.text, ...(files.length === 0 ? {} : { attachments: files }) };
+      }
+      if (d.kind === "content") {
+        const files = d.body.attachments.map((a) => persistedFromAttachmentRef(a));
+        return { kind: "text", text: "", content: d.body.content, ...(files.length === 0 ? {} : { attachments: files }) };
+      }
+      return { kind: "skip" };
     };
     const slot = log.channels[channel.idHex];
     try {

@@ -109,6 +109,9 @@ export interface PersistedAttachment {
   readonly width?: number | null;
   readonly height?: number | null;
   readonly thumb?: PersistedThumb | null;
+  /** ADR-0090 section 2 — an audio file's tags. */
+  readonly title?: string | null;
+  readonly artist?: string | null;
   /**
    * UX spec §8 — "played" is LOCAL state: this device has started playing
    * the message. Never sent, never part of a history bundle. Absent means
@@ -207,6 +210,16 @@ export interface PersistedMessage {
    * draw `chat.message.unsupported`, in the language current when drawn.
    */
   readonly unsupportedVersion?: number;
+  /**
+   * ADR-0090 — a poll, checklist, location, contact card or article, the
+   * `MessageContent` object exactly as the envelope carried it (plain JSON;
+   * for an edited checklist or article, the latest replacement). Optional
+   * without a version bump: a row without it is an ordinary message.
+   */
+  readonly content?: unknown;
+  /** ADR-0090 section 3.11 — the folded state a history bundle carried for
+   *  a poll or checklist (`ContentState`), as the sending device saw it. */
+  readonly contentState?: unknown;
   /**
    * `docs/ux/second-device.md` section 4 — on a system (commit) row only: the
    * person keys a received batch added to and removed from a group, recorded
@@ -317,6 +330,9 @@ export interface PersistedHeldSend {
    *  group it was composed in. */
   readonly replyGroupIdB64?: string;
   readonly forward?: PersistedForward;
+  /** ADR-0090 — a held content message's `MessageContent`, verbatim; absent
+   *  (rows written before the field) for an ordinary message. */
+  readonly content?: unknown;
 }
 
 /**

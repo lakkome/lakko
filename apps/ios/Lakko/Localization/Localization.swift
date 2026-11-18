@@ -252,6 +252,14 @@ final class Localization: ObservableObject {
                 texts: ["name": ReactionNotificationMirror.nameMark, "emoji": ReactionNotificationMirror.emojiMark], counts: [:]) {
                 words["notification.reaction.body"] = line
             }
+            // ADR-0090 section 1 — the content previews (`Poll: {question}`),
+            // with the marker `{text}` the extension replaces with the item's
+            // own text.
+            for key in SharedStorage.notificationContentLineKeys {
+                if let line = built?.format(key: key, texts: ["text": "{text}"], counts: [:]) {
+                    words[key] = line
+                }
+            }
             SharedStorage.setNotificationWords(words)
         }
     }

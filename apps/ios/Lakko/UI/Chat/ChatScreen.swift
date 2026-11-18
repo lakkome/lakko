@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import AVFoundation
 import LakkoCore
 import PhotosUI
 import SwiftUI
@@ -65,6 +66,18 @@ public struct ChatScreen: View {
     @State private var photoPickerItems: [PhotosPickerItem] = []
     @State private var fileImporterPresented: Bool = false
     @State private var attachActionSheetPresented: Bool = false
+    /// ADR-0090 — the menu item picked, run once the menu sheet has gone.
+    @State private var pendingMenuItem: AttachmentMenuItem?
+    /// ADR-0090 — the editor or reader on screen.
+    @State private var contentScreen: ContentScreenRequest?
+    @State private var audioImporterPresented = false
+    /// UX sections 3 and 4 — the send preview's items, when it is open.
+    @State private var previewItems: [SendPreviewItem]?
+    @State private var previewRetake = false
+    /// UX 7.3 / 8.2 — `Close this poll?` / `Close this checklist?`.
+    @State private var closeConfirm: ContentCloseConfirm?
+    /// ADR-0090 section 7 — what each contact card's button says after a tap.
+    @State private var contactCardStates: [String: ContactCardButton] = [:]
     // Inline preview of an image attachment — set when a
     // bubble-chip "Open" tap resolves the bytes. Sheet
     // dismisses on `nil`.
@@ -607,27 +620,65 @@ public struct ChatScreen: View {
             }
             openedModel.chatScreenClosed()
         }
-        // 1.19c3 — Attach action sheet → Photo / Document.
-        // Compactly hosts the two picker entry points without
-        // crowding the composer toolbar with two buttons.
-        .lakkoActionSheet(
-            isPresented: $attachActionSheetPresented,
-            title: l10n.t("chat.composer.attach")
-        ) {[
-            .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
-                // Trigger the PhotosPicker by giving it a fresh
-                // empty selection — the PhotosPicker `Button`
-                // below opens immediately when bound to a
-                // populated $photoPickerItems. SwiftUI's
-                // `PhotosPicker` doesn't have a programmatic
-                // show-trigger; we route through a transparent
-                // overlay (`photoPickerTrigger` below).
-                photoPickerOpenRequested = true
-            },
-            .action(l10n.t("chat.media.file"), systemImage: "doc") {
-                fileImporterPresented = true
-            },
-        ]}
+        // ADR-0090 / `docs/ux/attachments.md` section 2 — the one menu the
+        // paperclip opens: rows from the core, an in-app bottom sheet. The
+        // picked row runs once the sheet has gone, so a picker it presents is
+        // not refused by the dismissal still in flight.
+        .sheet(isPresented: $attachActionSheetPresented, onDismiss: runPendingMenuItem) {
+            AttachmentMenuSheet(rows: viewModel.attachmentMenuRows(
+                hasCamera: ContentDevice.hasCamera, hasLocation: ContentDevice.hasLocation)
+            ) { item in
+                pendingMenuItem = item
+                attachActionSheetPresented = false
+            }
+        }
+        .fullScreenCover(item: $contentScreen) { request in
+            contentScreenView(request)
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { previewItems != nil }, set: { if !$0 { previewItems = nil } })
+        ) {
+            if let items = previewItems {
+                SendPreviewScreen(
+                    items: items,
+                    onRetake: previewRetake ? {
+                        previewItems = nil
+                        previewRetake = false
+                        Task {
+                            try? await Task.sleep(nanoseconds: 400_000_000)
+                            contentScreen = .camera
+                        }
+                    } : nil,
+                    onSend: { picked, caption, asFile in
+                        previewItems = nil
+                        previewRetake = false
+                        Task { await viewModel.sendPreviewItems(picked, caption: caption, asFile: asFile) }
+                    },
+                    onCancel: { previewItems = nil; previewRetake = false })
+            }
+        }
+        .lakkoDialog(item: $closeConfirm) { confirm in
+            LakkoDialogContent(
+                title: l10n.t(confirm.isPoll ? "poll.close_confirm" : "checklist.close_confirm"),
+                message: nil, field: nil,
+                actions: [
+                    .danger(l10n.t(confirm.isPoll ? "poll.close" : "checklist.close")) {
+                        viewModel.closeContent(messageId: confirm.message.messageId)
+                    },
+                    .cancel(),
+                ])
+        }
+        .background(
+            // UX section 6 — the document picker filtered to audio. On its own
+            // view: SwiftUI keeps one file importer per view.
+            Color.clear.fileImporter(
+                isPresented: $audioImporterPresented, allowedContentTypes: [.audio],
+                allowsMultipleSelection: true
+            ) { result in
+                guard case .success(let urls) = result else { return }
+                for url in urls { Task { await viewModel.onAudioPicked(url: url) } }
+            }
+        )
         // PhotosPicker — multi-select, resolved on `.onChange`.
         .photosPicker(
             isPresented: $photoPickerOpenRequested,
@@ -642,11 +693,11 @@ public struct ChatScreen: View {
             // after kicking off the work so the same photo can
             // be re-picked later if the user wants to attach it
             // again.
+            // UX section 3 — the picked items open the send preview.
             let items = newItems
             photoPickerItems = []
-            for item in items {
-                Task { await sendPicked(item) }
-            }
+            guard !items.isEmpty else { return }
+            Task { previewItems = await loadPreviewItems(items) }
         }
         // File importer for arbitrary files.
         .fileImporter(
@@ -656,17 +707,19 @@ public struct ChatScreen: View {
         ) { result in
             switch result {
             case .success(let urls):
+                // UX section 4 — the picked files open the send preview; a
+                // file over the cap is not added and says so.
+                var items: [SendPreviewItem] = []
                 for url in urls {
-                    Task {
-                        if let payload = readFileURL(url) {
-                            await viewModel.onAttachmentPicked(
-                                bytes: payload.bytes,
-                                mime: payload.mime,
-                                name: payload.name
-                            )
-                        }
+                    guard let payload = readFileURL(url) else { continue }
+                    guard SendPreviewRules.fileAcceptable(bytes: payload.bytes.count) else {
+                        viewModel.reportAttachmentProblem(.key("attach.preview.file_too_big"))
+                        continue
                     }
+                    items.append(SendPreviewItem(
+                        source: .file(payload.bytes, name: payload.name ?? "file", mime: payload.mime)))
                 }
+                if !items.isEmpty { previewItems = items }
             case .failure:
                 // Cancelled or denied — silent.
                 break
@@ -911,8 +964,17 @@ public struct ChatScreen: View {
                                 readState: viewModel.readState(of: entry.message),
                                 onRetrySend: { viewModel.onRetrySend(localId: $0) },
                                 onPreview: openAttachmentPreview,
-                                onEdit: { viewModel.beginEdit(entry.message) },
+                                onEdit: {
+                                    if entry.message.content != nil {
+                                        contentScreen = .article(editing: entry.message)
+                                    } else {
+                                        viewModel.beginEdit(entry.message)
+                                    }
+                                },
                                 onDelete: { viewModel.deleteMessage(entry.message) },
+                                contentContext: entry.message.content == nil ? nil : contentContext,
+                                contentActions: contentMenuActions(entry.message),
+                                onContentAction: { performContentAction($0, entry.message) },
                                 onReact: { emoji in
                                     viewModel.react(to: entry.message, emoji: emoji)
                                 },
@@ -1314,6 +1376,10 @@ public struct ChatScreen: View {
     @ViewBuilder
     private func selectionActionBar(_ selection: MessageSelection) -> some View {
         let allOwn = selectionIsAllOwn
+        // ADR-0090 — a selection holding a poll, a checklist or a card that
+        // may not be shared cannot be forwarded as a whole.
+        let forwardEnabled = selection.forwardEnabled(
+            allForwardable: selectedMessagesOldestFirst.allSatisfy(viewModel.isForwardable))
         let helper = bulkNotice ?? selection.deleteHelper(allOwn: allOwn)
         VStack(spacing: 6) {
             HStack(spacing: 0) {
@@ -1328,8 +1394,8 @@ public struct ChatScreen: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.lakkoAccent)
-                .disabled(!selection.forwardEnabled || bulkRunning)
-                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .disabled(!forwardEnabled || bulkRunning)
+                .opacity(forwardEnabled && !bulkRunning ? 1 : 0.4)
                 .accessibilityIdentifier("selection-forward")
                 // ADR-0065 / UX section 2 — Save acts on the whole set.
                 Button {
@@ -1839,6 +1905,35 @@ public struct ChatScreen: View {
         }
     }
 
+    /// Load picked library items for the send preview: a photo's bytes and
+    /// picture, a video's file, poster and whether it may be sent as it is.
+    private func loadPreviewItems(_ picked: [PhotosPickerItem]) async -> [SendPreviewItem] {
+        var out: [SendPreviewItem] = []
+        for item in picked {
+            if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
+                guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
+                    viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_video"))
+                    continue
+                }
+                var entry = SendPreviewItem(source: .video(movie.url))
+                let generator = AVAssetImageGenerator(asset: AVURLAsset(url: movie.url))
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 640, height: 640)
+                if case let (image, _)? = try? await generator.image(at: .zero) { entry.thumbnail = UIImage(cgImage: image) }
+                if !(await SendPreviewRules.inspectVideo(movie.url)) { entry.problemKey = "attach.preview.video_refused" }
+                out.append(entry)
+            } else if let data = try? await item.loadTransferable(type: Data.self), !data.isEmpty {
+                var entry = SendPreviewItem(source: .photo(data))
+                entry.thumbnail = UIImage(data: data)
+                if entry.thumbnail == nil { entry.problemKey = "attach.preview.photo_unreadable" }
+                out.append(entry)
+            } else {
+                viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_photo"))
+            }
+        }
+        return out
+    }
+
     private static func pickStamp() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -1870,6 +1965,293 @@ public struct ChatScreen: View {
     /// attachment chip's "Open" tap. Routes the bytes into
     /// `previewImageData` so the body-level `.sheet` modifier
     /// surfaces them inline.
+    // MARK: - ADR-0090: the attachment menu and the content kinds
+
+    /// Run the menu row picked, once the menu has gone (UX section 2.2).
+    private func runPendingMenuItem() {
+        guard let item = pendingMenuItem else { return }
+        pendingMenuItem = nil
+        switch item {
+        case .photoOrVideo: photoPickerOpenRequested = true
+        case .camera: contentScreen = .camera
+        case .file: fileImporterPresented = true
+        case .audio: audioImporterPresented = true
+        case .poll: contentScreen = .poll
+        case .checklist: contentScreen = .checklist(editing: nil)
+        case .location: contentScreen = .location
+        case .contact: contentScreen = .contact
+        case .article: contentScreen = .article(editing: nil)
+        }
+    }
+
+    @ViewBuilder
+    private func contentScreenView(_ request: ContentScreenRequest) -> some View {
+        switch request {
+        case .poll:
+            PollEditorScreen(anonymity: viewModel.pollAnonymityHere, onCreate: { draft in
+                contentScreen = nil
+                viewModel.sendContent(draft)
+            }, onCancel: { contentScreen = nil })
+        case .checklist(let editing):
+            ChecklistEditorScreen(
+                initial: editing.flatMap { ChecklistView.make(message: $0) }.map {
+                    ChecklistBody(
+                        title: $0.state.title, othersAdd: $0.state.othersAdd, othersMark: $0.state.othersMark,
+                        items: $0.state.items.compactMap { item in
+                            if case .author(let id) = item.item { return ChecklistItem(id: id, text: item.text) }
+                            return nil
+                        })
+                },
+                onDone: { body in
+                    contentScreen = nil
+                    if let editing {
+                        viewModel.editChecklist(messageId: editing.messageId, body: body)
+                    } else {
+                        viewModel.sendContent(.checklist(body))
+                    }
+                },
+                onCancel: { contentScreen = nil })
+        case .location:
+            LocationScreen(onSend: { location in
+                contentScreen = nil
+                viewModel.sendContent(.location(location))
+            }, onCancel: { contentScreen = nil })
+        case .contact:
+            ContactCardPickerScreen(candidates: contactCandidates, onSend: { card in
+                contentScreen = nil
+                viewModel.sendContent(.contactCard(card))
+            }, onCancel: { contentScreen = nil })
+        case .article(let editing):
+            ArticleEditorScreen(
+                groupIdHex: viewModel.groupIdHex,
+                editing: editing.flatMap { m in
+                    m.content.flatMap(ContentModel.content).flatMap { content -> ArticleDraft? in
+                        if case .article(let article) = content {
+                            return ArticleDraft(article: article, attachments: m.attachments)
+                        }
+                        return nil
+                    }
+                },
+                upload: { await viewModel.uploadArticleImage($0) },
+                onPublish: { article, refs in
+                    contentScreen = nil
+                    if let editing {
+                        viewModel.editArticle(messageId: editing.messageId, article: article, attachments: refs)
+                    } else {
+                        viewModel.sendContent(.article(article), attachments: refs)
+                    }
+                },
+                onCancel: { contentScreen = nil })
+        case .reader(let message):
+            if let stored = message.content, case .article(let article)? = ContentModel.content(stored) {
+                ArticleReaderScreen(
+                    article: article, attachments: message.attachments,
+                    author: message.authorKeyB64.flatMap { viewModel.personName(signatureKeyB64: $0) } ?? "",
+                    date: message.createdAt,
+                    onClose: { contentScreen = nil },
+                    menu: { readerMenu(message: message, article: article) })
+            }
+        case .results(let message):
+            if let view = PollView.make(
+                message: message, ownAccountKey: viewModel.ownContentKey, registerChoice: nil,
+                nowMs: ChatRepository.nowMs()) {
+                PollResultsScreen(
+                    view: view,
+                    nameOf: { viewModel.personName(signatureKeyB64: $0.base64EncodedString()) ?? "" },
+                    onClose: { contentScreen = nil })
+            }
+        case .camera:
+            CameraCaptureScreen(onSend: { media in
+                // UX section 5 — what was captured opens the send preview,
+                // with Retake in place of the strip.
+                contentScreen = nil
+                Task {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    previewItems = [await SendPreviewItem.captured(media)]
+                    previewRetake = true
+                }
+            }, onClose: { contentScreen = nil })
+        }
+    }
+
+    /// UX section 11.3 — the message menu from the reader's `…`: react,
+    /// reply, forward, copy text, save, pin, as on the bubble. An action that
+    /// opens something of its own closes the reader first.
+    private func readerMenu(message: ChatMessage, article: Article) -> [LakkoMenuItem] {
+        func leaving(_ run: @escaping () -> Void) -> () -> Void {
+            {
+                contentScreen = nil
+                Task {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    run()
+                }
+            }
+        }
+        var items: [LakkoMenuItem] = []
+        if viewModel.messageActionsAvailable {
+            items.append(.action(l10n.t("chat.message.react"), systemImage: "face.smiling",
+                                 perform: leaving { picker = PickerRequest(mode: .reaction, message: message) }))
+            items.append(.action(MessageMenuAction.reply.title, systemImage: MessageMenuAction.reply.systemImage,
+                                 perform: leaving { viewModel.beginReply(message) }))
+        }
+        items.append(.action(MessageMenuAction.forward.title, systemImage: MessageMenuAction.forward.systemImage,
+                             perform: leaving { viewModel.beginForward(message) }))
+        items.append(.action(MessageMenuAction.copy.title, systemImage: MessageMenuAction.copy.systemImage) {
+            MessageClipboard.copy(ArticleReaderScreen.plainText(article))
+        })
+        switch viewModel.saveMenuState(for: message, saved: saved.entries) {
+        case .save:
+            items.append(.action(MessageMenuAction.save.title, systemImage: MessageMenuAction.save.systemImage) {
+                viewModel.toggleSave(message)
+            })
+        case .unsave:
+            items.append(.action(MessageMenuAction.unsave.title, systemImage: MessageMenuAction.unsave.systemImage) {
+                viewModel.toggleSave(message)
+            })
+        case .unavailable:
+            break
+        }
+        switch viewModel.pinMenuState(for: message) {
+        case .pin:
+            items.append(.action(MessageMenuAction.pin.title, systemImage: MessageMenuAction.pin.systemImage,
+                                 perform: leaving { viewModel.beginPin(message) }))
+        case .unpin:
+            items.append(.action(MessageMenuAction.unpin.title, systemImage: MessageMenuAction.unpin.systemImage,
+                                 perform: leaving { viewModel.beginPin(message) }))
+        case .unavailable:
+            break
+        }
+        return items
+    }
+
+    /// UX section 5 — what the camera took goes the photo / video way.
+    private func sendCaptured(_ media: CapturedMedia) async {
+        let stamp = Self.pickStamp()
+        switch media {
+        case .photo(let data):
+            let prepared = await Task.detached(priority: .userInitiated) {
+                PhotoVideoPrep.preparePhoto(data, stamp: stamp)
+            }.value
+            if let prepared {
+                await viewModel.onMediaPrepared(prepared)
+            } else {
+                viewModel.reportAttachmentProblem(.key("attach.preview.photo_unreadable"))
+            }
+        case .video(let url):
+            let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp)
+            try? FileManager.default.removeItem(at: url)
+            if let prepared {
+                await viewModel.onMediaPrepared(prepared)
+            } else {
+                viewModel.reportAttachmentProblem(.key("attach.preview.video_refused"))
+            }
+        }
+    }
+
+    /// UX section 10.1 — the person's contacts, with the username their own
+    /// profile carries (none = disabled).
+    private var contactCandidates: [ContactCardCandidate] {
+        contacts.repositoryState.accepted.map { c in
+            ContactCardCandidate.make(
+                accountKey: c.request.fromPubkey,
+                name: viewModel.personName(signatureKeyB64: c.request.fromPubkey.base64EncodedString())
+                    ?? c.displayLabel)
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// What a content bubble reaches back for.
+    private var contentContext: ContentBubbleContext {
+        ContentBubbleContext(
+            groupIdHex: viewModel.groupIdHex,
+            ownAccountKey: viewModel.ownContentKey,
+            nameOf: { viewModel.personName(signatureKeyB64: $0.base64EncodedString()) },
+            isOwnerOrAdmin: { viewModel.isOwnerOrAdmin($0) },
+            vote: { viewModel.votePoll(messageId: $0, choices: $1) },
+            tick: { viewModel.tickChecklist(messageId: $0, item: $1, done: $2) },
+            addItem: { viewModel.addChecklistItem(messageId: $0, text: $1) },
+            openArticle: { contentScreen = .reader($0) },
+            openResults: { contentScreen = .results($0) },
+            contactCardState: { card in
+                let keyB64 = card.accountKey.base64EncodedString()
+                if let shown = contactCardStates[keyB64] { return shown }
+                if card.accountKey == viewModel.ownContentKey { return .thisIsYou }
+                if contacts.contactMessageId(forPersonKey: card.accountKey) != nil { return .openChat }
+                return .add
+            },
+            contactCardAction: { card, message in Task { await contactCardTapped(card, from: message) } })
+    }
+
+    /// UX section 10.2 — `Open chat`, or the lookup behind `Add contact`.
+    private func contactCardTapped(_ card: SharedContactCard, from message: ChatMessage) async {
+        let keyB64 = card.accountKey.base64EncodedString()
+        if let messageId = contacts.contactMessageId(forPersonKey: card.accountKey),
+           let contact = contacts.contact(messageId: messageId) {
+            if let groupIdHex = await contacts.openOrStartChat(for: contact) {
+                onOpenConversation(groupIdHex, nil)
+            }
+            return
+        }
+        contactCardStates[keyB64] = .working
+        switch await contacts.addFromContactCard(username: card.username, accountKey: card.accountKey) {
+        case .sent:
+            contactCardStates[keyB64] = .notice(l10n.t("contact.request_sent"))
+        case .otherKey:
+            contactCardStates[keyB64] = .notice(l10n.t("contact.username_changed"))
+        case .notFound:
+            contactCardStates[keyB64] = .notice(l10n.t(
+                "contact.not_findable", texts: ["name": card.name,
+                         "sender": message.authorKeyB64.flatMap { viewModel.personName(signatureKeyB64: $0) } ?? ""]))
+        case .failed:
+            contactCardStates[keyB64] = nil
+            viewModel.reportAttachmentProblem(.key("attach.error.not_sent"))
+        }
+    }
+
+    /// ADR-0090 — the message-menu rows a content message adds (UX 7.3,
+    /// 8.2, 9.3).
+    private func contentMenuActions(_ message: ChatMessage) -> [MessageMenuAction] {
+        guard message.messageId > 0, !message.deleted, let stored = message.content,
+              let content = ContentModel.content(stored) else { return [] }
+        let own = viewModel.ownContentKey
+        let isAuthor = message.direction == .outgoing
+        switch content {
+        case .poll:
+            guard let view = PollView.make(
+                message: message, ownAccountKey: own,
+                registerChoice: viewModel.registerChoice(messageId: message.messageId),
+                nowMs: ChatRepository.nowMs()), !view.closed else { return [] }
+            var actions: [MessageMenuAction] = []
+            if view.ownChoices != nil { actions.append(.retractVote) }
+            if isAuthor || (own.map(viewModel.isOwnerOrAdmin) ?? false) { actions.append(.closePoll) }
+            return actions
+        case .checklist:
+            guard isAuthor, let view = ChecklistView.make(message: message), !view.closed else { return [] }
+            return [.editChecklist, .closeChecklist]
+        case .location:
+            return [.copyCoordinates]
+        default:
+            return []
+        }
+    }
+
+    private func performContentAction(_ action: MessageMenuAction, _ message: ChatMessage) {
+        switch action {
+        case .retractVote:
+            viewModel.votePoll(messageId: message.messageId, choices: [])
+        case .closePoll, .closeChecklist:
+            closeConfirm = ContentCloseConfirm(message: message, isPoll: action == .closePoll)
+        case .editChecklist:
+            contentScreen = .checklist(editing: message)
+        case .copyCoordinates:
+            if let stored = message.content, case .location(let l)? = ContentModel.content(stored) {
+                MessageClipboard.copy(LocationText.coordinates(latE7: l.latE7, lonE7: l.lonE7))
+            }
+        default:
+            break
+        }
+    }
+
     fileprivate func openAttachmentPreview(_ ref: AttachmentRef) {
         Task {
             do {
@@ -2065,6 +2447,11 @@ struct MessageRow: View {
     /// outgoing messages (gated below); React on any message.
     let onEdit: () -> Void
     let onDelete: () -> Void
+    /// ADR-0090 — set for a content message: what its bubble reaches back for.
+    var contentContext: ContentBubbleContext? = nil
+    /// ADR-0090 — the message-menu rows a content message adds.
+    var contentActions: [MessageMenuAction] = []
+    var onContentAction: (MessageMenuAction) -> Void = { _ in }
     let onReact: (String) -> Void
     /// ADR-0047 §4 — the reaction bar's trailing `+`: any single emoji.
     var onMoreReactions: () -> Void = {}
@@ -2248,6 +2635,14 @@ struct MessageRow: View {
     /// holds none of its content, so a forward would carry nothing.
     private var canForward: Bool {
         canReact && message.ack == .sent && message.unsupportedVersion == nil
+    }
+
+    /// ADR-0090 (forwarding, amended 2026-11-18) — Forward itself is offered
+    /// on that set minus what may not be forwarded: a poll or checklist, and
+    /// a contact card whose person does not let others share it. The pin
+    /// and Select gates keep ``canForward``.
+    private var forwardOffered: Bool {
+        canForward && ChatViewModel.isForwardable(message)
     }
 
     /// Section 8 — Select is offered on the rows the mode can select, which is
@@ -2455,8 +2850,8 @@ struct MessageRow: View {
 
     /// `docs/ux/message-actions.md` §3 — the card's rows for THIS message.
     private var menuActions: [MessageMenuAction] {
-        MessageMenuAction.offered(
-            canReply: canReply, canForward: canForward, canEditOrDelete: canEditOrDelete,
+        var actions = MessageMenuAction.offered(
+            canReply: canReply, canForward: forwardOffered, canEditOrDelete: canEditOrDelete,
             hasText: canCopy,
             // Section 4.1 — on any message whose send is complete and that
             // is not deleted, which is the set Forward is offered on.
@@ -2468,6 +2863,15 @@ struct MessageRow: View {
             // An older segment's row may be saved too (round-6 rule).
             save: saveState,
             translate: translateState)
+        // ADR-0090 / UX 7.3 — `Edit` is offered on an article only; a
+        // checklist has `Edit checklist`, a poll none. The content rows sit
+        // before Edit / Delete.
+        if let stored = message.content {
+            if case .article? = ContentModel.content(stored) {} else { actions.removeAll { $0 == .edit } }
+        }
+        let at = actions.firstIndex { $0 == .edit || $0 == .delete } ?? actions.count
+        actions.insert(contentsOf: contentActions, at: at)
+        return actions
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -2578,6 +2982,8 @@ struct MessageRow: View {
                     case .ban:
                         // Channel comments only.
                         break
+                    case .retractVote, .closePoll, .editChecklist, .closeChecklist, .copyCoordinates:
+                        onContentAction(action)
                     }
                 }
             )
@@ -2660,7 +3066,11 @@ struct MessageRow: View {
                             onQuoteTap(reply.target)
                         }
                     }
-                    if let channel = message.channelInvite(conversationIdHex: conversationIdHex) {
+                    if message.content != nil, let contentContext {
+                        // ADR-0090 — a poll, checklist, location, contact card
+                        // or article: its own card.
+                        ContentBubble(message: message, context: contentContext)
+                    } else if let channel = message.channelInvite(conversationIdHex: conversationIdHex) {
                         // ADR-0087 section 14 — a channel invitation: the card,
                         // with `Subscribe` (or `Open`), not its link.
                         ChannelInvitationCard(facts: channel, outgoing: isOutgoing)
@@ -2697,7 +3107,7 @@ struct MessageRow: View {
                             onOwnLink: onOpenOwnLink
                         )
                     }
-                    if !message.attachments.isEmpty {
+                    if !message.attachments.isEmpty, message.content == nil {
                         attachmentChips
                     }
                 }
@@ -2706,8 +3116,9 @@ struct MessageRow: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
-        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
+        // ADR-0090 — a content card reads on the surface on both sides.
+        .background(isOutgoing && message.content == nil ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
+        .foregroundStyle(isOutgoing && message.content == nil ? Color.lakkoAccentForeground : Color.lakkoText)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
     }
 
@@ -2784,7 +3195,10 @@ struct MessageRow: View {
                 // other ref (no kind, unknown kind, mismatched or refused MIME)
                 // stays a file chip.
                 let decision = InlineMedia.decision(for: ref)
-                if decision.bubble == .file {
+                if ref.kind == "audio", decision.inline == .audio {
+                    // ADR-0090 section 2 / UX section 6 — an audio file.
+                    AudioBubble(ref: ref)
+                } else if decision.bubble == .file {
                     AttachmentChip(
                         ref: ref,
                         direction: message.direction,
@@ -4419,4 +4833,46 @@ private struct EndDialogPresenter: ViewModifier {
                 actions: [.primary(Localization.text("common.ok")) {}])
         }
     }
+}
+
+// MARK: - ADR-0090 helpers
+
+/// The editor or reader the chat screen presents (UX sections 5, 7-11).
+enum ContentScreenRequest: Identifiable {
+    case poll
+    case checklist(editing: ChatMessage?)
+    case location
+    case contact
+    case article(editing: ChatMessage?)
+    case reader(ChatMessage)
+    case results(ChatMessage)
+    case camera
+
+    var id: String {
+        switch self {
+        case .poll: return "poll"
+        case .checklist(let m): return "checklist-\(m?.messageId ?? 0)"
+        case .location: return "location"
+        case .contact: return "contact"
+        case .article(let m): return "article-\(m?.messageId ?? 0)"
+        case .reader(let m): return "reader-\(m.messageId)"
+        case .results(let m): return "results-\(m.messageId)"
+        case .camera: return "camera"
+        }
+    }
+}
+
+/// `Close this poll?` / `Close this checklist?` for one message.
+struct ContentCloseConfirm: Identifiable {
+    let message: ChatMessage
+    let isPoll: Bool
+    var id: Int64 { message.messageId }
+}
+
+/// UX section 2.4 — what this device has.
+enum ContentDevice {
+    static var hasCamera: Bool { UIImagePickerController.isSourceTypeAvailable(.camera) }
+    /// Every iPhone and iPad has a location service; whether it may be used
+    /// is the location screen's question (UX section 9.4).
+    static let hasLocation = true
 }

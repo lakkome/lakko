@@ -91,8 +91,6 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -488,9 +486,9 @@ public fun ChatScreen(
     val pickFilesLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> ->
-        // Each item gets its upload chip at once in the view model, which
-        // reads, previews and uploads it (UX spec §10).
-        viewModel.onPickedUris(uris)
+        // ADR-0090 / attachments UX section 4 — the same send preview, file
+        // chips, the bytes unchanged.
+        viewModel.openSendPreview(uris, filesOnly = true)
     }
     // UX spec §10 — the gallery pick for photos and videos, next to the
     // document pick above. Both paths attach size + thumb when the MIME type
@@ -498,16 +496,24 @@ public fun ChatScreen(
     val pickVisualLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(),
     ) { uris: List<Uri> ->
-        // Each item gets its upload chip at once in the view model, which
-        // reads, previews and uploads it (UX spec §10).
-        viewModel.onPickedUris(uris)
+        // ADR-0090 / attachments UX section 3 — the send preview: a photo is
+        // re-encoded with its metadata dropped, each item its own message.
+        viewModel.openSendPreview(uris, filesOnly = false)
     }
+    // ADR-0090 / attachments UX section 6 — the document picker filtered to audio.
+    val pickAudioLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> -> viewModel.onPickedAudio(uris) }
+    var attachMenuOpen by remember { mutableStateOf(false) }
+    var contentScreen by remember { mutableStateOf<ContentScreen?>(null) }
 
     LaunchedEffect(Unit) {
         // Claimed for this effect's lifetime, FIRST, so the app-level
         // all-groups poll hands this group to this screen (and stops holding
         // its in-flight slot) before the refresh below runs.
         viewModel.claimScreenPoll()
+        // ADR-0090 / UX 7.5 — an anonymous vote left unsent goes again at open.
+        viewModel.retryFailedBallots()
         try {
             // ADR-0040 (G-35) — re-publish any pending commit that crashed
             // mid-window on a previous run BEFORE the first poll, re-arming the
@@ -1043,7 +1049,19 @@ public fun ChatScreen(
                     if (!isGroupChat || otherMembers.isNotEmpty()) EmptyTimelineHint()
                 }
             } else {
-                androidx.compose.runtime.CompositionLocalProvider(LocalBubbleReactions provides reactionContext) {
+                val contentBubbleContext = rememberContentBubbleContext(
+                    viewModel = viewModel,
+                    contactsRepository = contactsRepository,
+                    ownKey = ownIdentity,
+                    isOneToOne = !isGroupChat,
+                    onScreen = { contentScreen = it },
+                    onOpenContact = onOpenContact,
+                    mediaHub = mediaHub,
+                )
+                androidx.compose.runtime.CompositionLocalProvider(
+                    LocalBubbleReactions provides reactionContext,
+                    LocalContentBubble provides contentBubbleContext,
+                ) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -1327,11 +1345,18 @@ public fun ChatScreen(
         // multiplied.
         val liveSelection = selection
         if (liveSelection != null) {
+            // ADR-0090 / UX 11a — a selection holding a poll, a checklist or a
+            // card that may not be shared is not forwarded at all (a forward
+            // that silently left a message out would not be what was chosen).
+            val selectionForwardable = viewModel.selectedMessagesInOrder()
+                .all { me.lakko.app.chat.isForwardableMessage(it, cardShareableOf(context)) }
             SelectionActionBar(
                 selection = liveSelection,
                 busy = bulkBusy,
                 status = bulkStatus,
+                forwardAllowed = selectionForwardable,
                 onForward = {
+                    if (!selectionForwardable) return@SelectionActionBar
                     val requests = viewModel.selectedMessagesInOrder().map { msg ->
                         ForwardRequest(
                             sourceGroupIdHex = state.groupIdHex,
@@ -1380,11 +1405,7 @@ public fun ChatScreen(
                         ),
                     )
                 },
-                onAttachClicked = {
-                    // ACTION_OPEN_DOCUMENT — pick any MIME. The
-                    // contract returns `Uri` per pick.
-                    pickFilesLauncher.launch(arrayOf("*/*"))
-                },
+                onAttachClicked = { attachMenuOpen = true },
                 onRemoveAttachment = viewModel::onRemovePendingAttachment,
             )
 
@@ -1415,6 +1436,24 @@ public fun ChatScreen(
         confirmBulkDelete = false
     }
 
+    AttachmentSurfaces(
+        viewModel = viewModel,
+        contactsRepository = contactsRepository,
+        menuOpen = attachMenuOpen,
+        onMenuDismiss = { attachMenuOpen = false },
+        screen = contentScreen,
+        onScreen = { contentScreen = it },
+        onPickVisual = {
+            pickVisualLauncher.launch(
+                androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+            )
+        },
+        onPickFiles = { pickFilesLauncher.launch(arrayOf("*/*")) },
+        onPickAudio = { pickAudioLauncher.launch(arrayOf("audio/*")) },
+        onOpenContact = onOpenContact,
+        callHoldsCamera = callOwnsMedia,
+        mediaHub = mediaHub,
+    )
     picker?.let { request ->
         EmojiPickerSheet(
             mode = request.mode,
@@ -2125,7 +2164,7 @@ internal fun Bubble(
         // ADR-0052 decision 2 — a forward's attribution line needs the same
         // chrome, for the same reason.
         val soleBubble = remember(msg) {
-            if (msg.reply != null || msg.forward != null) {
+            if (msg.reply != null || msg.forward != null || msg.content != null) {
                 null
             } else {
                 me.lakko.app.media.soleMediaBubble(
@@ -2158,6 +2197,7 @@ internal fun Bubble(
         }
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly || emojiOnly > 0
         val reactionCtx = LocalBubbleReactions.current
+        val contentBubbleCtx = LocalContentBubble.current
         val ownEmoji = remember(msg.reactions, ownIdentity) {
             me.lakko.app.chat.ownReactionEmoji(msg.reactions, ownIdentity).toSet()
         }
@@ -2258,6 +2298,26 @@ internal fun Bubble(
                             color = contentColor.copy(alpha = 0.6f),
                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
                         )
+                    } else if (msg.content != null) {
+                        // ADR-0090 — a poll, checklist, location, contact card
+                        // or article: a card of its own kind. UX 11a — a
+                        // forwarded one carries the ordinary forward line.
+                        msg.forward?.let { forward ->
+                            ForwardLine(
+                                forward = forward,
+                                contentColor = contentColor,
+                                onClick = { onJumpToForward(forward) },
+                            )
+                        }
+                        msg.reply?.let { reply ->
+                            ReplyQuote(
+                                reply = reply,
+                                quotesOwnAccount = replyTargetIsOwn(reply.target),
+                                contentColor = contentColor,
+                                onClick = { onJumpToReply(reply.target) },
+                            )
+                        }
+                        ContentBubble(msg, contentColor, isOwn)
                     } else {
                         // ADR-0052 / UX 3.1 — the quote above the message's
                         // own text, in the bubble's own colours, drawn from
@@ -2467,6 +2527,26 @@ internal fun Bubble(
                             canTranslate = menuAvailable && tr.menuOffered,
                             translateLabel = tr.menuLabel,
                         ).let { base ->
+                            // ADR-0090 — a content message has no text to copy
+                            // or edit; its own rows replace those (UX 7.3: no
+                            // Edit on a poll).
+                            val contentCtx = contentBubbleCtx
+                            if (msg.content == null || contentCtx == null) {
+                                base
+                            } else {
+                                base.copy(
+                                    canCopy = false,
+                                    canEdit = false,
+                                    canTranslate = false,
+                                    contentRows = contentMenuRows(
+                                        msg,
+                                        contentCtx,
+                                        me.lakko.app.l10n.Localization.strings.value,
+                                        System.currentTimeMillis(),
+                                    ).map { row -> row.copy(onClick = { menuOpen = false; row.onClick() }) },
+                                )
+                            }
+                        }.let { base ->
                             if (channelPost == null) {
                                 base
                             } else {
@@ -2479,6 +2559,15 @@ internal fun Bubble(
                                     canEdit = menuAvailable && channelPost.publisher && !msg.deleted,
                                     canDelete = menuAvailable && channelPost.publisher && !msg.deleted,
                                 )
+                            }
+                        }.let { base ->
+                            // ADR-0090 / UX 11a and 10.1 — no Forward on a poll
+                            // or checklist, nor on a card of a person who does
+                            // not let others share it.
+                            if (!base.canForward || me.lakko.app.chat.isForwardableMessage(msg, cardShareableOf(context))) {
+                                base
+                            } else {
+                                base.copy(canForward = false)
                             }
                         }
                     },
@@ -3543,30 +3632,15 @@ internal fun Composer(
                 // ACTION_OPEN_DOCUMENT picker via the launcher
                 // wired in [ChatScreen]; the contract surfaces both
                 // photos and arbitrary files behind a single tap.
-                var attachMenu by remember { mutableStateOf(false) }
-                Box {
-                    IconButton(
-                        onClick = { attachMenu = true },
-                        enabled = !sending && !uploading,
-                    ) {
-                        Icon(Icons.Filled.AttachFile, contentDescription = t("chat.composer.attach"))
-                    }
-                    DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text(t("chat.composer.attach_media")) },
-                            onClick = {
-                                attachMenu = false
-                                onPickMedia()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text(t("chat.media.file")) },
-                            onClick = {
-                                attachMenu = false
-                                onAttachClicked()
-                            },
-                        )
-                    }
+                // ADR-0090 / docs/ux/attachments.md section 2 — the paperclip
+                // opens the one attachment menu (a LakkoMenu sheet) owned by
+                // ChatScreen; never a stock dropdown.
+                IconButton(
+                    onClick = onAttachClicked,
+                    enabled = !sending && !uploading,
+                    modifier = Modifier.testTag("composer-attach"),
+                ) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = t("chat.composer.attach"))
                 }
                 // UX 5.2 — a pill field on the sunken surface that grows to
                 // five lines and then scrolls; the IME resizes the screen
@@ -5390,6 +5464,13 @@ private fun SelectionBar(
  * The same elevated surface and hairline top as the composer it stands in
  * for (design system: composer = elevated surface, hairline top).
  */
+/** ADR-0090 section 7 — whether the person behind a card's account key lets
+ *  others share their card, per the newest profile this device holds. */
+private fun cardShareableOf(context: android.content.Context): (ByteArray) -> Boolean = { key ->
+    me.lakko.app.profile.ProfileDirectory.get(context)
+        .isCardShareable(java.util.Base64.getEncoder().encodeToString(key))
+}
+
 @Composable
 private fun SelectionActionBar(
     selection: me.lakko.app.chat.MessageSelection,
@@ -5399,6 +5480,9 @@ private fun SelectionActionBar(
     onDelete: () -> Unit,
     /** Saved section 2 — Select mode's Save, beside Delete and Forward. */
     onSave: () -> Unit = {},
+    /** ADR-0090 / UX 11a — `false` when the selection holds a message that is
+     *  never forwarded (a poll, a checklist, a card that may not be shared). */
+    forwardAllowed: Boolean = true,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth()) {
@@ -5415,7 +5499,7 @@ private fun SelectionActionBar(
             ) {
                 TextButton(
                     onClick = onForward,
-                    enabled = selection.forwardEnabled && !busy,
+                    enabled = selection.forwardEnabled && forwardAllowed && !busy,
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(

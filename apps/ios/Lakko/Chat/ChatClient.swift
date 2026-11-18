@@ -98,6 +98,16 @@ public final class ChatClient {
         self.ds = ds
     }
 
+    /// ADR-0090 section 3.6 — post a NON-MLS row (an anonymous poll ballot)
+    /// to `group`'s journal, proven with the current epoch's access key,
+    /// which every member holds, so the proof names nobody. No wake.
+    public func publishRawRow(identity: Identity, group: Group, row: Data) async throws {
+        let groupId = try group.groupId()
+        _ = try await ds.publishGroup(
+            groupId: groupId, payload: row,
+            auth: await dsAuth(identity: identity, group: group, groupId: groupId), wake: nil)
+    }
+
     /// Encrypt `plaintext` for the current group epoch and post
     /// the wire bytes to the DS group journal.
     ///
@@ -471,6 +481,15 @@ public final class ChatClient {
                 continue
             }
 
+            // ADR-0090 section 3.6 — an anonymous poll ballot is a NON-MLS
+            // row on the group journal (the `WelcomeRendezvous` pattern): it is
+            // recognised by its domain and never fed to MLS processing.
+            if isPollBallotRow(row: message.payload) {
+                events.append(.pollBallotRow(
+                    messageId: message.id, row: message.payload, createdAt: message.createdAt))
+                eventSenders.append(nil)
+                continue
+            }
             // Marked BEFORE the call, not after — see
             // ``PollMessagesResult/touchedMlsState``.
             touchedMlsState = true
@@ -515,6 +534,14 @@ public final class ChatClient {
                     group: group
                 )
             )
+            // ADR-0090 section 3.4 — a merged commit may add accounts to the
+            // ring of an open anonymous poll. The roster is read HERE, on the
+            // line after the apply, the one moment it is this commit's.
+            if case .commit = processed {
+                events.append(.commitRoster(
+                    messageId: message.id, accountKeys: ContentRing.accountKeys(of: group)))
+                eventSenders.append(nil)
+            }
         }
 
         return PollMessagesResult(
@@ -551,7 +578,7 @@ public final class ChatClient {
         processed: ProcessedMessage,
         group: Group
     ) -> IncomingChatEvent {
-        toEvent(
+        let event = toEvent(
             messageId: messageId,
             createdAt: createdAt,
             processed: processed,
@@ -559,6 +586,16 @@ public final class ChatClient {
             resolveDevice: { AuthorIdentity.resolveDevice(group: group, leafIndex: $0) },
             conversationIdHex: (try? group.groupId()).map(DsClient.pseudonymHex)
         )
+        // ADR-0090 section 3.4 — ring version 0 of an anonymous poll is the
+        // roster at the epoch the poll was sealed at, which is NOW (the line
+        // after the apply). Checked against the signed `ring0_hash`.
+        if case .content(let id, let parsed, let envelope, let senderKey, let created, _) = event,
+           case .poll(let poll)? = parsed.content, poll.body.anonymous != nil {
+            return .content(
+                messageId: id, parsed: parsed, envelope: envelope, senderKey: senderKey,
+                createdAt: created, ring: ContentRing.ringAtReceipt(poll: poll, group: group))
+        }
+        return event
     }
 
     /// Internal rather than private so `LakkoTests` can drive the
@@ -796,6 +833,17 @@ public final class ChatClient {
             // Placed after the identity resolution so the receive side can
             // tell another person's request from this account's own echo
             // (another of our devices asking) without a second roster read.
+            // ADR-0090 section 3.9 — the open-items hand-over and the
+            // old-ballot rows: never bubbles; routed to the receive side,
+            // which adopts them on a device that needs them.
+            if isOpenItemsEnvelope(bytes: data) {
+                return .openItems(
+                    messageId: messageId, envelope: data, senderKey: senderKey, createdAt: createdAt)
+            }
+            if isPollBallotsEnvelope(bytes: data) {
+                return .pollBallots(
+                    messageId: messageId, envelope: data, senderKey: senderKey, createdAt: createdAt)
+            }
             if Self.looksLikeProfileRequest(data) {
                 return .profileRequest(
                     messageId: messageId,
@@ -920,6 +968,17 @@ public final class ChatClient {
                 // pre-2026-09-29 parser it WAS a bubble of domain text and
                 // binary.
                 return .serviceEnvelope(messageId: messageId, createdAt: createdAt)
+            // ADR-0090 — a poll, checklist, location, contact card or
+            // article: a timeline row carrying its content.
+            case .poll, .checklist, .location, .contactCard, .article:
+                return .content(
+                    messageId: messageId, parsed: parsed, envelope: data, senderKey: senderKey,
+                    createdAt: createdAt, ring: nil)
+            // ADR-0090 — an op on one: folded into the target, never a row.
+            case .pollVote, .pollClose, .checklistTick, .checklistAdd, .editChecklist, .editArticle:
+                return .contentOp(
+                    messageId: messageId, parsed: parsed, envelope: data, senderKey: senderKey,
+                    createdAt: createdAt)
             case .unsupported:
                 // ADR-0061 section 6 — a chat envelope from a newer wire
                 // version. The core leaves `text` empty and carries the
@@ -1090,7 +1149,10 @@ public final class ChatClient {
             usernameCertificate: decoded.usernameCertificate,
             grants: decoded.grants,
             // Envelope v4 (ADR-0084) — the profile photo, or none.
-            avatar: ProfileAvatar(decoded.avatar)
+            avatar: ProfileAvatar(decoded.avatar),
+            // Envelope v5 (ADR-0090 section 7) — whether the sender lets
+            // others share their contact card.
+            cardShareable: decoded.cardShareable
         )
     }
 
@@ -1287,6 +1349,27 @@ public struct SendMessageResult: Equatable {
 /// documented fallback paths — existing bubbles render
 /// unchanged.
 public enum IncomingChatEvent: Equatable {
+    /// ADR-0090 — a poll, checklist, location, contact card or article.
+    /// `envelope` is the authenticated plaintext (what the row is stored
+    /// as); `ring` is set for an anonymous poll: ring version 0 read from the
+    /// roster at receipt, or ``ContentRingCheck/mismatch``.
+    case content(
+        messageId: Int64, parsed: ParsedBody, envelope: Data, senderKey: MemberIdentity?,
+        createdAt: String, ring: ContentRingCheck?)
+    /// ADR-0090 — a vote, close, tick, added item or edit on a content
+    /// message; folded into its target.
+    case contentOp(
+        messageId: Int64, parsed: ParsedBody, envelope: Data, senderKey: MemberIdentity?,
+        createdAt: String)
+    /// ADR-0090 section 3.6 — an anonymous poll ballot (a non-MLS row).
+    case pollBallotRow(messageId: Int64, row: Data, createdAt: String)
+    /// ADR-0090 section 3.4 — the account keys of the roster right after a
+    /// merged commit, for ring extension. Follows the commit's `.system`.
+    case commitRoster(messageId: Int64, accountKeys: [Data])
+    /// ADR-0090 section 3.9 — an open-items hand-over row.
+    case openItems(messageId: Int64, envelope: Data, senderKey: MemberIdentity?, createdAt: String)
+    /// ADR-0090 section 3.9 — old ballot rows handed to a newcomer.
+    case pollBallots(messageId: Int64, envelope: Data, senderKey: MemberIdentity?, createdAt: String)
     /// Application-data message (user-visible chat row).
     ///
     /// ADR-0023: carries the original author's IDENTITY — their signature

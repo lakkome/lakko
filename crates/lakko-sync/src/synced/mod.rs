@@ -59,6 +59,9 @@
 //! - [`quick_reaction`] — the account's quick reaction (UX
 //!   `reactions-and-emoji.md` D3: the emoji a double tap sends, synced) and
 //!   its envelope.
+//! - [`poll_choice`] — the account's own choice in each poll it voted in
+//!   (ADR-0090 section 3.6), kept until the conversation ends, and its
+//!   envelope.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
@@ -69,6 +72,7 @@ pub mod entry;
 pub mod lineage;
 pub mod link_record;
 pub mod own_username;
+pub mod poll_choice;
 pub mod quick_reaction;
 pub mod recovery_email;
 pub mod state;
@@ -136,6 +140,12 @@ pub use own_username::{
     compose_own_username_envelope, decode_own_username_envelope, is_own_username_envelope,
     OwnUsernameEnvelopeError, OWN_USERNAME_ENVELOPE_DOMAIN_V1, OWN_USERNAME_ENVELOPE_MAX_LEN,
     OWN_USERNAME_ENVELOPE_MIN_LEN, OWN_USERNAME_ENVELOPE_VERSION_V1,
+};
+pub use poll_choice::{
+    compose_poll_choice_envelope, decode_poll_choice_envelope, is_poll_choice_envelope,
+    PollChoiceEntry, PollChoiceEnvelopeError, POLL_CHOICES_MAX_CLIENT,
+    POLL_CHOICE_ENVELOPE_DOMAIN_V1, POLL_CHOICE_ENVELOPE_MAX_ENTRIES, POLL_CHOICE_ENVELOPE_MAX_LEN,
+    POLL_CHOICE_ENVELOPE_MIN_LEN, POLL_CHOICE_ENVELOPE_VERSION, POLL_CHOICE_MAX_OPTIONS,
 };
 pub use quick_reaction::{
     compose_quick_reaction_envelope, decode_quick_reaction_envelope, is_quick_reaction_envelope,

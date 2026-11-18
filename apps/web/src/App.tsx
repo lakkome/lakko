@@ -60,6 +60,7 @@ import { AccountNotices } from "./auth/protect/AccountNotices";
 import { RenameResume } from "./auth/rename-runtime";
 import { GroupHandleRuntime } from "./chat/GroupHandleRuntime";
 import { BlobAccessRuntime } from "./storage/BlobAccessRuntime";
+import { AttachRuntime } from "./attach/AttachRuntime";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
@@ -265,6 +266,9 @@ const App: Component = () => (
           <RenameResume />
           {/* ADR-0065 - blob passes, owed deletes and the keep tick. */}
           <BlobAccessRuntime />
+          {/* ADR-0090 - the poll and checklist store and the anonymous
+              ballot queue, bound to the account. */}
+          <AttachRuntime />
           {/* ADR-0087 sections 3 to 5 - owed @name writes, lease renewal,
               and the public record published again when the knock key moves. */}
           <GroupHandleRuntime />

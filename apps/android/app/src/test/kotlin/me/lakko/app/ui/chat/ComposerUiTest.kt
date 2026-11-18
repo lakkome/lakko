@@ -157,7 +157,7 @@ class ComposerUiTest {
                         onDraftChange = {},
                         onSendClicked = { sendClicks += 1 },
                         onFocusChanged = {},
-                        onPickMedia = { attachMenuPicks += 1 },
+                        onPickMedia = {},
                         onAttachClicked = { attachMenuPicks += 1 },
                         onRemoveAttachment = {},
                         replyStrip = replyStrip,
@@ -312,20 +312,16 @@ class ComposerUiTest {
     }
 
     @Test
-    fun theAttachButtonOffersPhotoOrVideoAndFile() {
-        // UX spec §10 — one tap, two destinations, because a person who wants
-        // to send a photo and a person who wants to send a PDF press the same
-        // thing. Both items have to be THERE: an attach button that only ever
-        // opened the document picker is how a photo became a file attachment.
+    fun theAttachButtonOpensTheAttachmentMenu() {
+        // ADR-0090 / docs/ux/attachments.md section 2 — the paperclip opens the
+        // one attachment menu (a LakkoMenu sheet the chat screen owns), never a
+        // stock dropdown in the composer: one tap, handed up once.
         compose.setContent { ComposerUnderTest(draft = "") }
 
         compose.onNodeWithContentDescription(ATTACH).performClick()
 
-        compose.onNodeWithText(PHOTO_OR_VIDEO).assertExists()
-        compose.onNodeWithText(FILE).assertExists()
-
-        compose.onNodeWithText(PHOTO_OR_VIDEO).performClick()
-        assertEquals("the gallery item is not wired to anything", 1, attachMenuPicks)
+        assertEquals("the paperclip is not wired to the menu", 1, attachMenuPicks)
+        compose.onNodeWithText(PHOTO_OR_VIDEO).assertDoesNotExist()
     }
 
     // ----- 3. the field grows, and then stops ------------------------------

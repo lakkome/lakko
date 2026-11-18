@@ -24,6 +24,8 @@ import { loadWasm } from "../wasm";
 import { markServiceEnvelopeDirty, setServiceEnvelopeComposer } from "../reach/service-envelope-outbox";
 import { adoptOwnProfile, loadOwnProfile, type OwnProfile, type OwnProfileStorage } from "./own-profile";
 import { avatarToWasm, type AvatarData, type AvatarWasm } from "./avatar-model";
+import { ownCardShareable } from "./card-share";
+import { visibilitySetting } from "../reach/visibility-store";
 
 /** The one wasm export the composer needs, structurally. */
 export interface OwnProfileComposer {
@@ -35,6 +37,7 @@ export interface OwnProfileComposer {
     usernameCertificate?: Uint8Array | null,
     grants?: never[] | null,
     avatar?: never | null,
+    cardShareable?: boolean | null,
   ): Uint8Array;
 }
 
@@ -48,6 +51,8 @@ export function composeOwnProfileForDevices(
   accountIdBytes: Uint8Array | null,
   /** The backup carries it too; a device of the account keeps the session's. */
   username: string | null = null,
+  /** ADR-0090 section 7 — the own "my card may be shared" flag. */
+  cardShareable: boolean = true,
 ): Uint8Array | null {
   if (own.updatedAtMs <= 0) return null;
   // ADR-0084 — the photo travels with the name to the account's other
@@ -64,6 +69,7 @@ export function composeOwnProfileForDevices(
     undefined,
     undefined,
     avatar,
+    cardShareable,
   );
 }
 
@@ -82,7 +88,7 @@ setServiceEnvelopeComposer("profile", async () => {
   if (b === null) return null;
   const own = loadOwnProfile(b.accountId, b.storage);
   if (own.updatedAtMs <= 0) return null;
-  return composeOwnProfileForDevices(await loadWasm(), own, b.accountIdBytes);
+  return composeOwnProfileForDevices(await loadWasm(), own, b.accountIdBytes, null, ownCardShareable(visibilitySetting()));
 });
 
 /**

@@ -314,6 +314,9 @@ private class RealThrowawayGroup(
         // commit throws, and the throw reaches the caller's loop, which
         // drops the row (fail-closed) and tells this device's own message
         // apart from one it cannot read.
+        // ADR-0090 section 3.6 — an anonymous ballot row is not an MLS
+        // message and never a preview; it is skipped before the MLS path.
+        if (me.lakko.app.chat.isPollBallotRowSafe(payload)) return null
         val processed = group.processIncomingVerifyingRoles(identity, payload)
         // Only Application messages carry a user-visible preview. A
         // Commit / Proposal / ExternalJoinProposal advances state (in
@@ -369,7 +372,7 @@ private class RealThrowawayGroup(
         val kind = previewKindOf(body.kind) ?: return null
         return ProcessedRow(
             kind = kind,
-            text = body.text,
+            text = contentPreviewText(body.content, body.text),
             attachmentCount = body.attachments.size,
             senderName = senderNameOf(app.senderLeaf),
             senderAccountB64 = senderAccountOf(app),

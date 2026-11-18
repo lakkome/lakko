@@ -46,6 +46,11 @@ struct ChannelConversationScreen: View {
     @State private var photoPickerOpen = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var fileImporterOpen = false
+    /// ADR-0090 — the menu row picked, the editor on screen, the audio picker.
+    @State private var pendingMenuItem: AttachmentMenuItem?
+    @State private var contentScreen: ContentScreenRequest?
+    @State private var audioOpen = false
+    @State private var closeConfirm: ChannelTimelineItem?
     @State private var previewImageData: Data?
     @State private var width: CGFloat = 360
     @State private var onScreen: Set<UInt64> = []
@@ -207,12 +212,57 @@ struct ChannelConversationScreen: View {
             .lakkoDialog(
                 isPresented: $anonymousNote, title: l10n.t("channels.reactions.anonymous")
             ) { [.primary(l10n.t("common.ok")) {}] }
-            .lakkoActionSheet(isPresented: $attachSheet, title: l10n.t("chat.composer.attach")) {[
-                .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
-                    photoPickerOpen = true
-                },
-                .action(l10n.t("chat.media.file"), systemImage: "doc") { fileImporterOpen = true },
-            ]}
+            // ADR-0090 / UX section 2 — the same menu as a conversation; in
+            // a channel only the owner and publishers have a paperclip.
+            .sheet(isPresented: $attachSheet, onDismiss: runPendingMenuItem) {
+                AttachmentMenuSheet(rows: attachmentMenu(
+                    kind: .channel, role: model.isPublisher ? .owner : .member,
+                    hasCamera: ContentDevice.hasCamera, hasLocation: ContentDevice.hasLocation,
+                    callHoldsCamera: false)
+                ) { item in
+                    pendingMenuItem = item
+                    attachSheet = false
+                }
+            }
+            .fullScreenCover(item: $contentScreen) { request in channelContentScreen(request) }
+            .background(Color.clear.fileImporter(
+                isPresented: $audioOpen, allowedContentTypes: [.audio], allowsMultipleSelection: true
+            ) { result in
+                guard case .success(let urls) = result else { return }
+                for url in urls {
+                    Task {
+                        let scoped = url.startAccessingSecurityScopedResource()
+                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                        guard let bytes = try? Data(contentsOf: url) else { return }
+                        // UX section 6 — the same audio upload as in a chat:
+                        // kind audio, duration, cover as the thumb, title and
+                        // artist from the file's own tags.
+                        let tags = await AudioTags.read(url: url)
+                        let limits = contentLimits()
+                        var thumb: ThumbRef?
+                        if let cover = tags.cover {
+                            thumb = try? await AttachmentBridge.encryptAndUploadThumb(
+                                bytes: cover.data, mime: "image/jpeg", width: cover.width, height: cover.height)
+                        }
+                        await model.stageAttachment(
+                            bytes: bytes, mime: UTTypeMime.of(url), name: url.lastPathComponent,
+                            media: MediaAttachmentMeta(
+                                kind: "audio", durationMs: tags.durationMs.map { min($0, limits.maxAudioDurationMs) },
+                                thumb: thumb),
+                            title: AudioTags.bounded(tags.title ?? url.deletingPathExtension().lastPathComponent, limits),
+                            artist: tags.artist.flatMap { AudioTags.bounded($0, limits) })
+                    }
+                }
+            })
+            .lakkoDialog(
+                isPresented: Binding(get: { closeConfirm != nil }, set: { if !$0 { closeConfirm = nil } }),
+                title: l10n.t("poll.close_confirm")
+            ) {
+                [.danger(l10n.t("poll.close")) {
+                    if let item = closeConfirm { Task { await model.closePoll(item) } }
+                 },
+                 .cancel()]
+            }
             .photosPicker(
                 isPresented: $photoPickerOpen, selection: $photoItems, maxSelectionCount: 10,
                 matching: .any(of: [.images, .videos]))
@@ -349,6 +399,23 @@ struct ChannelConversationScreen: View {
                     editing = item
                 },
                 onDelete: { Task { await model.delete(item) } },
+                contentContext: item.contentEnvelopeB64 == nil ? nil : channelContentContext(item),
+                contentActions: channelContentActions(item),
+                onContentAction: { action in
+                    switch action {
+                    case .editChecklist: contentScreen = .checklist(editing: ChannelTimeline.message(item))
+                    case .closeChecklist:
+                        if let bytes = try? ContentFFI.composeClose(target: Int64(clamping: item.cursor), tally: nil) {
+                            Task { await model.publishContentOp(bytes) }
+                        }
+                    case .copyCoordinates:
+                        if case .location(let l)? = item.contentEnvelopeB64.flatMap({
+                            ContentModel.content(PersistedContent(envelopeB64: $0)) }) {
+                            MessageClipboard.copy(LocationText.coordinates(latE7: l.latE7, lonE7: l.lonE7))
+                        }
+                    default: closeConfirm = item
+                    }
+                },
                 onReact: { emoji in Task { await model.react(item, emoji: emoji) } },
                 onMoreReactions: { picker = PickerRequest(mode: .reaction, item: item) },
                 reactionRow: model.reactionRow(item),
@@ -369,6 +436,153 @@ struct ChannelConversationScreen: View {
                 })
                 .padding(.leading, 4)
         }
+    }
+
+    // MARK: - ADR-0090: the content kinds in a channel
+
+    private func runPendingMenuItem() {
+        guard let item = pendingMenuItem else { return }
+        pendingMenuItem = nil
+        switch item {
+        case .photoOrVideo: photoPickerOpen = true
+        case .camera: contentScreen = .camera
+        case .file: fileImporterOpen = true
+        case .audio: audioOpen = true
+        case .poll: contentScreen = .poll
+        case .checklist: contentScreen = .checklist(editing: nil)
+        case .location: contentScreen = .location
+        case .contact: contentScreen = .contact
+        case .article: contentScreen = .article(editing: nil)
+        }
+    }
+
+    @ViewBuilder
+    private func channelContentScreen(_ request: ContentScreenRequest) -> some View {
+        let publish: (ContentDraft, [AttachmentRef]) -> Void = { draft, refs in
+            contentScreen = nil
+            Task { await model.publishContent(draft, attachments: refs) }
+        }
+        switch request {
+        case .poll:
+            PollEditorScreen(
+                anonymity: pollAnonymity(kind: .channel, accounts: 0),
+                onCreate: { publish($0, []) }, onCancel: { contentScreen = nil })
+        case .checklist(let editing):
+            ChecklistEditorScreen(
+                initial: editing.flatMap { ChecklistView.make(message: $0) }.map { view in
+                    ChecklistBody(
+                        title: view.state.title, othersAdd: false, othersMark: false,
+                        items: view.state.items.compactMap { item in
+                            if case .author(let id) = item.item { return ChecklistItem(id: id, text: item.text) }
+                            return nil
+                        })
+                },
+                showsSwitches: false,
+                onDone: { body in
+                    if let editing {
+                        contentScreen = nil
+                        let signed = SignedChecklist(body: body, authorSig: nil)
+                        if let bytes = try? composeChecklistEditEnvelope(target: editing.messageId, checklist: signed) {
+                            Task { await model.publishContentOp(bytes) }
+                        }
+                    } else {
+                        publish(.checklist(body), [])
+                    }
+                },
+                onCancel: { contentScreen = nil })
+        case .location:
+            LocationScreen(onSend: { publish(.location($0), []) }, onCancel: { contentScreen = nil })
+        case .contact:
+            ContactCardPickerScreen(
+                candidates: ContactCardCandidates.load(), onSend: { publish(.contactCard($0), []) },
+                onCancel: { contentScreen = nil })
+        case .article:
+            ArticleEditorScreen(
+                groupIdHex: "channel-" + channelId, editing: nil,
+                upload: { bytes in
+                    let stamp = String(UUID().uuidString.prefix(8))
+                    guard let prepared = PhotoVideoPrep.preparePhoto(bytes, stamp: stamp), let payload = prepared.bytes
+                    else { return nil }
+                    return try? await AttachmentBridge.encryptAndUpload(
+                        bytes: payload, mime: prepared.mime, name: prepared.name,
+                        media: MediaAttachmentMeta(kind: nil, width: prepared.width, height: prepared.height),
+                        idleDays: ChannelConversationModel.fileIdleDays)
+                },
+                onPublish: { publish(.article($0), $1) }, onCancel: { contentScreen = nil })
+        case .reader(let message):
+            if let stored = message.content, case .article(let article)? = ContentModel.content(stored) {
+                ArticleReaderScreen(
+                    article: article, attachments: message.attachments, author: title, date: message.createdAt,
+                    onClose: { contentScreen = nil },
+                    menu: {
+                        [.action(l10n.t("common.copy"), systemImage: "doc.on.doc") {
+                            MessageClipboard.copy(ArticleReaderScreen.plainText(article))
+                        }]
+                    })
+            }
+        case .camera:
+            CameraCaptureScreen(onSend: { media in
+                contentScreen = nil
+                Task { await stageCaptured(media) }
+            }, onClose: { contentScreen = nil })
+        case .results:
+            EmptyView()
+        }
+    }
+
+    private func stageCaptured(_ media: CapturedMedia) async {
+        let stamp = String(UUID().uuidString.prefix(8))
+        switch media {
+        case .photo(let data):
+            if let prepared = PhotoVideoPrep.preparePhoto(data, stamp: stamp), let bytes = prepared.bytes {
+                await model.stageAttachment(bytes: bytes, mime: prepared.mime, name: prepared.name)
+            }
+        case .video(let url):
+            if let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp), let file = prepared.fileURL,
+               let bytes = try? Data(contentsOf: file) {
+                await model.stageAttachment(bytes: bytes, mime: prepared.mime, name: prepared.name)
+            }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// The message-menu rows a content post adds (publishers close a poll,
+    /// edit or close a checklist; anyone copies a location).
+    private func channelContentActions(_ item: ChannelTimelineItem) -> [MessageMenuAction] {
+        guard let b64 = item.contentEnvelopeB64,
+              let content = ContentModel.content(PersistedContent(envelopeB64: b64)) else { return [] }
+        switch content {
+        case .poll: return model.isPublisher && !item.closedByOp ? [.closePoll] : []
+        case .checklist: return model.isPublisher && !item.closedByOp ? [.editChecklist, .closeChecklist] : []
+        case .location: return [.copyCoordinates]
+        default: return []
+        }
+    }
+
+    /// A channel post's card: a poll votes through the credential.
+    private func channelContentContext(_ item: ChannelTimelineItem) -> ContentBubbleContext {
+        ContentBubbleContext(
+            groupIdHex: "channel-" + channelId,
+            // Publishers tick and add as the channel (ADR-0090 section 5).
+            ownAccountKey: model.isPublisher ? Data(base64Encoded: ChannelTimeline.channelKeyB64) : nil,
+            nameOf: { _ in nil },
+            isOwnerOrAdmin: { _ in false },
+            vote: { _, choices in Task { await model.votePoll(item, choices: choices) } },
+            tick: { target, ref, done in
+                guard let bytes = try? composeChecklistTickEnvelope(target: target, item: ref, done: done) else { return }
+                Task { await model.publishContentOp(bytes) }
+            },
+            addItem: { target, text in
+                guard let bytes = try? composeChecklistAddEnvelope(target: target, text: text) else { return }
+                Task { await model.publishContentOp(bytes) }
+            },
+            openArticle: { contentScreen = .reader($0) },
+            openResults: { _ in },
+            contactCardState: { _ in .notice("") },
+            contactCardAction: { _, _ in },
+            pollOverride: { _ in model.pollView(item) },
+            pollSendState: model.pollSendState[item.cursor],
+            pollRetry: { Task { await model.votePoll(item, choices: model.pollView(item)?.ownChoices ?? []) } })
     }
 
     private func markNewestRead() {

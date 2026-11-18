@@ -3,6 +3,9 @@
 
 package me.lakko.app.feed
 
+import me.lakko.app.chat.parseContentBytes
+import me.lakko.app.chat.toAttachmentRef
+
 /**
  * The feed's input, assembled from what this device already holds (ADR-0063
  * section 1, `docs/ux/feed.md` section 9). Mirror of
@@ -115,6 +118,8 @@ public data class FeedMessage(
     val reactions: List<FeedReaction> = emptyList(),
     val replyTarget: Long? = null,
     val forwardAuthor: String? = null,
+    /** ADR-0090 — a poll, checklist, location, contact card or article. */
+    val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
 )
 
 /** One candidate in the shape `rankFeed` takes, before it crosses the FFI. */
@@ -164,6 +169,16 @@ public data class FeedContext(
     /** The mention rule, `mentionsUsername` from the core. */
     val mentions: (text: String, username: String) -> Boolean,
     val nowMs: Long,
+    /** A stored channel-post attachment as the reference a bubble opens;
+     *  `null` when it does not decode. */
+    val attachmentRef: (me.lakko.app.chat.PersistedAttachment) -> uniffi.lakko_ffi_uniffi.AttachmentRef? =
+        { it.toAttachmentRef() },
+    /** A stored channel-post envelope (standard base64) to its content, by
+     *  the core's parser; `null` when it does not parse. */
+    val parseContent: (String) -> uniffi.lakko_ffi_uniffi.MessageContent? = { b64 ->
+        runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+            ?.let(::parseContentBytes)
+    },
 )
 
 /**
@@ -208,14 +223,16 @@ private fun addChannelPosts(
             mentionsMe = mentionsMe,
             repliesToMe = false,
             reactionsDistinct = 0,
-            hasMedia = false,
+            hasMedia = p.attachments.isNotEmpty(),
             text = p.text,
         )
         val message = FeedMessage(
             messageId = p.cursor,
             direction = if (fromSelf) "outgoing" else "incoming",
             text = p.text,
+            attachments = p.attachments.map { a -> FeedAttachment(a.kind, a.mime, ctx.attachmentRef(a)) },
             createdAt = java.time.Instant.ofEpochMilli(p.serverTsMs).toString(),
+            content = p.contentEnvelopeB64?.let(ctx.parseContent),
         )
         refs += FeedCandidateRef(source, message, mentionsMe, repliesToMe = false)
     }

@@ -421,9 +421,11 @@ struct FeedScreen: View {
         items.append(.action(
             l10n.t("common.copy"), systemImage: "doc.on.doc", enabled: FeedForward.canCopy(ref.message)
         ) { model.copyText(ref) })
-        items.append(.action(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right") {
-            model.forwarding = ref
-        })
+        if FeedViewModel.canForward(ref.message) {
+            items.append(.action(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right") {
+                model.forwarding = ref
+            })
+        }
         items.append(.action(l10n.t("feed.action.hide"), systemImage: "eye.slash") {
             model.hide(ref.source.key)
         })

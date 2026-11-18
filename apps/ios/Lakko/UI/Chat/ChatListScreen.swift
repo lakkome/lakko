@@ -1354,10 +1354,13 @@ public final class ChatListViewModel: ObservableObject {
         } else if let publisher = last.coPublisherInvite(conversationIdHex: thread.groupIdHex) {
             text = ChatListFormatting.channelInvitePreview(
                 channelName: publisher.channelName, publisher: true)
+        } else if let line = ContentPreview.line(last) {
+            // ADR-0090 — `Poll: {question}`, `Location`, ...
+            text = line
         }
         return ChatListFormatting.preview(
             text: text,
-            attachmentLabels: last.attachments.map {
+            attachmentLabels: last.content != nil ? [] : last.attachments.map {
                 ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
             },
             direction: last.direction,

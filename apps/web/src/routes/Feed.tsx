@@ -110,7 +110,13 @@ import { createMediaHub, mediaKey } from "../media/media-hub";
 import { ownAvatarLabel } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Icon } from "../ui/icons";
-import { composeForwardEnvelope, reencryptAttachmentRef, type AttachmentRefBytes } from "../chat/attachments";
+import {
+  composeContentEnvelope,
+  composeForwardEnvelope,
+  contentPartsOfForward,
+  reencryptAttachmentRef,
+  type AttachmentRefBytes,
+} from "../chat/attachments";
 import { appendToGroupSlot } from "../chat/background-log";
 import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "../chat/persisted-attachment";
 import { persistedFromForwardRef } from "../chat/forward";
@@ -119,7 +125,7 @@ import type { ForwardPickerRow } from "../chat/forward-picker";
 import { MESSAGE_LOG_VERSION, updateMessageLog, type PersistedMessage } from "../chat/message-log-store";
 import { dsClockSkewNotice } from "../ds/access";
 import { sealedWakeForGroup } from "../push/group-routing";
-import { feedForwardPayload } from "../feed/feed-forward";
+import { feedForwardPayload, feedItemForwardable } from "../feed/feed-forward";
 import { feedIconName, PRESET_ICONS } from "../feed/feed-icons";
 import {
   dividerIndex,
@@ -943,7 +949,13 @@ export default function Feed(): JSX.Element {
     // share a blob (ADR-0052 decision 2); one at a time, as the chat does.
     const fresh: AttachmentRefBytes[] = [];
     for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(attachmentRefFromPersisted(a).ref));
-    const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
+    if (!feedItemForwardable(ref.message, (k) => profiles.cardShareableOf(k))) {
+      throw new KeyedError("chat.forward.error.generic");
+    }
+    const bytes =
+      payload.content === undefined
+        ? await composeForwardEnvelope(payload.text, fresh, payload.forward)
+        : await composeContentEnvelope(payload.content, fresh, contentPartsOfForward(payload.forward));
     let result: Awaited<ReturnType<typeof forwardClient.sendMessage>>;
     const openTarget = (): void => {
       setForwarding(null);
@@ -961,7 +973,13 @@ export default function Feed(): JSX.Element {
       if (err instanceof HeldForSuccessor) {
         heldSends.hold(
           lineageView.conversationHexOf(entry.group.groupId),
-          { text: payload.text, attached: fresh, reply: undefined, forward: payload.forward },
+          {
+            text: payload.text,
+            attached: fresh,
+            reply: undefined,
+            forward: payload.forward,
+            ...(payload.content === undefined ? {} : { content: payload.content }),
+          },
           Date.now(),
         );
         void persistHeldSends(accountId());
@@ -983,6 +1001,7 @@ export default function Feed(): JSX.Element {
         attachments: fresh.map((a) => persistedFromAttachmentRef(a)),
         createdAt: result.createdAt,
         forward: persistedFromForwardRef(payload.forward),
+        ...(payload.content === undefined ? {} : { content: payload.content }),
       };
       await updateMessageLog(account, deviceKey, (existing) => {
         const groups = existing?.groups ?? {};
@@ -1557,17 +1576,21 @@ export default function Feed(): JSX.Element {
                 <Icon name="copy" size={16} />
                 {t("common.copy")}
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMenu(null);
-                  setForwarding(m().ref);
-                }}
-              >
-                <Icon name="forward" size={16} />
-                {t("chat.message.forward")}
-              </button>
+              {/* UX `attachments.md` section 11a: never a poll or checklist,
+                  a contact card only while its person lets it be shared. */}
+              <Show when={feedItemForwardable(m().ref.message, (k) => profiles.cardShareableOf(k))}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu(null);
+                    setForwarding(m().ref);
+                  }}
+                >
+                  <Icon name="forward" size={16} />
+                  {t("chat.message.forward")}
+                </button>
+              </Show>
               <div class="lk-menu-sep" />
               <button
                 type="button"

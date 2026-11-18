@@ -271,6 +271,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
   put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
   put(`lakko.channel-feedback.unsent.v1.${acct}`, "1");
+  put(`lakko.poll-choice.unsent.v1.${acct}`, "1");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
   put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
@@ -696,6 +697,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.recent-reactions:": "account",
   "lakko.quick-reaction.unsent.v1.": "account",
   "lakko.channel-feedback.unsent.v1.": "account",
+  "lakko.poll-choice.unsent.v1.": "account",
   "lakko.unseen-reactions.v1:": "account",
   "lakko-account-kv": "account",
   // Reactions section 12: this device's notification filter.

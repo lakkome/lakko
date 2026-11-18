@@ -1766,6 +1766,85 @@ impl SyncedState {
         self.with(|s| u64::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u64::MAX))
     }
 
+    /// ADR-0090 — record this account's choice in a poll, stamped `hlc`:
+    /// `choices` empty retracts. `set_version` is the ring version of the
+    /// account's anonymity set in the poll (the version the first vote drew,
+    /// read back with [`Self::poll_choice`]; 0 for a channel poll).
+    /// `poll_message_id` is the poll row's DS `messageId`, or the post cursor
+    /// in a channel. Returns the envelope to send to the account's other
+    /// devices, or `None` when the held register is newer or identical.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for bad choices or a full register set;
+    /// [`FfiError::LockPoisoned`].
+    pub fn set_poll_choice(
+        &self,
+        hlc: u64,
+        conversation: FolderConversationRef,
+        poll_message_id: i64,
+        choices: Vec<u8>,
+        set_version: u32,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| {
+            s.set_poll_choice(hlc, &conversation, poll_message_id, &choices, set_version)
+        })?
+        .map_err(synced_err)
+    }
+
+    /// The held own-choice register of a poll (a retraction included).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn poll_choice(
+        &self,
+        conversation: FolderConversationRef,
+        poll_message_id: i64,
+    ) -> Result<Option<PollChoice>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| {
+            s.poll_choice(&conversation, poll_message_id)
+                .map(|p| PollChoice {
+                    hlc: p.hlc,
+                    choices: p.value.choices,
+                    set_version: p.value.set_version,
+                })
+        })
+    }
+
+    /// Every held own-choice register as envelopes (the catch-up on
+    /// DeviceGroup growth, and the re-send owed after a failed live send).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn poll_choice_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.poll_choice_envelopes())
+    }
+
+    /// Fold in a poll-choice envelope (route on [`is_poll_choice_envelope`]).
+    /// Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_poll_choice_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_poll_choice_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    /// Drop the own-choice registers of ended conversations. Returns how many
+    /// went.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn prune_poll_choices(&self) -> Result<u64, FfiError> {
+        self.with(|s| u64::try_from(s.prune_poll_choices()).unwrap_or(u64::MAX))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4), stamped
     /// `hlc`: at mint, and for any change. `true` when written; then send
     /// [`Self::link_record_envelope_for`] in a DeviceGroup service envelope.
@@ -2128,6 +2207,25 @@ pub fn lineage_group_id_max_len() -> u32 {
 #[must_use]
 pub fn is_quick_reaction_envelope(bytes: Vec<u8>) -> bool {
     core::is_quick_reaction_envelope(&bytes)
+}
+
+/// ADR-0090 — this account's held choice in one poll.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PollChoice {
+    /// The register's stamp.
+    pub hlc: u64,
+    /// The choices, strictly ascending; empty = retracted.
+    pub choices: Vec<u8>,
+    /// The ring version the anonymity set was drawn from (0 in a channel).
+    pub set_version: u32,
+}
+
+/// Whether `bytes` is an own-poll-choice envelope (route a DeviceGroup
+/// service envelope to [`SyncedState::apply_poll_choice_envelope`]).
+#[uniffi::export]
+#[must_use]
+pub fn is_poll_choice_envelope(bytes: Vec<u8>) -> bool {
+    core::is_poll_choice_envelope(&bytes)
 }
 
 /// Whether `bytes` is an own-channel-reaction envelope.

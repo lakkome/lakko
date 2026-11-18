@@ -715,6 +715,7 @@ public object StateBundle {
             },
             grants = emptyList(),
             avatar = p.avatar?.toFfi(),
+            cardShareable = p.cardShareable,
         )
         return try {
             uniffi.lakko_ffi_uniffi.composeProfileEnvelope(ffi(withCertificate = true))

@@ -224,4 +224,118 @@ final class ForwardPayloadTests: XCTestCase {
         XCTAssertFalse(a.hasOrigin)
         XCTAssertFalse(b.hasOrigin)
     }
+
+    // MARK: - ADR-0090 — forwarding content messages (amended 2026-11-18)
+
+    private func contentMessage(_ content: MessageContent) throws -> ChatMessage {
+        let bytes = try composeContentEnvelope(content: content, attachments: [], parts: ContentModel.emptyParts)
+        return ChatMessage(
+            messageId: 41, direction: .incoming, text: "", createdAt: "2026-11-18T10:00:00Z",
+            authorKeyB64: "them", content: PersistedContent(envelopeB64: bytes.base64EncodedString()))
+    }
+
+    private let cardKey = Data(repeating: 0x33, count: 32)
+
+    func testAPlainMessageALocationAndAnArticleAreForwardableAsTheSameContent() throws {
+        XCTAssertTrue(ForwardPayload.isForwardable(message("hi")) { _ in false })
+        XCTAssertNil(ForwardPayload.forwardedContent(of: message("hi")))
+        let location = SharedLocation(latE7: 600_000_000, lonE7: 250_000_000, accuracyM: 12, fixAtMs: 1, name: "Here")
+        let located = try contentMessage(.location(location: location))
+        XCTAssertTrue(ForwardPayload.isForwardable(located) { _ in false })
+        guard case .location(let sent)? = ForwardPayload.forwardedContent(of: located) else {
+            return XCTFail("a location forwards as a location")
+        }
+        XCTAssertEqual(sent, location)
+    }
+
+    func testAPollAndAChecklistAreNeverForwarded() throws {
+        let body = ChecklistBody(title: "T", othersAdd: false, othersMark: false, items: [ChecklistItem(id: 1, text: "a")])
+        let checklist = try contentMessage(.checklist(checklist: SignedChecklist(body: body, authorSig: nil)))
+        XCTAssertFalse(ForwardPayload.isForwardable(checklist) { _ in true })
+        XCTAssertNil(ForwardPayload.forwardedContent(of: checklist))
+        let poll = PollBody(
+            id: Data(repeating: 1, count: 16), question: "Q?", options: ["a", "b"], multiple: false,
+            quiz: nil, closeAtMs: nil, anonymous: nil)
+        let polled = try contentMessage(.poll(poll: SignedPoll(body: poll, authorSig: nil)))
+        XCTAssertFalse(ForwardPayload.isForwardable(polled) { _ in true })
+    }
+
+    func testAContactCardIsForwardedOnlyWhenItsPersonLetsItBeShared() throws {
+        let card = SharedContactCard(name: "Anna", username: "anna", accountKey: cardKey)
+        let carded = try contentMessage(.contactCard(card: card))
+        var asked: [Data] = []
+        XCTAssertTrue(ForwardPayload.isForwardable(carded) { asked.append($0); return true })
+        XCTAssertEqual(asked, [cardKey], "the check is read for the person on the card")
+        XCTAssertFalse(ForwardPayload.isForwardable(carded) { _ in false })
+        guard case .contactCard(let sent)? = ForwardPayload.forwardedContent(of: carded) else {
+            return XCTFail("a card forwards as a card")
+        }
+        XCTAssertEqual(sent, card)
+    }
+
+    func testAForwardedContentEnvelopeCarriesTheForwardLine() throws {
+        let parts = ContentModel.forwardParts(
+            ForwardRef(author: "Anna", originGroupIdHex: "0a0b", originMessageId: 7))
+        let card = SharedContactCard(name: "Anna", username: "anna", accountKey: cardKey)
+        let bytes = try composeContentEnvelope(content: .contactCard(card: card), attachments: [], parts: parts)
+        let parsed = parseBodyEnvelope(bytes: bytes)
+        XCTAssertEqual(parsed.forwardedFrom, "Anna")
+        XCTAssertEqual(parsed.forwardOriginMessageId, 7)
+        XCTAssertEqual(parsed.forwardOriginGroupB64.flatMap(ForwardPayload.groupIdHex(fromB64:)), "0a0b")
+        XCTAssertNil(ContentModel.forwardParts(nil).forwardedFrom)
+    }
+
+    func testASelectionForwardsOnlyWhenEveryMessageMay() {
+        let selection = MessageSelection(remaining: [1, 2])
+        XCTAssertTrue(selection.forwardEnabled(allForwardable: true))
+        XCTAssertFalse(selection.forwardEnabled(allForwardable: false))
+    }
+
+    // MARK: - Retry of a failed message (aligned with web and Android)
+
+    @MainActor
+    func testARetriedForwardKeepsItsForwardLine() throws {
+        let forward = ForwardRef(author: "Anna", originGroupIdHex: "0a0b", originMessageId: 7)
+        let plain = ChatMessage(
+            messageId: 0, direction: .outgoing, text: "see you", createdAt: "", authorKeyB64: nil,
+            forward: forward)
+        let parsed = parseBodyEnvelope(bytes: try ChatRepository.retryEnvelope(row: plain))
+        XCTAssertEqual(parsed.text, "see you")
+        XCTAssertEqual(parsed.forwardedFrom, "Anna")
+        XCTAssertEqual(parsed.forwardOriginMessageId, 7)
+
+        let card = SharedContactCard(name: "Anna", username: "anna", accountKey: cardKey)
+        let stored = try XCTUnwrap(ContentModel.store(
+            content: .contactCard(card: card), attachments: [], parts: ContentModel.forwardParts(forward)))
+        let content = ChatMessage(
+            messageId: 0, direction: .outgoing, text: "", createdAt: "", authorKeyB64: nil,
+            forward: forward, content: stored)
+        let resent = parseBodyEnvelope(bytes: try ChatRepository.retryEnvelope(row: content))
+        XCTAssertEqual(resent.forwardedFrom, "Anna", "a retried content forward keeps its line")
+        guard case .contactCard(let back)? = resent.content else { return XCTFail("still the card") }
+        XCTAssertEqual(back, card)
+    }
+
+    @MainActor
+    func testAnAnonymousPollIsResentOnlyWhileItsRosterIsUnchanged() throws {
+        let a = Data(repeating: 2, count: 32), b = Data(repeating: 1, count: 32), c = Data(repeating: 3, count: 32)
+        let hash = try pollRingHash(keys: [b, a])
+        func poll(_ anonymous: PollAnonymous?) -> MessageContent {
+            .poll(poll: SignedPoll(body: PollBody(
+                id: Data(repeating: 1, count: 16), question: "Q?", options: ["x", "y"], multiple: false,
+                quiz: nil, closeAtMs: nil, anonymous: anonymous), authorSig: nil))
+        }
+        let anon = poll(PollAnonymous(secret: Data(repeating: 5, count: 32), ring0Hash: hash))
+        XCTAssertTrue(ContentRing.retryAllowed(content: anon, rosterKeys: [a, b, a]),
+                      "the same people in any order, a repeated key counted once")
+        XCTAssertFalse(ContentRing.retryAllowed(content: anon, rosterKeys: [a, b, c]))
+        XCTAssertFalse(ContentRing.retryAllowed(content: anon, rosterKeys: [a]))
+        XCTAssertTrue(ContentRing.retryAllowed(content: poll(nil), rosterKeys: [c]), "a named poll always may")
+        XCTAssertTrue(ContentRing.retryAllowed(content: nil, rosterKeys: []), "a plain message always may")
+        XCTAssertEqual(
+            ChatViewModel.errorText(for: ContentSendError.pollRingChanged, fallbackKey: "chat.send.failed").text,
+            Localization.text("poll.resend_refused"))
+    }
 }
+
+

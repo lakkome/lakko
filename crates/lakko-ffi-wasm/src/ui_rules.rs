@@ -2096,6 +2096,107 @@ pub fn speaking_floor_onset_ms() -> u32 {
     small_ms(FLOOR_ONSET_MS)
 }
 
+// ============================================================================
+// ADR-0090 — the paperclip menu and the poll editor's anonymity switch
+// ============================================================================
+
+/// One paperclip-menu row.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct AttachmentMenuRow {
+    item: &'static str,
+    section: u8,
+    disabled: Option<&'static str>,
+}
+
+#[wasm_bindgen]
+impl AttachmentMenuRow {
+    /// `"photo-or-video" | "camera" | "file" | "audio" | "poll" |
+    /// "checklist" | "location" | "contact" | "article"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn item(&self) -> String {
+        self.item.to_string()
+    }
+
+    /// The row's group (0 files, 1 things people answer, 2 things people
+    /// share, 3 long text); a separator goes between rows whose sections
+    /// differ.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn section(&self) -> u8 {
+        self.section
+    }
+
+    /// `"no-camera" | "camera-in-call" | "no-location"` when shown disabled,
+    /// else `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn disabled(&self) -> Option<String> {
+        self.disabled.map(str::to_string)
+    }
+}
+
+/// The paperclip menu (`docs/ux/attachments.md` section 2.4). `role` is
+/// `"owner" | "admin" | "member"`. Empty means no paperclip.
+///
+/// # Errors
+///
+/// `attachmentMenu.badRole` for another role string.
+#[wasm_bindgen(js_name = attachmentMenu)]
+pub fn attachment_menu(
+    kind: ConversationKind,
+    role: &str,
+    has_camera: bool,
+    has_location: bool,
+    call_holds_camera: bool,
+) -> Result<Vec<AttachmentMenuRow>, String> {
+    use lakko_ui_rules::attachment_menu as am;
+    use lakko_ui_rules::info::ConversationRole;
+    let role = match role {
+        "owner" => ConversationRole::Owner,
+        "admin" => ConversationRole::Admin,
+        "member" => ConversationRole::Member,
+        _ => return Err("attachmentMenu.badRole: role must be owner, admin or member".to_string()),
+    };
+    Ok(am::attachment_menu(
+        kind.into(),
+        role,
+        has_camera,
+        has_location,
+        call_holds_camera,
+    )
+    .into_iter()
+    .map(|r| AttachmentMenuRow {
+        item: r.item.name(),
+        section: r.item.section(),
+        disabled: r.disabled.map(am::AttachmentMenuDisabled::name),
+    })
+    .collect())
+}
+
+/// What the poll editor shows for anonymity in a conversation of `kind`
+/// with `accounts` distinct accounts: `"not-offered" | "switch-default-on" |
+/// "always-anonymous"`.
+#[wasm_bindgen(js_name = pollAnonymity)]
+#[must_use]
+pub fn poll_anonymity(kind: ConversationKind, accounts: u32) -> String {
+    use lakko_ui_rules::attachment_menu as am;
+    match am::poll_anonymity(kind.into(), accounts as usize) {
+        am::PollAnonymity::NotOffered => "not-offered",
+        am::PollAnonymity::SwitchDefaultOn => "switch-default-on",
+        am::PollAnonymity::AlwaysAnonymous => "always-anonymous",
+    }
+    .to_string()
+}
+
+/// A sent photo's longest side at most, pixels.
+#[wasm_bindgen(js_name = photoMaxLongestSidePx)]
+#[must_use]
+pub fn photo_max_longest_side_px() -> u32 {
+    lakko_ui_rules::attachment_menu::PHOTO_MAX_LONGEST_SIDE_PX
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

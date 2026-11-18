@@ -303,6 +303,14 @@ enum AccountLocalDataWipe {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
+        // ADR-0090 — the channel-poll credentials, the article drafts, the
+        // queued ballots and who admitted this device to each group.
+        step("content-kinds") {
+            removeKeys(in: standard, withPrefix: "lakko.anon-credential.v1." + accountIdB64 + ".")
+            removeKeys(in: standard, withPrefix: ArticleDraftStore.prefix + accountIdB64 + ".")
+            standard.removeObject(forKey: BallotQueue.storeKey(accountIdB64))
+            standard.removeObject(forKey: ContentAdmitters.key(accountIdB64))
+        }
         // ADR-0082 section 5 — the translations, transcripts and
         // per-conversation translation choices, and the audio extracted for a
         // transcription still under way.

@@ -66,6 +66,8 @@ import kotlinx.coroutines.launch
 import me.lakko.app.channels.ChannelFeedback
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.ChannelPostItem
+import me.lakko.app.ui.chat.withSendAsFile
+import me.lakko.app.ui.chat.without
 import me.lakko.app.channels.ChannelPublisherLoop
 import me.lakko.app.channels.ChannelPublisherSigners
 import me.lakko.app.channels.ChannelReader
@@ -111,7 +113,7 @@ private const val SEED_WAIT_MS: Long = 3_000L
 private const val ENVELOPE_RECHECK_EVERY: Int = 6
 
 /** ADR-0087 section 13 — a channel file: 30 days of posts and 15 of margin. */
-private const val CHANNEL_FILE_IDLE_DAYS: Int = 45
+internal const val CHANNEL_FILE_IDLE_DAYS: Int = 45
 
 /**
  * ADR-0087 section 12 — a channel opens where a group opens, in the same view:
@@ -140,6 +142,8 @@ public fun ChannelConversationScreen(
     onForwardPost: ((me.lakko.app.chat.ForwardRequest) -> Unit)? = null,
     /** Section 9 — the membership ended while open: after OK, Chats. */
     onEnded: () -> Unit = onBack,
+    /** ADR-0090 — the Contact item of the attachment menu lists these. */
+    contactsRepository: me.lakko.app.contacts.ContactsRepository? = null,
 ) {
     val context = LocalContext.current
     val strings = LocalStrings.current
@@ -249,6 +253,7 @@ public fun ChannelConversationScreen(
                     onSubscribe = { pressed = true },
                 )
                 else -> ChannelTimelineView(
+                    contactsRepository = contactsRepository,
                     channelId = channelId,
                     state = state,
                     client = client,
@@ -328,6 +333,7 @@ private fun ChannelTimelineView(
     onRegistered: () -> Unit,
     channelName: String,
     onForwardPost: ((me.lakko.app.chat.ForwardRequest) -> Unit)?,
+    contactsRepository: me.lakko.app.contacts.ContactsRepository? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -522,7 +528,7 @@ private fun ChannelTimelineView(
         )
     }
 
-    fun uploadPicked(uris: List<android.net.Uri>) {
+    fun uploadPicked(uris: List<android.net.Uri>, audio: Boolean = false, visual: Boolean = false) {
         for (uri in uris) {
             scope.launch {
                 val id = System.nanoTime()
@@ -534,7 +540,33 @@ private fun ChannelTimelineView(
                     val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         resolver.openInputStream(uri)?.use { it.readBytes() }
                     } ?: throw java.io.IOException("unreadable")
-                    val ref = AttachmentBridge.encryptAndUpload(bytes = bytes, mime = mime, name = fileName, idleDays = CHANNEL_FILE_IDLE_DAYS)
+                    val ref = if (audio) {
+                        // ADR-0090 / UX 6 — the file's own tags, read here.
+                        val tags = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            me.lakko.app.media.readAudioTags(context, uri)
+                        }
+                        val cover = tags.cover?.let { art ->
+                            runCatching {
+                                AttachmentBridge.encryptAndUploadThumb(art.bytes, "image/jpeg", art.width.toUInt(), art.height.toUInt())
+                            }.getOrNull()
+                        }
+                        AttachmentBridge.encryptAndUpload(
+                            bytes = bytes,
+                            mime = mime,
+                            name = fileName,
+                            media = me.lakko.app.chat.AttachmentMediaMeta(kind = "audio", durationMs = tags.durationMs, thumb = cover),
+                            idleDays = CHANNEL_FILE_IDLE_DAYS,
+                        ).copy(title = tags.title ?: fileName.substringBeforeLast('.'), artist = tags.artist)
+                    } else if (visual && mime?.startsWith("image/") == true && mime != "image/gif") {
+                        // ADR-0090 / UX 3 — a photo re-encoded, its metadata dropped.
+                        val max = runCatching { uniffi.lakko_ffi_uniffi.photoMaxLongestSidePx().toInt() }.getOrDefault(2560)
+                        val jpeg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            me.lakko.app.media.reencodePhoto(bytes, max)
+                        } ?: throw java.io.IOException("unreadable photo")
+                        AttachmentBridge.encryptAndUpload(bytes = jpeg, mime = "image/jpeg", name = fileName.substringBeforeLast('.') + ".jpg", idleDays = CHANNEL_FILE_IDLE_DAYS)
+                    } else {
+                        AttachmentBridge.encryptAndUpload(bytes = bytes, mime = mime, name = fileName, idleDays = CHANNEL_FILE_IDLE_DAYS)
+                    }
                     pending.value = pending.value + ref
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -547,13 +579,179 @@ private fun ChannelTimelineView(
             }
         }
     }
+    // ADR-0090 / attachments UX 3-4 — the same send preview as a chat: each
+    // item its own post, the caption on the first, `Send as file`, the
+    // video rule; a channel file lives CHANNEL_FILE_IDLE_DAYS idle days.
+    var channelPreview by remember { mutableStateOf<me.lakko.app.ui.chat.SendPreview?>(null) }
+    val previewIds = remember { java.util.concurrent.atomic.AtomicLong(1) }
+    fun openPreview(uris: List<android.net.Uri>, filesOnly: Boolean) {
+        if (uris.isEmpty()) return
+        scope.launch {
+            val items = me.lakko.app.ui.chat.buildPreviewItems(context, uris, filesOnly) { previewIds.getAndIncrement() }
+            val tooBig = items.filter { it.problemKey == "attach.preview.file_too_big" }
+            if (tooBig.isNotEmpty()) sendError = UiText("attach.preview.file_too_big")
+            val kept = items - tooBig.toSet()
+            if (kept.isNotEmpty()) channelPreview = me.lakko.app.ui.chat.SendPreview(kept, filesOnly = filesOnly)
+        }
+    }
+    fun sendPreview(p: me.lakko.app.ui.chat.SendPreview) {
+        channelPreview = null
+        val maxSide = runCatching { uniffi.lakko_ffi_uniffi.photoMaxLongestSidePx().toInt() }.getOrDefault(2560)
+        scope.launch {
+            for ((item, caption) in me.lakko.app.ui.chat.previewSendOrder(p.items.filter { it.problemKey == null }, p.caption)) {
+                try {
+                    val ref = me.lakko.app.ui.chat.uploadPreviewItem(context, item, p.sendAsFile, maxSide, CHANNEL_FILE_IDLE_DAYS) ?: continue
+                    publish(uniffi.lakko_ffi_uniffi.composeEnvelope(caption, listOf(ref)))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.w(TAG, "preview item not published", e)
+                    sendError = channelsErrorText(e, "channels.publish.error.generic", "channels.publish.error.prefix")
+                }
+            }
+            readNow()
+        }
+    }
+    channelPreview?.let { p ->
+        me.lakko.app.ui.chat.SendPreviewScreen(
+            preview = p,
+            onCaption = { channelPreview = p.copy(caption = it) },
+            onSendAsFile = { channelPreview = p.withSendAsFile(it) },
+            onRemove = { channelPreview = p.without(it) },
+            onSend = { sendPreview(p) },
+            onClose = { channelPreview = null },
+        )
+    }
     val pickVisual = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
-        uploadPicked(uris)
+        openPreview(uris, filesOnly = false)
+    }
+    val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        uploadPicked(uris, audio = true)
     }
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uploadPicked(uris)
+        openPreview(uris, filesOnly = true)
     }
+    // ADR-0090 / attachments UX section 2 — the publisher's one menu.
+    var attachMenuOpen by remember { mutableStateOf(false) }
+    var channelContent by remember { mutableStateOf<ChannelContentScreen?>(null) }
+    fun publishContent(content: uniffi.lakko_ffi_uniffi.MessageContent, refs: List<AttachmentRef> = emptyList()) {
+        scope.launch {
+            try {
+                publish(
+                    uniffi.lakko_ffi_uniffi.composeContentEnvelope(
+                        content,
+                        refs,
+                        uniffi.lakko_ffi_uniffi.ContentEnvelopeParts(),
+                    ),
+                )
+                readNow()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "content publish failed", e)
+                sendError = channelsErrorText(e, "channels.publish.error.generic", "channels.publish.error.prefix")
+            }
+        }
+    }
+    ChannelAttachSurfaces(
+        menuOpen = attachMenuOpen,
+        onMenuDismiss = { attachMenuOpen = false },
+        isOwner = true,
+        screen = channelContent,
+        onScreen = { channelContent = it },
+        contactsRepository = contactsRepository,
+        onPickVisual = {
+            pickVisual.launch(
+                androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+            )
+        },
+        onPickFiles = { pickFiles.launch(arrayOf("*/*")) },
+        onPickAudio = { pickAudio.launch(arrayOf("audio/*")) },
+        onCaptured = { uri -> openPreview(listOf(uri), filesOnly = false) },
+        onPublish = ::publishContent,
+        draftKey = channelId,
+    )
 
+    // ADR-0090 section 4 — a channel poll's card: counts from the channels
+    // service, one vote per account through the anonymous credential; a
+    // publisher closes it by editing the post with the frozen tally.
+    var failedVotes by remember { mutableStateOf<Map<Long, ByteArray>>(emptyMap()) }
+    var pollTick by remember { mutableIntStateOf(0) }
+    fun channelVote(post: ChannelPostItem, choices: ByteArray) {
+        val body = (post.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body ?: return
+        scope.launch {
+            val ok = try {
+                feedback.votePoll(post.cursor, choices, body.options.size)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "channel vote not sent (${e.javaClass.simpleName})")
+                false
+            }
+            failedVotes = if (ok) failedVotes - post.cursor else failedVotes + (post.cursor to choices)
+            try {
+                chips.putAll(feedback.chips(listOf(post.cursor)))
+            } catch (_: Throwable) {
+            }
+            pollTick += 1
+        }
+    }
+    val channelContentCtx: (ChannelPostItem) -> me.lakko.app.ui.chat.ContentBubbleContext? = { post ->
+        if (post.content == null) {
+            null
+        } else {
+            me.lakko.app.ui.chat.ContentBubbleContext(
+                groupId = null,
+                ownKey = null,
+                isOwnerOrAdmin = isPublisher,
+                isOneToOne = false,
+                nameOf = { null },
+                onVote = { _, choices -> channelVote(post, choices) },
+                onRetryVote = { _ -> failedVotes[post.cursor]?.let { channelVote(post, it) } },
+                onViewResults = {},
+                onTick = { target, item, done ->
+                    scope.launch {
+                        runCatching { publish(uniffi.lakko_ffi_uniffi.composeChecklistTickEnvelope(target, item, done)); readNow() }
+                            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+                    }
+                },
+                onAddItem = { target, text ->
+                    scope.launch {
+                        runCatching { publish(uniffi.lakko_ffi_uniffi.composeChecklistAddEnvelope(target, text.trim())); readNow() }
+                            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+                    }
+                },
+                banner = me.lakko.app.ui.chat.articleBanner(mediaHub),
+                onOpenLocation = { loc -> me.lakko.app.ui.chat.openGeo(context, loc) },
+                contactCardAction = { me.lakko.app.ui.chat.ContactCardAction.ADD },
+                onContactCard = { _, _ -> },
+                onOpenArticle = {},
+                channel = true,
+                onClose = { msg ->
+                    val body = (post.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body
+                    scope.launch {
+                        try {
+                            // A checklist closes with no tally.
+                            val tally = body?.let { feedback.currentTallyBytes(post.cursor, it.options.size) }
+                            publish(uniffi.lakko_ffi_uniffi.composePollCloseEnvelope(msg.messageId, tally))
+                            readNow()
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "poll close not published (${e.javaClass.simpleName})")
+                        }
+                    }
+                },
+                pollViewOverride = { _ ->
+                    pollTick.let { }
+                    (post.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body?.let { body ->
+                        feedback.pollView(post.cursor, body, post.closed, post.frozenTally, System.currentTimeMillis())
+                            .let { v -> if (post.cursor in failedVotes) v.copy(ownBallotStatus = me.lakko.app.chat.OwnBallotStatus.Failed) else v }
+                    }
+                },
+            )
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val width = maxWidth - 24.dp
@@ -601,6 +799,7 @@ private fun ChannelTimelineView(
                             )
                         } else {
                             PostBlock(
+                                contentCtx = channelContentCtx(post),
                                 commentCount = commentCounts[post.cursor],
                                 post = post,
                                 width = width,
@@ -783,7 +982,7 @@ private fun ChannelTimelineView(
                             androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
                         )
                     },
-                    onAttachClicked = { pickFiles.launch(arrayOf("*/*")) },
+                    onAttachClicked = { attachMenuOpen = true },
                     onRemoveAttachment = { index ->
                         pending.value = pending.value.filterIndexed { i, _ -> i != index }
                     },
@@ -933,6 +1132,8 @@ private fun PostBlock(
     canSave: Boolean = false,
     onToggleSaved: (ChatMessage) -> Unit = {},
     onForward: ((ChatMessage) -> Unit)? = null,
+    /** ADR-0090 — what a content post's card answers to. */
+    contentCtx: me.lakko.app.ui.chat.ContentBubbleContext? = null,
 ) {
     val context = LocalContext.current
     val time = remember(post.tsMs) {
@@ -946,9 +1147,13 @@ private fun PostBlock(
             attachments = post.attachments,
             createdAt = java.time.Instant.ofEpochMilli(post.tsMs).toString(),
             edited = post.edited,
+            content = post.content,
+            authorKey = me.lakko.app.channels.CHANNEL_PUBLISHER_KEY,
+            contentExtras = me.lakko.app.chat.ContentExtras(ops = post.ops),
         )
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        androidx.compose.runtime.CompositionLocalProvider(me.lakko.app.ui.chat.LocalContentBubble provides contentCtx) {
         Bubble(
             msg = msg,
             time = time,
@@ -976,6 +1181,7 @@ private fun PostBlock(
                 canSave = canSave,
             ),
         )
+        }
         if (chips.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (chip in chips) {

@@ -305,12 +305,13 @@ public class ForwardViewModel(
     /** `null` when the slot was empty on arrival — the picker then closes. */
     public val batch: ForwardBatch?,
     private val sender: ForwardSender = ForwardSender(
-        send = { target, text, attachments, forward ->
+        send = { target, text, attachments, forward, content ->
             repo.sendMessage(
                 groupIdHex = target,
                 plaintext = text,
                 attachments = attachments,
                 forward = forward,
+                content = content,
             )
         },
     ),

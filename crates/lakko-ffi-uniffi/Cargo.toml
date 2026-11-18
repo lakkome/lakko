@@ -27,6 +27,12 @@ lakko-ds-proof.workspace = true
 # ADR-0054 S3 - the client half of the anonymous rate-limit tokens (blind,
 # finalize with the DLEQ check, header encoding).
 lakko-anon-token.workspace = true
+# ADR-0090 section 3 - anonymous group-poll ballots (cast, open, verify,
+# tally) and section 4 - the client half of the channel-poll credential.
+lakko-ballot.workspace = true
+lakko-anon-cred.workspace = true
+# ADR-0090 section 3.9 - building and adopting open-items hand-overs.
+lakko-open-items.workspace = true
 # ADR-0049 section 2 (amended 2026-09-28) - the device link: the SPAKE2
 # exchange behind the camera-less add-device confirmation.
 lakko-device-link.workspace = true

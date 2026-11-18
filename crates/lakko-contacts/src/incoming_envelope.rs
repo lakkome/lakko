@@ -75,6 +75,10 @@
 //!    (ADR-0086 §6): a contact request sealed to one member of the group.
 //!    Never rendered; every member tries
 //!    [`crate::group_contact_request::check_group_contact_request`].
+//!    Then [`crate::open_items::try_unwrap_open_items`] and
+//!    [`crate::poll_ballots::try_unwrap_poll_ballots`] (ADR-0090 §3.9): the
+//!    open-items hand-over and old ballot rows a committer sends after an
+//!    admission. Never rendered.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
@@ -154,7 +158,9 @@ use crate::knock_seed::{try_unwrap_knock_seed, KnockSeedEnvelope, KnockSeedError
 use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
 use crate::link_founded::{try_unwrap_link_founded, LinkFounded, LinkFoundedError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
+use crate::open_items::{try_unwrap_open_items, OpenItems, OpenItemsError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
+use crate::poll_ballots::{try_unwrap_poll_ballots, PollBallots, PollBallotsError};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
@@ -454,6 +460,19 @@ pub enum IncomingEnvelope<'a> {
     /// journal, sent by a current publisher resolved at receipt; requests
     /// before the next rotation collapse into it.
     ChannelRotateRequest([u8; 16]),
+    /// An open-items hand-over (ADR-0090 section 3.9): the open polls and
+    /// checklists of the group, sent by the committer of an admission. Never
+    /// a chat bubble. A device that already holds an item ignores it; a
+    /// device admitted by the commit takes it only from a sender
+    /// [`crate::open_items::open_items_sender_trusted`] accepts, puts parts
+    /// together with [`crate::open_items::assemble_open_items`] and checks
+    /// each item (author signature, body, ring) before adopting it.
+    OpenItems(OpenItems),
+    /// Old ballot rows of an anonymous poll the journal may no longer hold
+    /// (ADR-0090 section 3.9). Never a chat bubble. Taken from the same
+    /// senders as [`IncomingEnvelope::OpenItems`]; each row is opened and
+    /// verified like a ballot read from the journal.
+    PollBallots(PollBallots),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -569,6 +588,13 @@ pub enum DispatchError {
     /// malformed payload.
     #[error(transparent)]
     ChannelRotateRequest(#[from] ChannelRotateRequestError),
+    /// The open-items domain (ADR-0090 section 3.9) with a malformed payload.
+    #[error(transparent)]
+    OpenItems(#[from] OpenItemsError),
+    /// The poll-ballots domain (ADR-0090 section 3.9) with a malformed
+    /// payload.
+    #[error(transparent)]
+    PollBallots(#[from] PollBallotsError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -589,6 +615,7 @@ pub enum DispatchError {
 /// `Ok(IntroMessage(&[]))`, which is a valid (degenerate)
 /// ContactRequest payload the UI can render as an empty
 /// message body.
+#[allow(clippy::too_many_lines)] // one step per envelope kind, in dispatch order
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'_>, DispatchError> {
     // 1. Call-Welcome — first joiner.
     if let Some(welcome) = try_unwrap_call_welcome(plaintext)? {
@@ -700,6 +727,12 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
         return Ok(IncomingEnvelope::ChannelRotateRequest(channel));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
+    if let Some(items) = try_unwrap_open_items(plaintext)? {
+        return Ok(IncomingEnvelope::OpenItems(items));
+    }
+    if let Some(ballots) = try_unwrap_poll_ballots(plaintext)? {
+        return Ok(IncomingEnvelope::PollBallots(ballots));
+    }
     if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {
         return Ok(IncomingEnvelope::GroupContactRequest(envelope));
     }
@@ -938,6 +971,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         };
         let wrapped = compose_profile(&profile).unwrap();
         assert_eq!(
@@ -950,15 +984,15 @@ mod tests {
     fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
         // Fail-closed: a profile carrying a right-to-left override in
         // its name must be dropped, never rendered as chat text.
-        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V4};
+        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V5};
         let name = "Alice\u{202E}".as_bytes();
         let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
-        wrapped.push(PROFILE_VERSION_V4);
+        wrapped.push(PROFILE_VERSION_V5);
         wrapped.extend_from_slice(&0u64.to_be_bytes());
         wrapped.push(u8::try_from(name.len()).unwrap());
         wrapped.extend_from_slice(name);
-        // No username, account id, certificate, grants or avatar.
-        wrapped.extend_from_slice(&[0, 0, 0, 0, 0]);
+        // No username, account id, certificate, grants, avatar or flags.
+        wrapped.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
         assert_eq!(
             dispatch_incoming_envelope(&wrapped),
             Err(DispatchError::Profile(ProfileError::DisplayName(

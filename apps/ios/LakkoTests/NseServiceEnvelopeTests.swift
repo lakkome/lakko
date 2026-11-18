@@ -113,15 +113,15 @@ final class NseServiceEnvelopeTests: XCTestCase {
     }()
 
     /// Stand-in for the slim FFI's `profileEnvelopeMinLen()...profileEnvelopeMaxLen()`
-    /// (32...926 — profile v4 (ADR-0084) with ADR-0078's 134-byte reach grants:
-    /// domain 17 + version 1 + stamp 8 + six length / count bytes at the least;
+    /// (33...927 — profile v5 (ADR-0090 section 7) with ADR-0078's 134-byte reach grants:
+    /// domain 17 + version 1 + stamp 8 + six length / count bytes + the flags byte at the least;
     /// at most a 255-byte name, a 32-byte username, a 16-byte account id, a
     /// 153-byte username certificate, two grants and a 170-byte avatar). Restated for the same reason as
     /// ``beaconEnvelopeLen``; the Rust golden in
     /// `crates/lakko-ffi-extension/src/profile.rs` pins the exported values,
     /// and ``testProfileFixtureBoundsMatchTheAdvertisedRange`` keeps this
     /// fixture honest against the envelopes this file builds.
-    private static let profileEnvelopeLens: ClosedRange<Int> = 32...926
+    private static let profileEnvelopeLens: ClosedRange<Int> = 33...927
 
     /// ADR-0084 — the avatar field's lengths: none, a still, a still and a
     /// video with its duration.
@@ -131,16 +131,16 @@ final class NseServiceEnvelopeTests: XCTestCase {
     /// binding(97)`.
     private static let reachGrantLen = 134
 
-    /// A well-formed profile v4 envelope: `domain(17) || version(1) ||
+    /// A well-formed profile v5 envelope: `domain(17) || version(1) ||
     /// updated_at_ms(8 BE) || name_len || name || username_len || username ||
     /// account_id_len || account_id || cert_len || cert || grant_count ||
-    /// grants || avatar_len || avatar`. `full` fills the account id, the
+    /// grants || avatar_len || avatar || flags`. `full` fills the account id, the
     /// certificate, two grants and a still-and-video avatar.
     private func profileEnvelope(
         name: String = "", username: String = "", updatedAtMs: UInt64 = 7, full: Bool = false
     ) -> Data {
         var out = Self.profileDomain
-        out.append(0x04)
+        out.append(0x05)
         for shift in stride(from: 56, through: 0, by: -8) {
             out.append(UInt8((updatedAtMs >> UInt64(shift)) & 0xFF))
         }
@@ -158,6 +158,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         if full { out.append(Data(repeating: 3, count: 2 * Self.reachGrantLen)) }
         out.append(full ? 170 : 0)
         if full { out.append(Data(repeating: 5, count: 170)) }
+        out.append(0)
         return out
     }
 
@@ -168,7 +169,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let domain = Self.profileDomain
         guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
         let payload = Array(bytes.dropFirst(domain.count))
-        guard payload.count >= 1 + 8 + 6, payload[0] == 0x04 else { return false }
+        guard payload.count >= 1 + 8 + 7, payload[0] == 0x05 else { return false }
         var at = 9
         func field(_ allowed: (Int) -> Bool) -> Bool {
             guard payload.count > at, allowed(Int(payload[at])) else { return false }
@@ -181,7 +182,10 @@ final class NseServiceEnvelopeTests: XCTestCase {
         guard grants <= 2 else { return false }
         at += 1 + grants * Self.reachGrantLen
         guard payload.count > at, Self.avatarLens.contains(Int(payload[at])) else { return false }
-        return payload.count == at + 1 + Int(payload[at])
+        at += 1 + Int(payload[at])
+        // The flags byte: only bit 0 is defined.
+        guard payload.count == at + 1, payload[at] & ~0x01 == 0 else { return false }
+        return true
     }
 
     /// A well-formed committer beacon: `domain(26) || version(1)=0x01`, 27

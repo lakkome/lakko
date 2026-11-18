@@ -163,15 +163,16 @@ function addChannelPosts(
       mentionsMe,
       repliesToMe: false,
       reactionsDistinct: 0,
-      hasMedia: false,
+      hasMedia: (p.attachments?.length ?? 0) > 0,
       text: p.text,
     });
     const message: PersistedMessage = {
       messageId: String(p.cursor),
       direction: fromSelf ? "outgoing" : "incoming",
       text: p.text,
-      attachments: [],
+      attachments: p.attachments ?? [],
       createdAt: new Date(p.serverTsMs).toISOString(),
+      ...(p.content === undefined ? {} : { content: p.content }),
     };
     refs.push({ source, message, mentionsMe, repliesToMe: false });
   }

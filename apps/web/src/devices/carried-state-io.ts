@@ -111,6 +111,8 @@ export function carriedProfilesFromRow(
           : base64Decode(p.usernameCertificateB64),
         undefined,
         avatar,
+        // ADR-0090 section 7 — the person's own "my card may be shared".
+        p.cardShareable !== false,
       );
       out.push({ personKeyB64, envelopeB64: base64Encode(envelope) });
     } catch {

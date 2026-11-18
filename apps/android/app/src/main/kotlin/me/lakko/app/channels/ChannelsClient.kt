@@ -992,9 +992,14 @@ public class ChannelsClient(
     private data class LabelCountJson(val label_hex: String, val count: Long)
 
     @Serializable
+    private data class VotesJson(val voters: Long = 0, val labels: List<LabelCountJson> = emptyList())
+
+    @Serializable
     private data class PostCountsJson(
         val cursor: Long,
         val labels: List<LabelCountJson> = emptyList(),
+        /** ADR-0090 section 4 — a channel poll's anonymous vote counts. */
+        val votes: VotesJson? = null,
         /** The post's maintained comment count (2026-11-05). */
         val comments: Long = 0,
     )
@@ -1007,6 +1012,8 @@ public class ChannelsClient(
     public class ReactionSummary(
         public val labels: Map<ULong, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>>,
         public val comments: Map<ULong, Long>,
+        /** ADR-0090 section 4 — per poll post: voters and per-label counts. */
+        public val votes: Map<ULong, Pair<Long, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>>> = emptyMap(),
     )
 
     /** Label counts of up to 50 posts, no session (cacheable). */
@@ -1030,6 +1037,15 @@ public class ChannelsClient(
                 }
             },
             comments = posts.associate { it.cursor.toULong() to it.comments },
+            votes = posts.mapNotNull { p ->
+                p.votes?.let { v ->
+                    p.cursor.toULong() to (
+                        v.voters to v.labels.mapNotNull { l ->
+                            hexOrNull(l.label_hex)?.let { uniffi.lakko_ffi_uniffi.FfiReactionLabelCount(it, l.count.toULong()) }
+                        }
+                        )
+                }
+            }.toMap(),
         )
     }
 

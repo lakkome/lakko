@@ -27,6 +27,7 @@
  * Also here: the chat-list summary (unread count + last-message preview) read
  * from a slot, and the conversion from a received event to a persisted row.
  */
+import { contentPreviewOf } from "../attach/preview";
 import { authorIdentityToPersisted } from "./author-identity";
 import type { IncomingChatEvent } from "./client";
 import { attachmentsPreviewLabel } from "./list-preview";
@@ -350,6 +351,9 @@ function previewText(m: PersistedMessage): string {
   // ADR-0061 section 6 — a message from a newer Lakko: the catalog's words,
   // never the core's English placeholder.
   if (typeof m.unsupportedVersion === "number") return t("chat.message.unsupported");
+  // ADR-0090 — a poll, checklist, location, contact card or article.
+  const contentLine = contentPreviewOf(m.content);
+  if (contentLine !== null) return contentLine;
   const text = m.text.replace(/\s+/g, " ").trim();
   if (text.length > 0) {
     return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;
@@ -396,6 +400,9 @@ export function eventToPersistedMessage(
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
+      // ADR-0090 — the content object, verbatim.
+      ...(e.content === undefined ? {} : { content: e.content }),
+      ...(e.contentState === undefined ? {} : { contentState: e.contentState }),
     };
   }
   const membership = persistedFromMembership(e.membership);

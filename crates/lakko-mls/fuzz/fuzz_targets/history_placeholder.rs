@@ -11,10 +11,18 @@
 //! decoded placeholder must round-trip stably — re-encoding and
 //! re-decoding yields an equal value (catches encode/decode
 //! asymmetry).
+//!
+//! Version 4 (ADR-0090): the optional content block (kind byte, payload,
+//! state snapshot) is asserted within its structural bounds whenever a
+//! placeholder decodes. Its typed decode lives in `lakko-attachments`
+//! (fuzz target `content_bundle_decode`).
 
 #![no_main]
 
-use lakko_mls::history_placeholder::HistoryMessagePlaceholder;
+use lakko_mls::history_placeholder::{
+    HistoryMessagePlaceholder, CONTENT_KINDS, MAX_AUDIO_TAG_BYTES, MAX_CONTENT_PAYLOAD_BYTES,
+    MAX_CONTENT_STATE_BYTES,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -23,6 +31,21 @@ fuzz_target!(|data: &[u8]| {
 
     // Round-trip stability on anything that parses.
     if let Ok(msg) = HistoryMessagePlaceholder::decode(data) {
+        if let Some(c) = &msg.content {
+            assert!(CONTENT_KINDS.contains(&c.kind));
+            assert!(!c.payload.is_empty() && c.payload.len() <= MAX_CONTENT_PAYLOAD_BYTES);
+            assert!(c.state.len() <= MAX_CONTENT_STATE_BYTES);
+        }
+        for a in &msg.attachments {
+            assert!(a
+                .title
+                .as_ref()
+                .map_or(true, |t| t.len() <= MAX_AUDIO_TAG_BYTES));
+            assert!(a
+                .artist
+                .as_ref()
+                .map_or(true, |t| t.len() <= MAX_AUDIO_TAG_BYTES));
+        }
         let re = msg.encode().expect("decoded placeholder must re-encode");
         let back =
             HistoryMessagePlaceholder::decode(&re).expect("re-encoded placeholder must re-decode");

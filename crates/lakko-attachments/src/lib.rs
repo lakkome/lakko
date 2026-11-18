@@ -117,6 +117,22 @@ use zeroize::Zeroize;
 
 use lakko_crypto::aead::{open, seal, AeadKey, Algorithm, KEY_LEN, NONCE_LEN};
 
+pub mod article;
+pub mod checklist;
+pub mod contact_card;
+pub mod content;
+pub mod content_state;
+pub mod location;
+pub mod message_links;
+pub mod poll;
+
+pub use article::Article;
+pub use checklist::{ChecklistItemRef, SignedChecklist};
+pub use contact_card::ContactCard;
+pub use content::{ContentError, TextError};
+pub use location::Location;
+pub use poll::SignedPoll;
+
 /// Length of a content-addressed blob id (= SHA-256 output).
 pub const BLOB_ID_LEN: usize = 32;
 
@@ -225,6 +241,18 @@ pub const MEDIA_KIND_VIDEO_NOTE: &str = "video_note";
 /// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a GIF
 /// picked from the GIF proxy and re-uploaded as an attachment.
 pub const MEDIA_KIND_GIF: &str = "gif";
+
+/// ADR-0090 section 2 — the wire value of [`AttachmentRef::kind`] for a
+/// music or other audio file (not a voice message).
+pub const MEDIA_KIND_AUDIO: &str = "audio";
+
+/// ADR-0090 section 2 — the longest `duration_ms` an `audio` attachment may
+/// carry (24 hours; chosen). A longer value is dropped at parse and compose.
+pub const MAX_AUDIO_DURATION_MS: u32 = 86_400_000;
+
+/// ADR-0090 section 2 — the longest `title` or `artist` an `audio`
+/// attachment may carry, in bytes.
+pub const MAX_AUDIO_TAG_BYTES: usize = 255;
 
 /// ADR-0047 — the longest `duration_ms` a `voice` attachment may carry
 /// (15 minutes). A longer value is dropped at parse and at compose.
@@ -425,6 +453,16 @@ pub struct AttachmentRef {
     /// its size is outside 1..=[`MAX_THUMB_BYTES`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumb: Option<ThumbRef>,
+    /// ADR-0090 section 2 — the title tag of an `audio` attachment, read on
+    /// the sender's device. Kept only for kind `audio`, 1..=
+    /// [`MAX_AUDIO_TAG_BYTES`] bytes with no control or format character;
+    /// otherwise dropped alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// ADR-0090 section 2 — the artist tag of an `audio` attachment, under
+    /// the same rule as [`Self::title`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
 }
 
 /// The receiver-side classification of [`AttachmentRef::kind`]
@@ -437,6 +475,8 @@ pub enum MediaKind {
     VideoNote,
     /// [`MEDIA_KIND_GIF`] — a GIF re-uploaded from the GIF proxy.
     Gif,
+    /// [`MEDIA_KIND_AUDIO`] — a music or other audio file (ADR-0090).
+    Audio,
     /// Any other value — a kind this build does not know. Renders as a
     /// plain file.
     Other,
@@ -450,6 +490,7 @@ impl MediaKind {
             MEDIA_KIND_VOICE => Self::Voice,
             MEDIA_KIND_VIDEO_NOTE => Self::VideoNote,
             MEDIA_KIND_GIF => Self::Gif,
+            MEDIA_KIND_AUDIO => Self::Audio,
             _ => Self::Other,
         }
     }
@@ -461,6 +502,7 @@ impl MediaKind {
             Self::Voice => Some(MEDIA_KIND_VOICE),
             Self::VideoNote => Some(MEDIA_KIND_VIDEO_NOTE),
             Self::Gif => Some(MEDIA_KIND_GIF),
+            Self::Audio => Some(MEDIA_KIND_AUDIO),
             Self::Other => None,
         }
     }
@@ -481,12 +523,13 @@ pub enum InlineMediaType {
 
 /// The inline-playback allowlist (ADR-0047), MIME essence → class.
 /// `image/svg+xml` is deliberately absent — it can carry script.
-const INLINE_MEDIA_ALLOWLIST: [(&str, InlineMediaType); 6] = [
+const INLINE_MEDIA_ALLOWLIST: [(&str, InlineMediaType); 7] = [
     ("image/jpeg", InlineMediaType::Image),
     ("image/png", InlineMediaType::Image),
     ("image/gif", InlineMediaType::Image),
     ("image/webp", InlineMediaType::Image),
     ("audio/mp4", InlineMediaType::Audio),
+    ("audio/mpeg", InlineMediaType::Audio),
     ("video/mp4", InlineMediaType::Video),
 ];
 
@@ -637,7 +680,18 @@ impl AttachmentRef {
             width: None,
             height: None,
             thumb: None,
+            title: None,
+            artist: None,
         }
+    }
+
+    /// ADR-0090 — set the audio `title` and `artist` tags. Kept on the wire
+    /// only for kind [`MEDIA_KIND_AUDIO`] within their bound.
+    #[must_use]
+    pub fn with_audio_tags(mut self, title: Option<String>, artist: Option<String>) -> Self {
+        self.title = title;
+        self.artist = artist;
+        self
     }
 
     /// ADR-0047 — set the media `kind` (e.g. [`MEDIA_KIND_VOICE`]).
@@ -717,6 +771,9 @@ impl AttachmentRef {
         self.width = self.width.filter(|&w| dimension_in_bounds(w));
         self.height = self.height.filter(|&h| dimension_in_bounds(h));
         self.thumb = self.thumb.and_then(ThumbRef::sanitized);
+        let audio = self.media_kind() == Some(MediaKind::Audio);
+        self.title = self.title.filter(|t| audio && audio_tag_in_bounds(t));
+        self.artist = self.artist.filter(|a| audio && audio_tag_in_bounds(a));
         self
     }
 
@@ -789,6 +846,10 @@ struct AttachmentRefWire {
     height: Option<u32>,
     #[serde(default, deserialize_with = "lenient")]
     thumb: Option<ThumbRef>,
+    #[serde(default, deserialize_with = "lenient")]
+    title: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    artist: Option<String>,
 }
 
 impl From<AttachmentRefWire> for AttachmentRef {
@@ -806,6 +867,8 @@ impl From<AttachmentRefWire> for AttachmentRef {
             width: w.width,
             height: w.height,
             thumb: w.thumb,
+            title: w.title,
+            artist: w.artist,
         }
         .sanitized()
     }
@@ -857,9 +920,16 @@ fn bound_duration(kind: Option<&str>, duration_ms: Option<u32>) -> Option<u32> {
     let max = match kind.map(MediaKind::from_wire) {
         Some(MediaKind::Voice) => MAX_VOICE_DURATION_MS,
         Some(MediaKind::VideoNote) => MAX_VIDEO_NOTE_DURATION_MS,
+        Some(MediaKind::Audio) => MAX_AUDIO_DURATION_MS,
         Some(MediaKind::Gif | MediaKind::Other) | None => return None,
     };
     duration_ms.filter(|&d| d > 0 && d <= max)
+}
+
+/// An audio title or artist tag: 1..=[`MAX_AUDIO_TAG_BYTES`] bytes under
+/// the display-text rule.
+fn audio_tag_in_bounds(tag: &str) -> bool {
+    content::check_display_text(tag, 1, MAX_AUDIO_TAG_BYTES, "audioTag").is_ok()
 }
 
 const fn thumb_size_in_bounds(size: u64) -> bool {
@@ -883,6 +953,10 @@ pub struct RawMediaMetadata {
     pub height: Option<u32>,
     /// Poster-frame metadata.
     pub thumb: Option<RawThumbMetadata>,
+    /// ADR-0090 audio title tag.
+    pub title: Option<String>,
+    /// ADR-0090 audio artist tag.
+    pub artist: Option<String>,
 }
 
 /// The poster-frame part of [`RawMediaMetadata`].
@@ -906,7 +980,10 @@ impl RawMediaMetadata {
     /// the same thing.
     #[must_use]
     pub fn bounded(self) -> Self {
+        let audio = self.kind.as_deref().map(MediaKind::from_wire) == Some(MediaKind::Audio);
         Self {
+            title: self.title.filter(|t| audio && audio_tag_in_bounds(t)),
+            artist: self.artist.filter(|a| audio && audio_tag_in_bounds(a)),
             duration_ms: bound_duration(self.kind.as_deref(), self.duration_ms),
             waveform: self
                 .waveform
@@ -1144,6 +1221,68 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub channel_invite: Option<String>,
+    /// ADR-0090 section 3 — a poll: `{"body": base64, "author_sig": base64?}`. A content field; at most one per envelope. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) poll: Option<serde_json::Value>,
+    /// ADR-0090 section 5 — a checklist, in the poll shape. A content field; also the replacement payload of a checklist edit. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checklist: Option<serde_json::Value>,
+    /// ADR-0090 section 6 — a location object. A content field. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) location: Option<serde_json::Value>,
+    /// ADR-0090 section 7 — a contact card object. A content field. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) contact_card: Option<serde_json::Value>,
+    /// ADR-0090 section 8 — standard base64 of an article. A content field; also the replacement payload of an article edit. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) article: Option<serde_json::Value>,
+    /// ADR-0090 section 3.2 — a non-anonymous vote op on the poll with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) poll_vote_of: Option<serde_json::Value>,
+    /// ADR-0090 — the option indices of a vote, strictly ascending; empty retracts. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) choices: Option<serde_json::Value>,
+    /// ADR-0090 section 3.5 — a close op on the poll or checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) poll_close_of: Option<serde_json::Value>,
+    /// ADR-0090 section 4.3 — on a channel poll's close, standard base64 of
+    /// the frozen tally (`lakko_channels::ChannelPollTally`, opaque here, at
+    /// most [`poll::MAX_POLL_CLOSE_TALLY_BYTES`]). Lenient: a value that is
+    /// not such base64 is dropped and the close stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tally: Option<serde_json::Value>,
+    /// ADR-0090 section 5 — a tick op on the checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) check_of: Option<serde_json::Value>,
+    /// ADR-0090 — the item a tick names: an author item id, or with `item_added` the DS `messageId` of an add row. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) item: Option<serde_json::Value>,
+    /// ADR-0090 — `true` when `item` names an added item. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) item_added: Option<serde_json::Value>,
+    /// ADR-0090 — the tick state. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) done: Option<serde_json::Value>,
+    /// ADR-0090 section 5 — an add-item op on the checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) check_add_of: Option<serde_json::Value>,
+    /// ADR-0090 — the added item's text. Read as untyped JSON so presence is known; validated
+    /// when the envelope is classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) item_text: Option<serde_json::Value>,
 }
 
 impl Envelope {
@@ -1173,6 +1312,21 @@ impl Envelope {
             resend_origin_group: None,
             resend_origin_message: None,
             channel_invite: None,
+            poll: None,
+            checklist: None,
+            location: None,
+            contact_card: None,
+            article: None,
+            poll_vote_of: None,
+            choices: None,
+            poll_close_of: None,
+            tally: None,
+            check_of: None,
+            item: None,
+            item_added: None,
+            done: None,
+            check_add_of: None,
+            item_text: None,
         }
     }
 
@@ -1412,6 +1566,112 @@ pub enum MessageBody {
         /// The highest `messageId` the sender has read.
         up_to: i64,
     },
+    /// ADR-0090 section 3 — a poll. The author signature is NOT checked
+    /// here: the receiver calls [`SignedPoll::verify`] with the group id and
+    /// the account key the MLS sender resolves to (C-68) and drops the poll
+    /// when it fails.
+    Poll {
+        /// The poll and its author signature.
+        poll: SignedPoll,
+        /// The message this one replies to, if any.
+        reply: Option<Reply>,
+        /// Forward attribution, if any.
+        forward: Option<Forward>,
+    },
+    /// ADR-0090 section 5 — a checklist; its signature is checked like a
+    /// poll's ([`SignedChecklist::verify`]).
+    Checklist {
+        /// The checklist and its author signature.
+        checklist: SignedChecklist,
+        /// The message this one replies to, if any.
+        reply: Option<Reply>,
+        /// Forward attribution, if any.
+        forward: Option<Forward>,
+    },
+    /// ADR-0090 section 6 — a location.
+    Location {
+        /// The location.
+        location: Location,
+        /// The message this one replies to, if any.
+        reply: Option<Reply>,
+        /// Forward attribution, if any.
+        forward: Option<Forward>,
+    },
+    /// ADR-0090 section 7 — a contact card.
+    ContactCard {
+        /// The card.
+        card: ContactCard,
+        /// The message this one replies to, if any.
+        reply: Option<Reply>,
+        /// Forward attribution, if any.
+        forward: Option<Forward>,
+    },
+    /// ADR-0090 section 8 — an article; every image block points at an
+    /// image attachment of `attachments`.
+    Article {
+        /// The article.
+        article: Article,
+        /// The envelope's attachments the image blocks point at.
+        attachments: Vec<AttachmentRef>,
+        /// The message this one replies to, if any.
+        reply: Option<Reply>,
+        /// Forward attribution, if any.
+        forward: Option<Forward>,
+    },
+    /// ADR-0090 section 3.2 — a non-anonymous vote on the poll `target`.
+    /// The structural rule ([`poll::choices_shape_valid`]) is checked here;
+    /// whether the choices fit the poll is [`poll::fold`]'s.
+    PollVote {
+        /// DS `messageId` of the poll.
+        target: i64,
+        /// Option indices, strictly ascending; empty retracts.
+        choices: Vec<u8>,
+    },
+    /// ADR-0090 section 3.5 — close the poll or checklist `target`.
+    PollClose {
+        /// DS `messageId` of the poll or checklist.
+        target: i64,
+        /// ADR-0090 section 4.3 — a channel poll's frozen tally, the encoded
+        /// `lakko_channels::ChannelPollTally` (opaque here; decode it at the
+        /// FFI, drop it when it does not decode). `None` in a group, and
+        /// when the envelope carried none or an out-of-bound one.
+        tally: Option<Vec<u8>>,
+    },
+    /// ADR-0090 section 5 — mark an item of the checklist `target`.
+    ChecklistTick {
+        /// DS `messageId` of the checklist.
+        target: i64,
+        /// Which item.
+        item: ChecklistItemRef,
+        /// Done or not.
+        done: bool,
+    },
+    /// ADR-0090 section 5 — add an item to the checklist `target`; the item's
+    /// id is this row's DS `messageId`.
+    ChecklistAdd {
+        /// DS `messageId` of the checklist.
+        target: i64,
+        /// The item text.
+        text: String,
+    },
+    /// ADR-0090 section 1 — an edit of the checklist `target` by its author,
+    /// replacing it with `checklist` (signature checked by the receiver).
+    EditChecklist {
+        /// DS `messageId` of the checklist.
+        target: i64,
+        /// The replacement.
+        checklist: SignedChecklist,
+    },
+    /// ADR-0090 section 1 — an edit of the article `target`, replacing the
+    /// whole article.
+    EditArticle {
+        /// DS `messageId` of the article.
+        target: i64,
+        /// The replacement.
+        article: Article,
+        /// The replacement's attachments.
+        attachments: Vec<AttachmentRef>,
+    },
     /// A Lakko service envelope (a plaintext opening with
     /// [`SERVICE_ENVELOPE_PREFIX`]) that the caller did not recognise before
     /// asking this parser: most often a newer version of a profile, group
@@ -1423,7 +1683,11 @@ pub enum MessageBody {
     /// ever classified here.
     ServiceEnvelope,
     /// A JSON chat envelope whose `v` is not [`WIRE_VERSION`]: a message
-    /// from a client on a newer wire version. It carries no text for this
+    /// from a client on a newer wire version. Also, with `version ==`
+    /// [`WIRE_VERSION`] (ADR-0090): a v1 envelope whose content this build
+    /// refuses (two content fields, an ADR-0090 payload that broke a bound
+    /// with nothing else to show, an op carrying content, a refused edit
+    /// payload). It carries no text for this
     /// build to show; the client renders its own catalog sentence in the
     /// interface language (ADR-0061 section 6). **Never shown as chat
     /// text** — before this variant the core put the English placeholder
@@ -1453,7 +1717,15 @@ impl Envelope {
     /// emoji) envelope falls back to [`MessageBody::Chat`] — never
     /// trust a half-formed op to mutate another message (fail-safe,
     /// the same posture the rest of the parser takes).
+    ///
+    /// ADR-0090: at most one content field (`poll`, `checklist`,
+    /// `location`, `contact_card`, `article`) with an empty text; a second
+    /// one, or one beside an op other than `edit_of`, is
+    /// [`MessageBody::Unsupported`]. A content payload or a new op that
+    /// breaks a bound is dropped whole: the message shows its text and
+    /// attachments when it has any, and is `Unsupported` otherwise.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     fn into_body(self) -> MessageBody {
         // Read before `text` / `attachments` are moved out below; the reply is
         // exclusive with nothing and is simply carried on the Chat exits.
@@ -1465,22 +1737,105 @@ impl Envelope {
             + u8::from(self.delete_of.is_some())
             + u8::from(self.react_to.is_some())
             + u8::from(self.typing.is_some())
-            + u8::from(self.read_up_to.is_some());
+            + u8::from(self.read_up_to.is_some())
+            + u8::from(self.poll_vote_of.is_some())
+            + u8::from(self.poll_close_of.is_some())
+            + u8::from(self.check_of.is_some())
+            + u8::from(self.check_add_of.is_some());
+        let content_count = u8::from(self.poll.is_some())
+            + u8::from(self.checklist.is_some())
+            + u8::from(self.location.is_some())
+            + u8::from(self.contact_card.is_some())
+            + u8::from(self.article.is_some());
+        let unsupported = MessageBody::Unsupported {
+            version: WIRE_VERSION,
+        };
+        if op_count == 1 && content_count > 0 && self.edit_of.is_none() {
+            return unsupported;
+        }
+        if op_count == 0 && content_count > 1 {
+            return unsupported;
+        }
         if op_count == 1 {
+            if let Some(target) = self.edit_of {
+                return match content_count {
+                    0 => MessageBody::Edit {
+                        target,
+                        text: self.text,
+                    },
+                    1 if self.text.is_empty() => {
+                        if let Some(v) = self.checklist {
+                            if !self.attachments.is_empty() {
+                                return unsupported;
+                            }
+                            signed_checklist_from_json(v).map_or(unsupported, |checklist| {
+                                MessageBody::EditChecklist { target, checklist }
+                            })
+                        } else if let Some(v) = self.article {
+                            article_from_json(v, &self.attachments).map_or(unsupported, |article| {
+                                MessageBody::EditArticle {
+                                    target,
+                                    article,
+                                    attachments: self.attachments,
+                                }
+                            })
+                        } else {
+                            // An edit of a poll, location or contact card is
+                            // refused (UX section 7.3).
+                            unsupported
+                        }
+                    },
+                    _ => unsupported,
+                };
+            }
             if let Some(target) = self.delete_of {
                 return MessageBody::Delete { target };
-            }
-            if let Some(target) = self.edit_of {
-                return MessageBody::Edit {
-                    target,
-                    text: self.text,
-                };
             }
             if let Some(is_typing) = self.typing {
                 return MessageBody::Typing { is_typing };
             }
             if let Some(up_to) = self.read_up_to {
                 return MessageBody::ReadReceipt { up_to };
+            }
+            let fallback_empty = self.text.is_empty() && self.attachments.is_empty();
+            let new_op = if let Some(v) = self.poll_vote_of {
+                Some(poll_vote_from_json(&v, self.choices.as_ref()))
+            } else if let Some(v) = self.poll_close_of {
+                let tally = self
+                    .tally
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|t| decode_bounded_b64(t, poll::MAX_POLL_CLOSE_TALLY_BYTES));
+                Some(
+                    v.as_i64()
+                        .map(|target| MessageBody::PollClose { target, tally }),
+                )
+            } else if let Some(v) = self.check_of {
+                Some(checklist_tick_from_json(
+                    &v,
+                    self.item.as_ref(),
+                    self.item_added.as_ref(),
+                    self.done.as_ref(),
+                ))
+            } else if let Some(v) = self.check_add_of {
+                Some(checklist_add_from_json(&v, self.item_text.as_ref()))
+            } else {
+                None
+            };
+            match new_op {
+                Some(Some(body)) => return body,
+                Some(None) if fallback_empty => return unsupported,
+                Some(None) => {
+                    return MessageBody::Chat {
+                        text: self.text,
+                        attachments: self.attachments,
+                        reply,
+                        forward,
+                        resend,
+                        channel_invite,
+                    }
+                },
+                None => {},
             }
             if let Some(target) = self.react_to {
                 if let (Some(emoji), Some(action)) = (self.emoji, self.react_op) {
@@ -1506,6 +1861,60 @@ impl Envelope {
                 };
             }
         }
+        if op_count == 0 && content_count == 1 {
+            let classified = if !self.text.is_empty() {
+                None
+            } else if let Some(v) = self.article {
+                article_from_json(v, &self.attachments)
+                    .ok()
+                    .map(|article| MessageBody::Article {
+                        article,
+                        attachments: self.attachments.clone(),
+                        reply: reply.clone(),
+                        forward: forward.clone(),
+                    })
+            } else if !self.attachments.is_empty() {
+                None
+            } else if let Some(v) = self.poll {
+                signed_poll_from_json(v).ok().map(|poll| MessageBody::Poll {
+                    poll,
+                    reply: reply.clone(),
+                    forward: forward.clone(),
+                })
+            } else if let Some(v) = self.checklist {
+                signed_checklist_from_json(v)
+                    .ok()
+                    .map(|checklist| MessageBody::Checklist {
+                        checklist,
+                        reply: reply.clone(),
+                        forward: forward.clone(),
+                    })
+            } else if let Some(v) = self.location {
+                Location::from_json(v)
+                    .ok()
+                    .map(|location| MessageBody::Location {
+                        location,
+                        reply: reply.clone(),
+                        forward: forward.clone(),
+                    })
+            } else if let Some(v) = self.contact_card {
+                ContactCard::from_json(v)
+                    .ok()
+                    .map(|card| MessageBody::ContactCard {
+                        card,
+                        reply: reply.clone(),
+                        forward: forward.clone(),
+                    })
+            } else {
+                None
+            };
+            if let Some(body) = classified {
+                return body;
+            }
+            if self.text.is_empty() && self.attachments.is_empty() {
+                return unsupported;
+            }
+        }
         MessageBody::Chat {
             text: self.text,
             attachments: self.attachments,
@@ -1515,6 +1924,397 @@ impl Envelope {
             channel_invite,
         }
     }
+}
+
+// ---- ADR-0090 content and op decoding from the envelope's JSON ----
+
+/// The JSON shape of a signed binary body (poll, checklist).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedBodyWire {
+    body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author_sig: Option<String>,
+}
+
+/// Standard base64 of at most `max` bytes, with the encoded length checked
+/// before decoding.
+fn decode_bounded_b64(encoded: &str, max: usize) -> Option<Vec<u8>> {
+    if encoded.is_empty() || encoded.len() > max.div_ceil(3) * 4 {
+        return None;
+    }
+    B64.decode(encoded).ok().filter(|b| b.len() <= max)
+}
+
+fn signed_body_from_json(
+    value: serde_json::Value,
+    max: usize,
+) -> Result<(Vec<u8>, Option<[u8; content::AUTHOR_SIG_LEN]>), ContentError> {
+    let malformed = ContentError::Malformed { what: "signedBody" };
+    let wire: SignedBodyWire = serde_json::from_value(value).map_err(|_| malformed)?;
+    let body = decode_bounded_b64(&wire.body, max).ok_or(malformed)?;
+    let sig = match wire.author_sig {
+        None => None,
+        Some(s) => Some(
+            decode_bounded_b64(&s, content::AUTHOR_SIG_LEN)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(malformed)?,
+        ),
+    };
+    Ok((body, sig))
+}
+
+fn signed_body_to_json(
+    body: &[u8],
+    sig: Option<&[u8; content::AUTHOR_SIG_LEN]>,
+) -> Result<serde_json::Value, ContentError> {
+    serde_json::to_value(SignedBodyWire {
+        body: B64.encode(body),
+        author_sig: sig.map(|s| B64.encode(s)),
+    })
+    .map_err(|_| ContentError::Malformed { what: "signedBody" })
+}
+
+fn signed_poll_from_json(value: serde_json::Value) -> Result<SignedPoll, ContentError> {
+    let (bytes, author_sig) = signed_body_from_json(value, poll::MAX_POLL_BODY_LEN)?;
+    Ok(SignedPoll {
+        body: poll::PollBody::decode(&bytes)?,
+        author_sig,
+    })
+}
+
+fn signed_checklist_from_json(value: serde_json::Value) -> Result<SignedChecklist, ContentError> {
+    let (bytes, author_sig) = signed_body_from_json(value, checklist::MAX_CHECKLIST_BODY_LEN)?;
+    Ok(SignedChecklist {
+        body: checklist::ChecklistBody::decode(&bytes)?,
+        author_sig,
+    })
+}
+
+fn article_from_json(
+    value: serde_json::Value,
+    attachments: &[AttachmentRef],
+) -> Result<Article, ContentError> {
+    let malformed = ContentError::Malformed { what: "article" };
+    let encoded = value.as_str().ok_or(malformed)?;
+    let bytes = decode_bounded_b64(encoded, article::MAX_ARTICLE_BYTES).ok_or(malformed)?;
+    let article = Article::decode(&bytes)?;
+    article.check_images(attachments)?;
+    Ok(article)
+}
+
+fn poll_vote_from_json(
+    target: &serde_json::Value,
+    choices: Option<&serde_json::Value>,
+) -> Option<MessageBody> {
+    let target = target.as_i64()?;
+    let raw = choices?.as_array()?;
+    if raw.len() > poll::MAX_POLL_OPTIONS {
+        return None;
+    }
+    let choices = raw
+        .iter()
+        .map(|c| c.as_u64().and_then(|c| u8::try_from(c).ok()))
+        .collect::<Option<Vec<u8>>>()?;
+    poll::choices_shape_valid(&choices).then_some(MessageBody::PollVote { target, choices })
+}
+
+fn checklist_tick_from_json(
+    target: &serde_json::Value,
+    item: Option<&serde_json::Value>,
+    item_added: Option<&serde_json::Value>,
+    done: Option<&serde_json::Value>,
+) -> Option<MessageBody> {
+    let target = target.as_i64()?;
+    let raw = item?.as_i64()?;
+    let added = match item_added {
+        None => false,
+        Some(v) => v.as_bool()?,
+    };
+    let item = if added {
+        ChecklistItemRef::Added(raw)
+    } else {
+        ChecklistItemRef::Author(u32::try_from(raw).ok()?)
+    };
+    let done = done?.as_bool()?;
+    Some(MessageBody::ChecklistTick { target, item, done })
+}
+
+fn checklist_add_from_json(
+    target: &serde_json::Value,
+    text: Option<&serde_json::Value>,
+) -> Option<MessageBody> {
+    let target = target.as_i64()?;
+    let text = text?.as_str()?;
+    content::check_display_text(text, 1, checklist::MAX_CHECKLIST_ITEM_BYTES, "item").ok()?;
+    Some(MessageBody::ChecklistAdd {
+        target,
+        text: text.to_owned(),
+    })
+}
+
+/// One ADR-0090 content payload, for [`compose_content`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Content {
+    /// A poll.
+    Poll(SignedPoll),
+    /// A checklist.
+    Checklist(SignedChecklist),
+    /// A location.
+    Location(Location),
+    /// A contact card.
+    ContactCard(ContactCard),
+    /// An article; its image blocks point at the attachments passed beside it.
+    Article(Article),
+}
+
+/// Encode an ADR-0090 content message: one content payload with empty text,
+/// optionally a reply and a forward attribution (under the rules of
+/// [`compose_chat`]). Only an article carries attachments, and every image
+/// block must point at an image attachment. Refuses exactly what a receiver
+/// refuses.
+///
+/// # Errors
+///
+/// [`AttachmentError::Content`] for a payload that breaks a bound, or
+/// attachments beside a payload that takes none; [`AttachmentError::WireFormat`]
+/// if serialisation fails.
+pub fn compose_content(
+    content: &Content,
+    attachments: Vec<AttachmentRef>,
+    reply: Option<&Reply>,
+    forward: Option<&Forward>,
+) -> Result<Vec<u8>, AttachmentError> {
+    let attachments: Vec<AttachmentRef> = attachments
+        .into_iter()
+        .map(AttachmentRef::sanitized)
+        .collect();
+    if !matches!(content, Content::Article(_)) && !attachments.is_empty() {
+        return Err(AttachmentError::Content(ContentError::Malformed {
+            what: "attachments",
+        }));
+    }
+    let mut envelope = Envelope::base();
+    if let Content::Article(a) = content {
+        a.check_images(&attachments)?;
+    }
+    let value = Some(content_field_value(content)?);
+    match content {
+        Content::Poll(_) => envelope.poll = value,
+        Content::Checklist(_) => envelope.checklist = value,
+        Content::Location(_) => envelope.location = value,
+        Content::ContactCard(_) => envelope.contact_card = value,
+        Content::Article(_) => envelope.article = value,
+    }
+    let origin = forward.and_then(|f| f.origin.as_ref()).filter(|o| {
+        !o.group_id_b64.is_empty() && o.group_id_b64.len() <= MAX_FORWARD_ORIGIN_GROUP_BYTES
+    });
+    envelope.attachments = attachments;
+    envelope.reply_to = reply.map(|r| r.target);
+    envelope.reply_author =
+        reply.and_then(|r| truncated_snapshot(r.author.as_deref(), MAX_REPLY_AUTHOR_BYTES));
+    envelope.reply_excerpt =
+        reply.and_then(|r| truncated_snapshot(r.excerpt.as_deref(), MAX_REPLY_EXCERPT_BYTES));
+    envelope.forwarded_from =
+        forward.and_then(|f| truncated_snapshot(f.author.as_deref(), MAX_FORWARDED_FROM_BYTES));
+    envelope.forward_origin_group = origin.map(|o| o.group_id_b64.clone());
+    envelope.forward_origin_message = origin.map(|o| o.message_id);
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_content: {e}")))
+}
+
+/// The JSON value of the envelope field that carries `content` (not the
+/// article's image check, which needs the attachments).
+pub(crate) fn content_field_value(content: &Content) -> Result<serde_json::Value, ContentError> {
+    match content {
+        Content::Poll(p) => signed_body_to_json(&p.body.encode()?, p.author_sig.as_ref()),
+        Content::Checklist(c) => signed_body_to_json(&c.body.encode()?, c.author_sig.as_ref()),
+        Content::Location(l) => {
+            l.validate()?;
+            serde_json::to_value(l).map_err(|_| ContentError::Malformed { what: "location" })
+        },
+        Content::ContactCard(c) => c.to_json(),
+        Content::Article(a) => Ok(serde_json::Value::String(B64.encode(a.encode()?))),
+    }
+}
+
+/// Decode the JSON value of a content field of kind `kind`
+/// (`content_state::CONTENT_KIND_*`) with the envelope's own decoders.
+pub(crate) fn content_from_field_value(
+    kind: u8,
+    value: serde_json::Value,
+    attachments: &[AttachmentRef],
+) -> Result<Content, ContentError> {
+    match kind {
+        content_state::CONTENT_KIND_POLL => signed_poll_from_json(value).map(Content::Poll),
+        content_state::CONTENT_KIND_CHECKLIST => {
+            signed_checklist_from_json(value).map(Content::Checklist)
+        },
+        content_state::CONTENT_KIND_LOCATION => Location::from_json(value).map(Content::Location),
+        content_state::CONTENT_KIND_CONTACT_CARD => {
+            ContactCard::from_json(value).map(Content::ContactCard)
+        },
+        content_state::CONTENT_KIND_ARTICLE => {
+            article_from_json(value, attachments).map(Content::Article)
+        },
+        _ => Err(ContentError::Malformed {
+            what: "contentKind",
+        }),
+    }
+}
+
+impl MessageBody {
+    /// The ADR-0090 content this body carries, for a content message (not
+    /// an edit or an op).
+    #[must_use]
+    pub fn content(&self) -> Option<Content> {
+        match self {
+            Self::Poll { poll, .. } => Some(Content::Poll(poll.clone())),
+            Self::Checklist { checklist, .. } => Some(Content::Checklist(checklist.clone())),
+            Self::Location { location, .. } => Some(Content::Location(location.clone())),
+            Self::ContactCard { card, .. } => Some(Content::ContactCard(card.clone())),
+            Self::Article { article, .. } => Some(Content::Article(article.clone())),
+            _ => None,
+        }
+    }
+}
+
+fn compose_op(envelope: &Envelope, what: &str) -> Result<Vec<u8>, AttachmentError> {
+    serde_json::to_vec(envelope).map_err(|e| AttachmentError::WireFormat(format!("{what}: {e}")))
+}
+
+/// Encode a non-anonymous VOTE (ADR-0090 section 3.2) on the poll `target`:
+/// option indices strictly ascending, empty to retract.
+///
+/// # Errors
+///
+/// [`AttachmentError::Content`] when `choices` breaks
+/// [`poll::choices_shape_valid`].
+pub fn compose_poll_vote(target: i64, choices: &[u8]) -> Result<Vec<u8>, AttachmentError> {
+    if !poll::choices_shape_valid(choices) {
+        return Err(AttachmentError::Content(ContentError::OutOfRange {
+            field: "choices",
+        }));
+    }
+    let envelope = Envelope {
+        poll_vote_of: Some(target.into()),
+        choices: Some(
+            choices
+                .iter()
+                .map(|&c| serde_json::Value::from(c))
+                .collect(),
+        ),
+        ..Envelope::base()
+    };
+    compose_op(&envelope, "compose_poll_vote")
+}
+
+/// Encode a CLOSE (ADR-0090 section 3.5) of the poll or checklist `target`;
+/// a channel poll's close carries its frozen tally (section 4.3), the encoded
+/// `lakko_channels::ChannelPollTally`, opaque here.
+///
+/// # Errors
+///
+/// [`AttachmentError::Content`] `tally.outOfRange` for an empty tally or one
+/// longer than [`poll::MAX_POLL_CLOSE_TALLY_BYTES`];
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_poll_close(target: i64, tally: Option<&[u8]>) -> Result<Vec<u8>, AttachmentError> {
+    if let Some(t) = tally {
+        if t.is_empty() || t.len() > poll::MAX_POLL_CLOSE_TALLY_BYTES {
+            return Err(AttachmentError::Content(ContentError::OutOfRange {
+                field: "tally",
+            }));
+        }
+    }
+    let envelope = Envelope {
+        poll_close_of: Some(target.into()),
+        tally: tally.map(|t| serde_json::Value::String(B64.encode(t))),
+        ..Envelope::base()
+    };
+    compose_op(&envelope, "compose_poll_close")
+}
+
+/// Encode a TICK (ADR-0090 section 5) of `item` in the checklist `target`.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_checklist_tick(
+    target: i64,
+    item: ChecklistItemRef,
+    done: bool,
+) -> Result<Vec<u8>, AttachmentError> {
+    let (raw, added) = match item {
+        ChecklistItemRef::Author(id) => (i64::from(id), None),
+        ChecklistItemRef::Added(m) => (m, Some(serde_json::Value::Bool(true))),
+    };
+    let envelope = Envelope {
+        check_of: Some(target.into()),
+        item: Some(raw.into()),
+        item_added: added,
+        done: Some(done.into()),
+        ..Envelope::base()
+    };
+    compose_op(&envelope, "compose_checklist_tick")
+}
+
+/// Encode an ADD-ITEM (ADR-0090 section 5) to the checklist `target`.
+///
+/// # Errors
+///
+/// [`AttachmentError::Content`] when `text` breaks the item rule.
+pub fn compose_checklist_add(target: i64, text: &str) -> Result<Vec<u8>, AttachmentError> {
+    content::check_display_text(text, 1, checklist::MAX_CHECKLIST_ITEM_BYTES, "item")?;
+    let envelope = Envelope {
+        check_add_of: Some(target.into()),
+        item_text: Some(text.into()),
+        ..Envelope::base()
+    };
+    compose_op(&envelope, "compose_checklist_add")
+}
+
+/// Encode an EDIT of the checklist `target` replacing it with `checklist`.
+///
+/// # Errors
+///
+/// What [`checklist::ChecklistBody::encode`] refuses.
+pub fn compose_checklist_edit(
+    target: i64,
+    checklist: &SignedChecklist,
+) -> Result<Vec<u8>, AttachmentError> {
+    let envelope = Envelope {
+        edit_of: Some(target),
+        checklist: Some(signed_body_to_json(
+            &checklist.body.encode()?,
+            checklist.author_sig.as_ref(),
+        )?),
+        ..Envelope::base()
+    };
+    compose_op(&envelope, "compose_checklist_edit")
+}
+
+/// Encode an EDIT of the article `target` replacing the whole article.
+///
+/// # Errors
+///
+/// What [`Article::encode`] or [`Article::check_images`] refuses.
+pub fn compose_article_edit(
+    target: i64,
+    article: &Article,
+    attachments: Vec<AttachmentRef>,
+) -> Result<Vec<u8>, AttachmentError> {
+    let attachments: Vec<AttachmentRef> = attachments
+        .into_iter()
+        .map(AttachmentRef::sanitized)
+        .collect();
+    article.check_images(&attachments)?;
+    let envelope = Envelope {
+        edit_of: Some(target),
+        article: Some(serde_json::Value::String(B64.encode(article.encode()?))),
+        attachments,
+        ..Envelope::base()
+    };
+    compose_op(&envelope, "compose_article_edit")
 }
 
 /// Encode `(text, attachments)` as the canonical JSON envelope. The
@@ -1851,6 +2651,9 @@ pub enum AttachmentError {
     /// message is for logs only.
     #[error("attachment wire format: {0}")]
     WireFormat(String),
+    /// ADR-0090 — a content payload or op refused by its codec.
+    #[error("attachment content: {0}")]
+    Content(#[from] ContentError),
 }
 
 /// Fuzz-only entry point. Marked `#[doc(hidden)]` — the sole harness
@@ -1859,8 +2662,10 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, compose_channel_invite, compose_chat, compose_forward, compose_reaction,
-        compose_reply, is_reaction_emoji, parse, parse_body, AttachmentRef, MediaKind, MessageBody,
+        compose, compose_article_edit, compose_channel_invite, compose_chat, compose_checklist_add,
+        compose_checklist_edit, compose_checklist_tick, compose_content, compose_forward,
+        compose_poll_close, compose_poll_vote, compose_reaction, compose_reply, is_reaction_emoji,
+        parse, parse_body, Article, AttachmentRef, Content, MediaKind, MessageBody,
         MAX_CHANNEL_INVITE_BYTES, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
         MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES,
         MAX_RESEND_ORIGIN_GROUP_BYTES, MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS,
@@ -2026,6 +2831,128 @@ pub mod fuzz_api {
             }
     }
 
+    /// ADR-0090 property oracle over attacker-controlled bytes: every new
+    /// content kind and op that survives [`parse_body`] is within its bounds
+    /// (it re-encodes), and composing it again then parsing yields the same
+    /// body. Anything else passes trivially.
+    #[must_use]
+    pub fn content_within_bounds(bytes: &[u8]) -> bool {
+        let body = parse_body(bytes);
+        let recomposed = match &body {
+            MessageBody::Poll {
+                poll,
+                reply,
+                forward,
+            } => compose_content(
+                &Content::Poll(poll.clone()),
+                Vec::new(),
+                reply.as_ref(),
+                forward.as_ref(),
+            ),
+            MessageBody::Checklist {
+                checklist,
+                reply,
+                forward,
+            } => compose_content(
+                &Content::Checklist(checklist.clone()),
+                Vec::new(),
+                reply.as_ref(),
+                forward.as_ref(),
+            ),
+            MessageBody::Location {
+                location,
+                reply,
+                forward,
+            } => compose_content(
+                &Content::Location(location.clone()),
+                Vec::new(),
+                reply.as_ref(),
+                forward.as_ref(),
+            ),
+            MessageBody::ContactCard {
+                card,
+                reply,
+                forward,
+            } => compose_content(
+                &Content::ContactCard(card.clone()),
+                Vec::new(),
+                reply.as_ref(),
+                forward.as_ref(),
+            ),
+            MessageBody::Article {
+                article,
+                attachments,
+                reply,
+                forward,
+            } => compose_content(
+                &Content::Article(article.clone()),
+                attachments.clone(),
+                reply.as_ref(),
+                forward.as_ref(),
+            ),
+            MessageBody::PollVote { target, choices } => compose_poll_vote(*target, choices),
+            MessageBody::PollClose { target, tally } => {
+                compose_poll_close(*target, tally.as_deref())
+            },
+            MessageBody::ChecklistTick { target, item, done } => {
+                compose_checklist_tick(*target, *item, *done)
+            },
+            MessageBody::ChecklistAdd { target, text } => compose_checklist_add(*target, text),
+            MessageBody::EditChecklist { target, checklist } => {
+                compose_checklist_edit(*target, checklist)
+            },
+            MessageBody::EditArticle {
+                target,
+                article,
+                attachments,
+            } => compose_article_edit(*target, article, attachments.clone()),
+            _ => return true,
+        };
+        let Ok(recomposed) = recomposed else {
+            return false;
+        };
+        parse_body(&recomposed) == body
+    }
+
+    /// ADR-0090 bundle oracle over attacker-controlled bytes: the first
+    /// byte is a content kind, the rest a payload. A payload that decodes
+    /// re-encodes to a payload that decodes to the same content; a state
+    /// snapshot (the same bytes read as one) that decodes re-encodes to the
+    /// identical bytes. Nothing panics.
+    #[must_use]
+    pub fn content_bundle_round_trip(bytes: &[u8]) -> bool {
+        use super::content_state::ContentState;
+        if let Ok(state) = ContentState::decode(bytes) {
+            if state.encode().ok().as_deref() != Some(bytes) {
+                return false;
+            }
+        }
+        let Some((&kind, payload)) = bytes.split_first() else {
+            return true;
+        };
+        let Ok(content) = Content::from_payload(kind, payload, &[]) else {
+            return true;
+        };
+        content
+            .to_payload()
+            .ok()
+            .and_then(|again| Content::from_payload(kind, &again, &[]).ok())
+            .is_some_and(|back| back == content)
+    }
+
+    /// ADR-0090 article oracle over attacker-controlled bytes: decoding never
+    /// panics, and an article that decodes re-encodes to the identical bytes
+    /// and has an excerpt within its bound.
+    #[must_use]
+    pub fn article_decode_round_trip(bytes: &[u8]) -> bool {
+        let Ok(article) = Article::decode(bytes) else {
+            return true;
+        };
+        article.encode().is_ok_and(|again| again == bytes)
+            && article.excerpt().chars().count() <= super::article::ARTICLE_EXCERPT_CHARS
+            && bytes.len() <= super::article::MAX_ARTICLE_BYTES
+    }
+
     /// ADR-0047 property oracle over attacker-controlled bytes.
     ///
     /// Every media field that survives [`parse`] is within its bound,
@@ -2056,8 +2983,18 @@ pub mod fuzz_api {
             (None, _) => true,
             (Some(d), Some(MediaKind::Voice)) => d > 0 && d <= MAX_VOICE_DURATION_MS,
             (Some(d), Some(MediaKind::VideoNote)) => d > 0 && d <= MAX_VIDEO_NOTE_DURATION_MS,
+            (Some(d), Some(MediaKind::Audio)) => d > 0 && d <= super::MAX_AUDIO_DURATION_MS,
             (Some(_), _) => false,
         };
+        let audio = r.media_kind() == Some(MediaKind::Audio);
+        let tag_ok = |t: &Option<String>| {
+            t.as_ref().map_or(true, |t| {
+                audio && !t.is_empty() && t.len() <= super::MAX_AUDIO_TAG_BYTES
+            })
+        };
+        if !tag_ok(&r.title) || !tag_ok(&r.artist) {
+            return false;
+        }
         let waveform_ok = r.waveform.is_none()
             || r.decode_waveform()
                 .is_some_and(|w| !w.is_empty() && w.len() <= MAX_WAVEFORM_BYTES);
@@ -2111,10 +3048,15 @@ pub mod fuzz_api {
             } => {
                 let _ = (text.len(), attachments.len());
             },
-            MessageBody::Edit { target, text } => {
+            MessageBody::Edit { target, text } | MessageBody::ChecklistAdd { target, text } => {
                 let _ = (target, text.len());
             },
             MessageBody::Delete { target } => {
+                let _ = target;
+            },
+            MessageBody::PollClose { target, tally } => {
+                assert!(tally.as_ref().map_or(true, |t| !t.is_empty()
+                    && t.len() <= crate::poll::MAX_POLL_CLOSE_TALLY_BYTES));
                 let _ = target;
             },
             MessageBody::Reaction {
@@ -2133,8 +3075,37 @@ pub mod fuzz_api {
             },
             // Never rendered; a service envelope must never be chat.
             MessageBody::ServiceEnvelope => assert!(super::is_service_envelope(bytes)),
-            // Only a JSON envelope of another wire version lands here.
-            MessageBody::Unsupported { version } => assert_ne!(version, super::WIRE_VERSION),
+            // A JSON envelope of another wire version, or (ADR-0090) a v1
+            // envelope whose content was refused: JSON either way.
+            MessageBody::Unsupported { version } => {
+                assert!(
+                    version != super::WIRE_VERSION
+                        || serde_json::from_slice::<super::Envelope>(bytes).is_ok()
+                );
+            },
+            // ADR-0090: touch the content each new kind carries.
+            MessageBody::Poll { poll, .. } => {
+                let _ = (poll.body.options.len(), poll.author_sig.is_some());
+            },
+            MessageBody::Checklist { checklist, .. }
+            | MessageBody::EditChecklist { checklist, .. } => {
+                let _ = checklist.body.items.len();
+            },
+            MessageBody::Location { location, .. } => {
+                let _ = location.name.as_ref().map(String::len);
+            },
+            MessageBody::ContactCard { card, .. } => {
+                let _ = card.username.len();
+            },
+            MessageBody::Article { article, .. } | MessageBody::EditArticle { article, .. } => {
+                let _ = article.excerpt().len();
+            },
+            MessageBody::PollVote { target, choices } => {
+                let _ = (target, choices.len());
+            },
+            MessageBody::ChecklistTick { target, item, done } => {
+                let _ = (target, item, done);
+            },
         }
         !refs.is_empty()
     }
@@ -2819,8 +3790,9 @@ mod tests {
     #[test]
     fn inline_playback_is_gated_on_the_mime_allowlist_only() {
         use InlineMediaType::{Audio, Image, Video};
-        let table: [(&str, Option<InlineMediaType>); 14] = [
+        let table: [(&str, Option<InlineMediaType>); 15] = [
             ("audio/mp4", Some(Audio)),
+            ("audio/mpeg", Some(Audio)),
             ("audio/mp4;codecs=mp4a.40.2", Some(Audio)),
             ("AUDIO/MP4", Some(Audio)),
             ("video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"", Some(Video)),
@@ -2931,6 +3903,7 @@ mod tests {
     /// The history-bundle route (`RawMediaMetadata::bounded`) keeps exactly
     /// what the envelope route (`AttachmentRef` deserialization) keeps.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn raw_media_bounds_match_the_envelope_bounds() {
         let blob = B64.encode([1u8; 32]);
         let key = B64.encode([2u8; 32]);
@@ -2943,6 +3916,8 @@ mod tests {
                 width: Some(0),
                 height: Some(MAX_MEDIA_DIMENSION),
                 thumb: None,
+                title: Some("dropped: not audio".into()),
+                artist: None,
             },
             RawMediaMetadata {
                 kind: Some("video_note".into()),
@@ -2956,6 +3931,8 @@ mod tests {
                     width: Some(1),
                     height: Some(1),
                 }),
+                title: None,
+                artist: None,
             },
             RawMediaMetadata {
                 kind: Some("gif".into()),
@@ -2969,6 +3946,22 @@ mod tests {
                     width: Some(MAX_MEDIA_DIMENSION + 1),
                     height: Some(20),
                 }),
+                title: None,
+                artist: None,
+            },
+            RawMediaMetadata {
+                kind: Some("audio".into()),
+                duration_ms: Some(MAX_AUDIO_DURATION_MS),
+                title: Some("Song".into()),
+                artist: Some("a\nb".into()),
+                ..RawMediaMetadata::default()
+            },
+            RawMediaMetadata {
+                kind: Some("audio".into()),
+                duration_ms: Some(MAX_AUDIO_DURATION_MS + 1),
+                title: Some("t".repeat(MAX_AUDIO_TAG_BYTES + 1)),
+                artist: Some("Band".into()),
+                ..RawMediaMetadata::default()
             },
             RawMediaMetadata::default(),
         ];
@@ -2991,6 +3984,12 @@ mod tests {
             }
             if let Some(h) = raw.height {
                 obj.insert("height".into(), h.into());
+            }
+            if let Some(t) = &raw.title {
+                obj.insert("title".into(), t.clone().into());
+            }
+            if let Some(a) = &raw.artist {
+                obj.insert("artist".into(), a.clone().into());
             }
             if let Some(t) = &raw.thumb {
                 let mut thumb = serde_json::json!({
@@ -3020,6 +4019,8 @@ mod tests {
             );
             assert_eq!(via_history.width, via_envelope.width, "{raw:?}");
             assert_eq!(via_history.height, via_envelope.height, "{raw:?}");
+            assert_eq!(via_history.title, via_envelope.title, "{raw:?}");
+            assert_eq!(via_history.artist, via_envelope.artist, "{raw:?}");
             assert_eq!(
                 via_history
                     .thumb

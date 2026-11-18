@@ -96,10 +96,12 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-mnemonic/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-ds-proof/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-anon-token/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-anon-cred/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-device-link/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-feed/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-vault/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-circle/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-ballot/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-l10n/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
@@ -167,6 +169,8 @@ fuzz-list:
     @ls crates/lakko-vault/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-circle:"
     @ls crates/lakko-circle/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-ballot:"
+    @ls crates/lakko-ballot/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-l10n:"
     @ls crates/lakko-l10n/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-svc-sfu:"

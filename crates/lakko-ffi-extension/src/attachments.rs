@@ -40,6 +40,29 @@ pub enum MessageBodyKind {
     /// own catalog word for the notification, never core prose. Appended
     /// last so every earlier variant keeps its ordinal.
     Unsupported,
+    /// ADR-0090 — a poll; `text` is its question. Appended.
+    Poll,
+    /// ADR-0090 — a checklist; `text` is its title.
+    Checklist,
+    /// ADR-0090 — a location; `text` is its place name or empty (the
+    /// extension shows its own catalog word, never core prose).
+    Location,
+    /// ADR-0090 — a contact card; `text` is the contact's display name.
+    ContactCard,
+    /// ADR-0090 — an article; `text` is its title.
+    Article,
+    /// ADR-0090 — a vote on the poll `target`. Never notify.
+    PollVote,
+    /// ADR-0090 — a close of the poll or checklist `target`. Never notify.
+    PollClose,
+    /// ADR-0090 — a tick in the checklist `target`. Never notify.
+    ChecklistTick,
+    /// ADR-0090 — an item added to the checklist `target`. Never notify.
+    ChecklistAdd,
+    /// ADR-0090 — an edit of the checklist `target`. Never notify.
+    EditChecklist,
+    /// ADR-0090 — an edit of the article `target`. Never notify.
+    EditArticle,
 }
 
 /// A decoded attachment reference (ADR-0023).
@@ -83,6 +106,12 @@ pub struct AttachmentRef {
     /// here).
     #[uniffi(default = None)]
     pub thumb: Option<ThumbRef>,
+    /// ADR-0090 — an `audio` attachment's title tag.
+    #[uniffi(default = None)]
+    pub title: Option<String>,
+    /// ADR-0090 — an `audio` attachment's artist tag.
+    #[uniffi(default = None)]
+    pub artist: Option<String>,
 }
 
 /// ADR-0047 — a decoded poster-frame blob reference, the parse-side mirror
@@ -247,6 +276,54 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             ..ParsedBody::of(MessageBodyKind::Unsupported)
         },
         inner::MessageBody::ServiceEnvelope => ParsedBody::of(MessageBodyKind::ServiceEnvelope),
+        // ADR-0090: a content message previews by one line of its own text;
+        // the reply and forward attribution are matched away as for chat.
+        inner::MessageBody::Poll { poll, .. } => ParsedBody {
+            text: poll.body.question,
+            ..ParsedBody::of(MessageBodyKind::Poll)
+        },
+        inner::MessageBody::Checklist { checklist, .. } => ParsedBody {
+            text: checklist.body.title,
+            ..ParsedBody::of(MessageBodyKind::Checklist)
+        },
+        inner::MessageBody::Location { location, .. } => ParsedBody {
+            text: location.name.unwrap_or_default(),
+            ..ParsedBody::of(MessageBodyKind::Location)
+        },
+        inner::MessageBody::ContactCard { card, .. } => ParsedBody {
+            text: card.name,
+            ..ParsedBody::of(MessageBodyKind::ContactCard)
+        },
+        inner::MessageBody::Article { article, .. } => ParsedBody {
+            text: article.title,
+            ..ParsedBody::of(MessageBodyKind::Article)
+        },
+        // ADR-0090 ops: never a notification; the target is carried so a
+        // client could withdraw one if it ever needs to.
+        inner::MessageBody::PollVote { target, .. } => ParsedBody {
+            target: Some(target),
+            ..ParsedBody::of(MessageBodyKind::PollVote)
+        },
+        inner::MessageBody::PollClose { target, .. } => ParsedBody {
+            target: Some(target),
+            ..ParsedBody::of(MessageBodyKind::PollClose)
+        },
+        inner::MessageBody::ChecklistTick { target, .. } => ParsedBody {
+            target: Some(target),
+            ..ParsedBody::of(MessageBodyKind::ChecklistTick)
+        },
+        inner::MessageBody::ChecklistAdd { target, .. } => ParsedBody {
+            target: Some(target),
+            ..ParsedBody::of(MessageBodyKind::ChecklistAdd)
+        },
+        inner::MessageBody::EditChecklist { target, .. } => ParsedBody {
+            target: Some(target),
+            ..ParsedBody::of(MessageBodyKind::EditChecklist)
+        },
+        inner::MessageBody::EditArticle { target, .. } => ParsedBody {
+            target: Some(target),
+            ..ParsedBody::of(MessageBodyKind::EditArticle)
+        },
     }
 }
 
@@ -283,6 +360,8 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 width: r.width,
                 height: r.height,
                 thumb,
+                title: r.title,
+                artist: r.artist,
             })
         })
         .collect()

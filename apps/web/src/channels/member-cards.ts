@@ -36,6 +36,7 @@ import {
   type ScopedGrantClass,
 } from "../reach/received-grants";
 import { visibilitySetting } from "../reach/visibility-store";
+import { ownCardShareable } from "../profile/card-share";
 import { loadWasm, type Wasm } from "../wasm";
 import {
   apiError,
@@ -151,7 +152,9 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
     }
     const pkHex = bytesToHex(input.keys.public);
     const key = `${input.channelIdHex}|${pkHex}`;
-    const fingerprint = cardFingerprint(content, input.updatedAtMs, grant?.version ?? null);
+    // ADR-0090 section 7 — a change of the card flag re-uploads the card.
+    const cardShareable = ownCardShareable(visibilitySetting());
+    const fingerprint = `${cardFingerprint(content, input.updatedAtMs, grant?.version ?? null)}${cardShareable ? "" : "|nocard"}`;
     if (!cardUploadDue(uploaded.get(key), input.epoch, fingerprint)) return "unchanged";
 
     const profile = wasm.composeProfileEnvelope(
@@ -164,6 +167,8 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
       input.avatar === undefined || input.avatar === null
         ? undefined
         : avatarToWasm<InstanceType<typeof wasm.ProfileAvatar>>(wasm, input.avatar),
+      // ADR-0090 section 7 — off exactly when "who can find me" is Nobody.
+      cardShareable,
     );
     // The card is bound to the account (ADR-0060 section 3): without a reach
     // session there is no account seed to sign with, and a reader drops an

@@ -292,6 +292,15 @@ pub enum BoundsError {
     /// `reactions-and-emoji.md` D3).
     #[error("quick reaction length is out of bounds")]
     QuickReaction,
+    /// An own poll choice list holds more than 10 indices, an index of 10 or
+    /// more, or indices not strictly ascending (ADR-0090 section 3.6).
+    #[error("poll choices are out of bounds")]
+    PollChoices,
+    /// A new own poll-choice register would pass
+    /// [`super::poll_choice::POLL_CHOICES_MAX_CLIENT`]. A writer-side rule,
+    /// never a decode bound.
+    #[error("too many poll choices held")]
+    TooManyPollChoices,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -1024,8 +1033,10 @@ pub enum SyncEntry {
     /// deletion (ADR-0087 section 13a).
     ChannelComment(super::channel_comment::ChannelCommentEntry),
     /// The account's quick reaction (UX `reactions-and-emoji.md` D3).
-    /// Appended last.
     QuickReaction(super::quick_reaction::QuickReactionEntry),
+    /// The account's own choice in one poll (ADR-0090 section 3.6).
+    /// Appended last.
+    PollChoice(super::poll_choice::PollChoiceEntry),
 }
 
 /// Which register an entry writes.
@@ -1082,9 +1093,11 @@ pub enum RegisterKey {
         u64,
         [u8; super::channel_comment::CHANNEL_COMMENT_NONCE_LEN],
     ),
-    /// The account's one quick-reaction register. Appended last, so the
-    /// register order of every older kind is unchanged.
+    /// The account's one quick-reaction register.
     QuickReaction,
+    /// The own-choice register of this poll (conversation, poll message id).
+    /// Appended last, so the register order of every older kind is unchanged.
+    PollChoice(ConversationRef, i64),
 }
 
 impl RegisterKey {
@@ -1120,6 +1133,7 @@ const TAG_DEVICE_ACK: u8 = 16;
 const TAG_CHANNEL_REACTION: u8 = 17;
 const TAG_CHANNEL_COMMENT: u8 = 18;
 const TAG_QUICK_REACTION: u8 = 19;
+const TAG_POLL_CHOICE: u8 = 20;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1152,6 +1166,9 @@ impl SyncEntry {
                 RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },
             Self::QuickReaction(_) => RegisterKey::QuickReaction,
+            Self::PollChoice(p) => {
+                RegisterKey::PollChoice(p.conversation.clone(), p.poll_message_id)
+            },
         }
     }
 
@@ -1179,6 +1196,7 @@ impl SyncEntry {
             Self::ConversationEnd(e) => e.validate(),
             Self::ChannelReaction(r) => r.validate(),
             Self::QuickReaction(q) => q.validate(),
+            Self::PollChoice(p) => p.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -1277,6 +1295,10 @@ impl SyncEntry {
             Self::QuickReaction(q) => {
                 out.push(TAG_QUICK_REACTION);
                 q.encode_body(&mut out);
+            },
+            Self::PollChoice(p) => {
+                out.push(TAG_POLL_CHOICE);
+                p.encode_body(&mut out);
             },
             Self::LinkRecord(r) => {
                 out.push(TAG_LINK_RECORD);
@@ -1466,6 +1488,9 @@ impl SyncEntry {
             TAG_QUICK_REACTION => Self::QuickReaction(
                 super::quick_reaction::QuickReactionEntry::take_body(&mut cur)?,
             ),
+            TAG_POLL_CHOICE => {
+                Self::PollChoice(super::poll_choice::PollChoiceEntry::take_body(&mut cur)?)
+            },
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {
@@ -1718,7 +1743,7 @@ fn put_bytes32(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-fn put_ref(out: &mut Vec<u8>, r: &ConversationRef) {
+pub(crate) fn put_ref(out: &mut Vec<u8>, r: &ConversationRef) {
     out.push(r.kind.to_wire());
     // A validated ref id is at most 64 bytes.
     out.push(u8::try_from(r.id.len()).unwrap_or(u8::MAX));
@@ -1883,7 +1908,7 @@ fn take_bounded_string(
         .map_err(|_| CodecError::NotUtf8)
 }
 
-fn take_ref(cur: &mut &[u8]) -> Result<ConversationRef, CodecError> {
+pub(crate) fn take_ref(cur: &mut &[u8]) -> Result<ConversationRef, CodecError> {
     let kind = ConversationRefKind::from_wire(i64::from(take_u8(cur)?))?;
     let n = usize::from(take_u8(cur)?);
     let id = take_n(cur, n)?.to_vec();
