@@ -43,6 +43,8 @@ struct DonateMethod: Equatable, Identifiable {
         let coin: String
         let network: String
         let address: String
+        /// The coin mark drawn in the centre of the address QR (signed).
+        let icon: DonationIcon
     }
 
     let id: String
@@ -75,7 +77,7 @@ final class DonationsClient {
 
     static let sha256Length = 32
     /// Largest QR image accepted (the signing tool and discovery refuse larger).
-    static let maxQrBytes = 128 * 1024
+    static let maxQrBytes = 512 * 1024
     /// The masked form shown before the number is revealed.
     static let maskedPhone = "+7 9•• ••• •• ••"
 
@@ -226,7 +228,7 @@ final class DonationsClient {
             else { return nil }
             return DonateMethod(
                 id: v.id, kind: .crypto, link: nil, qrSha256: nil, hasPhone: false,
-                crypto: .init(coin: coin, network: network, address: address))
+                crypto: .init(coin: coin, network: network, address: address, icon: v.icon))
         }
         let link = text(v.link).flatMap { raw -> URL? in
             guard raw.hasPrefix("https://"), let url = URL(string: raw), url.scheme == "https" else { return nil }
@@ -236,6 +238,13 @@ final class DonationsClient {
         guard link != nil || qr != nil || v.hasPhone else { return nil }
         return DonateMethod(
             id: v.id, kind: v.kind, link: link, qrSha256: qr, hasPhone: v.hasPhone, crypto: nil)
+    }
+
+    /// The two groups the screen shows (`docs/ux/donations.md` section 2):
+    /// "Bank and card" (SBP, Revolut, Buy Me a Coffee), then "Crypto", each in
+    /// the server's order.
+    static func groups(_ methods: [DonateMethod]) -> (payment: [DonateMethod], crypto: [DonateMethod]) {
+        (methods.filter { $0.crypto == nil }, methods.filter { $0.crypto != nil })
     }
 
     static func sameBytes(_ a: Data, _ b: Data) -> Bool {

@@ -17,8 +17,9 @@
 //!
 //! ```text
 //! method statement (DOMAIN_METHOD = b"lakko/donation-method/v1")
-//!   version(1)=0x01 ‖ signed_at_unix_millis(8 BE i64)
+//!   version(1)=0x02 ‖ signed_at_unix_millis(8 BE i64)
 //!   ‖ id_len(1) ‖ id ‖ kind(1: 1 sbp, 2 revolut, 3 bmc, 4 crypto)
+//!   ‖ icon(1: 0 none, 1 btc, 2 eth, 3 ton)
 //!   ‖ link_len(2 BE) ‖ link ‖ coin_len(1) ‖ coin ‖ network_len(1) ‖ network
 //!   ‖ address_len(2 BE) ‖ address
 //!   ‖ qr_sha256_flag(1: 0|1) ‖ [qr_sha256(32)] ‖ has_phone(1: 0|1)
@@ -29,6 +30,10 @@
 //!
 //! signing input = DOMAIN ‖ every byte before the signature
 //! ```
+//!
+//! A method statement of version 1 (no `icon` byte) is refused: there was
+//! never a deployment to stay compatible with. The phone statement did not
+//! change and stays version 1.
 //!
 //! An absent optional text field is a zero length; a present one is never
 //! empty, so the encoding is canonical (one method has one wire form).
@@ -41,9 +46,12 @@
 //! - `coin` and `network`: at most 64 bytes, no control character;
 //! - `phone`: 1..=32 bytes of `+0-9 ()-`, at least one digit.
 //! - a crypto method carries coin, network and address and nothing else (no
-//!   link, no QR — the client draws the address's QR — no phone);
-//! - any other kind carries no coin, network or address, and at least one of
-//!   a link, a QR and a phone (a card with none of them has nothing to show).
+//!   link, no QR — the client draws the address's QR — no phone); its `icon`
+//!   names the coin mark drawn in the centre of that QR (`none` = a plain QR);
+//! - any other kind carries no coin, network or address, `icon` none, and at
+//!   least one of a link, a QR and a phone (a card with none of them has
+//!   nothing to show; its QR is the operator's own image).
+//! - `icon` is a closed list; an unknown byte is refused.
 //!
 //! `qr_sha256` is the SHA-256 of the QR PNG the server serves for the method,
 //! so a client checks the image it fetched against the signed hash.
@@ -67,8 +75,11 @@ const DOMAIN_METHOD: &[u8] = b"lakko/donation-method/v1";
 /// Domain separator of a phone statement.
 const DOMAIN_PHONE: &[u8] = b"lakko/donation-phone/v1";
 
-/// Wire-format version of both statements. Any other value is refused.
-const VERSION: u8 = 1;
+/// Wire-format version of a method statement. Any other value is refused.
+const METHOD_VERSION: u8 = 2;
+
+/// Wire-format version of a phone statement. Any other value is refused.
+const PHONE_VERSION: u8 = 1;
 
 /// Longest method id, in bytes.
 pub const DONATION_ID_MAX: usize = 32;
@@ -87,6 +98,7 @@ pub const DONATION_METHOD_MAX_LEN: usize = 1
     + 1
     + DONATION_ID_MAX
     + 1
+    + 1
     + 2
     + DONATION_LINK_MAX
     + 1
@@ -104,7 +116,7 @@ pub const DONATION_METHOD_MAX_LEN: usize = 1
 pub const DONATION_PHONE_MAX_LEN: usize =
     1 + 1 + DONATION_ID_MAX + 1 + DONATION_PHONE_MAX + SIGNATURE_LEN;
 
-const _: () = assert!(DONATION_METHOD_MAX_LEN == 1299);
+const _: () = assert!(DONATION_METHOD_MAX_LEN == 1300);
 const _: () = assert!(DONATION_PHONE_MAX_LEN == 131);
 
 /// Why a donation statement was refused or could not be signed.
@@ -114,7 +126,7 @@ pub enum DonationError {
     /// longer than any statement can be.
     #[error("donation statement has the wrong length")]
     BadLength,
-    /// The version byte is not [`VERSION`].
+    /// The version byte is not the statement's version.
     #[error("unsupported donation statement version: {0}")]
     BadVersion(u8),
     /// The kind byte is not one of the four kinds.
@@ -216,6 +228,73 @@ impl DonationKind {
     }
 }
 
+/// The coin mark a client draws in the centre of a crypto method's QR. A
+/// closed list: the client carries the artwork, so a new mark is a new
+/// release.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DonationIcon {
+    /// No mark: a plain QR, and every payment method (wire 0).
+    #[default]
+    None,
+    /// The Bitcoin mark (wire 1).
+    Btc,
+    /// The Ethereum mark (wire 2).
+    Eth,
+    /// The TON mark (wire 3).
+    Ton,
+}
+
+impl DonationIcon {
+    /// The wire byte.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Btc => 1,
+            Self::Eth => 2,
+            Self::Ton => 3,
+        }
+    }
+
+    /// Parse the wire byte.
+    ///
+    /// # Errors
+    ///
+    /// [`DonationError::BadField`] (`icon`) for any other byte.
+    pub const fn from_byte(b: u8) -> Result<Self, DonationError> {
+        match b {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Btc),
+            2 => Ok(Self::Eth),
+            3 => Ok(Self::Ton),
+            _ => Err(DonationError::BadField("icon")),
+        }
+    }
+
+    /// The lower-case name (`none`, `btc`, `eth`, `ton`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Btc => "btc",
+            Self::Eth => "eth",
+            Self::Ton => "ton",
+        }
+    }
+
+    /// Parse the lower-case name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "none" => Some(Self::None),
+            "btc" => Some(Self::Btc),
+            "eth" => Some(Self::Eth),
+            "ton" => Some(Self::Ton),
+            _ => None,
+        }
+    }
+}
+
 /// The content of a method statement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DonationMethod {
@@ -225,6 +304,9 @@ pub struct DonationMethod {
     pub id: String,
     /// The kind.
     pub kind: DonationKind,
+    /// The coin mark in the centre of a crypto method's QR; always
+    /// [`DonationIcon::None`] for a payment method.
+    pub icon: DonationIcon,
     /// The payment link, `https://` only.
     pub link: Option<String>,
     /// The coin of a crypto method.
@@ -323,7 +405,8 @@ impl DonationMethod {
                 && self.qr_sha256.is_none()
                 && !self.has_phone
         } else {
-            self.coin.is_none()
+            self.icon == DonationIcon::None
+                && self.coin.is_none()
                 && self.network.is_none()
                 && self.address.is_none()
                 && (self.link.is_some() || self.qr_sha256.is_some() || self.has_phone)
@@ -339,10 +422,11 @@ impl DonationMethod {
     fn body(&self) -> Result<Vec<u8>, DonationError> {
         self.validate()?;
         let mut out = Vec::with_capacity(DONATION_METHOD_MAX_LEN);
-        out.push(VERSION);
+        out.push(METHOD_VERSION);
         out.extend_from_slice(&self.signed_at_unix_millis.to_be_bytes());
         put_u8_str(&mut out, &self.id)?;
         out.push(self.kind.to_byte());
+        out.push(self.icon.to_byte());
         put_u16_str(&mut out, self.link.as_deref().unwrap_or(""))?;
         put_u8_str(&mut out, self.coin.as_deref().unwrap_or(""))?;
         put_u8_str(&mut out, self.network.as_deref().unwrap_or(""))?;
@@ -413,7 +497,7 @@ impl DonationPhone {
     pub fn sign(&self, signing: &SigningKey) -> Result<Vec<u8>, DonationError> {
         self.validate()?;
         let mut out = Vec::with_capacity(DONATION_PHONE_MAX_LEN);
-        out.push(VERSION);
+        out.push(PHONE_VERSION);
         put_u8_str(&mut out, &self.id)?;
         put_u8_str(&mut out, &self.phone)?;
         let sig = signing.sign(&signing_input(DOMAIN_PHONE, &out));
@@ -604,7 +688,7 @@ fn parse_method(bytes: &[u8]) -> Result<(DonationMethod, usize), DonationError> 
     }
     let mut r = Reader::new(bytes);
     let version = r.u8()?;
-    if version != VERSION {
+    if version != METHOD_VERSION {
         return Err(DonationError::BadVersion(version));
     }
     let signed_at = r.take(8)?;
@@ -613,6 +697,7 @@ fn parse_method(bytes: &[u8]) -> Result<(DonationMethod, usize), DonationError> 
     let id_len = usize::from(r.u8()?);
     let id = r.text(id_len, DONATION_ID_MAX, "id")?.unwrap_or_default();
     let kind = DonationKind::from_byte(r.u8()?)?;
+    let icon = DonationIcon::from_byte(r.u8()?)?;
     let link_len = r.u16()?;
     let link = r.text(link_len, DONATION_LINK_MAX, "link")?;
     let coin_len = usize::from(r.u8()?);
@@ -637,6 +722,7 @@ fn parse_method(bytes: &[u8]) -> Result<(DonationMethod, usize), DonationError> 
         signed_at_unix_millis: i64::from_be_bytes(signed_at_be),
         id,
         kind,
+        icon,
         link,
         coin,
         network,
@@ -656,7 +742,7 @@ fn parse_phone(bytes: &[u8]) -> Result<(DonationPhone, usize), DonationError> {
     }
     let mut r = Reader::new(bytes);
     let version = r.u8()?;
-    if version != VERSION {
+    if version != PHONE_VERSION {
         return Err(DonationError::BadVersion(version));
     }
     let id_len = usize::from(r.u8()?);
@@ -692,6 +778,7 @@ mod tests {
             signed_at_unix_millis: 1_763_000_000_000,
             id: "sbp".to_string(),
             kind: DonationKind::Sbp,
+            icon: DonationIcon::None,
             link: Some("https://pay.example/sbp".to_string()),
             coin: None,
             network: None,
@@ -706,6 +793,7 @@ mod tests {
             signed_at_unix_millis: 1_763_000_000_000,
             id: "usdt".to_string(),
             kind: DonationKind::Crypto,
+            icon: DonationIcon::None,
             link: None,
             coin: Some("USDT".to_string()),
             network: Some("TRON (TRC-20)".to_string()),
@@ -784,6 +872,24 @@ mod tests {
             m.has_phone = phone;
             assert!(m.sign(&sk).is_ok());
         }
+        // A crypto method may carry any icon; a payment method only none.
+        for icon in [
+            DonationIcon::None,
+            DonationIcon::Btc,
+            DonationIcon::Eth,
+            DonationIcon::Ton,
+        ] {
+            let mut m = usdt();
+            m.icon = icon;
+            assert!(m.sign(&sk).is_ok());
+            let mut m = sbp();
+            m.icon = icon;
+            if icon == DonationIcon::None {
+                assert!(m.sign(&sk).is_ok());
+            } else {
+                assert_eq!(m.sign(&sk), Err(DonationError::KindMismatch));
+            }
+        }
         for change in 0..4 {
             let mut m = usdt();
             match change {
@@ -842,11 +948,87 @@ mod tests {
             Err(DonationError::BadField("has_phone"))
         );
         let mut bad = wire;
-        bad[0] = 2;
+        bad[0] = 3;
         assert_eq!(
             DonationMethod::decode_unverified(&bad),
-            Err(DonationError::BadVersion(2))
+            Err(DonationError::BadVersion(3))
         );
+    }
+
+    /// Offset of the icon byte: version, signed_at, id_len, id, kind.
+    fn icon_offset(m: &DonationMethod) -> usize {
+        1 + 8 + 1 + m.id.len() + 1
+    }
+
+    #[test]
+    fn the_icon_byte_is_signed_and_its_list_is_closed() {
+        let sk = key();
+        let vk = sk.verifying_key();
+        let mut m = usdt();
+        m.icon = DonationIcon::Btc;
+        let wire = m.sign(&sk).unwrap();
+        let at = icon_offset(&m);
+        assert_eq!(wire[at], 1);
+        // Another known icon parses but fails the signature.
+        let mut bad = wire.clone();
+        bad[at] = 3;
+        assert_eq!(
+            DonationMethod::decode_unverified(&bad).unwrap().icon,
+            DonationIcon::Ton
+        );
+        assert_eq!(
+            DonationMethod::open(&bad, &vk),
+            Err(DonationError::BadSignature)
+        );
+        for unknown in [4u8, 0x80, 0xFF] {
+            let mut bad = wire.clone();
+            bad[at] = unknown;
+            assert_eq!(
+                DonationMethod::decode_unverified(&bad),
+                Err(DonationError::BadField("icon"))
+            );
+        }
+        // A payment method's wire with a non-zero icon is refused before the
+        // signature is looked at.
+        let pay = sbp();
+        let mut bad = pay.sign(&sk).unwrap();
+        bad[icon_offset(&pay)] = 1;
+        assert_eq!(
+            DonationMethod::decode_unverified(&bad),
+            Err(DonationError::KindMismatch)
+        );
+    }
+
+    #[test]
+    fn a_version_one_method_is_refused() {
+        let sk = key();
+        let m = usdt();
+        let wire = m.sign(&sk).unwrap();
+        // The version 1 layout: the same bytes without the icon byte.
+        let at = icon_offset(&m);
+        let mut v1 = wire[..at].to_vec();
+        v1.extend_from_slice(&wire[at + 1..wire.len() - SIGNATURE_LEN]);
+        v1[0] = 1;
+        let sig = sk.sign(&signing_input(DOMAIN_METHOD, &v1)).to_bytes();
+        v1.extend_from_slice(&sig);
+        assert_eq!(
+            DonationMethod::open(&v1, &sk.verifying_key()),
+            Err(DonationError::BadVersion(1))
+        );
+    }
+
+    #[test]
+    fn icon_names_round_trip() {
+        for icon in [
+            DonationIcon::None,
+            DonationIcon::Btc,
+            DonationIcon::Eth,
+            DonationIcon::Ton,
+        ] {
+            assert_eq!(DonationIcon::from_name(icon.as_str()), Some(icon));
+            assert_eq!(DonationIcon::from_byte(icon.to_byte()), Ok(icon));
+        }
+        assert_eq!(DonationIcon::from_name("usdt"), None);
     }
 
     #[test]
@@ -1014,14 +1196,21 @@ mod tests {
         let crypto = (
             id,
             any::<i64>(),
+            prop_oneof![
+                Just(DonationIcon::None),
+                Just(DonationIcon::Btc),
+                Just(DonationIcon::Eth),
+                Just(DonationIcon::Ton)
+            ],
             text_strategy(64),
             "[A-Za-z0-9 ()-]{1,64}",
             text_strategy(512),
         )
-            .prop_map(|(id, at, coin, network, address)| DonationMethod {
+            .prop_map(|(id, at, icon, coin, network, address)| DonationMethod {
                 signed_at_unix_millis: at,
                 id,
                 kind: DonationKind::Crypto,
+                icon,
                 link: None,
                 coin: Some(coin),
                 network: Some(network),
@@ -1048,6 +1237,7 @@ mod tests {
                 signed_at_unix_millis: at,
                 id,
                 kind,
+                icon: DonationIcon::None,
                 link,
                 coin: None,
                 network: None,

@@ -63,7 +63,8 @@ options:
 #   * LAKKO_DONATIONS_KEY -> Info.plist `LakkoDonationsKey` (`DonationsPin`,
 #     docs/ux/donations.md section 4.1). The public half of the offline
 #     donations key, base64url without padding (32 bytes), as
-#     `just gen-donations-key` prints it. EMPTY -> the donations screen shows
+#     `just gen-donations-key` prints it, set in both configurations (it
+#     is public). EMPTY -> the donations screen shows
 #     "No way to donate is available" and asks the server nothing. Never
 #     taken from the server.
 settings:
@@ -72,12 +73,12 @@ settings:
       LAKKO_API_BASE_URL: "https://test.lakko.me/native"
       LAKKO_SFU_URL: "wss://test.lakko.me/sfu"
       LAKKO_WEB_ORIGIN: "https://test.lakko.me"
-      LAKKO_DONATIONS_KEY: ""
+      LAKKO_DONATIONS_KEY: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"
     Release:
       LAKKO_API_BASE_URL: ""
       LAKKO_SFU_URL: ""
       LAKKO_WEB_ORIGIN: "https://lakko.me"
-      LAKKO_DONATIONS_KEY: ""
+      LAKKO_DONATIONS_KEY: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"
 
 # Single iOS app target — `Lakko`. The SwiftUI source lives at
 # `apps/ios/Lakko/` (committed); the `Info.plist` is

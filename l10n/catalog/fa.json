@@ -5653,6 +5653,14 @@
       "text": "شماره تلفن پنهان است",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "رمزارز",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "بانک و کارت",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "از Lakko حمایت کنید",
       "status": "machine"

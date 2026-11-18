@@ -79,7 +79,7 @@ const CREDENTIAL_NAME: &str = "lakko-donations";
 /// Most methods the file may list.
 const MAX_METHODS: usize = 16;
 /// Largest QR image accepted, in bytes.
-const MAX_QR_BYTES: usize = 128 * 1024;
+const MAX_QR_BYTES: usize = 512 * 1024;
 /// Largest signed file accepted, in bytes.
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -218,7 +218,7 @@ impl Donations {
                 (Some(raw), Some(hash)) => {
                     let png = b64(raw, "qr_png_b64").map_err(fail)?;
                     if png.len() > MAX_QR_BYTES {
-                        return Err(fail("QR is larger than 128 KiB".to_string()));
+                        return Err(fail("QR is larger than 512 KiB".to_string()));
                     }
                     if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
                         return Err(fail("QR is not a PNG".to_string()));
@@ -499,6 +499,7 @@ pub(crate) fn test_methods() -> Vec<(lakko_attest::DonationMethod, Option<&'stat
         signed_at_unix_millis: 1,
         id: String::new(),
         kind: DonationKind::Bmc,
+        icon: lakko_attest::DonationIcon::None,
         link: None,
         coin: None,
         network: None,
@@ -677,6 +678,24 @@ mod tests {
         let mut e = test_entry(bmc, None, None);
         e["kind"] = "bmc".into();
         refuse(vec![e]);
+    }
+
+    #[test]
+    fn a_qr_up_to_512_kib_is_accepted_and_a_larger_one_refused() {
+        let key = test_key();
+        let (sbp, _) = test_methods().swap_remove(0);
+        for (len, ok) in [(MAX_QR_BYTES, true), (MAX_QR_BYTES + 1, false)] {
+            let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+            png.resize(len, 0x5a);
+            let method = lakko_attest::DonationMethod {
+                qr_sha256: Some(sha256(&png)),
+                ..sbp.clone()
+            };
+            let mut e = test_entry(&method, None, Some("+7 900"));
+            e["qr_png_b64"] = B64.encode(&png).into();
+            let json = serde_json::json!({ "methods": [e] }).to_string();
+            assert_eq!(Donations::parse(&json, Some(&key)).is_ok(), ok, "{len}");
+        }
     }
 
     #[test]

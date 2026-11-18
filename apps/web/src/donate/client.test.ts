@@ -6,7 +6,8 @@
  * (`docs/ux/donations.md` section 3). The wasm surface verifies only, so the
  * statements below were signed once by the offline tool
  * (`cargo run -p lakko-donations-tool -- keygen` then `sign`) with a test key
- * made for these tests; only its public half is here. They run through the
+ * made for these tests; only its public half is here. They are version 2
+ * statements (with the signed coin-mark byte); version 1 does not verify. They run through the
  * real wasm `verifyDonationMethod` / `verifyDonationPhone`.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -18,26 +19,33 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   fetchDonateMethods,
   fetchDonateQr,
+  groupDonateMethods,
+  MAX_QR_BYTES,
   pinnedDonationsKey,
   revealDonatePhone,
   verifyDonateMethods,
+  type DonateMethod,
+  type VerifiedStatement,
 } from "./client";
 
 /** Public half of the test donations key (base64url, no padding). */
-const KEY_B64URL = "Aa2oo1Ax_WyUSvvLwpKvosXMZ9MBmeQodQUQ9cRFhpI";
+const KEY_B64URL = "hDnlVp1-mevwnpnFjCiVRqrHP94c28ezxSqaf5ElX-I";
 
 /** sbp: link `https://example.org/pay/sbp`, a QR (hash of {@link QR_PNG_B64}), a phone. */
 const SBP =
-  "AQAAAaHhyfJJA3NicAEAG2h0dHBzOi8vZXhhbXBsZS5vcmcvcGF5L3NicAAAAAABTY9om8Dn/h1VongZaStJZ2Ltw5S7xRO2zK1OTWl3j2IBRiZ/imXADYiETe7DnEgGHssNMCOfZn3ma9jQiQf+T/BF+ReJHN3VbG60MRQdurvr6+Pb9K1UuCZBgiqw/MfUDw==";
+  "AgAAAaHuWJFCA3NicAEAABtodHRwczovL2V4YW1wbGUub3JnL3BheS9zYnAAAAAAAU2PaJvA5/4dVaJ4GWkrSWdi7cOUu8UTtsytTk1pd49iAfch/cyqlB5Bkvkrjmsk4TFqMEk2e6c9sVBcohufhLmWTggDgiHCcECFUoro8f+AjfR5OK1DIlVgmf5lR6KNFQg=";
 /** bmc: link `https://example.org/bmc` only. */
 const BMC =
-  "AQAAAaHhyfJJA2JtYwMAF2h0dHBzOi8vZXhhbXBsZS5vcmcvYm1jAAAAAAAA5nZKnFPzfsZLbOjeJ3ks3ABjbMWMkeK2W9lf+aExW3c+aB93oRqpdX7pHDjhVMMtq/NEbJCsTmreDG9zvo58Cw==";
+  "AgAAAaHuWJFCA2JtYwMAABdodHRwczovL2V4YW1wbGUub3JnL2JtYwAAAAAAAPxK5PNcSLP3adyqsDL7UbkuNTrIuFNNheKYBSM5FHvBXmBmNdnSCZ1Q98O22qwXXUHEl/Q23VLwGIpGBkoH4Qo=";
 /** usdt: crypto, USDT on TRON, address `TTestAddress123`. */
 const USDT =
-  "AQAAAaHhyfJJBHVzZHQEAAAEVVNEVARUUk9OAA9UVGVzdEFkZHJlc3MxMjMAAAkZA3eKg6Y+KZTc4Ctf+p17h7jEsDA4LmShIFGu4RTMZ24Mhidcu/CmzztuD6MW8WZfKBgLgu6jQVJeAzmRBww=";
+  "AgAAAaHuWJFCBHVzZHQEAAAABFVTRFQEVFJPTgAPVFRlc3RBZGRyZXNzMTIzAACRlRaxyK06IDpCIZKbFqMrSAKkNlduuEfMvJN8AXiGpUFCgZn0K+O3TCYlP/orFhaHPpDHRDbGpvIE/Uasul0D";
+/** btc: crypto, Bitcoin on Bitcoin, address `bc1qtestaddress`, coin mark `btc`. */
+const BTC =
+  "AgAAAaHuWJFCA2J0YwQBAAAHQml0Y29pbgdCaXRjb2luAA9iYzFxdGVzdGFkZHJlc3MAAK0MtWn1posfQx9V8Q+UtYoDr5k/O1aQYPWWupzalzokEQUzlRUM0JdpDmcZ60FFXBfN6OSWYiZjc7lFnu1CjQc=";
 /** The phone statement of `sbp`: `+7 900 000-00-00`. */
 const SBP_PHONE =
-  "AQNzYnAQKzcgOTAwIDAwMC0wMC0wMN9JN67Dh3kDZ5H5s41EhuyEPWdloGhf46BgxODda9QSaX+mF1HOFUdjq2BrnSD0UaCBGWztppdar6NonJ74Www=";
+  "AQNzYnAQKzcgOTAwIDAwMC0wMC0wMPqP6RzeAZv22J8g2TjqjVPFI0uaeCILSjKBZ/kU5l4BUwqCw6dqHWy7cYoveRax6Jen645+8aPe4554snHr+AE=";
 /** The QR image `sbp`'s statement hashes. */
 const QR_PNG_B64 = "iVBORw0KGgpmYWtlcXJpbWFnZWJ5dGVzLWZvci10ZXN0";
 
@@ -104,8 +112,32 @@ describe("verifyDonateMethods", () => {
     expect(bmc?.link).toBe("https://example.org/bmc");
     expect(bmc?.qrSha256).toBeNull();
     expect(bmc?.hasPhone).toBe(false);
-    expect(usdt?.crypto).toEqual({ coin: "USDT", network: "TRON", address: "TTestAddress123" });
+    expect(usdt?.crypto).toEqual({ coin: "USDT", network: "TRON", address: "TTestAddress123", icon: "none" });
     expect(usdt?.link).toBeNull();
+  });
+
+  it("carries the signed coin mark of a crypto method", () => {
+    const [btc] = verifyDonateMethods({ methods: [{ id: "btc", statement_b64: BTC }] }, key(), wasm.verifyDonationMethod);
+    expect(btc?.crypto).toEqual({ coin: "Bitcoin", network: "Bitcoin", address: "bc1qtestaddress", icon: "btc" });
+  });
+
+  it("draws a plain QR for a coin mark this client does not know", () => {
+    const fake = (icon: string): VerifiedStatement => ({
+      id: "x",
+      kind: "crypto",
+      icon,
+      link: null,
+      coin: "C",
+      network: "N",
+      address: "A",
+      qrSha256: null,
+      hasPhone: false,
+      free: () => undefined,
+    });
+    const [m] = verifyDonateMethods({ methods: [{ id: "x", statement_b64: "AA==" }] }, key(), () => fake("doge"));
+    expect(m?.crypto?.icon).toBe("none");
+    const [t] = verifyDonateMethods({ methods: [{ id: "x", statement_b64: "AA==" }] }, key(), () => fake("ton"));
+    expect(t?.crypto?.icon).toBe("ton");
   });
 
   it("drops a statement changed in any signed byte, and keeps the rest", () => {
@@ -202,8 +234,12 @@ describe("fetchDonateQr", () => {
     expect(await fetchDonateQr("sbp", hash, "/api")).toBeNull();
     installFetch(() => new Response("", { status: 404 }));
     expect(await fetchDonateQr("sbp", hash, "/api")).toBeNull();
-    installFetch(() => new Response(new Uint8Array(128 * 1024 + 1), { status: 200 }));
+    installFetch(() => new Response(new Uint8Array(MAX_QR_BYTES + 1), { status: 200 }));
     expect(await fetchDonateQr("sbp", hash, "/api")).toBeNull();
+  });
+
+  it("accepts an image up to 512 KiB", () => {
+    expect(MAX_QR_BYTES).toBe(512 * 1024);
   });
 });
 
@@ -221,5 +257,48 @@ describe("revealDonatePhone", () => {
     installFetch(() => json({ phone: "+7 999 999-99-99" }));
     await expect(revealDonatePhone("sbp", "/api", key())).rejects.toThrow();
     await expect(revealDonatePhone("sbp", "/api", null)).rejects.toThrow();
+  });
+});
+
+describe("groupDonateMethods", () => {
+  function method(id: string, crypto: boolean): DonateMethod {
+    return {
+      id,
+      kind: crypto ? "crypto" : "bmc",
+      link: crypto ? null : "https://example.org/",
+      qrSha256: null,
+      hasPhone: false,
+      crypto: crypto ? { coin: id, network: "N", address: "A", icon: "none" } : null,
+    };
+  }
+
+  it("puts bank and card methods first and wallets second, each in the server's order", () => {
+    const g = groupDonateMethods([method("btc", true), method("sbp", false), method("usdt", true), method("bmc", false)]);
+    expect(g.payment.map((m) => m.id)).toEqual(["sbp", "bmc"]);
+    expect(g.crypto.map((m) => m.id)).toEqual(["btc", "usdt"]);
+  });
+
+  it("leaves a group empty when it has no method", () => {
+    expect(groupDonateMethods([method("bmc", false)]).crypto).toEqual([]);
+    expect(groupDonateMethods([method("btc", true)]).payment).toEqual([]);
+    expect(groupDonateMethods([])).toEqual({ payment: [], crypto: [] });
+  });
+
+  it("groups the real verified statements", () => {
+    const methods = verifyDonateMethods(
+      {
+        methods: [
+          { id: "usdt", statement_b64: USDT },
+          { id: "sbp", statement_b64: SBP },
+          { id: "btc", statement_b64: BTC },
+          { id: "bmc", statement_b64: BMC },
+        ],
+      },
+      key(),
+      wasm.verifyDonationMethod,
+    );
+    const g = groupDonateMethods(methods);
+    expect(g.payment.map((m) => m.id)).toEqual(["sbp", "bmc"]);
+    expect(g.crypto.map((m) => m.id)).toEqual(["usdt", "btc"]);
   });
 });

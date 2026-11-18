@@ -5653,6 +5653,14 @@
       "text": "Номер телефону приховано",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "Криптовалюта",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Банк і картка",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Підтримати Lakko",
       "status": "machine"

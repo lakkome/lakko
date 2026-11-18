@@ -16,6 +16,13 @@ screens are built (iOS `Donate/Donations.swift` + `UI/Settings/DonationsScreen.s
 Android `donate/` + `ui/donate/DonationsScreen.kt`; unit-tested only, not run
 on a device, and with no key pinned in any build yet they show "none
 available").
+Round 2 decided by the maintainer 2026-11-18 after a look at
+`test.lakko.me`: method statements carry a signed coin-mark byte (`icon`,
+version 2 of the method statement), crypto QR codes carry the coin's mark and
+never the Lakko logo, a payment QR is the operator's colour image (limit
+raised to 512 KiB), and the web page uses the app's page width with a card
+grid in two groups (sections 2, 2.4, 3, 4). The core, the tool, discovery and
+both FFI surfaces are built for it; the three clients follow.
 **Pattern parent:** the donations page of the previous app (`lakko_me`,
 `public/web/donations.html`, `/api/donate/*`): the same page, the same three
 payment methods, the same per-country rule, the same hidden phone number;
@@ -49,10 +56,32 @@ From top to bottom:
 
 1. A back control (to Settings when opened from there, else to the home or
    the sign-in page).
-2. Heading **Support Lakko**.
-3. One paragraph: "Lakko is built and run by one person. Donations pay for
-   the servers and keep the work going."
-4. One card per payment method, in the order the server sends them.
+2. Heading **Support Lakko**, in the app's page-title size.
+3. One paragraph in the app's body size: "Lakko is built and run by one
+   person. Donations pay for the servers and keep the work going."
+4. The cards, in two groups when both exist, each under a small section
+   heading: **Bank and card** (`donate.section_payment`: SBP, Revolut, Buy Me
+   a Coffee) first, then **Crypto** (`donate.section_crypto`: the wallets).
+   When only one group has cards, its heading is still shown. Within a group
+   the cards keep the order the server sends them.
+
+### 2.0 Layout (web and desktop)
+
+Design system: `.claude/skills/ux-ui/design-system.md`.
+
+- The app's normal page width and type scale, not a narrow column: content
+  at most about 1040 px wide, centred, with the side padding of the other
+  wide pages.
+- The cards of a group in a responsive grid: one column on a phone, two from
+  about 640 px of content width, three from about 960 px; the cards of one
+  row have equal height.
+- A card, top to bottom: title row (service or coin name), the
+  who-it-is-for line or the network line, the QR at 200 px square, then the
+  actions (**Donate** full width; the phone row; for crypto the address in
+  monospace that wraps, **Copy address**, the warning line).
+- Body text in the app's body size, secondary text in its secondary size,
+  never smaller.
+- Works in light and dark, and at 360 px wide without horizontal scroll.
 
 ### 2.1 A payment card (SBP, Revolut, Buy Me a Coffee)
 
@@ -61,7 +90,8 @@ From top to bottom:
 - One line under it: who it is for ("For people in Russia." /
   "From anywhere.").
 - The QR code, when the server has one and its hash matches the signed one
-  (scan with a banking app).
+  (scan with a banking app): the operator's PNG exactly as served, in colour,
+  never recoloured, scaled to the card's QR size (section 2.4).
 - **Donate** button: opens the payment link outside Lakko (new tab on web,
   the system browser on desktop, iOS and Android).
 - Phone number, when the server has one: shown masked as `+7 9•• ••• •• ••`
@@ -75,7 +105,8 @@ sent by the server.
 
 - Title: the coin (`Bitcoin`, `USDT`, ...), and under it the network
   ("Network: TRON (TRC-20)").
-- The QR code of the address, drawn by the client.
+- The QR code of the address, drawn by the client, with the coin's mark in
+  the centre when the method names one (section 2.4).
 - The address in a monospace field that wraps, never cut, and a **Copy
   address** button.
 - One warning line, because it is something the person acts on: "Send only
@@ -91,6 +122,28 @@ sent by the server.
 | Error (network, server) | "Couldn't load the ways to donate. Check your connection and try again." + **Try again**. |
 | Show phone failed | Under the mask: "Couldn't show the number. Try again." The mask stays. |
 | Copy failed (no clipboard access) | The text is selected so the person can copy it by hand. |
+
+### 2.4 QR codes
+
+Both kinds of QR are shown at the same size on a card (web: 200 px square;
+iOS and Android: section 4).
+
+- **Crypto.** Drawn by the client from the verified `address`, error
+  correction level H (high), quiet zone 4 modules, dark modules in the app's
+  text colour on a white square (white in dark mode too, so wallets scan it).
+  In the centre the coin mark the signed `icon` names, on a white circle
+  that clears the modules beneath it:
+  - `btc`: an orange circle with a white Bitcoin "B";
+  - `eth`: the white Ethereum octahedron on a blue (`#627EEA`) circle;
+  - `ton`: a blue circle with the white TON diamond;
+  - `none`: a plain QR, no centre mark.
+  One small SVG per coin, authored by hand as simple geometry, the SAME
+  artwork on web (inline SVG strings), iOS (asset-catalog SVG or SwiftUI
+  `Path`) and Android (vector drawable). No artwork is downloaded. **Never
+  the Lakko logo**: the device-pairing branded QR is not reused here.
+- **Payment (SBP, Revolut, Buy Me a Coffee).** The operator's PNG exactly as
+  served (its SHA-256 checked against the signed `qrSha256`, as in section
+  3), in colour, no recolouring, no centre mark added.
 
 ## 3. Data the UI needs (the server contract)
 
@@ -118,7 +171,12 @@ country sees); it cannot change one.
   - `id`: a stable short id (`sbp`, `revolut`, `bmc`, `btc`, ...); a card
     whose verified `id` differs from the entry's `id` is not shown;
   - `kind`: `sbp` | `revolut` | `bmc` | `crypto` (the client picks the
-    description line by kind);
+    description line and the group by kind);
+  - `icon`: the coin mark in the centre of a crypto QR (section 2.4); on
+    wasm the string `"none"` | `"btc"` | `"eth"` | `"ton"`, on UniFFI the enum
+    `DonationIcon` (`.none` / `.btc` / `.eth` / `.ton`, Kotlin `NONE` /
+    `BTC` / `ETH` / `TON`). Always `none` for a payment method; a closed list
+    the statement signs (an unknown value does not verify);
   - `link` (optional): the payment URL, `https://` only;
   - `qrSha256` (optional, 32 bytes): a QR image exists, and its SHA-256;
   - `hasPhone`: a phone number exists (the number itself is not in this
@@ -126,8 +184,8 @@ country sees); it cannot change one.
   - for `crypto`: `coin`, `network`, `address` (and never a link, a QR or a
     phone: the client draws the address's QR itself);
   - `signedAtMillis`: when it was signed.
-- `GET /discovery/donate/{id}/qr` returns the QR image (PNG), country rule
-  applied. The client hashes the bytes and shows the image only when the
+- `GET /discovery/donate/{id}/qr` returns the QR image (PNG, at most
+  512 KiB; the client refuses a larger answer), country rule applied. The client hashes the bytes and shows the image only when the
   SHA-256 equals the method's `qrSha256`; otherwise the card shows no QR.
 - `POST /discovery/donate/{id}/phone` with `{"action":"reveal"}` returns
   `{"statement_b64": "..."}`, a phone statement; the client calls
@@ -161,6 +219,10 @@ One screen, the same on every client: the page of section 2 with its states
 (section 2.3) and the contract of section 3.
 
 - **Web and desktop:** one page component, public route `/donations`.
+- **iOS and Android:** the same two groups with their headings and the same
+  order (section 2); one card per row, the QR at its current size (the card
+  width, centred; no separate size cap); the same coin marks as web (section
+  2.4); a payment PNG in colour.
 - **iOS and Android:** a screen of the app's own (SwiftUI / Compose), pushed
   from **Settings > About > Support Lakko** with the platform's back
   navigation. It is reachable only from Settings (there is no deep link to it;
@@ -204,9 +266,9 @@ One screen, the same on every client: the page of section 2 with its states
    Show can be pressed again. The number lives in screen state only and is
    gone when the screen closes.
 7. **Crypto card.** Coin, `donate.crypto_network`, the address QR drawn by
-   the client from the verified `address` with the QR view the app already
-   has (iOS `UI/Devices/BrandedQr.swift`, Android
-   `ui/devices/BrandedQr.kt`, zxing), the address in a monospace, selectable, wrapping field,
+   the client from the verified `address` per section 2.4 (error correction
+   H, the coin mark of `icon` in the centre, never the Lakko logo, so not the
+   device-pairing `BrandedQr`), the address in a monospace, selectable, wrapping field,
    **Copy address**, and the `donate.crypto_warning` line.
 8. **Copy.** Writes to the system clipboard; the button reads **Copied** for
    two seconds. The native clipboard is always writable, so the web
@@ -224,6 +286,8 @@ reflows the cards, and the address wraps instead of shrinking.
 | Key | Text |
 |---|---|
 | `donate.title` | Support Lakko |
+| `donate.section_payment` | Bank and card |
+| `donate.section_crypto` | Crypto |
 | `donate.lede` | Lakko is built and run by one person. Donations pay for the servers and keep the work going. |
 | `donate.for_russia` | For people in Russia. |
 | `donate.worldwide` | From anywhere. |

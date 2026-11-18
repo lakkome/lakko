@@ -78,6 +78,14 @@ impl DonationMethod {
         self.inner.kind.as_str().to_string()
     }
 
+    /// The coin mark drawn in the centre of a crypto method's QR: `"none"`
+    /// (a plain QR; always for a payment method), `"btc"`, `"eth"` or
+    /// `"ton"`. Signed with the statement.
+    #[wasm_bindgen(getter)]
+    pub fn icon(&self) -> String {
+        self.inner.icon.as_str().to_string()
+    }
+
     /// The payment link (`https://` only), absent for a crypto method and
     /// optional otherwise.
     #[wasm_bindgen(getter)]
@@ -159,7 +167,7 @@ fn verify_phone_inner(statement: &[u8], key_bytes: &[u8], id: &str) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lakko_attest::DonationKind;
+    use lakko_attest::{DonationIcon, DonationKind};
     use lakko_crypto::signing::SigningKey;
 
     fn method() -> lakko_attest::DonationMethod {
@@ -167,6 +175,7 @@ mod tests {
             signed_at_unix_millis: 5,
             id: "btc".to_string(),
             kind: DonationKind::Crypto,
+            icon: DonationIcon::Btc,
             link: None,
             coin: Some("Bitcoin".to_string()),
             network: Some("Bitcoin".to_string()),
@@ -184,6 +193,7 @@ mod tests {
         let view = DonationMethod { inner };
         assert_eq!(view.id(), "btc");
         assert_eq!(view.kind(), "crypto");
+        assert_eq!(view.icon(), "btc");
         assert_eq!(view.address().as_deref(), Some("bc1qexample"));
         assert_eq!(view.link(), None);
         assert_eq!(view.qr_sha256(), None);

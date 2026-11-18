@@ -22,6 +22,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import me.lakko.app.anon.AnonymousHttp
 import me.lakko.app.discovery.DiscoveryClient
+import uniffi.lakko_ffi_uniffi.DonationIcon
 import uniffi.lakko_ffi_uniffi.DonationKind
 import uniffi.lakko_ffi_uniffi.verifyDonationMethod
 import uniffi.lakko_ffi_uniffi.verifyDonationPhone
@@ -42,8 +43,17 @@ import kotlin.coroutines.cancellation.CancellationException
 /** What kind of card a method is drawn as. */
 public enum class DonateKind { SBP, REVOLUT, BMC, CRYPTO }
 
-/** The coin, network and address of a crypto method. */
-public data class DonateCrypto(val coin: String, val network: String, val address: String)
+/** The coin mark drawn in the centre of a crypto QR (section 2.4); always
+ *  [NONE] for a payment method. */
+public enum class DonateIcon { NONE, BTC, ETH, TON }
+
+/** The coin, network and address of a crypto method, and its signed mark. */
+public data class DonateCrypto(
+    val coin: String,
+    val network: String,
+    val address: String,
+    val icon: DonateIcon = DonateIcon.NONE,
+)
 
 /** One verified way to donate. Every field comes from the signed statement. */
 public class DonateMethod(
@@ -62,6 +72,7 @@ public class DonateMethod(
 public class VerifiedDonationStatement(
     public val id: String,
     public val kind: DonateKind,
+    public val icon: DonateIcon,
     public val link: String?,
     public val coin: String?,
     public val network: String?,
@@ -87,6 +98,12 @@ public object FfiDonationVerifier : DonationVerifier {
                 DonationKind.REVOLUT -> DonateKind.REVOLUT
                 DonationKind.BMC -> DonateKind.BMC
                 DonationKind.CRYPTO -> DonateKind.CRYPTO
+            },
+            icon = when (m.icon) {
+                DonationIcon.NONE -> DonateIcon.NONE
+                DonationIcon.BTC -> DonateIcon.BTC
+                DonationIcon.ETH -> DonateIcon.ETH
+                DonationIcon.TON -> DonateIcon.TON
             },
             link = m.link,
             coin = m.coin,
@@ -120,8 +137,9 @@ public class DonationsUnavailable(message: String) : IOException(message)
 private const val KEY_LEN = 32
 private const val SHA256_LEN = 32
 
-/** Largest QR image accepted (the signing tool and discovery refuse larger). */
-internal const val MAX_QR_BYTES: Int = 128 * 1024
+/** Largest QR image accepted (the signing tool and discovery refuse larger;
+ *  docs/ux/donations.md section 3). */
+internal const val MAX_QR_BYTES: Int = 512 * 1024
 
 /** The 32-byte key from its base64url (no padding) form, or `null` when
  *  blank, malformed or not 32 bytes. There is no fallback. */
@@ -159,7 +177,7 @@ private fun toMethod(v: VerifiedDonationStatement): DonateMethod? {
         val coin = nonBlank(v.coin) ?: return null
         val network = nonBlank(v.network) ?: return null
         val address = nonBlank(v.address) ?: return null
-        return DonateMethod(v.id, v.kind, null, null, false, DonateCrypto(coin, network, address))
+        return DonateMethod(v.id, v.kind, null, null, false, DonateCrypto(coin, network, address, v.icon))
     }
     if (link == null && qr == null && !v.hasPhone) return null
     return DonateMethod(v.id, v.kind, link, qr, v.hasPhone, null)

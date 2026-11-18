@@ -9476,70 +9476,188 @@ button.lk-card-row-button {
   color: var(--surface-muted);
 }
 
-/* docs/ux/donations.md: the donations page. */
-.lk-donate-back {
-  align-self: flex-start;
+/* docs/ux/donations.md: the donations page (section 2.0). A public page laid
+   out like a page of the app: the page ground, the app's wide page width and
+   type scale, two groups of cards in a grid. */
+.public-wide {
+  min-height: 100%;
+  background: var(--surface-bg);
+  padding: 32px 24px 48px;
 }
-.lk-donate-lede {
-  margin: 0;
-  color: var(--surface-muted);
+.public-wide-page {
+  max-width: 1040px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
-.lk-donate-card {
+.lk-donate {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
-  padding: 16px;
+  gap: 24px;
 }
-.lk-donate-card h2 {
+.lk-donate-back {
+  align-self: flex-start;
+  margin-inline-start: -12px;
+}
+.lk-donate-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lk-donate-intro h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 600;
+}
+.lk-donate-lede {
+  margin: 0;
+  max-width: 640px;
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--surface-muted);
+  text-wrap: pretty;
+}
+.lk-donate-none {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+}
+.lk-donate-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-donate-group-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--surface-muted);
+}
+/* One column on a phone, two from 640 px of content width, three from
+   960 px (the page pads 24 px a side, so 688 and 1008 px of viewport). */
+.lk-donate-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+@media (min-width: 688px) {
+  .lk-donate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1008px) {
+  .lk-donate-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.lk-donate-card {
+  height: 100%;
+  min-width: 0;
+  gap: 16px;
+}
+.lk-donate-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-donate-head h3 {
   margin: 0;
   font-size: 17px;
-  line-height: 22px;
+  line-height: 24px;
+  font-weight: 600;
 }
 .lk-donate-sub {
   margin: 0;
   font-size: 13px;
+  line-height: 18px;
   color: var(--surface-muted);
+  overflow-wrap: anywhere;
 }
+.lk-donate-qr-slot {
+  display: flex;
+  justify-content: center;
+  min-height: 200px;
+}
+/* Every QR is 200 px square: the operator's image as served (in colour,
+   scaled to fit), or the address code drawn in `src/donate/donate-qr.ts`. */
 .lk-donate-qr {
   display: block;
-  margin: 4px auto;
   width: 200px;
+  height: 200px;
   max-width: 100%;
-  height: auto;
   border-radius: 12px;
-  background: #fff;
+  object-fit: contain;
+}
+.lk-donate-qr-drawn svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.lk-donate-actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-donate-wide {
+  width: 100%;
+  min-height: 44px;
 }
 .lk-donate-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 14px;
+  line-height: 20px;
   user-select: all;
 }
 .lk-donate-address {
   overflow-wrap: anywhere;
   padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--surface-hover);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
 }
-.lk-donate-card > button.ghost {
-  align-self: flex-start;
+.lk-donate-phone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .lk-donate-phone-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding: 6px 6px 6px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
 }
 .lk-donate-warning,
 .lk-donate-error {
   margin: 0;
   font-size: 13px;
+  line-height: 18px;
+}
+.lk-donate-warning {
+  color: var(--surface-muted);
 }
 .lk-donate-error {
   color: var(--danger);
 }
+.lk-donate-retry {
+  align-self: flex-start;
+}
 .lk-donate-placeholder {
-  height: 120px;
-  border-radius: 16px;
-  background: var(--surface-hover);
+  height: 360px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+@media (max-width: 480px) {
+  .public-wide {
+    padding: 20px 16px 40px;
+  }
 }

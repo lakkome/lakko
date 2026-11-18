@@ -5653,6 +5653,14 @@
       "text": "מספר הטלפון מוסתר",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "קריפטו",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "בנק וכרטיס",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "תמכו ב-Lakko",
       "status": "machine"

@@ -11,7 +11,8 @@
 //! - `sign [--key <seedfile>] --in <methods.json> [--out <signed.json>]` - read
 //!   the plain methods file (the format discovery read before signing:
 //!   `id`, `kind`, `link`, `qr_file`, `phone`, `coin`, `network`, `address`,
-//!   `countries`), sign one method statement per method and one phone
+//!   `countries`, and on a crypto method `icon`: `btc`, `eth` or `ton`, the
+//!   coin mark the client draws in the centre of the address's QR), sign one method statement per method and one phone
 //!   statement per phone, embed each QR image, and write the signed file
 //!   discovery loads as one systemd credential:
 //!
@@ -40,7 +41,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use lakko_attest::{
     sign_donation_method, sign_donation_phone, verify_donation_method, verify_donation_phone,
-    DonationKind, DonationMethod,
+    DonationIcon, DonationKind, DonationMethod,
 };
 use lakko_crypto::hash::sha256;
 use lakko_crypto::signing::SigningKey;
@@ -57,7 +58,7 @@ const SEED_LEN: usize = 32;
 /// Most methods the file may list (discovery refuses more).
 const MAX_METHODS: usize = 16;
 /// Largest QR image, in bytes (discovery refuses larger).
-const MAX_QR_BYTES: usize = 128 * 1024;
+const MAX_QR_BYTES: usize = 512 * 1024;
 /// Largest signed file, in bytes (discovery refuses larger).
 const MAX_SIGNED_FILE_BYTES: usize = 1024 * 1024;
 
@@ -121,6 +122,8 @@ struct InputMethod {
     network: Option<String>,
     #[serde(default)]
     address: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
 }
 
 /// The plain input file.
@@ -194,7 +197,8 @@ fn cmd_sign(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("internal: cannot serialise: {e}"))?;
     if text.len() > MAX_SIGNED_FILE_BYTES {
         return Err(format!(
-            "the signed file is {} bytes, more than {MAX_SIGNED_FILE_BYTES}",
+            "the signed file is {} bytes, more than the {MAX_SIGNED_FILE_BYTES} bytes \
+             discovery accepts; make the QR images smaller or list fewer methods",
             text.len()
         ));
     }
@@ -271,11 +275,23 @@ fn sign_file(
             Some(path) => Some(read_qr(&base.join(path)).map_err(fail)?),
             None => None,
         };
+        let icon = match trimmed(m.icon.clone()) {
+            None => DonationIcon::None,
+            Some(name) => DonationIcon::from_name(&name).ok_or_else(|| {
+                fail(format!(
+                    "unknown icon `{name}` (btc, eth or ton, or leave it out)"
+                ))
+            })?,
+        };
+        if icon != DonationIcon::None && kind != DonationKind::Crypto {
+            return Err(fail("only a crypto method carries an icon".to_string()));
+        }
         let phone = trimmed(m.phone.clone());
         let method = DonationMethod {
             signed_at_unix_millis: signed_at,
             id: m.id.clone(),
             kind,
+            icon,
             link: trimmed(m.link.clone()),
             coin: trimmed(m.coin.clone()),
             network: trimmed(m.network.clone()),
@@ -448,7 +464,8 @@ mod tests {
         {"id": "sbp", "kind": "sbp", "link": "https://pay.example/sbp", "qr_file": "sbp.png",
          "phone": "+7 900 000-00-00", "countries": "RU,BY"},
         {"id": "bmc", "kind": "bmc", "link": "https://buymeacoffee.com/x", "countries": "!RU"},
-        {"id": "usdt", "kind": "crypto", "coin": "USDT", "network": "TRON (TRC-20)", "address": "Tabc"}
+        {"id": "usdt", "kind": "crypto", "coin": "USDT", "network": "TRON (TRC-20)", "address": "Tabc"},
+        {"id": "btc", "kind": "crypto", "coin": "Bitcoin", "network": "Bitcoin", "address": "bc1q", "icon": "btc"}
     ]}"#;
 
     #[test]
@@ -481,7 +498,7 @@ mod tests {
         let signing = read_signing_key(&seed).unwrap();
         let vk = signing.verifying_key();
         let signed: SignedFile = serde_json::from_slice(&fs::read(&out).unwrap()).unwrap();
-        assert_eq!(signed.methods.len(), 3);
+        assert_eq!(signed.methods.len(), 4);
         let sbp = &signed.methods[0];
         assert_eq!(sbp.countries.as_deref(), Some("RU,BY"));
         let m = verify_donation_method(&STANDARD.decode(&sbp.statement_b64).unwrap(), &vk).unwrap();
@@ -501,6 +518,10 @@ mod tests {
         let m =
             verify_donation_method(&STANDARD.decode(&usdt.statement_b64).unwrap(), &vk).unwrap();
         assert_eq!(m.kind, DonationKind::Crypto);
+        assert_eq!(m.icon, DonationIcon::None);
+        let btc = &signed.methods[3];
+        let m = verify_donation_method(&STANDARD.decode(&btc.statement_b64).unwrap(), &vk).unwrap();
+        assert_eq!(m.icon, DonationIcon::Btc);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -526,6 +547,8 @@ mod tests {
             r#"{"methods": [{"id": "a", "kind": "sbp", "qr_file": "big.png"}]}"#,
             r#"{"methods": [{"id": "a", "kind": "sbp", "qr_file": "gif.png"}]}"#,
             r#"{"methods": [{"id": "a", "kind": "sbp", "phone": "call me"}]}"#,
+            r#"{"methods": [{"id": "a", "kind": "bmc", "link": "https://x", "icon": "btc"}]}"#,
+            r#"{"methods": [{"id": "a", "kind": "crypto", "coin": "c", "network": "n", "address": "x", "icon": "usdt"}]}"#,
             r#"{"methods": [{"id": "a", "kind": "bmc", "link": "https://x"},
                             {"id": "a", "kind": "bmc", "link": "https://y"}]}"#,
         ] {

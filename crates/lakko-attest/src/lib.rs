@@ -155,8 +155,8 @@ pub use backup_head::{
 };
 pub use donation::{
     sign_donation_method, sign_donation_phone, verify_donation_method, verify_donation_phone,
-    DonationError, DonationKind, DonationMethod, DonationPhone, DONATION_METHOD_MAX_LEN,
-    DONATION_PHONE_MAX_LEN,
+    DonationError, DonationIcon, DonationKind, DonationMethod, DonationPhone,
+    DONATION_METHOD_MAX_LEN, DONATION_PHONE_MAX_LEN,
 };
 pub use genesis::{
     verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,

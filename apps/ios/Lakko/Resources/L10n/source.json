@@ -6023,6 +6023,14 @@
       "text": "Phone number hidden",
       "comment": "Read by the screen reader in place of the masked phone number on the donations screen, before the person taps Show."
     },
+    "donate.section_crypto": {
+      "text": "Crypto",
+      "comment": "Small heading on the donations page above the crypto wallet cards (Bitcoin, USDT and so on)."
+    },
+    "donate.section_payment": {
+      "text": "Bank and card",
+      "comment": "Small heading on the donations page above the bank transfer and card payment methods (SBP, Revolut, Buy Me a Coffee)."
+    },
     "donate.title": {
       "text": "Support Lakko",
       "comment": "Heading of the donations page."

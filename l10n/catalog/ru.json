@@ -5773,6 +5773,14 @@
       "text": "Номер телефона скрыт",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "Криптовалюта",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Банк и карта",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Поддержать Lakko",
       "status": "machine"

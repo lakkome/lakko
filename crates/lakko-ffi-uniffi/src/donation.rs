@@ -19,7 +19,7 @@
 //! `kind-mismatch`, `bad-signature`, `id-mismatch` — the same codes the wasm
 //! surface throws. The client shows nothing for a statement that fails.
 
-use lakko_attest::{DonationError, DonationKind as InnerKind};
+use lakko_attest::{DonationError, DonationIcon as InnerIcon, DonationKind as InnerKind};
 use lakko_crypto::signing::VerifyingKey;
 
 use crate::FfiError;
@@ -67,6 +67,31 @@ impl From<InnerKind> for DonationKind {
     }
 }
 
+/// The coin mark the screen draws in the centre of a crypto method's QR; a
+/// closed list, since the app carries the artwork.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DonationIcon {
+    /// No mark: a plain QR (always for a payment method).
+    None,
+    /// The Bitcoin mark.
+    Btc,
+    /// The Ethereum mark.
+    Eth,
+    /// The TON mark.
+    Ton,
+}
+
+impl From<InnerIcon> for DonationIcon {
+    fn from(i: InnerIcon) -> Self {
+        match i {
+            InnerIcon::None => Self::None,
+            InnerIcon::Btc => Self::Btc,
+            InnerIcon::Eth => Self::Eth,
+            InnerIcon::Ton => Self::Ton,
+        }
+    }
+}
+
 /// A verified donation method. Every field is part of a statement signed by
 /// the donations key; none is secret.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
@@ -75,6 +100,8 @@ pub struct DonationMethod {
     pub id: String,
     /// The kind.
     pub kind: DonationKind,
+    /// The coin mark in the centre of a crypto method's QR (signed).
+    pub icon: DonationIcon,
     /// The payment link (`https://` only), absent for a crypto method and
     /// optional otherwise.
     pub link: Option<String>,
@@ -100,6 +127,7 @@ impl From<lakko_attest::DonationMethod> for DonationMethod {
         Self {
             id: m.id,
             kind: m.kind.into(),
+            icon: m.icon.into(),
             link: m.link,
             coin: m.coin,
             network: m.network,
@@ -155,6 +183,7 @@ mod tests {
             signed_at_unix_millis: 5,
             id: "btc".to_string(),
             kind: InnerKind::Crypto,
+            icon: InnerIcon::Eth,
             link: None,
             coin: Some("Bitcoin".to_string()),
             network: Some("Bitcoin".to_string()),
@@ -178,6 +207,7 @@ mod tests {
         let got = verify_donation_method(wire, sk.verifying_key().to_bytes().to_vec()).unwrap();
         assert_eq!(got.id, "btc");
         assert_eq!(got.kind, DonationKind::Crypto);
+        assert_eq!(got.icon, DonationIcon::Eth);
         assert_eq!(got.coin.as_deref(), Some("Bitcoin"));
         assert_eq!(got.network.as_deref(), Some("Bitcoin"));
         assert_eq!(got.address.as_deref(), Some("bc1qexample"));
@@ -194,6 +224,7 @@ mod tests {
             signed_at_unix_millis: 7,
             id: "sbp".to_string(),
             kind: InnerKind::Sbp,
+            icon: InnerIcon::None,
             link: Some("https://example.org/pay".to_string()),
             coin: None,
             network: None,
@@ -204,6 +235,7 @@ mod tests {
         let wire = method.sign(&sk).unwrap();
         let got = verify_donation_method(wire, sk.verifying_key().to_bytes().to_vec()).unwrap();
         assert_eq!(got.kind, DonationKind::Sbp);
+        assert_eq!(got.icon, DonationIcon::None);
         assert_eq!(got.link.as_deref(), Some("https://example.org/pay"));
         assert_eq!(got.qr_sha256, Some(vec![0xAB; 32]));
         assert!(got.has_phone);
@@ -218,6 +250,18 @@ mod tests {
             (InnerKind::Crypto, DonationKind::Crypto),
         ] {
             assert_eq!(DonationKind::from(inner), outer);
+        }
+    }
+
+    #[test]
+    fn every_icon_projects_one_to_one() {
+        for (inner, outer) in [
+            (InnerIcon::None, DonationIcon::None),
+            (InnerIcon::Btc, DonationIcon::Btc),
+            (InnerIcon::Eth, DonationIcon::Eth),
+            (InnerIcon::Ton, DonationIcon::Ton),
+        ] {
+            assert_eq!(DonationIcon::from(inner), outer);
         }
     }
 

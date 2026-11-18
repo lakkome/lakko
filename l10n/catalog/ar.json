@@ -5653,6 +5653,14 @@
       "text": "رقم الهاتف مخفي",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "العملات المشفّرة",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "الدفع البنكي والبطاقة",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "ادعم Lakko",
       "status": "machine"

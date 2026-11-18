@@ -5653,6 +5653,14 @@
       "text": "फ़ोन नंबर छिपा है",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "क्रिप्टो",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "बैंक और कार्ड",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Lakko का समर्थन करें",
       "status": "machine"

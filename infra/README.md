@@ -476,7 +476,8 @@ just gen-donations-key
 
 ```bash
 # donations.json: {"methods":[{"id","kind": sbp|revolut|bmc|crypto,"link",
-#   "qr_file" (path relative to the file),"phone","countries","coin","network","address"}]}
+#   "qr_file" (path relative to the file),"phone","countries","coin","network","address",
+#   "icon": btc|eth|ton (crypto only: the coin mark in the centre of its QR)}]}
 just sign-donations donations.json        # -> donations.signed.json (0600)
 scp donations.signed.json lakkome@lakko.me:/tmp/
 ssh lakkome@lakko.me 'sudo install -m 600 -o root -g root /tmp/donations.signed.json \
@@ -488,8 +489,8 @@ The two `sudo` commands are not in the deploy sudoers entry; run them in an
 interactive session. A file discovery refuses (bad JSON, a statement that does
 not match its entry, a QR that does not hash to the signed value, a bad
 signature when the key is set) leaves the page empty and logs one warning
-naming only the method's position. QR images are PNG, at most 128 KiB; the
-signed file is at most 1 MiB.
+naming only the method's position. QR images are PNG, at most 512 KiB; the
+signed file is at most 1 MiB (the tool refuses a larger one).
 
 **At rest the file is plain.** Ubuntu 22.04 has systemd 249;
 `LoadCredentialEncrypted=` needs 250. After an OS upgrade, encrypt it with

@@ -19,6 +19,10 @@ import { loadWasm } from "../wasm";
 /** What kind of card a method is drawn as. */
 export type DonateKind = "sbp" | "revolut" | "bmc" | "crypto";
 
+/** The coin mark in the centre of a crypto QR (`docs/ux/donations.md`
+ *  section 2.4), as the signed statement names it. */
+export type DonateIcon = "none" | "btc" | "eth" | "ton";
+
 /** One verified way to donate. Every field comes from the signed statement. */
 export interface DonateMethod {
   readonly id: string;
@@ -29,14 +33,22 @@ export interface DonateMethod {
    *  equals this. */
   readonly qrSha256: Uint8Array | null;
   readonly hasPhone: boolean;
-  /** For a crypto method: the coin, the network and the address. */
-  readonly crypto: { readonly coin: string; readonly network: string; readonly address: string } | null;
+  /** For a crypto method: the coin, the network, the address and the coin
+   *  mark drawn in the centre of its QR. */
+  readonly crypto: {
+    readonly coin: string;
+    readonly network: string;
+    readonly address: string;
+    readonly icon: DonateIcon;
+  } | null;
 }
 
 /** The getters of the wasm `DonationMethod` this module reads. */
 export interface VerifiedStatement {
   readonly id: string;
   readonly kind: string;
+  /** `"none"` | `"btc"` | `"eth"` | `"ton"` (version 2 statements). */
+  readonly icon: string;
   readonly link: string | null | undefined;
   readonly coin: string | null | undefined;
   readonly network: string | null | undefined;
@@ -50,10 +62,11 @@ export interface VerifiedStatement {
 export type MethodVerifier = (statement: Uint8Array, key: Uint8Array) => VerifiedStatement;
 
 const KINDS: ReadonlySet<string> = new Set(["sbp", "revolut", "bmc", "crypto"]);
+const ICONS: ReadonlySet<string> = new Set(["none", "btc", "eth", "ton"]);
 const SHA256_LEN = 32;
 const KEY_LEN = 32;
 /** Largest QR image accepted (the signing tool and discovery refuse larger). */
-const MAX_QR_BYTES = 128 * 1024;
+export const MAX_QR_BYTES = 512 * 1024;
 
 function env(): Record<string, string | undefined> {
   return import.meta.env as Record<string, string | undefined>;
@@ -99,7 +112,9 @@ function toMethod(v: VerifiedStatement): DonateMethod | null {
     const network = text(v.network);
     const address = text(v.address);
     if (coin === null || network === null || address === null) return null;
-    return { id: v.id, kind, link: null, qrSha256: null, hasPhone: false, crypto: { coin, network, address } };
+    // The core refuses an unknown icon; anything else here draws a plain QR.
+    const icon: DonateIcon = ICONS.has(v.icon) ? (v.icon as DonateIcon) : "none";
+    return { id: v.id, kind, link: null, qrSha256: null, hasPhone: false, crypto: { coin, network, address, icon } };
   }
   const hasPhone = v.hasPhone === true;
   if (link === null && qr === null && !hasPhone) return null;
@@ -141,6 +156,21 @@ export function verifyDonateMethods(json: unknown, key: Uint8Array, verify: Meth
     out.push(method);
   }
   return out;
+}
+
+/** The two groups of the page (`docs/ux/donations.md` section 2): bank and
+ *  card methods first, then crypto wallets, each in the server's order. */
+export interface DonateGroups {
+  readonly payment: readonly DonateMethod[];
+  readonly crypto: readonly DonateMethod[];
+}
+
+/** Split the verified methods into the page's two groups. */
+export function groupDonateMethods(methods: readonly DonateMethod[]): DonateGroups {
+  return {
+    payment: methods.filter((m) => m.crypto === null),
+    crypto: methods.filter((m) => m.crypto !== null),
+  };
 }
 
 /** `GET /discovery/donate`, verified. A build with no pinned key returns no

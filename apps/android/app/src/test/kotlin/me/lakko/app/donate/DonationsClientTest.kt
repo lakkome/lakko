@@ -35,10 +35,10 @@ class DonationsClientTest {
         override fun verifyMethod(statement: ByteArray, key: ByteArray): VerifiedDonationStatement {
             keysSeen += key
             return when (String(statement)) {
-                "sbp" -> VerifiedDonationStatement("sbp", DonateKind.SBP, "https://pay.example/sbp", null, null, null, qrSha, true)
-                "usdt" -> VerifiedDonationStatement("usdt", DonateKind.CRYPTO, null, "USDT", "TRON (TRC-20)", "TXYZ", null, false)
-                "bmc-http" -> VerifiedDonationStatement("bmc", DonateKind.BMC, "http://insecure.example", null, null, null, null, false)
-                "revolut" -> VerifiedDonationStatement("revolut", DonateKind.REVOLUT, "https://revolut.example", null, null, null, null, false)
+                "sbp" -> VerifiedDonationStatement("sbp", DonateKind.SBP, DonateIcon.NONE, "https://pay.example/sbp", null, null, null, qrSha, true)
+                "usdt" -> VerifiedDonationStatement("usdt", DonateKind.CRYPTO, DonateIcon.TON, null, "USDT", "TRON (TRC-20)", "TXYZ", null, false)
+                "bmc-http" -> VerifiedDonationStatement("bmc", DonateKind.BMC, DonateIcon.NONE, "http://insecure.example", null, null, null, null, false)
+                "revolut" -> VerifiedDonationStatement("revolut", DonateKind.REVOLUT, DonateIcon.NONE, "https://revolut.example", null, null, null, null, false)
                 else -> throw IllegalStateException("bad-signature: test")
             }
         }
@@ -61,7 +61,7 @@ class DonationsClientTest {
         val v = FakeVerifier()
         val methods = client(v, handler = json(body)).methods()
         assertEquals(listOf("usdt", "sbp"), methods.map { it.id })
-        assertEquals(DonateCrypto("USDT", "TRON (TRC-20)", "TXYZ"), methods[0].crypto)
+        assertEquals(DonateCrypto("USDT", "TRON (TRC-20)", "TXYZ", DonateIcon.TON), methods[0].crypto)
         assertEquals("https://pay.example/sbp", methods[1].link)
         assertTrue(methods[1].hasPhone)
         assertArrayEquals(key, v.keysSeen.first())
@@ -114,6 +114,9 @@ class DonationsClientTest {
 
     @Test
     fun `a QR larger than the bound is refused even when it hashes right`() {
+        assertEquals(512 * 1024, MAX_QR_BYTES)
+        val atBound = ByteArray(MAX_QR_BYTES) { 1 }
+        assertTrue(qrMatches(atBound, MessageDigest.getInstance("SHA-256").digest(atBound)))
         val big = ByteArray(MAX_QR_BYTES + 1)
         val sha = MessageDigest.getInstance("SHA-256").digest(big)
         assertFalse(qrMatches(big, sha))

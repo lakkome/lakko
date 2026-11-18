@@ -310,12 +310,13 @@ android {
 
         // docs/ux/donations.md section 4.1 — `LAKKO_DONATIONS_KEY`: base64url
         // (no-pad) of the 32-byte Ed25519 key that signs the ways to donate
-        // (a dedicated offline key). Empty when unset → the Support Lakko
-        // screen shows no method and asks the server nothing.
+        // (a dedicated offline key). Defaults to the public half of that key;
+        // set the property empty and the Support Lakko screen shows no method
+        // and asks the server nothing.
         buildConfigField(
             "String",
             "LAKKO_DONATIONS_KEY",
-            "\"${project.findProperty("lakko.donations.key") as String? ?: ""}\"",
+            "\"${project.findProperty("lakko.donations.key") as String? ?: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"}\"",
         )
 
         // G3-4-mobile — wire androidx.test runner for the

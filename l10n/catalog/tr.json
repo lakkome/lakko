@@ -5653,6 +5653,14 @@
       "text": "Telefon numarası gizli",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "Kripto",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Banka ve kart",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Lakko'yu destekle",
       "status": "machine"

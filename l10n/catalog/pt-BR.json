@@ -5653,6 +5653,14 @@
       "text": "Número de telefone oculto",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "Cripto",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Banco e cartão",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "Apoie o Lakko",
       "status": "machine"

@@ -5653,6 +5653,14 @@
       "text": "电话号码已隐藏",
       "status": "machine"
     },
+    "donate.section_crypto": {
+      "text": "加密货币",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "银行和银行卡",
+      "status": "machine"
+    },
     "donate.title": {
       "text": "支持 Lakko",
       "status": "machine"
