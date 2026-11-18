@@ -29,6 +29,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -51,6 +52,11 @@ public data class LakkoMenuRow(
  * Action sheet): an in-app bottom sheet of 52dp rows, icon and label, an
  * optional heading, no Cancel row (dismissing is Cancel). Never the stock
  * Material `DropdownMenu`.
+ *
+ * [rowHeight] is 52dp by default; a long list of short actions (the
+ * attachment menu, UX `attachments.md` 2.1) passes 48dp. [separators] draws a
+ * hairline between rows of different sections; a menu whose rows are one list
+ * passes `false`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,6 +64,8 @@ public fun LakkoMenu(
     rows: List<LakkoMenuRow>,
     onDismissRequest: () -> Unit,
     heading: String? = null,
+    rowHeight: Dp = 52.dp,
+    separators: Boolean = true,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scheme = MaterialTheme.colorScheme
@@ -79,7 +87,7 @@ public fun LakkoMenu(
             }
             var previousSection: Int? = null
             for (row in rows) {
-                if (previousSection != null && previousSection != row.section) {
+                if (separators && previousSection != null && previousSection != row.section) {
                     HorizontalDivider(color = scheme.outlineVariant)
                 }
                 previousSection = row.section
@@ -94,7 +102,7 @@ public fun LakkoMenu(
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 52.dp)
+                        .heightIn(min = rowHeight)
                         .then(if (row.testTag != null) Modifier.testTag(row.testTag) else Modifier)
                         .semantics {
                             if (!enabled) {

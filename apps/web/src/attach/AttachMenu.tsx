@@ -3,8 +3,9 @@
 
 /**
  * `docs/ux/attachments.md` section 2 — the paperclip and its `LakkoMenu`:
- * a popover above the paperclip at wide widths, a bottom sheet of 52-point
- * rows at phone width (the CSS decides). No heading row, no Cancel row:
+ * a compact popover above the paperclip at wide widths (36 px rows, the
+ * message menu's look), a bottom sheet of 48 px rows at phone width (the CSS
+ * decides). One list, no separators. No heading row, no Cancel row:
  * dismissing is Cancel. `Enter` / `Space` on the paperclip opens it, arrows
  * move, `Enter` picks, `Escape` closes. A disabled row reads its reason.
  */
@@ -13,7 +14,7 @@ import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js"
 import { t } from "../l10n";
 import { Icon } from "../ui/icons";
 import { MenuBackdrop } from "../ui/MenuBackdrop";
-import { DISABLED_KEY, ITEM_ICON, ITEM_LABEL_KEY, nextEnabled, separatorBefore } from "./attach-menu";
+import { DISABLED_KEY, ITEM_ICON, ITEM_LABEL_KEY, nextEnabled } from "./attach-menu";
 import type { AttachItem, AttachMenuEntry } from "./types";
 import "./attach-menu.css";
 
@@ -97,36 +98,31 @@ export function AttachMenu(props: {
           >
             <For each={props.entries()}>
               {(entry, i) => (
-                <>
-                  <Show when={separatorBefore(props.entries(), i())}>
-                    <div class="lk-attach-menu-sep" role="separator" />
-                  </Show>
-                  <button
-                    ref={(el) => (rows[i()] = el)}
-                    type="button"
-                    role="menuitem"
-                    class="lk-attach-menu-row"
-                    tabindex={focus() === i() ? 0 : -1}
-                    aria-disabled={entry.disabled !== undefined ? "true" : undefined}
-                    aria-label={
-                      entry.disabled === undefined
-                        ? t(ITEM_LABEL_KEY[entry.item])
-                        : `${t(ITEM_LABEL_KEY[entry.item])}, ${t(DISABLED_KEY[entry.disabled])}`
-                    }
-                    classList={{ disabled: entry.disabled !== undefined }}
-                    onClick={() => pick(entry)}
-                  >
-                    <span class="lk-attach-menu-icon" aria-hidden="true">
-                      <Icon name={ITEM_ICON[entry.item]} size={20} />
-                    </span>
-                    <span class="lk-attach-menu-text">
-                      <span class="lk-attach-menu-label">{t(ITEM_LABEL_KEY[entry.item])}</span>
-                      <Show when={entry.disabled}>
-                        {(d) => <span class="lk-attach-menu-reason">{t(DISABLED_KEY[d()])}</span>}
-                      </Show>
-                    </span>
-                  </button>
-                </>
+                <button
+                  ref={(el) => (rows[i()] = el)}
+                  type="button"
+                  role="menuitem"
+                  class="lk-attach-menu-row"
+                  tabindex={focus() === i() ? 0 : -1}
+                  aria-disabled={entry.disabled !== undefined ? "true" : undefined}
+                  aria-label={
+                    entry.disabled === undefined
+                      ? t(ITEM_LABEL_KEY[entry.item])
+                      : `${t(ITEM_LABEL_KEY[entry.item])}, ${t(DISABLED_KEY[entry.disabled])}`
+                  }
+                  classList={{ disabled: entry.disabled !== undefined }}
+                  onClick={() => pick(entry)}
+                >
+                  <span class="lk-attach-menu-icon" aria-hidden="true">
+                    <Icon name={ITEM_ICON[entry.item]} size={18} />
+                  </span>
+                  <span class="lk-attach-menu-text">
+                    <span class="lk-attach-menu-label">{t(ITEM_LABEL_KEY[entry.item])}</span>
+                    <Show when={entry.disabled}>
+                      {(d) => <span class="lk-attach-menu-reason">{t(DISABLED_KEY[d()])}</span>}
+                    </Show>
+                  </span>
+                </button>
               )}
             </For>
           </div>

@@ -58,6 +58,16 @@ enum UiTestFixture: String {
     /// call's settings sheet on its own, with the camera background section.
     case callSettings
 
+    /// `docs/ux/attachments.md` section 2 — the paperclip menu of a group,
+    /// presented as the sheet a conversation presents.
+    case attachmentMenu
+
+    /// `docs/ux/attachments.md` sections 7.1 and 7.1a — the poll editor.
+    case pollEditor
+
+    /// `docs/ux/attachments.md` sections 8.1 and 7.1a — the checklist editor.
+    case checklistEditor
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -92,7 +102,29 @@ struct UiTestFixtureRoot: View {
             MessageActionsFixture()
         case .callSettings:
             CallSettingsSheet(state: CallUiState(), onDone: {})
+        case .attachmentMenu:
+            AttachmentMenuFixture()
+        case .pollEditor:
+            PollEditorScreen(anonymity: .switchDefaultOn, onCreate: { _ in }, onCancel: {})
+        case .checklistEditor:
+            ChecklistEditorScreen(initial: nil, onDone: { _ in }, onCancel: {})
         }
+    }
+}
+
+/// The production attachment menu of a group member, shown in the sheet a
+/// conversation presents it in.
+private struct AttachmentMenuFixture: View {
+    @State private var open = true
+
+    var body: some View {
+        Color.lakkoBackground
+            .ignoresSafeArea()
+            .sheet(isPresented: $open) {
+                AttachmentMenuSheet(rows: attachmentMenu(
+                    kind: .group, role: .member, hasCamera: true, hasLocation: true, callHoldsCamera: false)
+                ) { _ in }
+            }
     }
 }
 

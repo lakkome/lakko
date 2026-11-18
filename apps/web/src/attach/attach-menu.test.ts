@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import init, { attachmentMenu, ConversationKind } from "../../wasm/lakko_ffi_wasm";
-import { menuEntriesOf, menuRole, nextEnabled, separatorBefore } from "./attach-menu";
+import { menuEntriesOf, menuRole, nextEnabled } from "./attach-menu";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -41,15 +41,6 @@ describe("the paperclip menu (docs/ux/attachments.md section 2)", () => {
     expect(r.find((e) => e.item === "location")?.disabled).toBe("no-location");
     const inCall = rows(ConversationKind.Group, "member", true, true, true);
     expect(inCall.find((e) => e.item === "camera")?.disabled).toBe("camera-in-call");
-  });
-
-  it("puts a separator between the four sections", () => {
-    const r = rows(ConversationKind.Group, "member");
-    const seps = r.map((_, i) => separatorBefore(r, i));
-    expect(seps.filter(Boolean).length).toBe(3);
-    expect(seps[4]).toBe(true); // before Poll
-    expect(seps[6]).toBe(true); // before Location
-    expect(seps[8]).toBe(true); // before Article
   });
 
   it("moves over disabled rows with the arrow keys and wraps", () => {

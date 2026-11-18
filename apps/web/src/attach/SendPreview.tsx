@@ -12,9 +12,10 @@
 import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 
 import { formatAttachmentSize } from "../chat/attachments";
+import { paintVideoBehind } from "../media/video-overlay";
 import { t } from "../l10n";
 import { Icon } from "../ui/icons";
-import { AttachScreen, AttachSwitch } from "./AttachScreen";
+import { AttachScreen, AttachSwitch, AttachSwitchGroup } from "./AttachScreen";
 import { previewVerdict } from "./capture-rules";
 import type { PreviewResult } from "./types";
 import "./editors.css";
@@ -129,7 +130,7 @@ export function SendPreview(props: {
                   when={it().file.type.startsWith("video/")}
                   fallback={<img src={it().url ?? ""} alt={it().file.name} />}
                 >
-                  <video src={it().url ?? ""} controls playsinline aria-label={it().file.name} />
+                  <video ref={paintVideoBehind} src={it().url ?? ""} controls playsinline aria-label={it().file.name} />
                 </Show>
               </Show>
             </div>
@@ -153,7 +154,7 @@ export function SendPreview(props: {
                   >
                     <Show when={it.url !== null} fallback={<Icon name="folder" />}>
                       <Show when={it.file.type.startsWith("video/")} fallback={<img src={it.url ?? ""} alt="" />}>
-                        <video src={it.url ?? ""} muted preload="metadata" />
+                        <video ref={paintVideoBehind} src={it.url ?? ""} muted preload="metadata" />
                       </Show>
                     </Show>
                   </button>
@@ -171,7 +172,9 @@ export function SendPreview(props: {
             </For>
           </div>
         </Show>
-        <AttachSwitch title={t("attach.preview.send_as_file")} on={asFile()} onChange={setAsFile} />
+        <AttachSwitchGroup>
+          <AttachSwitch title={t("attach.preview.send_as_file")} on={asFile()} onChange={setAsFile} />
+        </AttachSwitchGroup>
       </Show>
       <Show when={props.mode !== "media"}>
         <div class="lk-attach-rows">

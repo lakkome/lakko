@@ -4,12 +4,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canAddRow,
+  canRemoveRow,
+  CHECKLIST_ITEMS_MAX,
+  CHECKLIST_ITEMS_MIN,
+  enterAction,
   isChecklistDraftValid,
   isPollDraftValid,
-  moved,
+  keyboardMoveTarget,
+  movedTo,
   normaliseOptions,
-  withoutEmptyAt,
-  withTrailingEmpty,
+  POLL_OPTIONS_MAX,
+  POLL_OPTIONS_MIN,
+  withAddedRow,
+  withoutRow,
 } from "./poll-draft";
 
 const base = { question: "Lunch?", options: ["Pizza", "Soup"], multiple: false, anonymous: true };
@@ -37,19 +45,44 @@ describe("poll draft", () => {
   it("normalises options", () => {
     expect(normaliseOptions([" a ", "", "b", "  "])).toEqual(["a", "b"]);
   });
-  it("keeps one empty field trailing until the cap", () => {
-    expect(withTrailingEmpty(["a", "b"])).toEqual(["a", "b", ""]);
-    expect(withTrailingEmpty(["a", ""])).toEqual(["a", ""]);
-    expect(withTrailingEmpty(Array.from({ length: 10 }, () => "x"))).toHaveLength(10);
+  it("shows Add only below the maximum and the remove icon only above the minimum (UX 7.1a)", () => {
+    expect(canAddRow(9, POLL_OPTIONS_MAX)).toBe(true);
+    expect(canAddRow(10, POLL_OPTIONS_MAX)).toBe(false);
+    expect(canAddRow(CHECKLIST_ITEMS_MAX, CHECKLIST_ITEMS_MAX)).toBe(false);
+    expect(canRemoveRow(2, POLL_OPTIONS_MIN)).toBe(false);
+    expect(canRemoveRow(3, POLL_OPTIONS_MIN)).toBe(true);
+    expect(canRemoveRow(1, CHECKLIST_ITEMS_MIN)).toBe(false);
+    expect(canRemoveRow(2, CHECKLIST_ITEMS_MIN)).toBe(true);
   });
-  it("removes an emptied field on leave, not the trailing one, keeping two", () => {
-    expect(withoutEmptyAt(["a", "", "c", ""], 1)).toEqual(["a", "c", ""]);
-    expect(withoutEmptyAt(["a", "", ""], 2)).toEqual(["a", "", ""]);
-    expect(withoutEmptyAt(["", "b"], 0)).toEqual(["", "b"]);
+  it("adds a row at the end, never past the maximum, and never adds a trailing row by itself", () => {
+    expect(withAddedRow(["a", "b"], "", POLL_OPTIONS_MAX)).toEqual(["a", "b", ""]);
+    const full = Array.from({ length: 10 }, () => "x");
+    expect(withAddedRow(full, "", POLL_OPTIONS_MAX)).toHaveLength(10);
+  });
+  it("removes a row, never below the minimum", () => {
+    expect(withoutRow(["a", "b", "c"], 1, POLL_OPTIONS_MIN)).toEqual(["a", "c"]);
+    expect(withoutRow(["a", "b"], 0, POLL_OPTIONS_MIN)).toEqual(["a", "b"]);
+    expect(withoutRow(["a"], 0, CHECKLIST_ITEMS_MIN)).toEqual(["a"]);
+    expect(withoutRow(["a", "b", "c"], 5, POLL_OPTIONS_MIN)).toEqual(["a", "b", "c"]);
+  });
+  it("Enter moves to the next row, adds one on the last, and does nothing on the last at the maximum", () => {
+    expect(enterAction(0, 3, POLL_OPTIONS_MAX)).toEqual({ kind: "focus", to: 1 });
+    expect(enterAction(2, 3, POLL_OPTIONS_MAX)).toEqual({ kind: "add", to: 3 });
+    expect(enterAction(9, 10, POLL_OPTIONS_MAX)).toBeNull();
+    expect(enterAction(4, 3, POLL_OPTIONS_MAX)).toBeNull();
+  });
+  it("Alt+Up and Alt+Down move a row one place, not past either end", () => {
+    expect(keyboardMoveTarget(1, "ArrowUp", true, 3)).toBe(0);
+    expect(keyboardMoveTarget(1, "ArrowDown", true, 3)).toBe(2);
+    expect(keyboardMoveTarget(0, "ArrowUp", true, 3)).toBeNull();
+    expect(keyboardMoveTarget(2, "ArrowDown", true, 3)).toBeNull();
+    expect(keyboardMoveTarget(1, "ArrowUp", false, 3)).toBeNull();
+    expect(keyboardMoveTarget(1, "Enter", true, 3)).toBeNull();
   });
   it("moves entries", () => {
-    expect(moved(["a", "b", "c"], 0, 1)).toEqual(["b", "a", "c"]);
-    expect(moved(["a"], 0, 1)).toEqual(["a"]);
+    expect(movedTo(["a", "b", "c"], 0, 1)).toEqual(["b", "a", "c"]);
+    expect(movedTo(["a", "b", "c"], 2, 0)).toEqual(["c", "a", "b"]);
+    expect(movedTo(["a"], 0, 1)).toEqual(["a"]);
   });
   it("validates a checklist", () => {
     expect(isChecklistDraftValid({ title: "T", othersAdd: false, othersMark: true, items: [{ text: "x" }] })).toBe(true);

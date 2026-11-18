@@ -21,7 +21,8 @@ final class AttachmentKindsTests: XCTestCase {
             .photoOrVideo, .camera, .file, .audio, .poll, .checklist, .location, .contact, .article,
         ])
         XCTAssertTrue(rows.allSatisfy { $0.disabled == nil })
-        // Four sections: files, answers, shares, long text (UX 2.2 hairlines).
+        // The core still groups the rows in four sections; the sheet draws
+        // no separator between them (UX 2.2, amended 2026-11-18).
         XCTAssertEqual(Set(rows.map(\.section)).count, 4)
     }
 
@@ -47,6 +48,64 @@ final class AttachmentKindsTests: XCTestCase {
             let key = AttachmentMenuCopy.reasonKey(reason)
             XCTAssertNotEqual(Localization.text(key), key)
         }
+    }
+
+    func testMenuSheetIsSizedForFortyEightPointRows() {
+        let rows = attachmentMenu(kind: .group, role: .member, hasCamera: true, hasLocation: true, callHoldsCamera: false)
+        XCTAssertEqual(AttachmentMenuSheet.rowHeight, 48)
+        XCTAssertEqual(AttachmentMenuSheet.sheetHeight(rows), 9 * 48 + 28)
+        // A disabled row with its reason takes one more line.
+        let inCall = attachmentMenu(kind: .group, role: .member, hasCamera: true, hasLocation: true, callHoldsCamera: true)
+        XCTAssertEqual(AttachmentMenuSheet.sheetHeight(inCall), 9 * 48 + 16 + 28)
+    }
+
+    // MARK: Editor rows (UX 7.1a)
+
+    func testAddRowIsAbsentAtTheMaximumAndRemoveAboveTheMinimumOnly() {
+        XCTAssertTrue(EditorRows.canAdd(count: 9, max: 10))
+        XCTAssertFalse(EditorRows.canAdd(count: 10, max: 10))
+        XCTAssertFalse(EditorRows.canRemove(count: 2, min: 2))
+        XCTAssertTrue(EditorRows.canRemove(count: 3, min: 2))
+        XCTAssertFalse(EditorRows.canRemove(count: 1, min: 1))
+        XCTAssertTrue(EditorRows.canRemove(count: 2, min: 1))
+    }
+
+    func testReturnMovesToTheNextRowAndAddsOneOnTheLast() {
+        XCTAssertEqual(EditorRows.onReturn(at: 0, count: 3, max: 10), .focus(1))
+        XCTAssertEqual(EditorRows.onReturn(at: 2, count: 3, max: 10), .append)
+        XCTAssertEqual(EditorRows.onReturn(at: 9, count: 10, max: 10), .done)
+    }
+
+    func testMoveByOneStaysWithinTheList() {
+        var rows = ["a", "b", "c"]
+        XCTAssertEqual(EditorRows.move(&rows, at: 1, by: -1), 0)
+        XCTAssertEqual(rows, ["b", "a", "c"])
+        XCTAssertEqual(EditorRows.move(&rows, at: 1, by: 1), 2)
+        XCTAssertEqual(rows, ["b", "c", "a"])
+        XCTAssertNil(EditorRows.move(&rows, at: 0, by: -1))
+        XCTAssertNil(EditorRows.move(&rows, at: 2, by: 1))
+        XCTAssertEqual(rows, ["b", "c", "a"])
+    }
+
+    func testDragDestinationMatchesListMove() {
+        for (source, offset) in [(0, 3), (2, 0), (1, 2), (1, 1), (0, 1)] {
+            var rows = [0, 1, 2]
+            rows.move(fromOffsets: IndexSet(integer: source), toOffset: offset)
+            XCTAssertEqual(rows.firstIndex(of: source), EditorRows.destination(from: source, toOffset: offset))
+        }
+    }
+
+    func testEditorCopyIsInTheCatalog() {
+        for key in [
+            "poll.editor.add_option", "checklist.editor.add_item", "checklist.editor.items", "poll.editor.options",
+            "poll.editor.move_up", "poll.editor.move_down", "common.close",
+        ] {
+            XCTAssertNotEqual(Localization.text(key), key, "no catalog text for \(key)")
+        }
+        // Text arguments arrive wrapped in direction isolates; strip them.
+        let moved = Localization.shared.t("editor.moved", texts: ["n": "2"])
+            .replacingOccurrences(of: "\u{2068}", with: "").replacingOccurrences(of: "\u{2069}", with: "")
+        XCTAssertEqual(moved, "Moved to position 2.")
     }
 
     func testAnonymousSwitchIsAbsentInAOneToOneAndAGroupOfTwo() {

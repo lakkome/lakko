@@ -8,17 +8,58 @@
  * browser that cannot record MP4 hides the Video switch. The browser's
  * permission prompt is the only system surface, at the first open of this
  * view. Every track is stopped when the view closes.
+ *
+ * Which camera: the one chosen for calls when there is one, else the default
+ * device (a phone-class browser asks for the front camera). The switch button
+ * moves through the cameras by device id. A camera that gives no frame within
+ * `CAMERA_FIRST_FRAME_MS` counts as failed: the next camera is tried once,
+ * then the no-camera state is shown, never a black picture.
  */
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import { t } from "../l10n";
+import { paintVideoBehind } from "../media/video-overlay";
+import { callState } from "../state/call-state";
 import { Icon } from "../ui/icons";
-import { CAMERA_VIDEO_MAX_MS, pickVideoMime } from "./capture-rules";
+import {
+  CAMERA_FIRST_FRAME_MS,
+  CAMERA_VIDEO_MAX_MS,
+  cameraVideoConstraint,
+  isPhoneClassBrowser,
+  nextCameraId,
+  pickVideoMime,
+} from "./capture-rules";
 import { PHOTO_JPEG_QUALITY } from "./photo-encode";
 import "./editors.css";
 
 type Mode = "photo" | "video";
 type Phase = "starting" | "live" | "denied" | "failed";
+
+/** Resolves true once the element has a frame, false after `ms` without one. */
+function waitForFrame(el: HTMLVideoElement, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      el.removeEventListener("loadeddata", onData);
+      el.removeEventListener("resize", onData);
+      resolve(ok);
+    };
+    const onData = (): void => {
+      if (el.videoWidth > 0) finish(true);
+    };
+    const timer = setTimeout(() => finish(el.videoWidth > 0), ms);
+    if (typeof el.requestVideoFrameCallback === "function") {
+      el.requestVideoFrameCallback(() => finish(true));
+    } else {
+      el.addEventListener("loadeddata", onData);
+      el.addEventListener("resize", onData);
+      onData();
+    }
+  });
+}
 
 function stamp(): string {
   const d = new Date();
@@ -33,8 +74,14 @@ export function CameraScreen(props: {
   const [phase, setPhase] = createSignal<Phase>("starting");
   const [mode, setMode] = createSignal<Mode>("photo");
   const [recording, setRecording] = createSignal(false);
-  const [cameraCount, setCameraCount] = createSignal(0);
-  const [facing, setFacing] = createSignal<"user" | "environment">("user");
+  const [cameraIds, setCameraIds] = createSignal<string[]>([]);
+  const phoneClass = typeof navigator !== "undefined" && isPhoneClassBrowser(navigator as Navigator & {
+    readonly userAgentData?: { readonly mobile?: boolean };
+  });
+  /** The camera to open: the one chosen for calls until the switch moves on. */
+  let wantedId: string | null = callState.settings().selectedVideoInput;
+  /** The camera the open stream comes from. */
+  let currentId: string | null = null;
   const videoMime =
     typeof MediaRecorder !== "undefined" && typeof MediaRecorder.isTypeSupported === "function"
       ? pickVideoMime((m) => MediaRecorder.isTypeSupported(m))
@@ -51,38 +98,81 @@ export function CameraScreen(props: {
     stream = null;
   }
 
-  async function open(): Promise<void> {
+  function attach(el: HTMLVideoElement): void {
+    if (stream === null || el.srcObject === stream) return;
+    el.srcObject = stream;
+    void el.play().catch(() => undefined);
+  }
+
+
+  async function listCameras(): Promise<string[]> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter((d) => d.kind === "videoinput" && d.deviceId.length > 0).map((d) => d.deviceId);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Open `deviceId` (or the default camera); `retry` is false on the first
+   *  attempt, so a camera without a picture hands over to the next one once. */
+  async function open(deviceId: string | null = wantedId, retry = false): Promise<void> {
     stopStream();
     setPhase("starting");
     if (typeof navigator === "undefined" || navigator.mediaDevices?.getUserMedia === undefined) {
       setPhase("failed");
       return;
     }
+    let s: MediaStream;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing(), width: { ideal: 1920 }, height: { ideal: 1080 } },
+      s = await navigator.mediaDevices.getUserMedia({
+        video: cameraVideoConstraint({ deviceId, phoneClass }),
         audio: mode() === "video",
       });
-      if (closed) {
-        s.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      stream = s;
-      if (video !== undefined) {
-        video.srcObject = s;
-        void video.play().catch(() => undefined);
-      }
-      setPhase("live");
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        setCameraCount(devices.filter((d) => d.kind === "videoinput").length);
-      } catch {
-        setCameraCount(1);
-      }
     } catch (err) {
       const name = (err as { name?: string }).name;
-      setPhase(name === "NotAllowedError" || name === "SecurityError" ? "denied" : "failed");
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        setPhase("denied");
+        return;
+      }
+      // A chosen camera that is gone (unplugged, another computer's id):
+      // fall back to the default device once.
+      if (!retry && deviceId !== null) {
+        await open(null, true);
+        return;
+      }
+      setPhase("failed");
+      return;
     }
+    if (closed) {
+      s.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    stream = s;
+    currentId = s.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId;
+    const el = video;
+    if (el === undefined) {
+      setPhase("failed");
+      stopStream();
+      return;
+    }
+    attach(el);
+    const ids = await listCameras();
+    setCameraIds(ids);
+    const hasFrame = await waitForFrame(el, CAMERA_FIRST_FRAME_MS);
+    if (closed || stream !== s) return;
+    if (hasFrame) {
+      setPhase("live");
+      return;
+    }
+    stopStream();
+    const next = retry ? null : nextCameraId(ids, currentId);
+    if (next !== null) {
+      wantedId = next;
+      await open(next, true);
+      return;
+    }
+    setPhase("failed");
   }
 
   onMount(() => {
@@ -159,14 +249,16 @@ export function CameraScreen(props: {
   function switchMode(next: Mode): void {
     if (recording() || mode() === next) return;
     setMode(next);
-    // Video needs the microphone too; reopen with it.
-    void open();
+    // Video needs the microphone too; reopen with it, on the same camera.
+    void open(currentId ?? wantedId);
   }
 
   function switchCamera(): void {
     if (recording()) return;
-    setFacing(facing() === "user" ? "environment" : "user");
-    void open();
+    const next = nextCameraId(cameraIds(), currentId);
+    if (next === null) return;
+    wantedId = next;
+    void open(next);
   }
 
   return (
@@ -181,7 +273,7 @@ export function CameraScreen(props: {
         >
           <Icon name="xmark" />
         </button>
-        <Show when={cameraCount() > 1 && phase() === "live"}>
+        <Show when={cameraIds().length > 1 && phase() === "live"}>
           <button
             type="button"
             class="lk-icon-button"
@@ -205,7 +297,18 @@ export function CameraScreen(props: {
           </div>
         }
       >
-        <video ref={video} autoplay muted playsinline />
+        <div class="lk-attach-camera-view">
+          <video
+            ref={(el) => {
+              video = el;
+              paintVideoBehind(el);
+              attach(el);
+            }}
+            autoplay
+            muted
+            playsinline
+          />
+        </div>
       </Show>
       <div class="lk-attach-camera-bottom">
         <Show when={videoMime !== null} fallback={<p class="lk-attach-note">{t("camera.video_unsupported")}</p>}>

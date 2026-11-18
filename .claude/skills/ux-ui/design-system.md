@@ -184,10 +184,12 @@ names; iOS / Android use the same names.
   consequence in one sentence. Never the system alert, `confirm()` or the
   stock Material `AlertDialog`.
 - **Action sheet** (`LakkoMenu`): a choice among actions with no further
-  input. Phone: an in-app bottom sheet of 52px rows (icon + label,
+  input. Phone: an in-app bottom sheet of 48px rows (icon + label,
   danger rows in danger colour), optional heading row; dismissing it is
-  Cancel, so no Cancel row. Wide web: the same rows in a popover anchored
-  at the control. Replaces `.confirmationDialog` / `.actionSheet` /
+  Cancel, so no Cancel row. Wide web and desktop: a compact popover anchored
+  at the control, 36px rows, 18px icon then a 14/500 label, both
+  start-aligned (never centred), sized to its longest label: the message
+  menu (`.lk-menu`) look. Replaces `.confirmationDialog` / `.actionSheet` /
   SwiftUI `Menu` / `.contextMenu`.
 - **Picker** (`LakkoPicker`): one value from a short list. A field-shaped
   button (40/44px, sunken surface, radius-sm) showing the current value

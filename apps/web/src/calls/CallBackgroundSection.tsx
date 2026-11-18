@@ -32,6 +32,7 @@ import {
 } from "solid-js";
 
 import { t, isRtl } from "../l10n";
+import { paintVideoBehind } from "../media/video-overlay";
 import { callActions, callState } from "../state/call-state";
 import { wasmSync } from "../wasm";
 import { Icon } from "../ui/icons";
@@ -117,7 +118,12 @@ const PreviewVideo: Component<{ track: MediaStreamTrack | null }> = (props) => {
   onCleanup(() => {
     if (el !== undefined) el.srcObject = null;
   });
-  return <video ref={el} class="lk-call-bg-preview-video" muted playsinline autoplay aria-hidden="true" />;
+  return <video
+      ref={(v) => {
+        el = v;
+        paintVideoBehind(v);
+      }}
+      class="lk-call-bg-preview-video" muted playsinline autoplay aria-hidden="true" />;
 };
 
 export const CallBackgroundSection: Component = () => {

@@ -73,12 +73,6 @@
   border-top: 1px solid var(--surface-border);
   background: var(--surface-elevated);
 }
-.lk-attach-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--surface-muted, var(--surface-fg));
-  margin: 0;
-}
 .lk-attach-field {
   width: 100%;
   box-sizing: border-box;
@@ -110,9 +104,6 @@
   flex: 1 1 auto;
   min-width: 0;
 }
-.lk-attach-row .lk-icon-button:disabled {
-  opacity: 0.35;
-}
 .lk-attach-radio {
   width: 20px;
   height: 20px;
@@ -120,29 +111,188 @@
   accent-color: var(--accent);
 }
 
-/* A switch row: label and explanation, then the On / Off button. */
+/* UX 7.1a — the poll and checklist sheet: 420 px wide on wide screens, the
+   title centred with the close at the start, one full-width primary button. */
+.lk-attach-screen.compact {
+  width: min(420px, 100vw);
+}
+.lk-attach-screen.compact .lk-attach-head {
+  display: grid;
+  grid-template-columns: 40px 1fr 40px;
+  background: var(--surface-bg);
+  border-bottom: none;
+  padding: 10px 12px 4px;
+}
+.lk-attach-screen.compact .lk-attach-head h2 {
+  text-align: center;
+}
+.lk-attach-screen.compact .lk-attach-body {
+  gap: 12px;
+  padding: 8px 16px 16px;
+}
+.lk-attach-screen.compact .lk-attach-foot {
+  border-top: none;
+  background: var(--surface-bg);
+  padding-top: 4px;
+}
+.lk-attach-screen.compact .lk-attach-foot > button {
+  flex: 1 1 auto;
+  min-height: 44px;
+}
+
+/* The section label (`Options` / `Items`): small and muted. */
+.lk-attach-section {
+  margin: 4px 0 0;
+  padding-inline: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--surface-muted);
+}
+.lk-attach-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* One entry: a single-line field with a remove (x) inside its end edge. */
+.lk-attach-entry {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+}
+.lk-attach-entry input[type="text"] {
+  width: 100%;
+  padding-inline-end: 36px;
+}
+.lk-attach-entry-remove {
+  position: absolute;
+  inset-inline-end: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--surface-muted);
+}
+.lk-attach-entry-remove:hover:not(:disabled),
+.lk-attach-entry-remove:focus-visible {
+  background: var(--surface-hover);
+  color: var(--surface-fg);
+}
+/* `Add option` / `Add item`: a plus and the label in the accent colour,
+   start-aligned like a row. */
+.lk-attach-add {
+  align-self: stretch;
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 500;
+}
+.lk-attach-add:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+/* The switches of an editor, grouped in one card. */
+.lk-attach-switches {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+/* No dividers between rows (design system, List row): whitespace does it. */
+.lk-attach-switches {
+  padding-block: 4px;
+}
+.lk-attach-switch-extra {
+  padding: 2px 14px 10px;
+}
+/* A switch row: the label at the start, the switch at the end, 44 px. The row
+   is the button, so the global button rules are undone here. */
 .lk-attach-switch {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  padding: 8px 0;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--surface-fg);
+  font-weight: 400;
+  text-align: start;
+  white-space: normal;
 }
-.lk-attach-switch-body {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+.lk-attach-switch:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-attach-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.lk-attach-switch:disabled {
+  cursor: default;
+  color: var(--surface-muted);
 }
 .lk-attach-switch-title {
-  font-weight: 500;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .lk-attach-switch-sub {
+  margin: -6px 0 0;
+  padding: 0 14px 10px;
   font-size: 13px;
-  color: var(--surface-muted, var(--surface-fg));
+  color: var(--surface-muted);
 }
-.lk-attach-switch > button {
-  min-width: 64px;
+.lk-switch-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-faint);
+  transition: background 0.15s ease;
+}
+.lk-switch-knob {
+  position: absolute;
+  top: 2px;
+  inset-inline-start: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-1);
+  transition: transform 0.15s ease;
+}
+.lk-attach-switch[aria-checked="true"] .lk-switch-track {
+  background: var(--accent);
+}
+.lk-attach-switch[aria-checked="true"] .lk-switch-knob {
+  background: var(--accent-fg);
+  transform: translateX(16px);
+}
+[dir="rtl"] .lk-attach-switch[aria-checked="true"] .lk-switch-knob {
+  transform: translateX(-16px);
+}
+.lk-attach-switch:disabled .lk-switch-track {
+  opacity: 0.5;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-switch-track,
+  .lk-switch-knob {
+    transition: none;
+  }
 }
 
 /* A segmented control (close-after choice). */
@@ -329,6 +479,12 @@
   display: flex;
   flex-direction: column;
 }
+.lk-attach-camera-view {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
 .lk-attach-camera video {
   flex: 1 1 auto;
   min-height: 0;
@@ -352,6 +508,9 @@
   color: #fff;
   background: transparent;
   border-color: rgba(255, 255, 255, 0.4);
+}
+.lk-attach-camera .lk-attach-segments {
+  align-self: center;
 }
 .lk-attach-camera .lk-attach-segments > button[aria-checked="true"] {
   background: rgba(255, 255, 255, 0.2);
@@ -389,14 +548,45 @@
   padding: 24px;
   text-align: center;
 }
-/* UX 7.1 / 8.1 — drag handles reorder. */
+/* UX 7.1a — a muted drag handle that takes no room in the row: it sits in the
+   dialog's side padding just outside the field's start edge (before the quiz
+   radio when there is one), shown on hover and focus. A touch screen has no
+   hover, so there it is always shown, inside the field's start padding. */
 .lk-attach-grip {
+  position: absolute;
+  top: 50%;
+  inset-inline-start: -15px;
+  transform: translateY(-50%);
+  z-index: 1;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 24px;
   color: var(--surface-muted);
   cursor: grab;
   touch-action: none;
-  padding: 4px 2px;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.lk-attach-row.has-leading .lk-attach-grip {
+  /* The radio (20 px) and the row gap (6 px) sit between it and the field. */
+  inset-inline-start: -41px;
+}
+.lk-attach-row:hover .lk-attach-grip,
+.lk-attach-row:focus-within .lk-attach-grip,
+.lk-attach-row.dragging .lk-attach-grip {
+  opacity: 1;
+}
+@media (hover: none) {
+  .lk-attach-grip,
+  .lk-attach-row.has-leading .lk-attach-grip {
+    inset-inline-start: 10px;
+    opacity: 1;
+  }
+  .lk-attach-entry input[type="text"] {
+    padding-inline-start: 32px;
+  }
 }
 .lk-attach-grip.inert {
   visibility: hidden;

@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `docs/ux/attachments.md` 7.1 / 8.1 — "drag handles reorder". Pointer events
- * (mouse, pen and touch alike); the up/down buttons stay for the keyboard and
- * screen readers. The geometry is pure and tested.
+ * `docs/ux/attachments.md` 7.1a — drag a row by its handle to reorder. Pointer
+ * events (mouse, pen and touch alike); the keyboard and screen readers use
+ * `Alt+Up` / `Alt+Down` in the row instead. The geometry is pure and tested.
  */
 
 /** The index a dragged row lands at, from the pointer's y and the rows'

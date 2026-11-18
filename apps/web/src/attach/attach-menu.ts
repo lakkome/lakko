@@ -4,7 +4,8 @@
 /**
  * `docs/ux/attachments.md` section 2 — the paperclip menu, as the core's
  * `attachmentMenu` rule decides it (one rule for the four clients), turned
- * into what this client draws: label key, icon, reason line, separators.
+ * into what this client draws: label key, icon, reason line. The menu is one
+ * list with no separators (UX 2.2, amended 2026-11-18).
  */
 import type { AttachDisabled, AttachItem, AttachMenuEntry } from "./types";
 import type { IconName } from "../ui/icons";
@@ -57,11 +58,6 @@ export function menuEntriesOf(
     out.push({ item: r.item as AttachItem, section: r.section, disabled });
   }
   return out;
-}
-
-/** Whether a hairline goes above row `i` (sections differ). */
-export function separatorBefore(entries: readonly AttachMenuEntry[], i: number): boolean {
-  return i > 0 && entries[i - 1]?.section !== entries[i]?.section;
 }
 
 /** The next enabled row from `from` in direction `step` (arrow keys), wrapping. */

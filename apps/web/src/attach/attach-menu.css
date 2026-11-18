@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 /* SPDX-FileCopyrightText: 2026 Lakko Contributors */
 
-/* docs/ux/attachments.md section 2.1 — a popover above the paperclip, opening
-   upwards, aligned to its start edge; a bottom sheet at phone width. */
+/* docs/ux/attachments.md section 2.1 — a compact popover above the paperclip,
+   opening upwards, aligned to its start edge, the size and look of the
+   message menu (`.lk-msg-menu-card`): 4 px padding, 36 px rows, an 18 px icon
+   and a 14/500 label, both start-aligned, width set by the longest label. One
+   list, no separators (2.2). A bottom sheet of 48 px rows at phone width. */
 .lk-attach-anchor {
   position: relative;
   display: inline-flex;
@@ -12,29 +15,37 @@
   inset-inline-start: 0;
   bottom: calc(100% + 8px);
   z-index: 40;
-  min-width: 232px;
-  padding: 6px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 4px;
   background: var(--surface-elevated);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
 }
+/* The global `button` rule centres its content, sets a 40 px height and 16 px
+   padding; a menu row undoes all of it. */
 .lk-attach-menu-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  padding: 6px 10px;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
   background: transparent;
   color: var(--surface-fg);
   font: inherit;
+  font-size: 14px;
   font-weight: 500;
+  line-height: 1.25;
   text-align: start;
+  white-space: nowrap;
   cursor: pointer;
 }
 .lk-attach-menu-row:hover:not(.disabled),
@@ -48,7 +59,8 @@
 }
 .lk-attach-menu-icon {
   display: inline-flex;
-  color: var(--accent);
+  flex: 0 0 auto;
+  color: inherit;
 }
 .lk-attach-menu-row.disabled .lk-attach-menu-icon {
   color: var(--surface-muted);
@@ -56,17 +68,17 @@
 .lk-attach-menu-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  min-width: 0;
+}
+/* A disabled row's reason sits under its label; the row grows to hold it. */
+.lk-attach-menu-row.disabled {
+  padding-block: 6px;
 }
 .lk-attach-menu-reason {
   font-size: 12px;
   font-weight: 400;
   color: var(--surface-muted);
-}
-.lk-attach-menu-sep {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--surface-border);
 }
 @media (max-width: 599px) {
   .lk-attach-menu {
@@ -74,10 +86,19 @@
     inset-inline: 0;
     bottom: 0;
     top: auto;
+    width: auto;
+    max-width: none;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
   }
   .lk-attach-menu-row {
-    min-height: 52px;
+    min-height: 48px;
+    padding: 0 12px;
+    gap: 14px;
+    font-size: 15px;
+  }
+  .lk-attach-menu-icon svg {
+    width: 22px;
+    height: 22px;
   }
 }

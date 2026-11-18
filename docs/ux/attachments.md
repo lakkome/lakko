@@ -34,10 +34,13 @@ conversation kind, carrying every kind Telegram's menu carries, all in the first
 
 Activating the paperclip opens one **`LakkoMenu`** (the design system's action sheet):
 
-- **Phone (iOS, Android, narrow web):** an in-app bottom sheet of 52-point rows, icon and
+- **Phone (iOS, Android, narrow web):** an in-app bottom sheet of 48-point rows, icon and
   label, no heading row, no Cancel row (dismissing is Cancel).
-- **Wide web and desktop:** the same rows in a popover anchored above the paperclip,
-  opening upwards, aligned to the paperclip's start edge.
+- **Wide web and desktop:** a compact popover anchored above the paperclip, opening upwards,
+  aligned to the paperclip's start edge: rows 36 px high, 10 px horizontal padding, an
+  18 px icon then the label 14/500, both **start-aligned** (never centred), 10 px between
+  icon and label, 4 px padding inside the popover, width set by the longest label (about
+  200 px in English). It is the same size and look as the message menu (`.lk-menu`).
 
 It is never the system menu, `DropdownMenu`, a SwiftUI `Menu`, or a file chooser opened
 directly by the paperclip.
@@ -56,8 +59,8 @@ directly by the paperclip.
 | 8 | Contact | person | Lakko's contact picker (section 10) |
 | 9 | Article | page with lines | Lakko's article editor (section 11) |
 
-A hairline separates rows 1-4 (files), 5-6 (things people answer), 7-8 (things people
-share), 9 (long text). The order is the same in every conversation kind; a row that does
+No separators: the nine rows are one list (amended 2026-11-18; separators added height and
+told the person nothing). The order is the same in every conversation kind; a row that does
 not apply is **absent**, never disabled, except where a disabled row explains something the
 person needs to know (section 2.4).
 
@@ -179,7 +182,7 @@ decode failure.
 | Field | Rule |
 |---|---|
 | Question | Required, 1-255 characters (chosen) |
-| Options | 2-10 (chosen), each 1-100 characters (chosen). Starts with two empty fields; a new one appears when the last is typed into; drag handles reorder; a field emptied and left is removed |
+| Options | 2-10 (chosen), each 1-100 characters (chosen). Starts with two empty fields; `Add option` adds one; drag reorders; the remove icon removes (layout: section 7.1a) |
 | Anonymous voting | Switch, **on** by default in a group. Absent in a group of two people (one other voter makes anonymity meaningless). Always on and not shown in a channel |
 | Multiple answers | Switch, off by default |
 | Quiz mode | Switch, off by default; excludes Multiple answers. When on, each option has a radio to mark the correct one (required) and an optional `Explanation` field, 0-200 characters (chosen) |
@@ -192,6 +195,30 @@ danger / `Keep editing`).
 **What Anonymous voting promises, said under the switch:**
 `Nobody, including you, will see who voted for what. Everyone sees the totals.` In a quiz:
 the same. When it is off: `Everyone in this chat will see who voted for what.`
+
+### 7.1a Editor layout (poll and checklist, every client)
+
+Amended 2026-11-18 after the first build looked like a form: the editor is a compact sheet,
+not a page of controls.
+
+- **Wide web and desktop:** a dialog 420 px wide, the title centred in its header with a
+  close (x) at the start. **Phone:** full screen, the same content.
+- **Question / Title:** one field with the placeholder `Question` / `Title`, no label above it.
+- **Options / Items:** a small muted section label (`Options` / `Items`), then one row per
+  entry: a single-line field with a remove (x) icon button inside its end edge, shown only
+  when there is more than the minimum (two options, one item). No up/down buttons and no
+  separate minus button. Below the rows, an `Add option` / `Add item` row (a plus icon and
+  the label in the accent colour), absent once the maximum is reached. No empty trailing
+  row. `Enter` in a row moves to the next row, and on the last row adds one.
+- **Reorder:** drag a row by a muted handle at its start edge (web and desktop: shown on
+  row hover and focus; iOS and Android: the platform's drag handle). From the keyboard,
+  `Alt+Up` / `Alt+Down` in a row moves it; each move is announced (`Moved to position 2`).
+- **Switches:** real switches (track and knob, the platform switch on iOS and Android, a
+  Lakko switch on web), grouped in one card under the rows: label at the start, switch at
+  the end, rows 44 px. Never an `On` / `Off` button. A line explaining a switch sits under
+  its row, 13 px muted.
+- **Footer:** one full-width primary button (`Create` / `Save`), disabled until the draft is
+  valid.
 
 ### 7.2 The bubble
 
@@ -283,7 +310,7 @@ reactions do.
 | Field | Rule |
 |---|---|
 | Title | Required, 1-255 characters (chosen) |
-| Items | 1-30 (chosen), each 1-100 characters (chosen); add, reorder, remove as in the poll editor |
+| Items | 1-30 (chosen), each 1-100 characters (chosen); starts with one empty field; add, reorder, remove as in the poll editor (section 7.1a) |
 | Others can add items | Switch, off by default. Shown in a one-to-one (the other person may add) and a group; not shown in a channel (subscribers have no write path to a post, and publishers may always add) |
 | Others can mark items done | Switch, on by default in a one-to-one and a group; in a channel only publishers can |
 

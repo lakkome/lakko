@@ -4,6 +4,7 @@
 package me.lakko.app.ui.chat
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.components.LakkoMenu
 import me.lakko.app.ui.components.LakkoMenuRow
@@ -46,9 +47,10 @@ private fun attachmentMenuIcon(item: AttachmentMenuItem): Int = when (item) {
 }
 
 /**
- * UX 2 — the paperclip's one menu. The rows, their order, their sections and
- * which are disabled come from the core's `attachmentMenu` rule; this draws
- * them with the design system's `LakkoMenu`.
+ * UX 2 — the paperclip's one menu. The rows, their order and which are
+ * disabled come from the core's `attachmentMenu` rule; this draws them with
+ * the design system's `LakkoMenu` as one list of 48dp rows with no
+ * separators (UX 2.1 / 2.2).
  */
 @Composable
 internal fun AttachmentMenuSheet(
@@ -68,5 +70,7 @@ internal fun AttachmentMenuSheet(
             )
         },
         onDismissRequest = onDismiss,
+        rowHeight = 48.dp,
+        separators = false,
     )
 }

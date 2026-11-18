@@ -1968,14 +1968,6 @@
       "text": "Publishing...",
       "comment": "A channel post is being published."
     },
-    "channels.reader_device.owner": {
-      "text": "You can post here once Lakko opens on your other device.",
-      "comment": "Channel screen, in place of the post composer, on a device of the channel's owner that is not yet admitted to post (ADR-0090): another device of the owner adds it the next time Lakko runs there. No button, no spinner."
-    },
-    "channels.reader_device.publisher": {
-      "text": "You can post here once Lakko opens on your other device and on the owner's.",
-      "comment": "Channel screen, in place of the post composer, on a device of a channel publisher (co-publisher) that is not yet admitted to post (ADR-0090): the publisher's other device asks, and a device of the channel's owner adds it the next time Lakko runs there. No button, no spinner."
-    },
     "channels.copublishers.desc": {
       "text": "People who can post to this channel. Share a link; approve them when they ask.",
       "comment": "Description of the co-publishers card: the link lets someone ask, only approval lets them post.",
@@ -2547,6 +2539,14 @@
     "channels.reactions.anonymous_note": {
       "text": "Reactions in a channel are anonymous. Nobody can see who reacted, not even the channel's owner.",
       "comment": "Note shown on a long press or right click on a reaction under a channel post. One OK button."
+    },
+    "channels.reader_device.owner": {
+      "text": "You can post here once Lakko opens on your other device.",
+      "comment": "Channel screen, in place of the post composer, on a device of the channel's owner that is not yet admitted to post (ADR-0090): another device of the owner adds it the next time Lakko runs there. No button, no spinner."
+    },
+    "channels.reader_device.publisher": {
+      "text": "You can post here once Lakko opens on your other device and on the owner's.",
+      "comment": "Channel screen, in place of the post composer, on a device of a channel publisher (co-publisher) that is not yet admitted to post (ADR-0090): the publisher's other device asks, and a device of the channel's owner adds it the next time Lakko runs there. No button, no spinner."
     },
     "channels.rotation.desc": {
       "text": "Lakko refreshes the channel's protection on its own. Refresh it now if you think a subscriber's device was compromised.",
@@ -3916,25 +3916,25 @@
       "text": "Lakko needs camera access to record video messages. Allow camera access in your browser's site settings.",
       "comment": "Card shown when the browser refused the camera."
     },
-    "chat.record.denied_camera_desktop": {
-      "text": "Lakko needs camera access to record video messages. Allow it in your system's privacy settings.",
-      "comment": "Desktop app: card shown when the system refused the camera."
-    },
     "chat.record.denied_camera_app": {
       "text": "Lakko needs camera access to record video messages",
       "comment": "Card shown when camera access is denied for this app; an Open Settings button follows."
+    },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko needs camera access to record video messages. Allow it in your system's privacy settings.",
+      "comment": "Desktop app: card shown when the system refused the camera."
     },
     "chat.record.denied_microphone": {
       "text": "Lakko needs microphone access to record voice messages. Allow microphone access in your browser's site settings.",
       "comment": "Card shown when the browser refused the microphone."
     },
-    "chat.record.denied_microphone_desktop": {
-      "text": "Lakko needs microphone access to record voice messages. Allow it in your system's privacy settings.",
-      "comment": "Desktop app: card shown when the system refused the microphone."
-    },
     "chat.record.denied_microphone_app": {
       "text": "Lakko needs microphone access to record voice messages",
       "comment": "Card shown when microphone access is denied for this app; an Open Settings button follows."
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko needs microphone access to record voice messages. Allow it in your system's privacy settings.",
+      "comment": "Desktop app: card shown when the system refused the microphone."
     },
     "chat.record.finishing": {
       "text": "Finishing recording",
@@ -4659,6 +4659,10 @@
       "text": "Edit checklist",
       "comment": "Message-menu item on the creator's checklist."
     },
+    "checklist.editor.add_item": {
+      "text": "Add item",
+      "comment": "Row under the item fields in the checklist editor that adds one more item field; a plus icon precedes it."
+    },
     "checklist.editor.create": {
       "text": "Create",
       "comment": "Button that sends the checklist."
@@ -4674,6 +4678,10 @@
     "checklist.editor.item": {
       "text": "Item {n}",
       "comment": "Placeholder of an item field; {n} is its number."
+    },
+    "checklist.editor.items": {
+      "text": "Items",
+      "comment": "Small heading above the item fields in the checklist editor."
     },
     "checklist.editor.name": {
       "text": "Title",
@@ -6429,13 +6437,13 @@
       "text": "Couldn't show the number. Try again.",
       "comment": "Under a hidden phone number when showing it failed."
     },
-    "donate.phone_show": {
-      "text": "Show",
-      "comment": "Button next to a hidden phone number on the donations page; shows the number."
-    },
     "donate.phone_hidden": {
       "text": "Phone number hidden",
       "comment": "Read by the screen reader in place of the masked phone number on the donations screen, before the person taps Show."
+    },
+    "donate.phone_show": {
+      "text": "Show",
+      "comment": "Button next to a hidden phone number on the donations page; shows the number."
     },
     "donate.section_crypto": {
       "text": "Crypto",
@@ -6460,6 +6468,10 @@
     "editor.keep_editing": {
       "text": "Keep editing",
       "comment": "Button of a discard dialog that returns to the editor."
+    },
+    "editor.moved": {
+      "text": "Moved to position {n}.",
+      "comment": "Announced to screen readers after a poll option or checklist item is moved with the keyboard; {n} is its new position, counting from 1."
     },
     "feed.action.hide": {
       "text": "Hide from feeds",
@@ -8384,6 +8396,10 @@
       "text": "Closes in {time}",
       "comment": "Footer of a poll that closes automatically; {time} is a duration formatted for the locale."
     },
+    "poll.editor.add_option": {
+      "text": "Add option",
+      "comment": "Row under the option fields in the poll editor that adds one more option field; a plus icon precedes it."
+    },
     "poll.editor.anonymous": {
       "text": "Anonymous voting",
       "comment": "Switch in the poll editor."
@@ -9458,14 +9474,14 @@
       "comment": "Shown instead of the new recovery phrase when the account keys were reset but telling the directory and the account's device list about the new keys did not finish (for example the connection dropped). Try again repeats only that step (UX identity-recovery 15.4).",
       "security_critical": true
     },
-    "recovery_phrase.fresh.publish_waiting": {
-      "text": "Your account keys were reset less than an hour after the last change, so they can be published in {minutes, plural, one {# minute} other {# minutes}}. Lakko will finish by itself and then show the new words.",
-      "comment": "Shown instead of the new recovery phrase when the directory refused to publish the new keys because the account's keys were already changed less than an hour ago; {minutes} is how long until it accepts them (rounded up). No Try again button: the app retries by itself at that time and whenever it opens (UX identity-recovery 15.4).",
-      "security_critical": true
-    },
     "recovery_phrase.fresh.publish_refused": {
       "text": "Could not finish publishing the new keys. Try again later.",
       "comment": "Retrying the publishing of the new keys after a reset of the account keys was refused by a server: the reset proof was not accepted, or the server is not set up for it.",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "Your account keys were reset less than an hour after the last change, so they can be published in {minutes, plural, one {# minute} other {# minutes}}. Lakko will finish by itself and then show the new words.",
+      "comment": "Shown instead of the new recovery phrase when the directory refused to publish the new keys because the account's keys were already changed less than an hour ago; {minutes} is how long until it accepts them (rounded up). No Try again button: the app retries by itself at that time and whenever it opens (UX identity-recovery 15.4).",
       "security_critical": true
     },
     "recovery_phrase.fresh.safety_note": {
@@ -10870,6 +10886,10 @@
       "text": "Managed by Android",
       "comment": "Shown instead of Remove for a pack Android manages."
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Managed by your system",
+      "comment": "Desktop app: shown instead of Remove for a pack the operating system manages."
+    },
     "settings.translation.pack.managed.ios": {
       "text": "Managed by iOS",
       "comment": "Shown instead of Remove for a pack iOS manages."
@@ -10877,10 +10897,6 @@
     "settings.translation.pack.managed.web": {
       "text": "Managed by your browser",
       "comment": "Shown instead of Remove for a pack the browser manages."
-    },
-    "settings.translation.pack.managed.desktop": {
-      "text": "Managed by your system",
-      "comment": "Desktop app: shown instead of Remove for a pack the operating system manages."
     },
     "settings.translation.pack.remove": {
       "text": "Remove",
@@ -11117,6 +11133,11 @@
       "comment": "Second paragraph of the pack dialog on Android: who serves the download.",
       "security_critical": true
     },
+    "translate.pack.source.desktop": {
+      "text": "The pack comes from your system's maker.",
+      "comment": "Second paragraph of the pack dialog in the desktop app: who serves the download (the company that makes the operating system).",
+      "security_critical": true
+    },
     "translate.pack.source.ios": {
       "text": "The pack comes from Apple.",
       "comment": "Second paragraph of the pack dialog on iOS: who serves the download.",
@@ -11125,11 +11146,6 @@
     "translate.pack.source.web": {
       "text": "The pack comes from your browser's maker.",
       "comment": "Second paragraph of the pack dialog on the web: who serves the download.",
-      "security_critical": true
-    },
-    "translate.pack.source.desktop": {
-      "text": "The pack comes from your system's maker.",
-      "comment": "Second paragraph of the pack dialog in the desktop app: who serves the download (the company that makes the operating system).",
       "security_critical": true
     },
     "translate.pack.title.transcription": {

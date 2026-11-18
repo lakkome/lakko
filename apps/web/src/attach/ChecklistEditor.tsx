@@ -7,35 +7,28 @@
  * id, so its ticks stay with it (ADR-0092 section 5); a new item has none and
  * the conversation assigns one when it signs.
  */
-import { createMemo, createSignal, Index, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, Show, type JSX } from "solid-js";
 
 import { t } from "../l10n";
 import { requestConfirm } from "../ui/confirm-dialog";
-import { Icon } from "../ui/icons";
-import { AttachScreen, AttachSwitch } from "./AttachScreen";
+import { AttachScreen, AttachSwitch, AttachSwitchGroup } from "./AttachScreen";
+import { EditorRows } from "./EditorRows";
 import {
   CHECKLIST_ITEM_MAX,
   CHECKLIST_ITEMS_MAX,
+  CHECKLIST_ITEMS_MIN,
   CHECKLIST_TITLE_MAX,
   isChecklistDraftValid,
-  moved,
   movedTo,
+  withAddedRow,
+  withoutRow,
 } from "./poll-draft";
 import type { ChecklistDraft, ChecklistDraftItem } from "./types";
 import "./editors.css";
-import { startDragReorder } from "./drag-reorder";
 
 interface Row {
   readonly id?: number;
   readonly text: string;
-}
-
-/** One empty row trails the list while there is room. */
-function withTrailing(rows: readonly Row[]): Row[] {
-  const out = [...rows];
-  const last = out[out.length - 1];
-  if (out.length < CHECKLIST_ITEMS_MAX && (last === undefined || last.text.trim().length > 0)) out.push({ text: "" });
-  return out;
 }
 
 export function ChecklistEditor(props: {
@@ -48,7 +41,9 @@ export function ChecklistEditor(props: {
   const initial = props.initial;
   const [title, setTitle] = createSignal(initial?.title ?? "");
   const [rows, setRows] = createSignal<Row[]>(
-    withTrailing(initial?.items.map((i) => ({ ...(i.id === undefined ? {} : { id: i.id }), text: i.text })) ?? []),
+    initial === undefined || initial.items.length === 0
+      ? [{ text: "" }]
+      : initial.items.map((i) => ({ ...(i.id === undefined ? {} : { id: i.id }), text: i.text })),
   );
   const [othersAdd, setOthersAdd] = createSignal(initial?.othersAdd ?? false);
   const [othersMark, setOthersMark] = createSignal(initial?.othersMark ?? true);
@@ -104,24 +99,14 @@ export function ChecklistEditor(props: {
     const next = [...rows()];
     const old = next[i];
     next[i] = { ...(old?.id === undefined ? {} : { id: old.id }), text };
-    setRows(withTrailing(next));
+    setRows(next);
   }
 
-  function leaveRow(i: number): void {
-    const r = rows();
-    const row = r[i];
-    if (row === undefined || row.text.trim().length > 0 || i === r.length - 1 || r.length <= 1) return;
-    setRows(r.filter((_, j) => j !== i));
-  }
-
-  let rowsEl: HTMLDivElement | undefined;
-  const lastMovable = (): number => {
-    const r = rows();
-    return (r[r.length - 1]?.text ?? "").trim().length === 0 ? r.length - 2 : r.length - 1;
-  };
+  const texts = createMemo(() => rows().map((r) => r.text));
 
   return (
     <AttachScreen
+      compact
       title={initial === undefined ? t("checklist.editor.title") : t("checklist.editor.edit_title")}
       onClose={() => void close()}
       footer={
@@ -130,79 +115,38 @@ export function ChecklistEditor(props: {
         </button>
       }
     >
-      <label class="lk-attach-label" for="lk-checklist-title">
-        {t("checklist.editor.name")}
-      </label>
       <input
-        id="lk-checklist-title"
         class="lk-attach-field"
         type="text"
         maxLength={CHECKLIST_TITLE_MAX}
+        placeholder={t("checklist.editor.name")}
+        aria-label={t("checklist.editor.name")}
         value={title()}
         onInput={(e) => setTitle(e.currentTarget.value)}
       />
-      <div ref={rowsEl} class="lk-attach-rows">
-        <Index each={rows()}>
-          {(row, i) => (
-            <div class="lk-attach-row" data-reorder-row="">
-              <span
-                class="lk-attach-grip"
-                aria-hidden="true"
-                classList={{ inert: i > lastMovable() }}
-                onPointerDown={(e) =>
-                  startDragReorder(e, rowsEl, i, lastMovable(), (from, to) => setRows(movedTo(rows(), from, to)))
-                }
-              >
-                <Icon name="drag-handle" size={16} />
-              </span>
-              <input
-                type="text"
-                maxLength={CHECKLIST_ITEM_MAX}
-                placeholder={t("checklist.editor.item", { n: i + 1 })}
-                aria-label={t("checklist.editor.item", { n: i + 1 })}
-                value={row().text}
-                onInput={(e) => setRow(i, e.currentTarget.value)}
-                onBlur={() => leaveRow(i)}
-              />
-              <button
-                type="button"
-                class="lk-icon-button"
-                aria-label={t("poll.editor.move_up")}
-                title={t("poll.editor.move_up")}
-                disabled={i === 0 || i > lastMovable()}
-                onClick={() => setRows(moved(rows(), i, i - 1))}
-              >
-                <Icon name="chevron-up" size={16} />
-              </button>
-              <button
-                type="button"
-                class="lk-icon-button"
-                aria-label={t("poll.editor.move_down")}
-                title={t("poll.editor.move_down")}
-                disabled={i >= lastMovable()}
-                onClick={() => setRows(moved(rows(), i, i + 1))}
-              >
-                <Icon name="chevron-down" size={16} />
-              </button>
-              <button
-                type="button"
-                class="lk-icon-button"
-                aria-label={t("checklist.editor.remove_item", { n: i + 1 })}
-                title={t("checklist.editor.remove_item", { n: i + 1 })}
-                disabled={i > lastMovable() || rows().length <= 1}
-                onClick={() => setRows(withTrailing(rows().filter((_, j) => j !== i)))}
-              >
-                <Icon name="minus-circle" size={16} />
-              </button>
-            </div>
-          )}
-        </Index>
-      </div>
-      <Show when={props.showOthersAdd}>
-        <AttachSwitch title={t("checklist.others_add")} on={othersAdd()} onChange={setOthersAdd} />
-      </Show>
-      <Show when={props.showOthersMark}>
-        <AttachSwitch title={t("checklist.others_mark")} on={othersMark()} onChange={setOthersMark} />
+      <EditorRows
+        label={t("checklist.editor.items")}
+        items={texts()}
+        min={CHECKLIST_ITEMS_MIN}
+        max={CHECKLIST_ITEMS_MAX}
+        maxLength={CHECKLIST_ITEM_MAX}
+        placeholder={(i) => t("checklist.editor.item", { n: i + 1 })}
+        removeLabel={(i) => t("checklist.editor.remove_item", { n: i + 1 })}
+        addLabel={t("checklist.editor.add_item")}
+        onInput={setRow}
+        onAdd={() => setRows(withAddedRow(rows(), { text: "" }, CHECKLIST_ITEMS_MAX))}
+        onRemove={(i) => setRows(withoutRow(rows(), i, CHECKLIST_ITEMS_MIN))}
+        onMove={(from, to) => setRows(movedTo(rows(), from, to))}
+      />
+      <Show when={props.showOthersAdd || props.showOthersMark}>
+        <AttachSwitchGroup>
+          <Show when={props.showOthersAdd}>
+            <AttachSwitch title={t("checklist.others_add")} on={othersAdd()} onChange={setOthersAdd} />
+          </Show>
+          <Show when={props.showOthersMark}>
+            <AttachSwitch title={t("checklist.others_mark")} on={othersMark()} onChange={setOthersMark} />
+          </Show>
+        </AttachSwitchGroup>
       </Show>
     </AttachScreen>
   );
