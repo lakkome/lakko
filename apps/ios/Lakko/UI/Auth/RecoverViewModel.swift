@@ -442,6 +442,7 @@ public final class RecoverViewModel: ObservableObject {
             phraseEntropy: outcome.phraseEntropy,
             session: session,
             forgotPassword: true,
+            predecessors: outcome.predecessors,
             persistJoin: outcome.persistJoin ?? {}
         )
     }

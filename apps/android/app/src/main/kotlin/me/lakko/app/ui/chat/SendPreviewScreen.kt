@@ -18,10 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -97,10 +93,10 @@ internal fun SendPreviewScreen(
                             contentAlignment = Alignment.Center,
                         ) { PreviewVisual(item, large = false) }
                         IconButton(onClick = { onRemove(item.id) }, modifier = Modifier.size(24.dp).align(Alignment.TopEnd)) {
-                            Icon(
-                                Icons.Filled.Close,
+                            me.lakko.app.ui.components.LkIcon(
+                                me.lakko.app.R.drawable.ic_lk_xmark_circle_fill,
                                 contentDescription = t("attach.preview.remove", mapOf("name" to (item.name ?: ""))),
-                                modifier = Modifier.size(16.dp),
+                                size = 16.dp,
                             )
                         }
                     }
@@ -136,10 +132,10 @@ private fun PreviewVisual(item: PreviewItem, large: Boolean) {
         )
     } else {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(8.dp)) {
-            Icon(
-                if (item.kind == PreviewKind.VIDEO) Icons.Filled.Movie else Icons.AutoMirrored.Filled.InsertDriveFile,
+            me.lakko.app.ui.components.LkIcon(
+                if (item.kind == PreviewKind.VIDEO) me.lakko.app.R.drawable.ic_lk_video else me.lakko.app.R.drawable.ic_lk_doc,
                 contentDescription = null,
-                modifier = Modifier.size(if (large) 48.dp else 24.dp),
+                size = if (large) 48.dp else 24.dp,
             )
             if (large) {
                 Text(item.name ?: "", fontSize = 13.sp, maxLines = 2)

@@ -125,6 +125,10 @@
       "text": "Этот браузер не поддерживает ключи доступа.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Это устройство не поддерживает ключи доступа.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Этот ключ доступа принадлежит другому аккаунту, а не тому, что сохранён на этом устройстве. Сначала войдите с паролем.",
       "status": "machine"
@@ -243,6 +247,42 @@
     },
     "auth.username.label": {
       "text": "Имя пользователя",
+      "status": "machine"
+    },
+    "auth.username_prompt.continue": {
+      "text": "Продолжить",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Не удалось проверить имя пользователя. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Это не имя пользователя этого аккаунта.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Слишком много попыток. Попробуйте позже.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Имя пользователя",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Не помню",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Его можно посмотреть в Настройках на другом устройстве. До тех пор это устройство не синхронизируется с ними.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Это устройство ещё не знает имя пользователя вашего аккаунта. Введите его, чтобы синхронизироваться с другими устройствами.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Какое у вас имя пользователя?",
       "status": "machine"
     },
     "backup.rollback_refused.body": {
@@ -711,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "Этот браузер не может шифровать звук и видео звонка, поэтому звонок не начался.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Это устройство не может шифровать звук и видео звонка, поэтому звонок не начался.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -1261,8 +1305,16 @@
       "text": "Не удалось показать экран. Разрешите показ экрана для этого сайта в настройках браузера.",
       "status": "machine"
     },
+    "call.screen_share.refused_desktop": {
+      "text": "Не удалось показать экран. Разрешите Lakko запись экрана в настройках конфиденциальности системы.",
+      "status": "machine"
+    },
     "call.screen_share.refused_macos": {
       "text": "Не удалось показать экран. Разрешите браузеру запись экрана в Системных настройках.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Не удалось показать экран. Разрешите Lakko запись экрана в Системных настройках.",
       "status": "machine"
     },
     "call.screen_share.started": {
@@ -1990,7 +2042,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Не удалось создать канал. Ничего не создано. Попробуйте ещё раз.",
+      "text": "Не удалось создать канал. Попробуйте ещё раз.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -2151,6 +2203,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "Реакции в канале анонимны. Никто не видит, кто отреагировал, даже владелец канала.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "Вы сможете публиковать здесь, когда Lakko откроется на другом вашем устройстве.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "Вы сможете публиковать здесь, когда Lakko откроется на другом вашем устройстве и на устройстве владельца.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -3493,12 +3553,20 @@
       "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения. Разрешите доступ к камере в настройках сайта в браузере.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения. Разрешите доступ в настройках конфиденциальности системы.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko нужен доступ к микрофону, чтобы записывать голосовые сообщения. Разрешите доступ к микрофону в настройках сайта в браузере.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko нужен доступ к микрофону, чтобы записывать голосовые сообщения. Разрешите доступ в настройках конфиденциальности системы.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3611,6 +3679,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "В этом браузере нельзя записывать голосовые сообщения",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "На этом устройстве нельзя записывать голосовые сообщения",
       "status": "machine"
     },
     "chat.record.video": {
@@ -4127,10 +4199,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "Другие ваши устройства добавляют это устройство в чаты.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -5226,7 +5294,7 @@
       "status": "machine"
     },
     "devices.rotate.effect_passkeys": {
-      "text": "Ключи доступа по-прежнему позволяют войти. Функция «Восстанавливать ключи этим ключом доступа» отключена, пока вы не включите её снова.",
+      "text": "Ключи доступа по-прежнему позволяют войти. Чтобы снова восстанавливать ключи одним из них, нажмите «Восстанавливать ключи этим ключом доступа» в его строке.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5299,6 +5367,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko не может использовать камеру. Разрешите доступ к камере в настройках сайта в браузере и попробуйте снова.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko не может использовать камеру. Разрешите доступ к камере в настройках конфиденциальности системы и попробуйте ещё раз.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5679,6 +5751,66 @@
     },
     "display_name.error.unknown": {
       "text": "Это имя нельзя использовать",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "Пожертвовать",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Скопировано",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Копировать",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Копировать адрес",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Сеть: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Отправляйте на этот адрес только {coin} в сети {network}. Всё остальное будет потеряно.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Не удалось загрузить способы пожертвования. Проверьте подключение и попробуйте снова.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Пожертвования оплачивают серверы и помогают продолжать работу.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Сейчас в вашей стране нет доступного способа пожертвовать.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Не удалось показать номер. Попробуйте снова.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Показать",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "Номер телефона скрыт",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "Криптовалюта",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Банк и карта",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Поддержать Lakko",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6449,10 +6581,6 @@
       "text": "Запросить вступление",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Запросить снова",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Запрос не отправлен. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
@@ -6474,11 +6602,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Запрос отправлен. Администратор одобрит его, затем изменение будет применено к группе.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Если ничего не происходит, запрос можно отправить снова.",
+      "text": "Запрос отправлен. Администратор увидит его, когда в следующий раз откроет Lakko.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6954,7 +7078,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Приглашение не принято",
+      "text": "Не удалось открыть приглашение. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7418,7 +7542,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Не удалось создать группу. Ничего не создано. Попробуйте ещё раз.",
+      "text": "Не удалось создать группу. Попробуйте ещё раз.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -8006,7 +8130,7 @@
       "status": "machine"
     },
     "recovery.method.passkey.sub": {
-      "text": "Позволяет войти. Возвращает и чаты, если вы включили это для этого ключа доступа.",
+      "text": "Входит в аккаунт. Возвращает и чаты, если ключ доступа может хранить ваши ключи.",
       "status": "machine"
     },
     "recovery.method.passkey.title": {
@@ -8083,6 +8207,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "Это устройство или браузер не поддерживает ключи доступа. Выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Это устройство не поддерживает ключи доступа. Выберите другой способ.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8425,6 +8553,14 @@
       "text": "Устройство, на котором вы ещё не вышли из аккаунта, покажет шестизначный код; введите его здесь. Камера не нужна; при желании можно использовать QR-код.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Откройте Lakko на устройстве, на котором вы ещё не вышли из аккаунта.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "Вы вошли как {username}, но на этом устройстве ещё нет ключей, которые используют ваши чаты. Перенесите их с другого устройства, на котором вы ещё не вышли из аккаунта.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "С аккаунтом, сохранённым на этом устройстве, что-то не так. Выйдите и войдите снова или используйте фразу восстановления.",
       "status": "machine"
@@ -8486,7 +8622,7 @@
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
-      "text": "Если вы включили восстановление ключей аккаунта для ключа доступа.",
+      "text": "Если у вас есть ключ доступа для этого аккаунта.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8737,6 +8873,10 @@
       "text": "Сочетания клавиш",
       "status": "machine"
     },
+    "settings.about.support": {
+      "text": "Поддержать Lakko",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переводы обновлены {date}",
       "status": "machine"
@@ -8799,6 +8939,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "Удаляет данные аккаунта из этого браузера. Сообщения останутся на других ваших устройствах; чтобы вернуться сюда, понадобится другое устройство, ключ доступа, который восстанавливает ключи аккаунта, или фраза восстановления.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Удаляет данные аккаунта с этого устройства. Сообщения останутся на других ваших устройствах; чтобы вернуться сюда, понадобится другое устройство, ключ доступа, который восстанавливает ключи аккаунта, или фраза восстановления.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8985,6 +9129,10 @@
       "text": "Этот браузер не настроен для вашего аккаунта. Войдите снова.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Это устройство не настроено для вашего аккаунта. Войдите снова.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "Не удалось удалить устройство. Попробуйте ещё раз.",
       "status": "machine"
@@ -9105,6 +9253,10 @@
       "text": "Воспроизведение на этом устройстве.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Посты каналов могут приходить с опозданием, пока Lakko закрыт.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "Уведомления выключены, поэтому Lakko может звонить только когда открыт. Включите их, чтобы звонки и сообщения доходили до вас и когда приложение закрыто.",
       "status": "machine"
@@ -9129,6 +9281,10 @@
       "text": "Ключ доступа «{name}» добавлен.",
       "status": "machine"
     },
+    "settings.passkeys.added_keys_failed": {
+      "text": "Ключ доступа добавлен. Пока он позволяет только войти; восстанавливать ключи им можно включить в его строке.",
+      "status": "machine"
+    },
     "settings.passkeys.added_last_used": {
       "text": "Добавлен {added} · использован {used}",
       "status": "machine"
@@ -9141,8 +9297,16 @@
       "text": "Ключ доступа добавлен. С ним можно войти. На этом устройстве и с этим поставщиком ключей доступа он не может восстановить ключи аккаунта, поэтому сохраните фразу восстановления.",
       "status": "machine"
     },
+    "settings.passkeys.added_restores": {
+      "text": "Ключ доступа добавлен. Он позволяет войти и восстанавливает ваши ключи.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "Ключей доступа пока нет.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.already_exists": {
+      "text": "На этом устройстве уже есть ключ доступа для этого аккаунта.",
       "status": "machine"
     },
     "settings.passkeys.error.cancelled": {
@@ -9169,20 +9333,20 @@
       "text": "Этот браузер или устройство сейчас не может создать ключ доступа.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Это устройство сейчас не может создать ключ доступа.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.error.other_passkey": {
+      "text": "Ответил другой ключ доступа. Попробуйте ещё раз и выберите этот ключ.",
+      "status": "machine"
+    },
     "settings.passkeys.keys.turn_on": {
-      "text": "Включить восстановление ключей аккаунта",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Если оставить выключенным, ключ доступа позволяет только войти. Ключи аккаунта восстанавливаются с помощью фразы восстановления или другого устройства.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Если включить, этот ключ доступа сам по себе сможет перенести ключи вашего аккаунта на новое устройство. Ключи доступа обычно синхронизируются через Apple, Google или менеджер паролей. Тот, кто получит доступ к вашей учётной записи Apple, Google или менеджера паролей, сможет читать ваши будущие сообщения и действовать от вашего имени.",
+      "text": "Восстанавливать ключи этим ключом доступа",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.cancelled": {
-      "text": "Отменено. Этот ключ доступа по-прежнему позволяет только войти.",
+      "text": "Ключ доступа добавлен. Пока он позволяет только войти; восстанавливать ключи им можно включить в его строке.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
@@ -9190,15 +9354,11 @@
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Ответил другой ключ доступа. Попробуйте ещё раз и выберите тот ключ доступа, для которого вы это включаете.",
+      "text": "Ответил другой ключ доступа. Попробуйте ещё раз и выберите только что добавленный ключ.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Эта фраза восстановления не относится к этому аккаунту. Ничего не изменено.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Это можно изменить позже для каждого ключа доступа.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.no_prf": {
@@ -9206,19 +9366,7 @@
       "status": "machine"
     },
     "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Введите фразу восстановления, чтобы включить это.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Только вход",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Разрешить этому ключу доступа восстанавливать ключи аккаунта?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Включить",
+      "text": "Введите фразу восстановления, чтобы восстанавливать ключи этим ключом доступа.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -9234,11 +9382,11 @@
       "status": "machine"
     },
     "settings.passkeys.lede": {
-      "text": "Входите с Touch ID, Face ID или аппаратным ключом вместо пароля. Ключ доступа также может восстанавливать ключи аккаунта на новом устройстве, если вы это включите. Фраза восстановления тоже всегда работает.",
+      "text": "Входите с Touch ID, Face ID или ключом безопасности вместо пароля. Ключ доступа также восстанавливает ваши ключи на новом устройстве. Фраза восстановления тоже всегда работает.",
       "status": "machine"
     },
     "settings.passkeys.lede_device": {
-      "text": "Входите по отпечатку пальца, лицу или блокировке экрана либо с аппаратным ключом вместо пароля. Ключ доступа также может восстанавливать ключи аккаунта на новом устройстве, если вы это включите. Фраза восстановления тоже всегда работает.",
+      "text": "Входите по отпечатку пальца, лицу, блокировке экрана или ключу безопасности вместо пароля. Ключ доступа также восстанавливает ваши ключи на новом устройстве. Фраза восстановления тоже всегда работает.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9281,22 +9429,6 @@
       "text": "Ваши ключи доступа были удалены при сбросе ключей аккаунта. Добавьте ключ доступа, чтобы снова входить с Face ID, Touch ID или по отпечатку пальца.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Отключить восстановление ключей аккаунта",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Этот ключ доступа будет позволять только войти. Ключи аккаунта, уже восстановленные на других устройствах, останутся там.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Теперь этот ключ доступа позволяет только войти.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Отключить восстановление ключей аккаунта для этого ключа доступа?",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "Ключи доступа",
       "status": "machine"
@@ -9307,6 +9439,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Этот браузер не умеет управлять ключами доступа. Используйте свежую версию Safari, Chrome, Firefox или Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Это устройство не умеет управлять ключами доступа.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9613,6 +9749,10 @@
       "text": "Управляется браузером",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Управляется системой",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Удалить",
       "status": "machine"
@@ -9801,6 +9941,10 @@
       "text": "Перевод выполняется на этом устройстве. Для него Lakko нужен пакет «{language}» ({size}). Сообщения никуда не отправляются для перевода.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Перевод выполняется на этом устройстве. macOS скачивает пакет «{language}» в Системных настройках: «Язык и регион», затем «Языки перевода». Сообщения никуда не отправляются для перевода.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "Отмена",
       "status": "machine"
@@ -9829,6 +9973,10 @@
       "text": "Не сейчас",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Открыть Системные настройки",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "Пакет предоставляет Google.",
       "status": "machine"
@@ -9839,6 +9987,10 @@
     },
     "translate.pack.source.web": {
       "text": "Пакет предоставляет разработчик вашего браузера.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "Пакет предоставляет разработчик вашей системы.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {

@@ -26,12 +26,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
@@ -102,6 +96,9 @@ import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * docs/ux/profile-screen.md — Settings > Profile.
@@ -173,7 +170,7 @@ public fun ProfileSettingsScreen(
                 title = { Text(t("settings.section.profile")) },
                 navigationIcon = {
                     IconButton(onClick = { requestLeave(onBack) }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -244,12 +241,12 @@ public fun ProfileSettingsScreen(
         val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
             Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                MenuItem(Icons.Filled.PhotoLibrary, t("profile.avatar.menu.library")) {
+                MenuItem(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
                     menuOpen = false
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 }
                 if (hasCamera) {
-                    MenuItem(Icons.Filled.PhotoCamera, t("profile.avatar.menu.camera")) {
+                    MenuItem(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
                         menuOpen = false
                         viewModel.cameraOpen = true
                     }
@@ -260,7 +257,7 @@ public fun ProfileSettingsScreen(
                     PhotoEdit.Unchanged -> edit.savedAvatar != null
                 }
                 if (photoSet) {
-                    MenuItem(Icons.Filled.Delete, t("profile.avatar.menu.remove"), destructive = true) {
+                    MenuItem(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
                         menuOpen = false
                         viewModel.removePhoto()
                     }
@@ -370,14 +367,14 @@ private fun AvatarBlock(
                 .offset(x = 2.dp, y = 2.dp)
                 .semantics { contentDescription = label },
         ) {
-            Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+            LkIcon(R.drawable.ic_lk_pencil, contentDescription = null, size = LkIconSize.Row)
         }
     }
 }
 
 @Composable
 private fun MenuItem(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     label: String,
     destructive: Boolean = false,
     onClick: () -> Unit,
@@ -385,7 +382,7 @@ private fun MenuItem(
     val color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
     ListItem(
         headlineContent = { Text(label, color = color) },
-        leadingContent = { Icon(icon, contentDescription = null, tint = color) },
+        leadingContent = { LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row) },
         colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
         modifier = Modifier.clickable(onClick = onClick),
     )
@@ -484,7 +481,7 @@ private fun RowWithPencil(
             modifier = Modifier.clickable(enabled = enabled, onClick = onEdit),
         )
         IconButton(enabled = enabled, onClick = onEdit) {
-            Icon(Icons.Filled.Edit, contentDescription = pencilLabel, modifier = Modifier.size(18.dp))
+            LkIcon(R.drawable.ic_lk_pencil, contentDescription = pencilLabel, size = LkIconSize.Row)
         }
     }
 }

@@ -27,6 +27,7 @@ import { ownCardShareable } from "../profile/card-share";
 import { visibilitySetting } from "../reach/visibility-store";
 import { loadReachRow, saveReachRow } from "../reach/reach-store";
 import { loadWasm, type Wasm } from "../wasm";
+import { registerAccountMemory } from "../auth/account-memory";
 
 /** Answers the account's username while a session of that account stands. */
 export type BackupUsernameSource = (accountIdB64: string) => string | null;
@@ -83,6 +84,10 @@ export async function visibilityForBackup(accountIdB64: string): Promise<Uint8Ar
 /** What the restored profile says. */
 export interface RestoredOwnProfile {
   readonly displayName: string | null;
+  /** The username the profile names, `null` for none. A claim only: the
+   *  caller checks it with auth before the device takes it
+   *  (`auth/username-prompt.ts`). */
+  readonly username: string | null;
   readonly updatedAtMs: bigint;
   readonly avatar: AvatarData | null;
 }
@@ -106,6 +111,7 @@ export function decodeRestoredOwnProfile(
     if (accountId !== undefined && base64Encode(accountId) !== accountIdB64) return null;
     return {
       displayName: profile.displayName ?? null,
+      username: nonEmpty(profile.username),
       updatedAtMs: profile.updatedAtMs,
       avatar: avatarFromWasm(profile.avatar),
     };
@@ -116,12 +122,36 @@ export function decodeRestoredOwnProfile(
   }
 }
 
+function nonEmpty(value: string | undefined): string | null {
+  const trimmed = (value ?? "").trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** The username the last restore of an account's backup named, in this
+ *  page. Kept apart from the own-profile store, which holds no username: a
+ *  passkey sign-in lands with none, and this is where the device first looks
+ *  for it (`docs/ux/identity-recovery.md` section 8b). */
+const restoredUsernames = new Map<string, string>();
+
+registerAccountMemory("restored-own-username", (ids) => {
+  for (const id of ids) restoredUsernames.delete(id);
+});
+
+/** The username the backup restored in this page named for `accountIdB64`,
+ *  or `null`. */
+export function restoredOwnUsername(accountIdB64: string): string | null {
+  return restoredUsernames.get(accountIdB64) ?? null;
+}
+
 /** Keep the backup's own profile when the store holds nothing newer. Answers
  *  whether it was kept. Never throws. */
 export async function adoptRestoredOwnProfile(accountIdB64: string, bytes: Uint8Array): Promise<boolean> {
   if (bytes.length === 0) return false;
   const restored = decodeRestoredOwnProfile(await loadWasm(), bytes, accountIdB64);
   if (restored === null) return false;
+  // Whatever the store does with the name and photo, the username the
+  // backup names is kept for the landing to check.
+  if (restored.username !== null) restoredUsernames.set(accountIdB64, restored.username);
   return (
     adoptOwnProfile(accountIdB64, restored.displayName, restored.updatedAtMs, undefined, restored.avatar) !== null
   );

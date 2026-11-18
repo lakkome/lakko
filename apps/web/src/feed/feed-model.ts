@@ -151,6 +151,11 @@ function addChannelPosts(
   const fromSelf = ctx.ownChannels.has(source.idHex);
   for (const p of slot.posts) {
     if (p.cursor <= 0 || p.serverTsMs < oldest) continue;
+    // A post shows its text and its attachments, as a group's message does
+    // (`docs/ux/feed.md` section 3, base scenario 32); one with neither has
+    // nothing to show. A content post (ADR-0092) shows its content.
+    const attachments = (p.media ?? []).flatMap((m) => (m.ref === undefined ? [] : [m.ref]));
+    if (p.text.trim() === "" && attachments.length === 0 && p.content === undefined) continue;
     const mentionsMe =
       !fromSelf && ctx.ownUsername !== null && ctx.mentions(p.text, ctx.ownUsername);
     candidates.push({
@@ -163,14 +168,14 @@ function addChannelPosts(
       mentionsMe,
       repliesToMe: false,
       reactionsDistinct: 0,
-      hasMedia: (p.attachments?.length ?? 0) > 0,
+      hasMedia: attachments.length > 0,
       text: p.text,
     });
     const message: PersistedMessage = {
       messageId: String(p.cursor),
       direction: fromSelf ? "outgoing" : "incoming",
       text: p.text,
-      attachments: p.attachments ?? [],
+      attachments,
       createdAt: new Date(p.serverTsMs).toISOString(),
       ...(p.content === undefined ? {} : { content: p.content }),
     };

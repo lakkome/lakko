@@ -125,6 +125,10 @@
       "text": "הדפדפן הזה לא תומך במפתחות גישה.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "המכשיר הזה לא תומך במפתחות גישה.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "מפתח הגישה הזה שייך לחשבון אחר מזה שבמכשיר הזה. התחברו קודם עם הסיסמה.",
       "status": "machine"
@@ -243,6 +247,42 @@
     },
     "auth.username.label": {
       "text": "שם משתמש",
+      "status": "machine"
+    },
+    "auth.username_prompt.continue": {
+      "text": "המשך",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "לא ניתן היה לבדוק את שם המשתמש. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "זה לא שם המשתמש של החשבון הזה.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "יותר מדי ניסיונות. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "שם משתמש",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "אני לא זוכר",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "אפשר לראות אותו בהגדרות במכשיר האחר שלכם. עד אז המכשיר הזה לא מסתנכרן איתם.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "המכשיר הזה עדיין לא יודע את שם המשתמש של החשבון שלך. הזינו אותו כדי לסנכרן עם המכשירים האחרים שלכם.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "מה שם המשתמש שלך?",
       "status": "machine"
     },
     "backup.rollback_refused.body": {
@@ -711,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "הדפדפן הזה לא יכול להצפין את השמע והווידאו של השיחה, ולכן השיחה לא התחילה.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "המכשיר הזה לא יכול להצפין את השמע והווידאו של השיחה, ולכן השיחה לא התחילה.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -1910,7 +1954,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "לא ניתן ליצור את הערוץ. שום דבר לא נוצר. נסה שוב.",
+      "text": "לא ניתן ליצור את הערוץ. נסה שוב.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -2071,6 +2115,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "תגובות בערוץ הן אנונימיות. אף אחד לא יכול לראות מי הגיב, אפילו לא בעל הערוץ.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "תוכלו לפרסם כאן ברגע ש-Lakko ייפתח במכשיר האחר שלכם.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "תוכלו לפרסם כאן ברגע ש-Lakko ייפתח במכשיר האחר שלכם ובמכשיר של הבעלים.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -3381,12 +3433,20 @@
       "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו. אפשרו גישה למצלמה בהגדרות האתר בדפדפן.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו. אפשרו זאת בהגדרות הפרטיות של המערכת.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko צריכה גישה למיקרופון כדי להקליט הודעות קוליות. אפשרו גישה למיקרופון בהגדרות האתר בדפדפן.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko צריכה גישה למיקרופון כדי להקליט הודעות קוליות. אפשרו זאת בהגדרות הפרטיות של המערכת.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3499,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "אי אפשר להקליט הודעות קוליות בדפדפן הזה",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "אי אפשר להקליט הודעות קוליות במכשיר הזה",
       "status": "machine"
     },
     "chat.record.video": {
@@ -4011,10 +4075,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "המכשירים האחרים שלכם מוסיפים את המכשיר הזה לצ׳אטים.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -5109,10 +5169,6 @@
       "text": "קישורי ההזמנה וקישורי השיחה שיצרת קודם יפסיקו לפעול. יש ליצור חדשים.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "מפתחות הגישה שלכם עדיין מחברים אתכם. האפשרות \"שחזור מפתחות עם מפתח הגישה הזה\" כבויה עד שתפעילו אותה שוב.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "תקבלו ביטוי שחזור חדש. הישן יפסיק לעבוד.",
       "status": "machine"
@@ -5183,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "ל-Lakko אין גישה למצלמה. יש לאפשר גישה למצלמה בהגדרות האתר בדפדפן ולנסות שוב.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "ל-Lakko אין גישה למצלמה. אפשרו גישה למצלמה בהגדרות הפרטיות של המערכת ונסו שוב.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5563,6 +5623,66 @@
     },
     "display_name.error.unknown": {
       "text": "לא ניתן להשתמש בשם הזה",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "תרומה",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "הועתק",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "העתק",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "העתקת הכתובת",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "רשת: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "שלחו לכתובת הזו רק {coin} ברשת {network}. כל דבר אחר יאבד.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "לא ניתן לטעון את דרכי התרומה. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "התרומות משלמות על השרתים ומאפשרות להמשיך בעבודה.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "כרגע אין דרך לתרום שזמינה במדינה שלך.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "לא ניתן להציג את המספר. נסו שוב.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "הצג",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "מספר הטלפון מוסתר",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "קריפטו",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "בנק וכרטיס",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "תמכו ב-Lakko",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6333,10 +6453,6 @@
       "text": "בקשת הצטרפות",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "שליחת בקשה שוב",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "הבקשה שלכם לא נשלחה. בדקו את החיבור ונסו שוב.",
       "status": "machine"
@@ -6358,11 +6474,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "הבקשה נשלחה. אחד המנהלים מאשר אותה, ואז השינוי מוחל על הקבוצה.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "אם לא קורה כלום, אפשר לשלוח את הבקשה שוב.",
+      "text": "הבקשה נשלחה. מנהל יראה אותה כשיפתח את Lakko בפעם הבאה.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6838,7 +6950,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "ההזמנה לא אושרה",
+      "text": "לא ניתן היה לפתוח את ההזמנה. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7302,7 +7414,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "לא ניתן ליצור את הקבוצה. שום דבר לא נוצר. נסו שוב.",
+      "text": "לא ניתן ליצור את הקבוצה. נסו שוב.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7769,10 +7881,6 @@
       "text": "מכשיר אחר",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "מחבר אתכם. מחזיר גם את הצ׳אטים אם הפעלתם זאת עבור מפתח הגישה הזה.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "מפתח גישה",
       "status": "machine"
@@ -7847,6 +7955,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "המכשיר או הדפדפן הזה לא תומכים במפתחות גישה. בחרו דרך אחרת.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "המכשיר הזה לא תומך במפתחות גישה. בחרו דרך אחרת.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8189,6 +8301,14 @@
       "text": "מכשיר שעדיין מחובר מציג קוד בן שש ספרות; הקלידו אותו כאן. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "פתחו את Lakko במכשיר שעדיין מחובר.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "התחברתם בתור {username}, אבל במכשיר הזה עדיין אין את המפתחות שהשיחות שלכם משתמשות בהם. העבירו אותם ממכשיר אחר שעדיין מחובר.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "יש בעיה בחשבון שנשמר במכשיר הזה. התנתקו והתחברו שוב, או השתמשו בביטוי השחזור.",
       "status": "machine"
@@ -8247,10 +8367,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "אין לי אף אחד מאלה",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "אם הפעלתם שחזור מפתחות החשבון עבור מפתח גישה.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8469,6 +8585,10 @@
       "text": "קיצורי מקלדת",
       "status": "machine"
     },
+    "settings.about.support": {
+      "text": "תמכו ב-Lakko",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "התרגומים עודכנו {date}",
       "status": "machine"
@@ -8531,6 +8651,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "מסיר את נתוני החשבון מהדפדפן הזה. ההודעות נשארות במכשירים האחרים שלכם; כדי לחזור לכאן תצטרכו מכשיר אחר, מפתח גישה שמשחזר את מפתחות החשבון, או את ביטוי השחזור.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "מסיר את נתוני החשבון מהמכשיר הזה. ההודעות נשארות במכשירים האחרים שלכם; כדי לחזור לכאן תצטרכו מכשיר אחר, מפתח גישה שמשחזר את מפתחות החשבון, או את ביטוי השחזור.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8717,6 +8841,10 @@
       "text": "הדפדפן הזה לא מוגדר עבור החשבון שלכם. התחברו שוב.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "המכשיר הזה לא מוגדר עבור החשבון שלכם. התחברו שוב.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "לא ניתן היה להסיר את המכשיר. נסו שוב.",
       "status": "machine"
@@ -8837,6 +8965,10 @@
       "text": "ניגון במכשיר הזה.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "פוסטים בערוצים עלולים להגיע באיחור כש-Lakko סגור.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "ההתראות כבויות, ולכן Lakko יכולה לצלצל רק כשהיא פתוחה. הפעילו אותן כדי ששיחות והודעות יגיעו אליכם גם כשהיא סגורה.",
       "status": "machine"
@@ -8901,56 +9033,20 @@
       "text": "הדפדפן או המכשיר הזה לא יכולים ליצור מפתחות גישה כרגע.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "הפעלת שחזור מפתחות החשבון",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "אם תשאירו את זה כבוי, מפתח הגישה רק מחבר אתכם. את מפתחות החשבון תשחזרו עם ביטוי השחזור או ממכשיר אחר.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "אם תפעילו את זה, מפתח הגישה הזה לבדו יוכל להביא את מפתחות החשבון שלכם למכשיר חדש. מפתחות גישה מסונכרנים בדרך כלל על ידי Apple, Google או מנהל הסיסמאות שלכם. מי שיכול להיכנס לחשבון Apple, Google או מנהל הסיסמאות שלכם יוכל אז לקרוא את ההודעות העתידיות שלכם ולפעול בשמכם.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "בוטל. מפתח הגישה הזה עדיין רק מחבר אתכם.",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "המכשיר הזה לא יכול ליצור מפתחות גישה כרגע.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "מפתח הגישה הזה משחזר עכשיו את מפתחות החשבון שלכם.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "מפתח גישה אחר ענה. נסו שוב ובחרו את מפתח הגישה שעבורו אתם מפעילים את זה.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "ביטוי השחזור הזה לא שייך לחשבון הזה. שום דבר לא השתנה.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "אפשר לשנות את זה מאוחר יותר לכל מפתח גישה.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "מפתח הגישה הזה יכול לחבר אתכם, אבל במכשיר הזה ועם ספק מפתחות הגישה הזה הוא לא יכול לשאת את מפתחות החשבון. שמרו את ביטוי השחזור.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "הקלידו את ביטוי השחזור כדי להפעיל את זה.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "התחברות בלבד",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "לאפשר למפתח הגישה הזה לשחזר את מפתחות החשבון שלכם?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "הפעלה",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +9059,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "מחבר בלבד",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "התחברו עם Touch ID, Face ID או מפתח אבטחה במקום הסיסמה. מפתח גישה יכול גם לשחזר את מפתחות החשבון במכשיר חדש אם תפעילו זאת. ביטוי השחזור שלכם תמיד עובד גם הוא.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "התחברו עם טביעת אצבע, זיהוי פנים או נעילת מסך, או עם מפתח אבטחה, במקום הסיסמה. מפתח גישה יכול גם לשחזר את מפתחות החשבון במכשיר חדש אם תפעילו זאת. ביטוי השחזור שלכם תמיד עובד גם הוא.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9013,22 +9101,6 @@
       "text": "מפתחות הגישה שלכם נמחקו כשמפתחות החשבון אופסו. הוסיפו מפתח גישה כדי להתחבר שוב עם Face ID, Touch ID או טביעת האצבע שלכם.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "הפסקת שחזור מפתחות החשבון",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "מפתח הגישה הזה רק יחבר אתכם. מפתחות החשבון שכבר שוחזרו במכשירים אחרים יישארו שם.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "מפתח הגישה הזה עכשיו רק מחבר אתכם.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "להפסיק לשחזר את מפתחות החשבון באמצעות מפתח הגישה הזה?",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "מפתחות גישה",
       "status": "machine"
@@ -9039,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "הדפדפן הזה לא יכול לנהל מפתחות גישה. השתמשו בגרסה עדכנית של Safari, Chrome, Firefox או Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "המכשיר הזה לא יכול לנהל מפתחות גישה.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9345,6 +9421,10 @@
       "text": "מנוהל על ידי הדפדפן",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "מנוהל על ידי המערכת",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "הסרה",
       "status": "machine"
@@ -9533,6 +9613,10 @@
       "text": "התרגום מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language} ({size}). הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "התרגום מתבצע במכשיר הזה. macOS מוריד את חבילת {language} בהגדרות המערכת: שפה ואזור, ואז שפות תרגום. הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "ביטול",
       "status": "machine"
@@ -9561,6 +9645,10 @@
       "text": "לא עכשיו",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "פתיחת הגדרות המערכת",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "החבילה מגיעה מ־Google.",
       "status": "machine"
@@ -9571,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "החבילה מגיעה מיצרן הדפדפן שלך.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "החבילה מגיעה מיצרן המערכת שלך.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9819,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "מי יכול למצוא אותי",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "אי אפשר לשתף את המסך. אפשרו ל-Lakko הקלטת מסך בהגדרות הפרטיות של המערכת.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "אי אפשר לשתף את המסך. אפשרו ל-Lakko הקלטת מסך בהגדרות המערכת.",
       "status": "machine"
     }
   },

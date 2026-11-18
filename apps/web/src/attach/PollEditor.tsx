@@ -3,7 +3,7 @@
 
 /**
  * `docs/ux/attachments.md` section 7.1 — the poll editor. It returns a draft;
- * the conversation signs and sends it (ADR-0090 section 3.1).
+ * the conversation signs and sends it (ADR-0092 section 3.1).
  */
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
 
@@ -179,7 +179,7 @@ export function PollEditor(props: {
                 classList={{ inert: i > lastMovable() }}
                 onPointerDown={(e) => startDragReorder(e, rowsEl, i, lastMovable(), dragTo)}
               >
-                <Icon name="grip" size={16} />
+                <Icon name="drag-handle" size={16} />
               </span>
               <Show when={quiz()}>
                 <input
@@ -209,7 +209,7 @@ export function PollEditor(props: {
                 disabled={i === 0 || i > lastMovable()}
                 onClick={() => move(i, i - 1)}
               >
-                <Icon name="chevron" class="lk-attach-up" size={16} />
+                <Icon name="chevron-up" size={16} />
               </button>
               <button
                 type="button"
@@ -219,7 +219,7 @@ export function PollEditor(props: {
                 disabled={i >= lastMovable()}
                 onClick={() => move(i, i + 1)}
               >
-                <Icon name="chevron" class="lk-attach-down" size={16} />
+                <Icon name="chevron-down" size={16} />
               </button>
               <button
                 type="button"
@@ -229,7 +229,7 @@ export function PollEditor(props: {
                 disabled={i > lastMovable() || options().length <= 2}
                 onClick={() => removeOption(i)}
               >
-                <Icon name="close" size={16} />
+                <Icon name="minus-circle" size={16} />
               </button>
             </div>
           )}

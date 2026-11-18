@@ -32,7 +32,7 @@ extension EnvironmentValues {
 /// glyph, so a muted microphone is unmissable. On is an outline — a translucent
 /// white fill with a white glyph.
 struct CallControlFaceView: View {
-    let systemImage: String
+    let icon: LkIcon
     let face: CallControlFace
     var diameter: CGFloat = CallScreenPresentation.controlDiameter
     /// The end button: the only red thing on a call screen.
@@ -44,8 +44,8 @@ struct CallControlFaceView: View {
             if face == .outline && !destructive {
                 Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
             }
-            Image(systemName: systemImage)
-                .font(.system(size: diameter * 0.38, weight: .regular))
+            // About 28 on the standard 64-point circle (the call control band).
+            LkIconView(icon, size: diameter * 0.44, relativeTo: nil)
                 .foregroundStyle(glyph)
         }
         .frame(width: diameter, height: diameter)
@@ -74,7 +74,7 @@ struct CallControlButton: View {
     /// Re-renders the word and the spoken label on a language switch.
     @ObservedObject var l10n = Localization.shared
     let control: CallControl
-    let systemImage: String
+    let icon: LkIcon
     let on: Bool
     var enabled: Bool = true
     var busy: Bool = false
@@ -96,7 +96,7 @@ struct CallControlButton: View {
             VStack(spacing: 6) {
                 ZStack {
                     CallControlFaceView(
-                        systemImage: systemImage,
+                        icon: icon,
                         face: CallScreenPresentation.face(control, on: on),
                         diameter: diameter,
                         destructive: control == .end)

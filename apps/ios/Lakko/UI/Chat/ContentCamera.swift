@@ -191,13 +191,13 @@ struct CameraCaptureScreen: View {
             VStack {
                 HStack {
                     Button(action: onClose) {
-                        Image(systemName: "xmark").font(.title3).foregroundStyle(.white).frame(width: 44, height: 44)
+                        LkIconView(.xmark, size: 24).foregroundStyle(.white).frame(width: 44, height: 44)
                     }
                     .accessibilityLabel(l10n.t("common.close"))
                     Spacer()
                     if camera.captured == nil, camera.access == .granted {
                         Button { camera.flashOn.toggle() } label: {
-                            Image(systemName: camera.flashOn ? "bolt.fill" : "bolt.slash")
+                            LkIconView(camera.flashOn ? .bolt : .boltSlash, size: 24)
                                 .foregroundStyle(.white).frame(width: 44, height: 44)
                         }
                     }
@@ -229,8 +229,8 @@ struct CameraCaptureScreen: View {
                 Spacer()
                 if camera.hasTwoCameras {
                     Button { camera.switchCamera() } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath.camera")
-                            .font(.title2).foregroundStyle(.white).frame(width: 60, height: 60)
+                        LkIconView(.cameraFlip, size: 28)
+                            .foregroundStyle(.white).frame(width: 60, height: 60)
                     }
                     .accessibilityLabel(l10n.t("camera.switch"))
                 } else {
@@ -269,7 +269,7 @@ struct CameraCaptureScreen: View {
             case .photo(let data):
                 if let image = UIImage(data: data) { Image(uiImage: image).resizable().scaledToFit() }
             case .video:
-                Image(systemName: "video").font(.system(size: 64)).foregroundStyle(.white)
+                LkIconView(.video, size: 64, relativeTo: nil).foregroundStyle(.white)
             }
             Spacer()
             HStack {

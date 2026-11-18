@@ -93,7 +93,7 @@
 //!
 //! A length of `0` means "no name" / "no username" / "no account id" / "no
 //! certificate". Total length is between [`PROFILE_ENVELOPE_MIN_LEN`] and
-//! [`PROFILE_ENVELOPE_MAX_LEN`]. v5 ([ADR-0090](../../../docs/adr/0090-attachment-kinds.md)
+//! [`PROFILE_ENVELOPE_MAX_LEN`]. v5 ([ADR-0092](../../../docs/adr/0092-attachment-kinds.md)
 //! section 7, the "card may not be shared" flag) is a flag day: v1 to v4
 //! are refused as [`ProfileError::UnknownVersion`], as v4 (ADR-0084, the
 //! profile photo) refused v1 to v3.
@@ -118,7 +118,7 @@
 //!   carrier. That the referenced bytes are what the slot says is the
 //!   receiver's check after it downloads them; this codec bounds only the
 //!   reference.
-//! * `flags` (v5, ADR-0090 section 7): bit 0 set means the sender's card
+//! * `flags` (v5, ADR-0092 section 7): bit 0 set means the sender's card
 //!   may not be shared in a contact-card message ([`Profile::card_shareable`]
 //!   is `false`); a client sets it exactly when its own "who can find me"
 //!   setting is `Nobody`. Any other bit set is refused
@@ -235,13 +235,13 @@ pub const PROFILE_VERSION_V3: u8 = 0x03;
 /// plus an optional avatar after the grants. Refused since v5.
 pub const PROFILE_VERSION_V4: u8 = 0x04;
 
-/// Schema version carried in the first payload byte since ADR-0090 section 7
+/// Schema version carried in the first payload byte since ADR-0092 section 7
 /// (2026-11-18): v4 plus one flags byte after the avatar. The only version
 /// decoded; v1 to v4 are refused (`UnknownVersion`), a flag day.
 pub const PROFILE_VERSION_V5: u8 = 0x05;
 
 /// Flags-byte bit: the sender's contact card may not be shared
-/// (ADR-0090 section 7). Set exactly when the sender's "who can find me"
+/// (ADR-0092 section 7). Set exactly when the sender's "who can find me"
 /// setting is `Nobody`.
 pub const PROFILE_FLAG_CARD_NOT_SHAREABLE: u8 = 0x01;
 
@@ -396,7 +396,7 @@ pub struct Profile {
     /// secret — see the module docs.
     pub avatar: Option<Avatar>,
     /// `true` when the sender lets others share its contact card
-    /// (ADR-0090 section 7): the flags byte's bit 0 is clear. `false`
+    /// (ADR-0092 section 7): the flags byte's bit 0 is clear. `false`
     /// exactly when the sender's "who can find me" setting is `Nobody`.
     /// The sender's own statement, honoured by the sending client.
     pub card_shareable: bool,
@@ -1156,7 +1156,7 @@ mod tests {
         assert!(!dbg.contains("238"), "{dbg}");
     }
 
-    // --- v5: the card-sharing flag (ADR-0090 section 7) ----------------------
+    // --- v5: the card-sharing flag (ADR-0092 section 7) ----------------------
 
     #[test]
     fn both_values_of_the_card_flag_round_trip() {

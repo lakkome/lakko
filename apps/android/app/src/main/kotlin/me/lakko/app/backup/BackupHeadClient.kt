@@ -12,6 +12,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
@@ -97,6 +98,16 @@ public class BackupHeadClient(
                 ),
             )
         }
+        if (response.status.value == HTTP_UNAUTHORIZED) {
+            // Auth does not accept this session (keys reset elsewhere, this
+            // device removed, an expired credential): the backup stops here.
+            val code = try {
+                me.lakko.app.anon.errorCodeOf(response.bodyAsText())
+            } catch (_: Throwable) {
+                null
+            }
+            throw BackupHeadSessionRefused(code)
+        }
         if (!response.status.isSuccess()) {
             throw RuntimeException(
                 "mintBackupHead: /auth/backup/head -> ${response.status.value}",
@@ -107,6 +118,23 @@ public class BackupHeadClient(
         return MintedBackupHead(head = head, version = wire.backup_version)
     }
 }
+
+/**
+ * `POST /auth/backup/head` answered `401` (`key-generation-superseded`,
+ * `device-revoked`, or a session auth no longer accepts). Storage checks the
+ * access token without asking auth (ADR-0073), so a device whose keys were
+ * reset elsewhere could still write; this refusal is what stops its upload.
+ * NOT a soft failure: no unframed envelope is written after it.
+ */
+public class BackupHeadSessionRefused(public val code: String?) :
+    RuntimeException("mintBackupHead: auth refused the session (${code ?: "401"})")
+
+/** Whether a failed head mint may still write the unframed legacy envelope
+ *  (ADR-0037 soft-fail): only when auth did not refuse the session. A refusal
+ *  stops the upload. */
+public fun headMintFailureAllowsLegacy(cause: Throwable): Boolean = cause !is BackupHeadSessionRefused
+
+private const val HTTP_UNAUTHORIZED: Int = 401
 
 /** The minted head + its auth-assigned monotone version (ADR-0037 §2). */
 public data class MintedBackupHead(

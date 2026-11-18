@@ -43,6 +43,7 @@
 import { createEffect, createMemo, createSignal, For, Index, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
+import { channelFlagsOf } from "../channels/channel-flags";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
@@ -440,7 +441,8 @@ export default function Feed(): JSX.Element {
         idHex: c.id,
         slug: c.id,
         title: channelTitle(shared.get(c.id)?.name, c.localName, c.localHandle),
-        muted: flags[c.id]?.muted === true,
+        // The channel row's Mute (`channels/channel-flags.ts`).
+        muted: channelFlagsOf(flags, c.id).muted,
         audience: 0,
       }),
     );
@@ -1126,7 +1128,7 @@ export default function Feed(): JSX.Element {
               aria-expanded={feedMenuOpen()}
               onClick={() => setFeedMenuOpen(!feedMenuOpen())}
             >
-              <Icon name="more" size={20} />
+              <Icon name="ellipsis-circle" size={24} />
             </button>
             <Show when={feedMenuOpen()}>
               <MenuBackdrop onClose={() => setFeedMenuOpen(false)} />
@@ -1140,7 +1142,7 @@ export default function Feed(): JSX.Element {
                     setEditing({ mode: "new" });
                   }}
                 >
-                  <Icon name="plus" size={16} />
+                  <Icon name="plus" size={20} />
                   {t("feed.new")}
                 </button>
                 <button
@@ -1151,7 +1153,7 @@ export default function Feed(): JSX.Element {
                     setHiddenOpen(true);
                   }}
                 >
-                  <Icon name="eyeOff" size={16} />
+                  <Icon name="eye-slash" size={20} />
                   {t("feed.hidden.title")}
                 </button>
               </div>
@@ -1168,7 +1170,7 @@ export default function Feed(): JSX.Element {
                 aria-selected={selection() === p.key}
                 onClick={() => choose(p.key)}
               >
-                <Icon name={PRESET_ICONS[p.key]} size={16} />
+                <Icon name={PRESET_ICONS[p.key]} size={20} />
                 {t(p.labelKey)}
               </button>
             )}
@@ -1180,7 +1182,7 @@ export default function Feed(): JSX.Element {
             aria-selected={selection() === "discover"}
             onClick={() => choose("discover")}
           >
-            <Icon name={PRESET_ICONS.discover} size={16} />
+            <Icon name={PRESET_ICONS.discover} size={20} />
             {t("feed.preset.discover")}
           </button>
           <For each={saved()}>
@@ -1192,7 +1194,7 @@ export default function Feed(): JSX.Element {
                 aria-selected={selection() === `custom:${v.id}`}
                 onClick={() => choose(`custom:${v.id}`)}
               >
-                <Icon name={feedIconName(v.draft.icon)} size={16} />
+                <Icon name={feedIconName(v.draft.icon)} size={20} />
                 {v.draft.name}
               </button>
             )}
@@ -1238,7 +1240,7 @@ export default function Feed(): JSX.Element {
 
       <Show when={selection() !== "discover" && feedRefreshFailed()}>
         <div class="lk-feed-banner" role="alert">
-          <Icon name="info" size={18} />
+          <Icon name="warning" size={20} />
           <span>{t("feed.refresh_failed")}</span>
           <button
             type="button"
@@ -1346,7 +1348,7 @@ export default function Feed(): JSX.Element {
                           openMenuAt(item.ref, r.right - 200, r.bottom + 4);
                         }}
                       >
-                        <Icon name="more" size={18} />
+                        <Icon name="ellipsis" size={20} />
                       </button>
                       <div class="lk-feed-source-avatar" aria-hidden="true">
                         <Avatar
@@ -1545,7 +1547,7 @@ export default function Feed(): JSX.Element {
                   open(m().ref);
                 }}
               >
-                <Icon name="chevron" size={16} />
+                <Icon name="arrow-up-right" size={20} />
                 {t("common.open")}
               </button>
               {/* A channel is one-way: its posts have no reply. A row of an
@@ -1560,7 +1562,7 @@ export default function Feed(): JSX.Element {
                     reply(m().ref);
                   }}
                 >
-                  <Icon name="reply" size={16} />
+                  <Icon name="reply" size={20} />
                   {t("chat.message.reply")}
                 </button>
               </Show>
@@ -1573,7 +1575,7 @@ export default function Feed(): JSX.Element {
                   copyText(m().ref);
                 }}
               >
-                <Icon name="copy" size={16} />
+                <Icon name="copy" size={20} />
                 {t("common.copy")}
               </button>
               {/* UX `attachments.md` section 11a: never a poll or checklist,
@@ -1587,7 +1589,7 @@ export default function Feed(): JSX.Element {
                     setForwarding(m().ref);
                   }}
                 >
-                  <Icon name="forward" size={16} />
+                  <Icon name="forward" size={20} />
                   {t("chat.message.forward")}
                 </button>
               </Show>
@@ -1602,7 +1604,7 @@ export default function Feed(): JSX.Element {
                   void hideFromFeeds(id);
                 }}
               >
-                <Icon name="eyeOff" size={16} />
+                <Icon name="eye-slash" size={20} />
                 {t("feed.action.hide")}
               </button>
             </div>

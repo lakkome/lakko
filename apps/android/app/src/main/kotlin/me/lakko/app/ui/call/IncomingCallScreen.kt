@@ -19,10 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.CallEnd
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -42,6 +38,9 @@ import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.LakkoDark
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The incoming call screen of `docs/ux/calls.md` section 2.2, with no opinion
@@ -123,11 +122,11 @@ internal fun IncomingCallContent(
                         contentDescription = e2eeLabel
                     },
                 ) {
-                    Icon(
-                        Icons.Filled.Lock,
+                    LkIcon(
+                        R.drawable.ic_lk_lock_fill,
                         contentDescription = null,
                         tint = LakkoDark.textMuted,
-                        modifier = Modifier.size(14.dp),
+                        size = LkIconSize.Mark,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -149,7 +148,7 @@ internal fun IncomingCallContent(
                     onClick = onDecline,
                     container = LakkoDark.danger,
                     contentColor = LakkoDark.dangerFg,
-                    icon = Icons.Filled.CallEnd,
+                    icon = R.drawable.ic_lk_phone_down_fill,
                     label = t("call.incoming.decline"),
                     spokenLabel = t(
                         if (video) "call.incoming.decline_video_a11y" else "call.incoming.decline_voice_a11y",
@@ -176,7 +175,8 @@ internal fun IncomingCallContent(
                     onClick = { permissions.request(video = video) { v -> onAccept(v) } },
                     container = LakkoDark.success,
                     contentColor = LakkoDark.accentFg,
-                    icon = Icons.Filled.Call,
+                    // A video call is accepted with the camera glyph, as on iOS and web.
+                    icon = if (video) R.drawable.ic_lk_video_fill else R.drawable.ic_lk_phone_fill,
                     label = t("call.incoming.accept"),
                     spokenLabel = t(
                         if (video) "call.incoming.accept_video_a11y" else "call.incoming.accept_voice_a11y",
@@ -193,7 +193,7 @@ private fun RoundCallButton(
     onClick: () -> Unit,
     container: androidx.compose.ui.graphics.Color,
     contentColor: androidx.compose.ui.graphics.Color,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     label: String,
     spokenLabel: String,
 ) {
@@ -210,7 +210,8 @@ private fun RoundCallButton(
                 .size(72.dp)
                 .clearAndSetSemantics { contentDescription = spokenLabel },
         ) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(28.dp))
+            // 32 in the 72 circle, the iOS proportion.
+            LkIcon(icon, contentDescription = null, size = 32.dp)
         }
         Spacer(Modifier.height(8.dp))
         // The label carries the meaning so nothing rests on colour alone

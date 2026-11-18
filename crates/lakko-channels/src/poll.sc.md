@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-A channel subscriber is not an MLS member, so a channel poll vote is a row at the channel service, keyed by the per-poll tag of an anonymous credential (`lakko-anon-cred`, ADR-0090 section 4). The service must count votes without learning which option a label is, and a captured vote request must not be replayable as a retract or to restore a vote its voter has changed. Clients and the service build the bound message from one definition here, so they cannot disagree on its bytes.
+A channel subscriber is not an MLS member, so a channel poll vote is a row at the channel service, keyed by the per-poll tag of an anonymous credential (`lakko-anon-cred`, ADR-0092 section 4). The service must count votes without learning which option a label is, and a captured vote request must not be replayable as a retract or to restore a vote its voter has changed. Clients and the service build the bound message from one definition here, so they cannot disagree on its bytes.
 
 ## Public contract
 
@@ -43,7 +43,7 @@ The poll (channel and post) is not in the message: the presentation's Fiat-Shami
 
 - It verifies no presentation (`lakko-anon-cred`) and keeps no ordering state (the service).
 - It does not carry the tally in a post: where the frozen tally rides in the edited post's plaintext is the chat envelope's business.
-- The tally is the publisher's reading; decoding checks only its shape (ADR-0090 4.6).
+- The tally is the publisher's reading; decoding checks only its shape (ADR-0092 4.6).
 
 ## Attacker exposure
 
@@ -51,4 +51,4 @@ The frozen tally is written by a publisher and decoded by every subscriber: fuzz
 
 ## References
 
-ADR-0090 sections 4.3, 4.5, 4.6; ADR-0087 section 13a (reaction key).
+ADR-0092 sections 4.3, 4.5, 4.6; ADR-0087 section 13a (reaction key).

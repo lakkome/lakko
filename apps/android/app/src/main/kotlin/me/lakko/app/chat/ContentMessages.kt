@@ -9,7 +9,7 @@ import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.MessageContent
 
 /**
- * ADR-0090 — the ops a poll or checklist row collects. Never a bubble: each is
+ * ADR-0092 — the ops a poll or checklist row collects. Never a bubble: each is
  * kept on its target row and the core's fold turns them into what is drawn.
  */
 public enum class ContentOpKind {
@@ -55,7 +55,7 @@ public data class ContentOpRecord(
     override fun hashCode(): Int = (opId * 31 + kind.ordinal).toInt()
 }
 
-/** ADR-0090 section 3.6 — a ballot row read from the journal, kept on its poll. */
+/** ADR-0092 section 3.6 — a ballot row read from the journal, kept on its poll. */
 public data class BallotRecord(val messageId: Long, val createdAtMs: Long, val row: ByteArray) {
     override fun equals(other: Any?): Boolean = other is BallotRecord && other.messageId == messageId
     override fun hashCode(): Int = messageId.hashCode()
@@ -82,7 +82,7 @@ public data class ContentExtras(
     /** [uniffi.lakko_ffi_uniffi.PollRing.encode] of an anonymous poll's ring. */
     val ring: ByteArray? = null,
     val ownBallot: OwnBallot? = null,
-    /** ADR-0090 section 3.11 — the state a history bundle or the vault
+    /** ADR-0092 section 3.11 — the state a history bundle or the vault
      *  carried for a row this device has no ops of: drawn as is. */
     val snapshot: uniffi.lakko_ffi_uniffi.ContentState? = null,
 ) {
@@ -191,7 +191,7 @@ internal fun persistSnapshot(state: uniffi.lakko_ffi_uniffi.ContentState): Persi
 }
 
 /**
- * ADR-0090 section 3.11 — what a history bundle or the vault carries for a
+ * ADR-0092 section 3.11 — what a history bundle or the vault carries for a
  * content row: the content and its folded state.
  */
 internal fun contentMessageOf(msg: ChatMessage, groupId: ByteArray?, nowMs: Long): uniffi.lakko_ffi_uniffi.ContentMessage? {
@@ -350,7 +350,7 @@ public data class PollView(
 )
 
 /**
- * ADR-0090 section 3.2 / 3.6 — fold a poll row. A non-anonymous poll folds its
+ * ADR-0092 section 3.2 / 3.6 — fold a poll row. A non-anonymous poll folds its
  * named votes (`foldPoll`); an anonymous one verifies each ballot under its ring
  * and folds the counted ballots (`foldPollBallots`). [nowMs] decides a close by
  * time. Any core failure returns an empty, open view rather than throwing.
@@ -551,7 +551,7 @@ public fun articleOf(msg: ChatMessage): Pair<uniffi.lakko_ffi_uniffi.Article, Li
 
 /**
  * The catalog key and arguments of a one-line summary of a content message, for
- * the chat list and a notification (ADR-0090 section 1: `Poll: {question}`).
+ * the chat list and a notification (ADR-0092 section 1: `Poll: {question}`).
  */
 public fun contentSummary(content: MessageContent): Pair<String, Map<String, String>> = when (content) {
     is MessageContent.Poll -> "preview.poll" to mapOf("question" to content.poll.body.question)
@@ -564,7 +564,7 @@ public fun contentSummary(content: MessageContent): Pair<String, Map<String, Str
 /**
  * Whether a failed row carrying [content] can be retried as it is. An
  * anonymous poll is bound to the roster it was composed under (its ring
- * version 0 hash, ADR-0090 section 3.4); once the roster changed, receivers
+ * version 0 hash, ADR-0092 section 3.4); once the roster changed, receivers
  * would refuse its ring, so the retry is refused rather than sent. [ringMatches]
  * says whether the current roster still gives that hash. Every other row
  * (a location, contact card, article, public poll, checklist, text) is.
@@ -627,7 +627,7 @@ internal fun extendRing(ringBytes: ByteArray, rosterKeys: List<ByteArray>): Byte
 }
 
 /**
- * ADR-0090 section 3.6 — an anonymous ballot leaves the device after a uniform
+ * ADR-0092 section 3.6 — an anonymous ballot leaves the device after a uniform
  * random wait of 0..=10 s, so the moment it arrives says less about who cast
  * it. [random] is replaceable for tests.
  */

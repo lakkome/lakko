@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.6 — casting an anonymous ballot off the UI thread: the
+ * ADR-0092 section 3.6 — casting an anonymous ballot off the UI thread: the
  * linkable one-out-of-many proof costs a measurable fraction of a second.
  * The worker gets the poll's keys, the ring, the voter's 32-byte Ed25519
  * seed and the choices, and returns the sealed row; it keeps nothing.

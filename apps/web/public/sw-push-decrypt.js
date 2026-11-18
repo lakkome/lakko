@@ -177,6 +177,9 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {{ fromSeed: (seed: Uint8Array) => any }} Identity
  * @property {{ load: (identity: any, groupId: Uint8Array) => any }} Group
  * @property {(bytes: Uint8Array) => any} parseBodyEnvelope
+ * @property {(card: Uint8Array) => any} [openChannelInviteCard]
+ *   ADR-0087 section 14 — opens a channel invitation card offline, for the
+ *   notification body ("Invitation to {channel}"). Read only.
  * @property {(bytes: Uint8Array) => any} [decodePushRoutingSecret]
  *   ADR-0042 / ADR-0044 — the fail-closed push-routing-secret envelope
  *   codec. THROWS when the bytes are not that envelope. Used only to
@@ -756,7 +759,7 @@ export async function decryptPushWake(wake, deps) {
     let held = null;
     let unreadableRows = 0;
     for (const message of messages) {
-      // ADR-0090 — an anonymous ballot row is not an MLS message: never a
+      // ADR-0092 — an anonymous ballot row is not an MLS message: never a
       // preview, never counted as unreadable.
       if (isPollBallotRow(deps.wasm, message.payload)) continue;
       let processed;
@@ -1208,7 +1211,18 @@ function isServiceEnvelope(wasm, bytes) {
   //      channel seeds handed to a new publisher and a publisher's rotate
   //      request. They belong on a PublisherGroup journal only; here they are
   //      classified and never opened, kept or shown (C-59).
-  if (isDispatchKind(wasm, bytes, ["ChannelEpochSeeds", "ChannelRotateRequest"])) return true;
+  //      ADR-0090: a co-publisher's device request and the admission mark,
+  //      the same way.
+  if (
+    isDispatchKind(wasm, bytes, [
+      "ChannelEpochSeeds",
+      "ChannelRotateRequest",
+      "PublisherDeviceRequest",
+      "ChannelAdmissionMark",
+    ])
+  ) {
+    return true;
+  }
   // 13. A contact request sealed to one member of the group
   //     (`docs/ux/who-can-find-me.md` section 6.4). Suppressed, never opened:
   //     only the app tries it, and only the device it is sealed to can.
@@ -2399,7 +2413,7 @@ function reactionFromProcessed(wasm, processed, ownKeyB64) {
  *
  * @param {DecryptWasm} wasm
  * @param {any} processed
- * @param {{ attachments: readonly string[], unsupportedMessage: string }} words
+ * @param {{ attachments: readonly string[], unsupportedMessage: string, newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
  * @returns {string | null}
  */
 function previewFromProcessed(wasm, processed, words) {
@@ -2437,13 +2451,18 @@ function previewFromProcessed(wasm, processed, words) {
     if (kind === "unsupported") return words.unsupportedMessage;
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
+      // ADR-0087 section 14, UX 15.2 — a message carrying a channel
+      // invitation card reads like its card ("Invitation to {channel}"),
+      // never as its text, which is the `/g/` link with its secret.
+      const card = parsed.channelInvite;
+      if (card instanceof Uint8Array && card.length > 0) return channelInvitePreview(wasm, card, words);
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      if (text.length > 0) return truncate(text);
+      if (text.length > 0) return truncate(withoutGroupLinkSecret(text));
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
       if (count > 0) return attachmentsLine(words, count);
       return null;
     }
-    // ADR-0090 — a poll, checklist, location, contact card or article: its
+    // ADR-0092 — a poll, checklist, location, contact card or article: its
     // one-line preview, never JSON. Ops on them (votes, ticks, closes, added
     // items, edits) fall through to `null` below, like reactions.
     if (kind === "poll" || kind === "checklist" || kind === "location" || kind === "contact-card" || kind === "article") {
@@ -2463,7 +2482,69 @@ function previewFromProcessed(wasm, processed, words) {
 }
 
 /**
- * ADR-0090 — the preview line of a content message from the stored words.
+ * The body for a message carrying a channel invitation card (ADR-0087
+ * section 14; UX 15.2 for a publisher invitation): the card opened offline
+ * through the core, the channel's name in the stored words. A card that does
+ * not open reads as a new message; the link text is never shown.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} card
+ * @param {{ newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
+ * @returns {string}
+ */
+export function channelInvitePreview(wasm, card, words) {
+  const generic = typeof words.newMessage === "string" && words.newMessage.length > 0 ? words.newMessage : "New message";
+  const open = /** @type {any} */ (wasm).openChannelInviteCard;
+  if (typeof open !== "function") return generic;
+  let opened;
+  try {
+    opened = open(card);
+  } catch {
+    return generic;
+  }
+  try {
+    const preview = opened.preview;
+    const channelId = preview?.channelId;
+    if (!(channelId instanceof Uint8Array) || channelId.length !== 16) return generic;
+    const named = typeof preview.groupName === "string" ? preview.groupName.trim() : "";
+    const fallback = words.channelFallbackName ?? "Channel";
+    const name = named.length > 0 ? named : fallback;
+    const publisher = preview.subscriber === undefined || preview.subscriber === null;
+    const template = publisher
+      ? (words.publisherInvite ?? "Invitation to publish in \u0001")
+      : (words.channelInvite ?? "Invitation to \u0001");
+    return truncate(template.replace("\u0001", name));
+  } finally {
+    freeQuietly(opened);
+  }
+}
+
+/**
+ * A message that is one `/g/` link and carries no card (an older message, a
+ * link pasted as text) is notified as the link WITHOUT its secret: what
+ * follows `#` opens the invitation and never reaches a notification, as on
+ * the Chats row (`chat/channel-invite-preview.ts`). Any other text is
+ * returned unchanged.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function withoutGroupLinkSecret(text) {
+  const trimmed = text.trim();
+  if (trimmed === "" || /\s/.test(trimmed)) return text;
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return text;
+  }
+  if (!url.pathname.startsWith("/g/") || url.hash === "") return text;
+  const at = trimmed.indexOf("#");
+  return at < 0 ? text : trimmed.slice(0, at);
+}
+
+/**
+ * ADR-0092 — the preview line of a content message from the stored words.
  * @param {any} content
  * @param {any} words
  * @returns {string | null}
@@ -2489,7 +2570,7 @@ function contentPreviewLine(content, words) {
 }
 
 /**
- * ADR-0090 — whether a journal row is an anonymous poll ballot.
+ * ADR-0092 — whether a journal row is an anonymous poll ballot.
  * @param {any} wasm
  * @param {Uint8Array} payload
  */

@@ -49,7 +49,7 @@ export function AttachScreen(props: {
             title={t("common.close")}
             onClick={() => props.onClose()}
           >
-            <Icon name="close" />
+            <Icon name="xmark" />
           </button>
           <h2 id={titleId}>{props.title}</h2>
         </header>

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 3 anonymous group-poll ballots on the wasm surface. The
+//! ADR-0092 section 3 anonymous group-poll ballots on the wasm surface. The
 //! UniFFI mirror is `lakko-ffi-uniffi/src/ballot.rs`; every rule is
 //! `lakko-ballot`'s. Lists of 32-byte keys cross flat-concatenated.
 //!

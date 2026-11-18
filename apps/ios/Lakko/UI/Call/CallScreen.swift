@@ -99,8 +99,7 @@ private struct EncryptionChip: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 5) {
-                Image(systemName: "lock.fill")
-                    .font(.caption2)
+                LkIconView(.lockFill, size: 14, relativeTo: .caption2)
                 Text(l10n.t("call.encryption.chip"))
                     .font(.caption2)
                     .fontWeight(.semibold)
@@ -135,8 +134,7 @@ private struct EncryptionSheet: View {
     var body: some View {
         VStack(spacing: 20) {
             VStack(spacing: 8) {
-                Image(systemName: "lock.fill")
-                    .font(.title2)
+                LkIconView(.lockFill, size: 26, relativeTo: .title2)
                     .foregroundColor(Color.lakkoSuccess)
                 Text(l10n.t("call.encryption.title"))
                     .font(.title3)
@@ -434,8 +432,7 @@ private struct ParticipantTile: View {
                 // what a peer with no bandwidth looks like.
                 VStack {
                     HStack(spacing: 6) {
-                        Image(systemName: "lock.slash.fill")
-                            .font(.caption)
+                        LkIconView(.lockSlashFill, size: 14, relativeTo: .caption)
                         Text(UndecryptableMedia.tileLabel)
                             .font(.caption)
                             .lineLimit(1)
@@ -544,8 +541,7 @@ private struct ParticipantTile: View {
             Button {
                 onPin?()
             } label: {
-                Image(systemName: "pin")
-                    .font(.system(size: 15, weight: .semibold))
+                LkIconView(.pin, size: 20, relativeTo: nil)
                     .foregroundColor(Color.lakkoText)
                     .frame(width: 32, height: 32)
                     .background(Color.lakkoBackground.opacity(0.6))
@@ -564,8 +560,7 @@ private struct ParticipantTile: View {
                 onPin?()
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2)
+                    LkIconView(.pinFill, size: 14, relativeTo: .caption2)
                     Text(l10n.t("call.participant.pinned"))
                         .font(.caption)
                         .lineLimit(1)
@@ -592,10 +587,9 @@ private struct ParticipantTile: View {
     private var nameStrip: some View {
         HStack(spacing: 6) {
             if !participant.micOn {
-                Image(systemName: "mic.slash.fill")
-                    .font(.caption)
+                LkIconView(.micSlashFill, size: 14, relativeTo: .caption,
+                           label: l10n.t("call.participant.muted_a11y"))
                     .foregroundColor(Color.lakkoDanger)
-                    .accessibilityLabel(l10n.t("call.participant.muted_a11y"))
             }
             Text(CallScreenPresentation.tileName(displayLabel, tileWidth: size.width))
                 .lineLimit(1)
@@ -607,10 +601,8 @@ private struct ParticipantTile: View {
                 QualityDot(tier: participant.quality, interactive: false, onTap: {})
             }
             if isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.caption2)
+                LkIconView(.pinFill, size: 14, relativeTo: .caption2, label: l10n.t("call.participant.pinned"))
                     .foregroundColor(Color.lakkoAccent)
-                    .accessibilityLabel(l10n.t("call.participant.pinned"))
             }
         }
         .font(.caption)
@@ -669,7 +661,7 @@ private struct ParticipantTile: View {
                 InitialsAvatar(
                     name: displayLabel, identity: participant.id,
                     size: CallScreenPresentation.tileInitialsDiameter(tileSize: size),
-                    placeholderSymbol: "person.fill",
+                    placeholderIcon: .personFill,
                     photo: participant.isLocal
                         ? .own : state.personKeys[participant.id].map(AvatarPhoto.person))
                     .padding(.bottom, min(24, size.height * 0.2))
@@ -968,7 +960,7 @@ private struct ParticipantListDrawer: View {
                     .foregroundColor(Color.lakkoText)
                 Spacer()
                 Button(action: { state.setParticipantListOpen(false) }) {
-                    Image(systemName: "xmark")
+                    LkIconView(.xmark, size: 20)
                         .foregroundColor(Color.lakkoTextMuted)
                 }
                 .accessibilityLabel(l10n.t("call.participants.close_a11y"))
@@ -982,7 +974,7 @@ private struct ParticipantListDrawer: View {
                     ForEach(state.participants) { p in
                         HStack(spacing: 10) {
                             InitialsAvatar(
-                                name: p.displayName, identity: p.id, size: 28, placeholderSymbol: "person.fill",
+                                name: p.displayName, identity: p.id, size: 28, placeholderIcon: .personFill,
                                 photo: p.isLocal ? .own : state.personKeys[p.id].map(AvatarPhoto.person))
                             if CallScreenPresentation.connectionIsWorthShowing(p.quality) {
                                 QualityDot(tier: p.quality, interactive: false, onTap: {})
@@ -992,9 +984,8 @@ private struct ParticipantListDrawer: View {
                                 .foregroundColor(Color.lakkoText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             if !p.micOn {
-                                Image(systemName: "mic.slash.fill")
+                                LkIconView(.micSlashFill, size: 14, relativeTo: .caption, label: l10n.t("call.participant.muted_a11y"))
                                     .foregroundColor(Color.lakkoDanger)
-                                    .accessibilityLabel(l10n.t("call.participant.muted_a11y"))
                             }
                         }
                         .padding(.vertical, 10)
@@ -1870,7 +1861,7 @@ public struct CallScreen: View {
             Spacer(minLength: 0)
             InitialsAvatar(
                 name: state.peerName ?? "", identity: tintIdentity, size: 132,
-                placeholderSymbol: "person.fill",
+                placeholderIcon: .personFill,
                 photo: peerKey.map(AvatarPhoto.person))
             CallStatusLine(
                 name: displayName,
@@ -1945,7 +1936,7 @@ public struct CallScreen: View {
                 } else {
                     InitialsAvatar(
                         name: state.peerName ?? "", identity: tintIdentity, size: width * 0.5,
-                        placeholderSymbol: "person.fill",
+                        placeholderIcon: .personFill,
                         photo: peerKey.map(AvatarPhoto.person))
                 }
             }
@@ -1974,8 +1965,7 @@ public struct CallScreen: View {
                 collapsing = true
                 onCollapse()
             } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 17, weight: .semibold))
+                LkIconView(.chevronDown, size: 24, relativeTo: nil)
                     .foregroundStyle(.white)
                     .frame(width: 44, height: 44)
                     .background(Circle().fill(Color.white.opacity(0.12)))
@@ -2041,10 +2031,9 @@ public struct CallScreen: View {
                                 LocalCameraCapture.active?.deviceId
                         }
                     } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath.camera")
-                            .font(.system(size: 13, weight: .semibold))
+                        LkIconView(.cameraFlip, size: 20, relativeTo: nil)
                             .foregroundStyle(.white)
-                            .frame(width: 30, height: 30)
+                            .frame(width: 36, height: 36)
                             .background(Circle().fill(Color.black.opacity(0.45)))
                     }
                     .buttonStyle(.plain)
@@ -2091,7 +2080,7 @@ public struct CallScreen: View {
             let on = local?.micOn ?? true
             CallControlButton(
                 control: .microphone,
-                systemImage: on ? "mic.fill" : "mic.slash.fill",
+                icon: on ? .micFill : .micSlashFill,
                 on: on,
                 enabled: enabled,
                 action: {
@@ -2102,7 +2091,7 @@ public struct CallScreen: View {
             let on = local?.camOn ?? false
             CallControlButton(
                 control: .camera,
-                systemImage: on ? "video.fill" : "video.slash.fill",
+                icon: on ? .videoFill : .videoSlashFill,
                 on: on,
                 enabled: enabled,
                 busy: state.videoPublishState == .starting,
@@ -2120,7 +2109,7 @@ public struct CallScreen: View {
                 canInvite: offer != nil, hasOthers: !remoteParticipants.isEmpty)
             CallControlButton(
                 control: .participants,
-                systemImage: "person.2.fill",
+                icon: .person2Fill,
                 on: state.participantListOpen,
                 enabled: enabled,
                 // While the call's link is being made the control shows that
@@ -2146,7 +2135,7 @@ public struct CallScreen: View {
             // anyone answers.
             CallControlButton(
                 control: .settings,
-                systemImage: "gearshape.fill",
+                icon: .gearFill,
                 on: false,
                 enabled: enabled,
                 action: {
@@ -2156,7 +2145,7 @@ public struct CallScreen: View {
         case .end:
             CallControlButton(
                 control: .end,
-                systemImage: "phone.down.fill",
+                icon: .phoneDownFill,
                 on: false,
                 enabled: true,
                 action: pressEnd)

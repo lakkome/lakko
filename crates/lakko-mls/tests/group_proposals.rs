@@ -2355,6 +2355,75 @@ fn a_landed_joiner_is_reaped_from_every_admins_queue() {
     assert!(s.bob_g.pending_proposals().is_empty());
 }
 
+/// A request approved by one admin must not come back on another admin's
+/// device once the joiner has LEFT the group (seen on a Pixel 2026-11-10: the
+/// request reappeared with Approve and Reject; approving it would have put the
+/// person back). The membership filter alone hid it only while the joiner was a
+/// member; the reap at the merge removes it for good, and the removal is in the
+/// storage a restart reads back.
+#[test]
+fn a_joiner_who_left_does_not_return_to_an_admins_queue() {
+    let mut s = scene(0x33);
+    let dave = Identity::from_seed(&[0xD6u8; 64]).expect("dave");
+    let req = dave
+        .create_external_join_proposal(&s.alice_g.group_id(), s.alice_g.epoch())
+        .expect("dave asks to join");
+    for (g, id) in [(&mut s.alice_g, &s.alice), (&mut s.bob_g, &s.bob)] {
+        g.process_incoming_verifying_roles(id, &req)
+            .expect("an admin sees the request");
+    }
+    let approval = s
+        .alice_g
+        .approve_external_join(&s.alice, dave.signature_public_key())
+        .expect("alice approves");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &approval)
+        .expect("bob takes alice's approval");
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("sweep")
+        .expect("a commit");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &wire(sweep.commit))
+        .expect("bob applies the add");
+    assert!(is_member(&s.bob_g, &dave));
+
+    // Dave leaves: alice removes him and sweeps; bob applies it.
+    let dave_leaf = leaf_of(&s.alice_g, dave.signature_public_key());
+    let remove = s
+        .alice_g
+        .propose_remove_member(&s.alice, dave_leaf)
+        .expect("alice proposes the removal");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &remove)
+        .expect("bob stores it");
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("sweep")
+        .expect("a commit");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &wire(sweep.commit))
+        .expect("bob applies the removal");
+    assert!(!is_member(&s.bob_g, &dave));
+
+    assert!(
+        s.bob_g.pending_external_joins().is_empty(),
+        "a settled request does not come back when the joiner leaves",
+    );
+
+    // Nor after a restart: the reap reached the stored row.
+    let group_id = s.bob_g.group_id();
+    let snapshot = s.bob.snapshot_storage().expect("snapshot");
+    let bob = Identity::from_seed(&[0xB0 ^ 0x33; 64]).expect("bob again");
+    bob.restore_storage(&snapshot).expect("restore");
+    let bob_g = Group::load(&bob, &group_id)
+        .expect("load")
+        .expect("group present");
+    assert!(bob_g.pending_external_joins().is_empty());
+}
+
 // ============================================================================
 // ADR-0053: the committer registers the Delivery Service access key of the
 // epoch its sweep moves to BEFORE publishing the commit, so it needs that

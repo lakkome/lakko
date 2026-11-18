@@ -41,7 +41,7 @@ public data class PersistedHeldSend(
     val attachments: List<PersistedAttachment> = emptyList(),
     val reply: PersistedReply? = null,
     val forward: PersistedForward? = null,
-    /** ADR-0090 — a poll, checklist, location, contact card or article,
+    /** ADR-0092 — a poll, checklist, location, contact card or article,
      *  as a composed content envelope (re-parsed on load). */
     val contentEnvelopeB64: String? = null,
 )
@@ -73,7 +73,7 @@ internal fun heldRowUsable(row: PersistedHeldSend): Boolean =
     HEX_ID.matches(row.conversationHex) &&
         HEX_ID.matches(row.groupIdHex) &&
         row.heldAtMs >= 0 &&
-        // ADR-0090 / UX 11a — a held location, contact card or article
+        // ADR-0092 / UX 11a — a held location, contact card or article
         // (a forward into a one-to-one whose successor is not here yet) has
         // no text and may have no attachment; its content is the message.
         (row.text.isNotEmpty() || row.attachments.isNotEmpty() || !row.contentEnvelopeB64.isNullOrEmpty())

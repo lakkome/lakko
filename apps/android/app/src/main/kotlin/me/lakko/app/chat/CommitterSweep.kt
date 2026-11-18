@@ -458,6 +458,13 @@ internal class SweepPorts(
      * never delays an obligation (C-67), only the next attempt.
      */
     val mayStage: () -> Boolean = { true },
+    /**
+     * ADR-0091 phase 1 — a row the verdict apply skipped: [row], the failure,
+     * and the group's epoch read just before the row. The adapter writes the
+     * identifier-free failed-row line (verdict skip); this file touches no
+     * Android API.
+     */
+    val logSkippedRow: (row: SweepJournalRow, failure: Throwable, localEpoch: ULong?) -> Unit = { _, _, _ -> },
 )
 
 /** What a failed commit of a staged sweep means ([SweepPorts.classifyCommitFailure]). */
@@ -1015,6 +1022,11 @@ private suspend fun adjudicate(
             // before either ADR-0022's role gate or ADR-0045's receipt gate can
             // refuse).
             gate.markTouched()
+            val localBeforeRow = try {
+                ports.group.epoch()
+            } catch (_: Throwable) {
+                null
+            }
             try {
                 // The port applies AND surfaces — see [SweepGroupPort.applyIncoming].
                 // These rows are the only ones the poll will never see again,
@@ -1022,12 +1034,19 @@ private suspend fun adjudicate(
                 // row goes over (the DS id and timestamp are what let the adapter
                 // build a timeline event).
                 ports.group.applyIncoming(row)
-            } catch (_: Throwable) {
+            } catch (failure: Throwable) {
                 // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
                 // attribution), a role-refused commit, or one of our own rows.
-                // Skipped, exactly as the poll loop skips it — and none of those
-                // advance the epoch, which is the only thing the verdict reads.
-                // A skipped row was never decrypted, so it surfaces nothing.
+                // Skipped — and none of those advance the epoch, which is the
+                // only thing the verdict reads. A skipped row was never
+                // decrypted, so it surfaces nothing. Not held (ADR-0091 phase
+                // 1): since ADR-0081 a registered commit cannot sit below this
+                // device's own registered commit. Logged, never silently.
+                try {
+                    ports.logSkippedRow(row, failure, localBeforeRow)
+                } catch (_: Throwable) {
+                    // A log line never changes the verdict.
+                }
             }
             lastApplied = row.id
         }

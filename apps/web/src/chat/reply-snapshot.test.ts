@@ -32,6 +32,19 @@ describe("replySnapshotFor (the strip, taken when Reply is chosen)", () => {
     expect(s).toEqual({ author: "Anna", excerpt: "first line second line" });
   });
 
+  // Base scenario 26 (2026-11-13): a channel invitation's text is the `/g/`
+  // link with its secret; the quote names the invitation instead.
+  it("quotes a channel invitation by its line, never by its link", () => {
+    const link = "https://test.lakko.me/g/AAAAAAAA#fakesecretxyz1";
+    const s = replySnapshotFor(
+      { text: link, attachments: [], invitationLine: "Invitation to Walk 26 private" },
+      "Anna",
+      bubbleOf,
+    );
+    expect(s).toEqual({ author: "Anna", excerpt: "Invitation to Walk 26 private" });
+    expect(replySnapshotFor({ text: "hi", attachments: [], invitationLine: null }, "Anna", bubbleOf).excerpt).toBe("hi");
+  });
+
   it("keeps the author label exactly as the timeline names them", () => {
     expect(replySnapshotFor({ text: "hi", attachments: [] }, "You", bubbleOf).author).toBe("You");
   });

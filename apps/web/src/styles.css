@@ -105,6 +105,42 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* The "new version" banner (`sw/SwUpdateBanner.tsx`) owns a strip at the
+   bottom of the viewport while it shows, and the page ends above it, so it
+   never sits on a form's button, a composer or a list row. The fixed
+   elements that sit near the bottom move up with it. */
+.lk-update-banner {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 1000;
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  border-top: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-1);
+  padding: 0.6rem 1rem calc(0.6rem + env(safe-area-inset-bottom));
+}
+.lk-update-banner-inner {
+  max-width: 32rem;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.lk-update-banner-text {
+  flex: 1;
+  font-size: 0.9rem;
+}
+html[data-update-banner] #root {
+  height: calc(100% - var(--lk-update-banner-h, 0px));
+}
+html[data-update-banner] .lk-toast {
+  bottom: calc(20px + var(--lk-update-banner-h, 0px));
+}
+html[data-update-banner] body .lk-open-in-app {
+  inset-block-end: calc(32px + var(--lk-update-banner-h, 0px));
+}
+
 /* User-supplied strings (message text, names, ids, links) never widen a
    pane: they break anywhere. Rows that ellipsise keep `nowrap` on top of it. */
 .lk-chat-scroll,
@@ -419,6 +455,12 @@ a:focus-visible {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+}
+/* A pane that is the whole page (Calls): it fills the height and has no
+   divider, so the page below its content is not a different colour. */
+.lk-pane-page {
+  height: 100%;
+  border-inline-end: none;
 }
 .lk-pane-head {
   display: flex;
@@ -1073,6 +1115,12 @@ a.lk-row.active {
 .lk-card-row-action {
   flex: 0 0 auto;
 }
+/* A small line under a card, about the whole card. */
+.lk-card-note {
+  font-size: 13px;
+  color: var(--surface-muted);
+  margin: 8px 16px 0;
+}
 .lk-stack {
   display: flex;
   flex-direction: column;
@@ -1175,6 +1223,10 @@ a.lk-row.active {
 @media (max-width: 720px) {
   .lk-settings {
     grid-template-columns: 1fr;
+  }
+  /* One column: the nav fills the width, so it has no divider. */
+  .lk-settings-nav {
+    border-inline-end: none;
   }
   .lk-settings[data-open="true"] > .lk-settings-nav {
     display: none;
@@ -1878,6 +1930,33 @@ a.ghost.small.lk-wide-only {
   height: 40px;
   border-radius: 10px;
 }
+/* A compact composer's send (pending chat, comments): the bare
+   arrow-in-circle glyph, accent when sendable and muted when not, as on iOS
+   and Android. */
+.lk-send-glyph {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.lk-send-glyph:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent-strong);
+}
+.lk-send-glyph:disabled {
+  color: var(--surface-muted);
+  opacity: 1;
+  cursor: default;
+}
 .lk-composer .lk-send {
   border-radius: 10px;
   background: var(--accent);
@@ -2036,29 +2115,32 @@ a.ghost.small.lk-wide-only {
    stay in one column. */
 .lk-select-mark,
 .lk-select-mark-slot {
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
   margin-right: auto;
   align-self: center;
 }
+/* The mark is the set's `circle` / `checkmark-circle-fill`, as on iOS and
+   Android: muted when unselected, accent when selected. */
 .lk-select-mark {
   min-height: 0;
   padding: 0;
   border-radius: var(--radius-pill);
-  border: 2px solid var(--surface-faint);
+  border: none;
   background: transparent;
-  color: var(--accent-fg);
+  color: var(--surface-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 .lk-select-mark:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: transparent;
+  color: var(--surface-fg);
 }
-.lk-select-mark[aria-checked="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
+.lk-select-mark[aria-checked="true"],
+.lk-select-mark[aria-checked="true"]:hover:not(:disabled) {
+  color: var(--accent);
 }
 .lk-select-mark:focus-visible {
   outline: 2px solid var(--accent);
@@ -2509,6 +2591,12 @@ html[data-open-in-app] .lk-feed-import {
   margin: 4px 6px;
   background: var(--surface-border);
 }
+/* A separator with nothing above it (a channel row's menu opens on Add to
+   folder) draws a stray line; base scenario 29, 2026-11-11. */
+.lk-menu > .lk-menu-sep:first-child,
+.lk-menu > .lk-menu-subanchor:first-child > .lk-menu-sep:first-child {
+  display: none;
+}
 
 /* A selectable contact row (New group). */
 .lk-row.pick {
@@ -2806,9 +2894,6 @@ html[data-open-in-app] .lk-feed-import {
   border-color: transparent;
   color: var(--accent-fg);
   transform: translateX(-50%) scale(1.1);
-}
-.lakko-lock-target .lakko-lock-up {
-  transform: rotate(-90deg);
 }
 @media (prefers-reduced-motion: reduce) {
   .lakko-lock-target { transition: none; }
@@ -4905,6 +4990,11 @@ button.lk-call-chip:focus-visible {
   gap: 12px;
   text-align: center;
 }
+.lk-encryption-sheet-lock {
+  display: inline-flex;
+  justify-content: center;
+  color: var(--success);
+}
 .lk-encryption-sheet h2 {
   margin: 0;
   font-size: 17px;
@@ -5726,8 +5816,8 @@ button.lk-call-chip:focus-visible {
   position: absolute;
   right: 6px;
   bottom: 6px;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   min-height: 0;
   padding: 0;
   display: inline-flex;
@@ -6223,10 +6313,6 @@ button.lk-call-chip:focus-visible {
 .lk-call-chat-close:hover {
   background: var(--surface-hover);
 }
-/* The shared chevron points to the end side; down closes the sheet. */
-.lk-call-chat-close.down svg {
-  transform: rotate(90deg);
-}
 .lk-call-chat-body {
   position: relative;
   flex: 1 1 auto;
@@ -6400,8 +6486,8 @@ button.lk-call-chip:focus-visible {
 }
 .lk-call-chat-send {
   flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   min-height: 0;
   padding: 0;
   border: none;
@@ -6409,12 +6495,19 @@ button.lk-call-chip:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent);
-  color: var(--accent-fg);
+  /* The bare arrow-in-circle glyph is the button face, as on iOS and
+     Android: accent when sendable, muted when not. */
+  background: transparent;
+  color: var(--accent);
   cursor: pointer;
 }
+.lk-call-chat-send:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent-strong);
+}
 .lk-call-chat-send:disabled {
-  opacity: 0.4;
+  color: var(--surface-muted);
+  opacity: 1;
   cursor: default;
 }
 .lk-call-chat-too-long {
@@ -7044,8 +7137,11 @@ html.lk-call-window-doc body {
   outline: 2px solid var(--call-ctl-on-fg);
   outline-offset: 2px;
 }
-.lk-call-collapse > svg {
-  transform: rotate(90deg);
+/* The page arrows sit at the physical left and right edges and follow the
+   screen edge, not the reading direction (design system section 8): undo
+   the right-to-left mirroring the set applies to chevrons. */
+[dir="rtl"] .lk-call-page-arrow .lk-icon-flip-rtl {
+  transform: none;
 }
 
 /* Feed (docs/ux/feed.md): one centred column of items, a chip switcher,
@@ -7708,6 +7804,15 @@ html.lk-call-window-doc body {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* A Discover card is a feed item for its frame, not for its layout: the feed
+   item's 40px avatar column took the whole body and the actions sat beside
+   it, over the channel's name (base scenario 32, 2026-11-11). The body and
+   the actions carry their own padding. */
+.lk-feed-item.lk-discover-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 .lk-discover-card-body {
   display: flex;
   flex-direction: column;
@@ -7778,8 +7883,10 @@ html.lk-call-window-doc body {
 
 /* ------------------------------------------------ language (ADR-0061) */
 
-/* A back arrow points the way back, which is the other way in a
-   right-to-left layout (`docs/ux/localization.md` section 6). */
+/* An icon that points in the reading direction (back, forward, send, reply,
+   ...) points the other way in a right-to-left layout
+   (`docs/ux/localization.md` section 6); `ui/icons.tsx` adds the class to
+   the icons the set lists as mirrored. */
 [dir="rtl"] .lk-icon-flip-rtl {
   transform: scaleX(-1);
 }
@@ -8373,7 +8480,17 @@ button.lk-folder-new {
   align-items: center;
   color: var(--surface-muted);
 }
-/* The Saved screen (section 3). */
+/* The Saved screen (section 3). A route of its own with no pane around it:
+   the screen's own margins, as the feed import has (it sat against the
+   window's edge; base scenario 30, 2026-11-11). */
+.lk-saved {
+  margin: 0 auto;
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+}
 .lk-saved-list {
   list-style: none;
   margin: 0;
@@ -8433,11 +8550,6 @@ button.lk-folder-new {
 .lk-picker-chevron {
   display: inline-flex;
   color: var(--surface-muted);
-  transform: rotate(90deg);
-  transition: transform 120ms ease;
-}
-.lk-picker-btn[aria-expanded="true"] .lk-picker-chevron {
-  transform: rotate(-90deg);
 }
 .lk-picker-scrim {
   display: none;
@@ -9083,6 +9195,16 @@ button.lk-card-row-button {
 .lk-channel-compose .lk-channel-files {
   margin: 0 16px 8px;
 }
+/* UX second-device.md section 4a: in place of the composer on a device of
+   the owner or a publisher that cannot post. Plain secondary text. */
+.lk-channel-reader-line {
+  margin: 0;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--surface-border);
+  font-size: 13px;
+  color: var(--surface-muted);
+  text-align: center;
+}
 .lk-channel-earlier {
   margin: 12px auto 0;
   font-size: 13px;
@@ -9352,4 +9474,190 @@ button.lk-card-row-button {
   justify-content: center;
   gap: 12px;
   color: var(--surface-muted);
+}
+
+/* docs/ux/donations.md: the donations page (section 2.0). A public page laid
+   out like a page of the app: the page ground, the app's wide page width and
+   type scale, two groups of cards in a grid. */
+.public-wide {
+  min-height: 100%;
+  background: var(--surface-bg);
+  padding: 32px 24px 48px;
+}
+.public-wide-page {
+  max-width: 1040px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.lk-donate {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 24px;
+}
+.lk-donate-back {
+  align-self: flex-start;
+  margin-inline-start: -12px;
+}
+.lk-donate-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lk-donate-intro h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 600;
+}
+.lk-donate-lede {
+  margin: 0;
+  max-width: 640px;
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--surface-muted);
+  text-wrap: pretty;
+}
+.lk-donate-none {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+}
+.lk-donate-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-donate-group-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--surface-muted);
+}
+/* One column on a phone, two from 640 px of content width, three from
+   960 px (the page pads 24 px a side, so 688 and 1008 px of viewport). */
+.lk-donate-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+@media (min-width: 688px) {
+  .lk-donate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1008px) {
+  .lk-donate-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.lk-donate-card {
+  height: 100%;
+  min-width: 0;
+  gap: 16px;
+}
+.lk-donate-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-donate-head h3 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+}
+.lk-donate-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--surface-muted);
+  overflow-wrap: anywhere;
+}
+.lk-donate-qr-slot {
+  display: flex;
+  justify-content: center;
+  min-height: 200px;
+}
+/* Every QR is 200 px square: the operator's image as served (in colour,
+   scaled to fit), or the address code drawn in `src/donate/donate-qr.ts`. */
+.lk-donate-qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  max-width: 100%;
+  border-radius: 12px;
+  object-fit: contain;
+}
+.lk-donate-qr-drawn svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.lk-donate-actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-donate-wide {
+  width: 100%;
+  min-height: 44px;
+}
+.lk-donate-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 20px;
+  user-select: all;
+}
+.lk-donate-address {
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.lk-donate-phone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-donate-phone-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 6px 6px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.lk-donate-warning,
+.lk-donate-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+}
+.lk-donate-warning {
+  color: var(--surface-muted);
+}
+.lk-donate-error {
+  color: var(--danger);
+}
+.lk-donate-retry {
+  align-self: flex-start;
+}
+.lk-donate-placeholder {
+  height: 360px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+@media (max-width: 480px) {
+  .public-wide {
+    padding: 20px 16px 40px;
+  }
 }

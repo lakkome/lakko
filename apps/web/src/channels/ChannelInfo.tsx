@@ -25,11 +25,14 @@ import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
+import { InfoRowButton } from "../ui/LabelledRows";
 import { PushedScreen } from "../ui/PushedScreen";
 import { channelAvatarKey } from "./channel-avatar";
+import { readerDeviceSections } from "./channel-subscription-plan";
 import {
   channelAvatarOf,
   channelHandleOf,
+  channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSubscriberCount,
   channelVisibilityOf,
@@ -75,14 +78,20 @@ export function ChannelInfo(props: {
   const sections = createMemo((): readonly InfoSection[] => {
     const r = role();
     if (r === null) return [];
-    return channelInfoSections(uiRules(), {
-      role: r,
-      hasHandle: handle() !== null,
-      hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
-      // Shown for every role: the switch itself reads the setting and says
-      // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
-      membersOfGroupsAndChannelsOn: true,
-    });
+    // 2026-11-13 (UX second-device.md section 4a): on a device of the owner
+    // or a publisher that cannot post here, a subscriber's blocks and an empty
+    // exit block.
+    return readerDeviceSections(
+      channelInfoSections(uiRules(), {
+        role: r,
+        hasHandle: handle() !== null,
+        hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
+        // Shown for every role: the switch itself reads the setting and says
+        // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
+        membersOfGroupsAndChannelsOn: true,
+      }),
+      channelReaderDeviceRoleOf(props.id),
+    );
   });
   const has = (s: InfoSection): boolean => sections().includes(s);
 
@@ -256,7 +265,7 @@ export function ChannelInfo(props: {
               disabled={uploading() !== null}
               onClick={() => setMenuOpen((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
           </Show>
           <Show when={menuOpen()}>
@@ -321,7 +330,7 @@ export function ChannelInfo(props: {
                     setEditing(true);
                   }}
                 >
-                  <Icon name="pencil" size={16} />
+                  <Icon name="pencil" size={20} />
                 </button>
               </Show>
             </div>
@@ -414,14 +423,14 @@ export function ChannelInfo(props: {
 
       <section class="lk-card">
         <Show when={has("invite-people")}>
-          <InfoRow icon="userPlus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
+          <InfoRow icon="person-plus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
         </Show>
         <Show when={has("invite-link")}>
           <InfoRow icon="link" title={t("chat.invite_link.label")} onOpen={() => setScreen("invite-link")} />
         </Show>
         <Show when={has("subscribers")}>
           <InfoRow
-            icon="groups"
+            icon="person-2"
             title={t("channels.subscribers.title")}
             value={publishes() && typeof count() === "number" ? (count() ?? 0).toLocaleString() : undefined}
             onOpen={() => setScreen("subscribers")}
@@ -429,7 +438,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("admins")}>
           <InfoRow
-            icon="user"
+            icon="person"
             title={t("channels.info.publishers")}
             value={String(channelPublishers(props.id).length)}
             onOpen={() => setScreen("publishers")}
@@ -437,7 +446,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("reactions")}>
           <InfoRow
-            icon="heart"
+            icon="face-smiling"
             title={t("group_reactions.title")}
             value={allowedSummary(channelAllowedReactions(props.id))}
             onOpen={() => setScreen("reactions")}
@@ -445,7 +454,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("group-type")}>
           <InfoRow
-            icon="eye"
+            icon="person-2"
             title={t("channel_type.who_can_subscribe")}
             value={channelVisibilityOf(props.id) === "public" ? t("group_type.public") : t("group_type.private")}
             onOpen={() => setScreen("type")}
@@ -461,7 +470,7 @@ export function ChannelInfo(props: {
         <section class="lk-card danger">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="logout" size={18} />
+              <Icon name="logout" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("channels.unsubscribe.action")}</span>
@@ -478,7 +487,7 @@ export function ChannelInfo(props: {
         <section class="lk-card danger">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="trash" size={18} />
+              <Icon name="trash" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("channels.delete.control")}</span>
@@ -524,27 +533,8 @@ export function ChannelInfo(props: {
   );
 }
 
-/** One row of the info's actions: icon, title, the value at the end, opens a
- *  pushed screen. */
-function InfoRow(props: {
-  readonly icon: Parameters<typeof Icon>[0]["name"];
-  readonly title: string;
-  readonly value?: string | undefined;
-  readonly onOpen: () => void;
-}): JSX.Element {
-  return (
-    <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpen()}>
-      <span class="lk-card-row-icon">
-        <Icon name={props.icon} size={18} />
-      </span>
-      <span class="lk-card-row-body">
-        <span class="lk-card-row-title">{props.title}</span>
-      </span>
-      <Show when={props.value}>{(v) => <span class="lk-card-row-sub">{v()}</span>}</Show>
-      <Icon name="chevron" size={16} />
-    </button>
-  );
-}
+/** One row of the info's actions, named by its title and value. */
+const InfoRow = InfoRowButton;
 
 /** The screen a channel's info pushed, drawn by the conversation view over
  *  the whole pane (UX 12.1). */

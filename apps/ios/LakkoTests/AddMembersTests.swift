@@ -178,4 +178,16 @@ final class AddMembersTests: XCTestCase {
         let path: [TabRoute] = [.newGroup, .chat(groupIdHex: "g"), .groupInfo(groupIdHex: "g")]
         XCTAssertEqual(GroupInfoNavigation.afterDelete(path, groupIdHex: "g"), [.newGroup])
     }
+
+    func testAScreenOverTheInfoIsAPushAndClosesBackToTheInfo() {
+        let info: [TabRoute] = [.chat(groupIdHex: "g"), .groupInfo(groupIdHex: "g")]
+        for screen in [GroupInfoSubscreen.inviteLinks, .reactions, .groupType, .transferOwnership] {
+            let opened = GroupInfoNavigation.openSubscreen(info, groupIdHex: "g", screen)
+            XCTAssertEqual(opened.last, .groupInfoSubscreen(groupIdHex: "g", screen: screen))
+            XCTAssertEqual(GroupInfoNavigation.openSubscreen(opened, groupIdHex: "g", screen), opened, "not pushed twice")
+            XCTAssertEqual(GroupInfoNavigation.closeSubscreen(opened, groupIdHex: "g", screen), info)
+            // Closing one that is not open changes nothing.
+            XCTAssertEqual(GroupInfoNavigation.closeSubscreen(info, groupIdHex: "g", screen), info)
+        }
+    }
 }

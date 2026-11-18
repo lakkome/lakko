@@ -28,11 +28,11 @@ const ISSUANCE_RESPONSE_PROTOCOL: &[u8] = b"lakko/anon-cred/v1 issuance-response
 /// Protocol label of the presentation proof.
 const PRESENTATION_PROTOCOL: &[u8] = b"lakko/anon-cred/v1 presentation";
 
-/// The ADR-0090 4.3 tag-base domain, hashed in front of the poll identifier.
+/// The ADR-0092 4.3 tag-base domain, hashed in front of the poll identifier.
 pub(crate) const CHANNEL_POLL_TAG_BASE_DOMAIN: &[u8] = b"lakko/channel-poll/tag-base/v1";
 
 /// `H_poll = hash-to-group("lakko/channel-poll/tag-base/v1" || channel_id ||
-/// post_cursor_be)` (ADR-0090 4.3), with this crate's hash-to-group label
+/// post_cursor_be)` (ADR-0092 4.3), with this crate's hash-to-group label
 /// `tag base` in front.
 pub(crate) fn channel_poll_tag_base(scope: &[u8]) -> RistrettoPoint {
     let mut input = Vec::with_capacity(CHANNEL_POLL_TAG_BASE_DOMAIN.len() + scope.len());

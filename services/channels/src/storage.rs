@@ -1223,7 +1223,7 @@ pub trait ChannelStore: Send + Sync {
 
     /// Store, replace (non-empty `labels`, sorted) or retract (empty) the
     /// channel poll vote of `tag` under the post, when `at_ms` is strictly
-    /// greater than the stored one (ADR-0090 section 4.3); the per-label
+    /// greater than the stored one (ADR-0092 section 4.3); the per-label
     /// counters and the voter count move in the same transaction. A retract
     /// keeps the row with no labels so its `at_ms` still orders.
     ///

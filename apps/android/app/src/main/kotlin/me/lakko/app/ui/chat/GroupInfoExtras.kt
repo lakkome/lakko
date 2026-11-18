@@ -26,13 +26,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -78,6 +71,9 @@ import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 import me.lakko.app.ui.profile.AvatarCropScreen
 import me.lakko.app.ui.profile.ProfileCameraScreen
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /*
  * ADR-0087 / group-and-channel-privacy.md section 4 and reactions-and-emoji
@@ -161,7 +157,7 @@ internal fun GroupPhotoHeader(viewModel: ChatViewModel, title: String, canSet: B
                         .clickable(enabled = state != PhotoState.Uploading) { menuOpen = true },
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                        LkIcon(R.drawable.ic_lk_pencil, contentDescription = null, size = LkIconSize.Row)
                     }
                 }
             }
@@ -195,18 +191,18 @@ internal fun GroupPhotoHeader(viewModel: ChatViewModel, title: String, canSet: B
         val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
             Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                PhotoMenuItem(Icons.Filled.PhotoLibrary, t("profile.avatar.menu.library")) {
+                PhotoMenuItem(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
                     menuOpen = false
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 }
                 if (hasCamera) {
-                    PhotoMenuItem(Icons.Filled.PhotoCamera, t("profile.avatar.menu.camera")) {
+                    PhotoMenuItem(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
                         menuOpen = false
                         cameraOpen = true
                     }
                 }
                 if (photo?.avatar != null) {
-                    PhotoMenuItem(Icons.Filled.Delete, t("profile.avatar.menu.remove"), destructive = true) {
+                    PhotoMenuItem(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
                         menuOpen = false
                         confirmRemove = true
                     }
@@ -284,7 +280,7 @@ private fun groupPhotoFailure(cause: Throwable): UiText? {
 
 @Composable
 private fun PhotoMenuItem(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     label: String,
     destructive: Boolean = false,
     onClick: () -> Unit,
@@ -297,7 +293,7 @@ private fun PhotoMenuItem(
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = color)
+        LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row)
         Spacer(Modifier.width(16.dp))
         Text(label, color = color)
     }
@@ -370,7 +366,7 @@ internal fun GroupHandleRow(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(text = "@" + handle.handle, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
             IconButton(onClick = { copyPlainText(context, "@" + handle.handle) }) {
-                Icon(Icons.Filled.ContentCopy, contentDescription = t("group_info.handle.copy_a11y"))
+                LkIcon(R.drawable.ic_lk_copy, contentDescription = t("group_info.handle.copy_a11y"), size = LkIconSize.Row)
             }
         }
     }
@@ -494,7 +490,7 @@ internal fun AllowedReactionsScreen(
                     title = { Text(t("group_reactions.title")) },
                     navigationIcon = {
                         IconButton(onClick = leave) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     },
                     actions = {
@@ -684,7 +680,7 @@ private fun GroupTypeScreen(
                     title = { Text(t("group_type.title")) },
                     navigationIcon = {
                         IconButton(onClick = onClose) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     },
                 )
@@ -895,7 +891,7 @@ internal fun NewGroupPhotoSlot(
                     .clickable(enabled = enabled) { menuOpen = true },
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                    LkIcon(R.drawable.ic_lk_pencil, contentDescription = null, size = LkIconSize.Row)
                 }
             }
         }
@@ -907,18 +903,18 @@ internal fun NewGroupPhotoSlot(
         val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
             Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                PhotoMenuItem(Icons.Filled.PhotoLibrary, t("profile.avatar.menu.library")) {
+                PhotoMenuItem(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
                     menuOpen = false
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 }
                 if (hasCamera) {
-                    PhotoMenuItem(Icons.Filled.PhotoCamera, t("profile.avatar.menu.camera")) {
+                    PhotoMenuItem(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
                         menuOpen = false
                         cameraOpen = true
                     }
                 }
                 if (chosen != null) {
-                    PhotoMenuItem(Icons.Filled.Delete, t("profile.avatar.menu.remove"), destructive = true) {
+                    PhotoMenuItem(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
                         menuOpen = false
                         onChosen(null)
                     }

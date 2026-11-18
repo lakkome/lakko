@@ -59,7 +59,7 @@ public final class ContactsViewModel: ObservableObject {
             invited, oneToOnePeerKeys: Set(repositoryState.accepted.map(\.request.fromPubkey)))
     }
 
-    // MARK: - ADR-0090 section 7: a contact card's Add contact
+    // MARK: - ADR-0092 section 7: a contact card's Add contact
 
     /// What `Add contact` on a contact card came to (UX section 10.2).
     public enum ContactCardAddResult: Equatable {

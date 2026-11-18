@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-Every relation the credential needs (knowledge of `s` behind `C`, the issuer's use of its key, a valid MAC behind a presentation with the same `s` as the tag) is a set of linear equations over secret scalars. One generic prover and verifier, the generalised Schnorr protocol CMZ14 and Signal's `poksho` use, written once, is easier to review than three hand-rolled proofs. ADR-0090 4.7 also names this proof layer as reusable by ADR-0086.
+Every relation the credential needs (knowledge of `s` behind `C`, the issuer's use of its key, a valid MAC behind a presentation with the same `s` as the tag) is a set of linear equations over secret scalars. One generic prover and verifier, the generalised Schnorr protocol CMZ14 and Signal's `poksho` use, written once, is easier to review than three hand-rolled proofs. ADR-0092 4.7 also names this proof layer as reusable by ADR-0086.
 
 ## Public contract (crate-internal)
 

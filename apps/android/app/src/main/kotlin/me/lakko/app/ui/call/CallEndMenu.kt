@@ -13,9 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -28,6 +25,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.theme.LakkoDark
+import me.lakko.app.R
 
 /**
  * What `End` opens for the person who started a group or link call while
@@ -84,12 +82,12 @@ internal fun BoxScope.CallEndMenu(
             .semantics { paneTitle = menuLabel },
     ) {
         CallMenuRow(
-            icon = Icons.AutoMirrored.Filled.Logout,
+            icon = R.drawable.ic_lk_logout,
             label = t("call.end_menu.leave"),
             onClick = onLeave,
         )
         CallMenuRow(
-            icon = Icons.Filled.CallEnd,
+            icon = R.drawable.ic_lk_phone_down_fill,
             label = t("call.end_menu.end_for_all"),
             onClick = onEndForEveryone,
             color = LakkoDark.danger,

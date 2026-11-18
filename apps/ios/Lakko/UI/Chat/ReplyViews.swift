@@ -39,8 +39,7 @@ struct ReplyStrip: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 13, weight: .semibold))
+                LkIconView(.xmark, size: 14, relativeTo: nil)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())

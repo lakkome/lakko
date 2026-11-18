@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.9 — the open-items hand-over.
+ * ADR-0092 section 3.9 — the open-items hand-over.
  *
  * Committer side: after an admission commit that adds a leaf (a newcomer, or a
  * new device of a member), the device that committed it posts, sealed at the
@@ -208,7 +208,7 @@ export async function receiveOpenItems(
         const record = adopted.item as AdoptedItem;
         const ev = await fileAdopted(groupIdB64, record, ringB64, event.createdAt);
         if (ev !== null) out.push(ev);
-        // ADR-0090 section 3.9 — the poll's earlier ballots, from the journal.
+        // ADR-0092 section 3.9 — the poll's earlier ballots, from the journal.
         if (record.kind === "poll" && ringB64 !== undefined) {
           const groupId = group.groupId;
           const pollRef = Number(record.pollRef);

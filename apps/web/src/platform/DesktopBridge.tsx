@@ -106,6 +106,7 @@ export function DesktopBridge(): JSX.Element {
       title: r.title,
       preview: r.preview,
       href: hrefOf(r),
+      channel: r.kind === "channel",
     }));
     const view = untrack(() => ({ focused: focused(), path: location.pathname }));
     const { next, notify } = messageNotifications(counts, rows, view, t("notification.message.new"));

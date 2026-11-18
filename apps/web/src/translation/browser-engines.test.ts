@@ -9,11 +9,28 @@
  * which would need a download is never created.
  */
 
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { browserDetection, browserTranscription, browserTranslation, transcriptOf } from "./browser-engines";
+import { beforeAll, describe, expect, it } from "vitest";
+
+import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
+import {
+  browserDetection,
+  browserTranscription,
+  browserTranslation,
+  coreDetection,
+  layeredDetection,
+  transcriptOf,
+  translatorTag,
+} from "./browser-engines";
 import { onCaptureStart, watchCaptures } from "./capture-watch";
-import { engineStateOf, permilleOf } from "./engines";
+import { engineStateOf, permilleOf, type Detection, type DetectionEngine } from "./engines";
+
+beforeAll(async () => {
+  const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await initWasm({ module_or_path: readFileSync(path) });
+});
 
 describe("engine state mapping", () => {
   it("maps the four browser answers and refuses anything else", () => {
@@ -91,6 +108,141 @@ describe("browserDetection", () => {
     const d = browserDetection(api as never);
     expect(await d.detect("hola")).toEqual({ tag: "es", permille: 910 });
     expect(await d.detect("???")).toBeNull();
+  });
+});
+
+describe("the core detector and its place behind the browser's", () => {
+  const core = (): DetectionEngine => coreDetection(() => Promise.resolve(wasm));
+
+  it("detects Dutch with no browser detector at all", async () => {
+    const d = layeredDetection(browserDetection(null), core());
+    const found = await d.detect("Ik ga morgen met de trein naar Amsterdam om mijn moeder te bezoeken.");
+    expect(found?.tag).toBe("nl");
+  });
+
+  it("answers an unsure guess for short text and nothing for text without letters", async () => {
+    const c = core();
+    const short = await c.detect("goedemorgen");
+    expect(short).not.toBeNull();
+    expect(short?.permille).toBeLessThan(wasm.translationDetectionConfidentPermille());
+    expect(await c.detect("123 !!! :)")).toBeNull();
+  });
+
+  it("uses the core when the browser model would need a download", async () => {
+    const api = {
+      availability: () => Promise.resolve("downloadable"),
+      create: () => Promise.reject(new Error("must not be created")),
+    };
+    const d = layeredDetection(browserDetection(api as never), core());
+    expect((await d.detect("Ik ga morgen met de trein naar Amsterdam om mijn moeder te bezoeken."))?.tag).toBe(
+      "nl",
+    );
+  });
+
+  it("prefers a ready browser detector's answer, and falls back on und", async () => {
+    const answers: Array<Array<{ detectedLanguage: string; confidence: number }>> = [
+      [{ detectedLanguage: "de", confidence: 0.8 }],
+      [{ detectedLanguage: "und", confidence: 0.9 }],
+    ];
+    const api = {
+      availability: () => Promise.resolve("available"),
+      create: () => Promise.resolve({ detect: () => Promise.resolve(answers.shift() ?? []) }),
+    };
+    const fromCore: Detection = { tag: "nl", permille: 900 };
+    let coreCalls = 0;
+    const fakeCore: DetectionEngine = {
+      present: true,
+      detect: () => {
+        coreCalls++;
+        return Promise.resolve(fromCore);
+      },
+    };
+    const d = layeredDetection(browserDetection(api as never), fakeCore);
+    expect(await d.detect("x")).toEqual({ tag: "de", permille: 800 });
+    expect(coreCalls).toBe(0);
+    expect(await d.detect("y")).toEqual(fromCore);
+    expect(coreCalls).toBe(1);
+  });
+
+  it("carries the close candidates of a near tie (seen on a Pixel: Catalan, Turkmen)", async () => {
+    const c = core();
+    const hola = await c.detect("hola, qué tal?");
+    expect(hola?.tag).toBe("ca");
+    expect(hola?.alternatives).toContain("es");
+    const goed = await c.detect("goedendag");
+    expect(goed?.tag).toBe("tk");
+    expect(goed?.alternatives).toContain("nl");
+    // A confident answer has none.
+    const de = await c.detect("Ich gehe morgen auf den Markt, um Gemüse zu kaufen. Willst du mitkommen?");
+    expect(de?.alternatives ?? []).toEqual([]);
+  });
+
+  it("puts the browser's ranked list through the same rule", async () => {
+    const api = {
+      availability: () => Promise.resolve("available"),
+      create: () =>
+        Promise.resolve({
+          detect: () =>
+            Promise.resolve([
+              { detectedLanguage: "ca", confidence: 0.4 },
+              { detectedLanguage: "es", confidence: 0.35 },
+              { detectedLanguage: "und", confidence: 0.2 },
+              { detectedLanguage: "it", confidence: 0.1 },
+            ]),
+        }),
+    };
+    const c = coreDetection(() => Promise.resolve(wasm));
+    const d = layeredDetection(browserDetection(api as never, c.rank), c);
+    expect(await d.detect("hola, qué tal?")).toEqual({ tag: "ca", permille: 400, alternatives: ["es"] });
+    // Without a ranker the top hypothesis alone.
+    expect(await browserDetection(api as never).detect("x")).toEqual({ tag: "ca", permille: 400 });
+  });
+
+  it("frees the wasm answer and survives a wasm that did not load", async () => {
+    let freed = 0;
+    const fake = {
+      detectTextLanguage: () => ({
+        tag: "nl",
+        confidencePermille: 400,
+        free: () => {
+          freed++;
+        },
+      }),
+    };
+    expect(await coreDetection(() => Promise.resolve(fake)).detect("goedemorgen")).toEqual({ tag: "nl", permille: 400 });
+    expect(freed).toBe(1);
+    expect(await coreDetection(() => Promise.reject(new Error("no wasm"))).detect("goedemorgen")).toBeNull();
+  });
+});
+
+describe("the tags Chrome's Translator takes", () => {
+  it("asks Norwegian Bokmal as no and passes every other tag through", () => {
+    expect(translatorTag("nb")).toBe("no");
+    expect(translatorTag("NB-no")).toBe("no");
+    expect(translatorTag("no")).toBe("no");
+    expect(translatorTag("tl")).toBe("tl");
+    expect(translatorTag("nl")).toBe("nl");
+    expect(translatorTag("zh-Hant")).toBe("zh-Hant");
+  });
+
+  it("maps the core's nb at the Translator boundary", async () => {
+    const asked: string[] = [];
+    const created: string[] = [];
+    const api = {
+      availability: (o: { sourceLanguage: string; targetLanguage: string }) => {
+        asked.push(`${o.sourceLanguage}>${o.targetLanguage}`);
+        return Promise.resolve("available");
+      },
+      create: (o: { sourceLanguage: string; targetLanguage: string }) => {
+        created.push(`${o.sourceLanguage}>${o.targetLanguage}`);
+        return Promise.resolve({ translate: (text: string) => Promise.resolve(text) });
+      },
+    };
+    const e = browserTranslation(api as never);
+    expect(await e.state("nb", "en")).toBe("ready");
+    await e.translate("nb", "en", "hei");
+    expect(asked).toEqual(["no>en"]);
+    expect(created).toEqual(["no>en"]);
   });
 });
 

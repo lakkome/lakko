@@ -217,7 +217,7 @@ class ForwardSenderTest {
         assertEquals(first, fakes.sent!!.forward)
     }
 
-    // ADR-0090 / docs/ux/attachments.md section 11a — content messages.
+    // ADR-0092 / docs/ux/attachments.md section 11a — content messages.
 
     @Test
     fun `a forwarded location goes as the same content with the forward line`() = runTest {

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Polls in channels: option labels, the message a vote's credential
-//! presentation is bound to, and the frozen tally ([ADR-0090] section 4).
+//! presentation is bound to, and the frozen tally ([ADR-0092] section 4).
 //!
 //! A channel subscriber is not an MLS member, so a vote is a row at the
 //! channel service, keyed by the tag of an anonymous credential
@@ -37,7 +37,7 @@
 //!
 //! At close the publisher edits the post with the counts it read
 //! ([`ChannelPollTally`]); readers show that and stop offering a vote. The
-//! tally is the publisher's reading (ADR-0090 4.6); decoding only checks it
+//! tally is the publisher's reading (ADR-0092 4.6); decoding only checks it
 //! is well formed.
 //!
 //! ```text
@@ -47,7 +47,7 @@
 //!
 //! Each count is at most `voters` (a voter marks an option once).
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 use crate::reaction::{ReactionKey, ReactionLabel, REACTION_LABEL_LEN};
 
@@ -63,13 +63,13 @@ pub const POLL_TALLY_DOMAIN: &[u8] = b"lakko/channel-poll/tally/v1\0";
 /// Version byte of the frozen tally.
 pub const POLL_TALLY_VERSION_V1: u8 = 0x01;
 
-/// The fewest options a poll has (ADR-0090 section 3.1).
+/// The fewest options a poll has (ADR-0092 section 3.1).
 pub const MIN_CHANNEL_POLL_OPTIONS: usize = 2;
 
-/// The most options a poll has (ADR-0090 section 3.1).
+/// The most options a poll has (ADR-0092 section 3.1).
 pub const MAX_CHANNEL_POLL_OPTIONS: usize = 10;
 
-/// The most labels one vote carries (ADR-0090 section 4.3).
+/// The most labels one vote carries (ADR-0092 section 4.3).
 pub const MAX_VOTE_LABELS: usize = MAX_CHANNEL_POLL_OPTIONS;
 
 /// The longest vote message.

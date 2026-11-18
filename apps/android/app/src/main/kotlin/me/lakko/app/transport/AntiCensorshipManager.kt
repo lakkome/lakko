@@ -33,6 +33,15 @@ public sealed interface AntiCensorshipState {
 }
 
 /**
+ * Whether the person has turned anti-censorship on, read without a manager
+ * (the background work has none). The same preference [AntiCensorshipManager]
+ * owns.
+ */
+public fun antiCensorshipEnabled(context: Context): Boolean =
+    context.applicationContext.getSharedPreferences("lakko.anticensorship", Context.MODE_PRIVATE)
+        .getBoolean("enabled", false)
+
+/**
  * ADR-0026 Phase 4 — the arming controller (the Kotlin twin of the iOS
  * `AntiCensorshipManager`).
  *

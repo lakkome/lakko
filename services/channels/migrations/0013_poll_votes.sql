@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0090 section 4.3: channel poll votes.
+-- ADR-0092 section 4.3: channel poll votes.
 --
 -- A vote is a row per `(post, tag)`. The tag is the per-poll tag of an
 -- anonymous credential presentation (`lakko-anon-cred`): the same for one

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A contact card (ADR-0090 section 7): a display name, a canonical username
+//! A contact card (ADR-0092 section 7): a display name, a canonical username
 //! and an account key. Nothing in it lets the receiver write to the person
 //! described: no reach grant, no mailbox binding. The receiver adds the
 //! person through the ordinary username lookup and accepts the result only

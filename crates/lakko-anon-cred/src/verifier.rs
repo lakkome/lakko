@@ -28,7 +28,7 @@ pub const PRESENTATION_LEN: usize = 1 + 8 + 4 * 32 + proof_len(3);
 pub const TAG_LEN: usize = 32;
 
 /// The poll a presentation is for: `(channel_id, post_cursor)`, the pair the
-/// reaction route already names (ADR-0090 4.3).
+/// reaction route already names (ADR-0092 4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PollScope {
     bytes: [u8; SCOPE_LEN],

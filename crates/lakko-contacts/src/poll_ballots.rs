@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Old ballot rows for a newcomer — [ADR-0090] section 3.9.
+//! Old ballot rows for a newcomer — [ADR-0092] section 3.9.
 //!
 //! A newcomer to a group fetches an anonymous poll's ballot rows from the
 //! group journal itself, from the poll's row onward. A poll open longer than
@@ -23,7 +23,7 @@
 //! [`POLL_BALLOTS_ENVELOPE_MAX_LEN`] bytes. The rows stay opaque here; the
 //! newcomer opens each with `lakko_ballot::open_and_verify`.
 //!
-//! [ADR-0090]: ../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../docs/adr/0092-attachment-kinds.md
 
 use core::result::Result as CoreResult;
 

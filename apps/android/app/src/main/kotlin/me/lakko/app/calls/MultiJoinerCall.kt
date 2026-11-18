@@ -744,7 +744,7 @@ class MultiJoinerCall private constructor(
             // chat receive loop), never the SFU signal-relay. A peer that
             // relays one here is off-contract — fail-closed drop.
             FfiIncomingEnvelopeKind.PUSH_ROUTING_SECRET -> Unit
-            // ADR-0090 section 3.9 — the open-items hand-over and its ballot
+            // ADR-0092 section 3.9 — the open-items hand-over and its ballot
             // rows ride the GROUP JOURNAL, never the SFU relay. Dropped.
             FfiIncomingEnvelopeKind.OPEN_ITEMS,
             FfiIncomingEnvelopeKind.POLL_BALLOTS,
@@ -798,6 +798,10 @@ class MultiJoinerCall private constructor(
             // the PublisherGroup journal, never the SFU signal-relay. Dropped.
             FfiIncomingEnvelopeKind.CHANNEL_EPOCH_SEEDS,
             FfiIncomingEnvelopeKind.CHANNEL_ROTATE_REQUEST,
+            // ADR-0090 - a publisher's device request and the admission mark
+            // ride the PublisherGroup journal too. Dropped.
+            FfiIncomingEnvelopeKind.PUBLISHER_DEVICE_REQUEST,
+            FfiIncomingEnvelopeKind.CHANNEL_ADMISSION_MARK,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.

@@ -60,16 +60,25 @@ options:
 #     calls refuse with a clear message.
 #       Debug:   wss://test.lakko.me/sfu
 #       Release: empty
+#   * LAKKO_DONATIONS_KEY -> Info.plist `LakkoDonationsKey` (`DonationsPin`,
+#     docs/ux/donations.md section 4.1). The public half of the offline
+#     donations key, base64url without padding (32 bytes), as
+#     `just gen-donations-key` prints it, set in both configurations (it
+#     is public). EMPTY -> the donations screen shows
+#     "No way to donate is available" and asks the server nothing. Never
+#     taken from the server.
 settings:
   configs:
     Debug:
       LAKKO_API_BASE_URL: "https://test.lakko.me/native"
       LAKKO_SFU_URL: "wss://test.lakko.me/sfu"
       LAKKO_WEB_ORIGIN: "https://test.lakko.me"
+      LAKKO_DONATIONS_KEY: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"
     Release:
       LAKKO_API_BASE_URL: ""
       LAKKO_SFU_URL: ""
       LAKKO_WEB_ORIGIN: "https://lakko.me"
+      LAKKO_DONATIONS_KEY: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"
 
 # Single iOS app target — `Lakko`. The SwiftUI source lives at
 # `apps/ios/Lakko/` (committed); the `Info.plist` is
@@ -125,6 +134,9 @@ targets:
         # under (`ApiEndpoints.webOrigin`): the host the same stack's web
         # client and app-link association live on. Debug: the test stack.
         LakkoWebOrigin: "$(LAKKO_WEB_ORIGIN)"
+        # docs/ux/donations.md section 4.1 — the pinned donations key
+        # (`DonationsPin`); empty by default (see the settings block above).
+        LakkoDonationsKey: "$(LAKKO_DONATIONS_KEY)"
         # `docs/ux/desktop.md` section 7.1 — the app's own scheme. Safari
         # never hands a link to the app while the person stays on the same
         # site, so "Open in the app" on a link's web page opens
@@ -281,6 +293,9 @@ targets:
           - voip
         BGTaskSchedulerPermittedIdentifiers:
           - me.lakko.dev.contact-refresh
+          # `docs/ux/channel-notifications.md` section 3 — channel posts read
+          # in the background (``ChannelPostBackgroundRefresh``).
+          - me.lakko.dev.channel-posts
         # CallKit files finished calls in the phone's own Recents (section 6,
         # "tapping the row calls back"). Tapping one there hands the app an
         # `INStartCallIntent` user activity, which iOS only delivers to an app
@@ -329,7 +344,7 @@ targets:
         # ADR-0047 — the microphone also records voice messages and the
         # sound of video notes, so the string no longer claims the mic is
         # only used during calls.
-        # ADR-0090 — the location screen asks for one fix while it is open;
+        # ADR-0092 — the location screen asks for one fix while it is open;
         # nothing leaves the device before Send. Text: `ios.permission.location`.
         NSLocationWhenInUseUsageDescription: >-
           Lakko uses your location only when you choose to send where you are
@@ -389,6 +404,10 @@ targets:
           # test host instead of Apple's CDN, which caches a missing or
           # earlier file. Ignored by any other build.
           - applinks:test.lakko.me?mode=developer
+          # Passkeys: the relying party's domains (same hosts as the links).
+          - webcredentials:lakko.me
+          - webcredentials:test.lakko.me
+          - webcredentials:test.lakko.me?mode=developer
         # 1.20c — Push Notifications entitlement. `development`
         # routes APNs requests through the sandbox endpoint
         # (`api.sandbox.push.apple.com`); production builds

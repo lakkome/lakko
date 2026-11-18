@@ -165,6 +165,26 @@ export function advanceChannelRead(marks: FeedMarks, channelIdHex: string, curso
 }
 
 /**
+ * Mark all read in Chats (`docs/ux/chat-folders.md` 2.2) on channels: each of
+ * `channelIds` is read through the newest post this device holds of it (its
+ * slot's cursor, never below its newest post), as opening it to its newest
+ * end would. A channel with no slot is left as it is; never backwards.
+ */
+export function markChannelsRead(
+  marks: FeedMarks,
+  channelIds: readonly string[],
+  slots: { readonly [channelIdHex: string]: { readonly cursor: number; readonly posts: ReadonlyArray<{ readonly cursor: number }> } },
+): FeedMarks {
+  let next = marks;
+  for (const hex of channelIds) {
+    const slot = slots[hex];
+    if (slot === undefined) continue;
+    next = advanceChannelRead(next, hex, Math.max(slot.cursor, ...slot.posts.map((p) => p.cursor), 0));
+  }
+  return next;
+}
+
+/**
  * Give every channel that has none a newest-read marker at the newest post
  * this device holds of it right now (its slot's cursor, never below its
  * newest post), so a fresh subscription starts with no new posts and only

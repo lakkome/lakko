@@ -135,7 +135,7 @@ export function PollCard(props: {
                           aria-hidden="true"
                         >
                           <Show when={props.view.multiple && ticked().has(i())}>
-                            <Icon name="check" size={12} strokeWidth={3} />
+                            <Icon name="checkmark" size={12} />
                           </Show>
                         </span>
                       }
@@ -153,7 +153,7 @@ export function PollCard(props: {
                   </Show>
                   <span class="lk-poll-text" aria-hidden="true">{o.text}</span>
                   <Show when={o.mine}>
-                    <Icon name="check" size={16} strokeWidth={2.4} class="lk-poll-check" />
+                    <Icon name="checkmark" size={16} class="lk-poll-check" />
                   </Show>
                   <span class="lk-poll-percent" aria-hidden="true">{`${o.percent}%`}</span>
                 </div>

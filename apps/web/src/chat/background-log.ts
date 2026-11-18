@@ -27,6 +27,7 @@
  * Also here: the chat-list summary (unread count + last-message preview) read
  * from a slot, and the conversion from a received event to a persisted row.
  */
+import { base64Encode } from "../auth/account-id";
 import { contentPreviewOf } from "../attach/preview";
 import { authorIdentityToPersisted } from "./author-identity";
 import type { IncomingChatEvent } from "./client";
@@ -274,6 +275,9 @@ export interface ChatListSummary {
   /** The newest message's author key (base64) when it is someone else's and
    *  the log recorded one, for the sender prefix in a group row; else `null`. */
   readonly lastAuthorKeyB64: string | null;
+  /** ADR-0087 section 14 — the newest message's channel invitation card
+   *  (base64), when it carried one; the row reads the invitation from it. */
+  readonly previewChannelInviteB64?: string;
 }
 
 /**
@@ -294,7 +298,15 @@ export interface ChatListSummary {
 export function summarizeGroupSlot(
   slot: PersistedGroup | undefined,
   syncedReadUpTo: bigint | null,
+  ownPersonKeyB64: string | null = null,
 ): ChatListSummary {
+  // A message this account sent from another of its devices arrives as an
+  // incoming row; the timeline draws it as the person's own by its author
+  // key, and so does the list: "You: ..." and never unread (base scenario
+  // 33, 2026-11-11: the list read "Ada Two: ..." for the person's own line).
+  const fromSelf = (m: PersistedMessage): boolean =>
+    m.direction === "outgoing" ||
+    (ownPersonKeyB64 !== null && m.direction === "incoming" && m.authorKeyB64 === ownPersonKeyB64);
   const messages = slot?.messages ?? [];
   let readUpTo: bigint | null = syncedReadUpTo;
   if (slot?.lastViewedMessageId !== undefined) {
@@ -311,7 +323,7 @@ export function summarizeGroupSlot(
   const historyThrough = floor === undefined ? null : BigInt(floor);
   let unread = 0;
   for (const m of messages) {
-    if (m.direction !== "incoming") continue;
+    if (m.direction !== "incoming" || fromSelf(m)) continue;
     const id = idOf(m);
     if (id === null) continue;
     if (historyThrough !== null && id <= historyThrough) continue;
@@ -331,12 +343,15 @@ export function summarizeGroupSlot(
   return {
     unread,
     preview: last === undefined ? null : previewText(last),
-    previewIsOwn: last?.direction === "outgoing",
+    previewIsOwn: last !== undefined && fromSelf(last),
     lastAt: last?.createdAt ?? null,
     lastAuthorKeyB64:
-      last !== undefined && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
+      last !== undefined && !fromSelf(last) && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
         ? last.authorKeyB64
         : null,
+    ...(last !== undefined && last.deleted !== true && typeof last.channelInviteB64 === "string"
+      ? { previewChannelInviteB64: last.channelInviteB64 }
+      : {}),
   };
 }
 
@@ -351,7 +366,7 @@ function previewText(m: PersistedMessage): string {
   // ADR-0061 section 6 — a message from a newer Lakko: the catalog's words,
   // never the core's English placeholder.
   if (typeof m.unsupportedVersion === "number") return t("chat.message.unsupported");
-  // ADR-0090 — a poll, checklist, location, contact card or article.
+  // ADR-0092 — a poll, checklist, location, contact card or article.
   const contentLine = contentPreviewOf(m.content);
   if (contentLine !== null) return contentLine;
   const text = m.text.replace(/\s+/g, " ").trim();
@@ -400,9 +415,11 @@ export function eventToPersistedMessage(
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
-      // ADR-0090 — the content object, verbatim.
+      // ADR-0092 — the content object, verbatim.
       ...(e.content === undefined ? {} : { content: e.content }),
       ...(e.contentState === undefined ? {} : { contentState: e.contentState }),
+      // ADR-0087 section 14 — the invitation card, opened offline when drawn.
+      ...(e.channelInvite === undefined ? {} : { channelInviteB64: base64Encode(e.channelInvite) }),
     };
   }
   const membership = persistedFromMembership(e.membership);

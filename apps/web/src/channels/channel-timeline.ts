@@ -44,14 +44,14 @@ export interface TimelinePost {
   readonly text: string;
   readonly attachments: readonly AttachmentRefBytes[];
   readonly edited: boolean;
-  /** ADR-0090 — a poll, checklist, location, contact card or article. */
+  /** ADR-0092 — a poll, checklist, location, contact card or article. */
   readonly content?: MessageContent;
-  /** ADR-0090 section 4.3 — a closed channel poll's frozen tally, as the
+  /** ADR-0092 section 4.3 — a closed channel poll's frozen tally, as the
    *  publisher's close carried it. */
   readonly closedTally?: { readonly voters: number; readonly counts: readonly number[] };
   /** The poll or checklist was closed by a publisher. */
   readonly closed?: boolean;
-  /** ADR-0090 section 5 — a checklist's publisher ops (ticks, added items,
+  /** ADR-0092 section 5 — a checklist's publisher ops (ticks, added items,
    *  edits, the close), attributed to the channel (a post is signed by a
    *  publisher; the service never says which). */
   readonly checklistOps?: ChannelChecklistOps;
@@ -98,7 +98,7 @@ export function channelTimeline(
       const op = d.body.op;
       if (op.target >= p.cursor) continue;
       // A post is signed by a publisher, so a publisher's close and edit
-      // stand (ADR-0090 section 4.3); the first close is final.
+      // stand (ADR-0092 section 4.3); the first close is final.
       if (op.op === "poll-close" && !closes.has(op.target)) closes.set(op.target, op.tally ?? null);
       if (op.op === "edit-article") articleEdits.set(op.target, { article: op.article, attachments: op.attachments });
       // A checklist in a channel: every publisher op stands (privileged).

@@ -62,6 +62,7 @@ import {
 } from "solid-js";
 
 import { Icon } from "../ui/icons";
+import { bottomStripPx } from "../ui/bottom-strip";
 import { initialsOf, toneOf } from "../ui/Avatar";
 import { isDesktop } from "../platform";
 import { onHostCallWindowAction } from "../platform/host";
@@ -351,10 +352,13 @@ function CallWindowBody(
 
   const viewport = viewportSignal();
   /** The screen's safe-area insets: the window never covers the system bars
-   *  (§4.5.2). Read again whenever the viewport changes. */
+   *  (§4.5.2). Read again whenever the viewport changes. The app's own
+   *  bottom strip (the update banner, `ui/bottom-strip.ts`) counts as one, so
+   *  a window in a bottom corner sits above it, and moves up when it appears. */
   const insets = createMemo((): CallWindowInsets => {
     viewport();
-    return readSafeInsets();
+    const safe = readSafeInsets();
+    return withBottomStrip(safe, bottomStripPx());
   });
   const size = createMemo(() =>
     osWindow
@@ -687,7 +691,7 @@ function CallWindowBody(
         <span class="lk-call-window-state">{status().text}</span>
         <Show when={encrypted()}>
           <span class="lk-call-window-mark">
-            <Icon name="lock" size={12} />
+            <Icon name="lock-fill" size={14} />
           </span>
         </Show>
       </div>
@@ -728,7 +732,7 @@ function CallWindowBody(
               callActions.setMic(local()?.micOn !== true);
             }}
           >
-            <Icon name={spec().icon} size={16} />
+            <Icon name={spec().icon} size={20} />
           </button>
         )}
       </Show>
@@ -777,7 +781,7 @@ function PersonPicture(props: {
         when={stream() !== undefined}
         fallback={
           <div class="lk-call-tile-blank" aria-hidden="true">
-            <Icon name="video" size={22} strokeWidth={1.4} />
+            <Icon name="video" size={24} />
           </div>
         }
       >
@@ -830,6 +834,11 @@ function viewportSignal(): () => CallWindowViewport {
     });
   });
   return viewport;
+}
+
+/** `insets` with the app's bottom strip added to the bottom one. Pure. */
+export function withBottomStrip(insets: CallWindowInsets, stripPx: number): CallWindowInsets {
+  return stripPx > 0 ? { ...insets, bottom: insets.bottom + stripPx } : insets;
 }
 
 /**

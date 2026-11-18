@@ -54,6 +54,7 @@ import { channelAvatarKey } from "../channels/channel-avatar";
 import {
   catchUpChannel,
   channelReadStateOf,
+  channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSeedFor,
   channelVisibilityOf,
@@ -68,6 +69,7 @@ import { dayLabelOf, sameDay } from "../chat/timeline-layout";
 import { ChannelComposer } from "../channels/ChannelComposer";
 import { ChannelInfo, ChannelInfoScreenHost, type ChannelInfoScreen } from "../channels/ChannelInfo";
 import { ChannelPostItem } from "../channels/ChannelPostItem";
+import { useOwnMemberCard } from "../channels/own-member-card";
 import { fetchPosts, type ChannelPostView } from "../channels/api";
 import { foldBanListFromPlaintext } from "../channels/ban-list";
 import { foldChannelMeta } from "../channels/channel-meta";
@@ -127,6 +129,10 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
    *  dialog over it, not a banner beside it. */
   const endedHere = (): EndNotice | null => membershipEnd.notices().find((n) => n.key === `3:${id}`) ?? null;
   const canPublish = (): boolean => role() === "owner" || role() === "publisher";
+  /** 2026-11-13 (UX second-device.md section 4a): the account owns or
+   *  publishes in this channel, but this device holds no publishing state for
+   *  it: a reader here. */
+  const readerRole = (): "owner" | "publisher" | null => channelReaderDeviceRoleOf(id);
   const reading = (): boolean => canPublish() || channelReadStateOf(id) === "reading";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(id);
 
@@ -280,6 +286,29 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   createEffect(on(heldSeedCount, () => void load({ redecode: true }), { defer: true }));
   const timeline = createMemo(() => channelTimeline(posts(), decoded()));
 
+  // ADR-0060 section 3: a subscriber keeps its member card current while the
+  // channel is open: once it is let in and holds a seed (a private channel's
+  // subscriber holds none until the owner's device lets it in), after a
+  // rotation, a renamed profile or a changed setting. Base walk 2026-11-13:
+  // no card was ever uploaded from web since channels became conversations.
+  const newestHeldEpoch = createMemo((): number | undefined => {
+    const held = channelsState.subscribedSeedsByChannel().get(id);
+    if (held === undefined || held.size === 0) return undefined;
+    return Math.max(...held.keys());
+  });
+  useOwnMemberCard({
+    channelIdHex: () => id,
+    keys: () => channelsState.subscriberKeysByChannel().get(id),
+    epoch: newestHeldEpoch,
+    seed: () => {
+      const epoch = newestHeldEpoch();
+      return epoch === undefined ? undefined : channelsState.subscribedSeedsByChannel().get(id)?.get(epoch);
+    },
+    // A reader device of the owner or a publisher uploads no member card,
+    // as the publishing device does not (it may hold no registered key).
+    enabled: () => !canPublish() && readerRole() === null && channelReadStateOf(id) === "reading",
+  });
+
   // Reactions in view, one batched read (ADR-0087 section 13a).
   createEffect(() => {
     const cursors = timeline()
@@ -376,7 +405,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     const fresh: AttachmentRefBytes[] = [];
     for (const a of post.attachments) fresh.push(await reencryptAttachmentRef(a));
     const forward = { author: facts().name };
-    // ADR-0090 / UX `attachments.md` section 11a — a location, contact card
+    // ADR-0092 / UX `attachments.md` section 11a — a location, contact card
     // or article travels as the same content (an article's images are the
     // post's attachments, re-encrypted above, in their order).
     const content = post.content;
@@ -414,14 +443,14 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   }
 
   // Delete for everyone, as a chat's Delete is: no dialog (UX 13).
-  /** ADR-0090 — an article post open in the reader. */
+  /** ADR-0092 — an article post open in the reader. */
   const [articleOpen, setArticleOpen] = createSignal<{
     article: Article;
     attachments: readonly AttachmentRefBytes[];
     atMs: number;
   } | null>(null);
 
-  /** ADR-0090 — `Edit checklist` / `Edit` on an article post, handed to the
+  /** ADR-0092 — `Edit checklist` / `Edit` on an article post, handed to the
    *  composer's editor. */
   const [contentEdit, setContentEdit] = createSignal<AttachEditRequest | null>(null);
   async function editContent(cursor: number, content: MessageContent, attachments: readonly AttachmentRefBytes[]): Promise<void> {
@@ -506,7 +535,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             aria-label={t("chat.header.back")}
             onClick={() => navigate(paths.home)}
           >
-            <Icon name="back" size={20} />
+            <Icon name="chevron-back" size={24} />
           </button>
           <button
             type="button"
@@ -560,7 +589,6 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
           when={role() !== null}
           fallback={
             <div class="lk-empty">
-              <Icon name="channels" size={40} strokeWidth={1.4} />
               <strong>{t("channels.subscribe.prompt_title")}</strong>
               <Show when={location.state?.access !== undefined}>
                 <button type="button" class="primary" disabled={subscribing()} onClick={() => void subscribe()}>
@@ -663,6 +691,15 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
               contentEdit={contentEdit}
               clearContentEdit={() => setContentEdit(null)}
             />
+          </Show>
+          {/* UX second-device.md section 4a: the account posts here from
+              another device; one line in place of the composer, no control. */}
+          <Show when={!canPublish() ? readerRole() : null}>
+            {(r) => (
+              <p class="lk-channel-reader-line">
+                {r() === "owner" ? t("channels.reader_device.owner") : t("channels.reader_device.publisher")}
+              </p>
+            )}
           </Show>
         </Show>
       </div>

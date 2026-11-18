@@ -11,7 +11,7 @@
 
 `fold(rules, ballots) -> Tally { counts, voters }`.
 
-- `PollRules { option_count, multiple, close_message_id, close_at_ms }` comes from the poll body and its accepted close (ADR-0090 section 3.5).
+- `PollRules { option_count, multiple, close_message_id, close_at_ms }` comes from the poll body and its accepted close (ADR-0092 section 3.5).
 - Each `CountedBallot` is a verified ballot with its row's DS `messageId` and `created_at`.
 - The input is sorted by `(message_id, created_at_ms, tag, choices)`; for each tag the last ballot that is before the close and whose choices fit the poll wins.
 - A ballot after the close (`message_id` above the close's, or `created_at_ms` at or past `close_at_ms`) is ignored. A ballot with an index at or past `option_count`, or with more than one choice in a single-choice poll, is dropped and replaces nothing.
@@ -29,4 +29,4 @@ It does not verify ballots (`ballot` does) and does not decide which close is ac
 
 ## References
 
-ADR-0090 sections 3.5 and 3.6 ("The tally").
+ADR-0092 sections 3.5 and 3.6 ("The tally").

@@ -184,9 +184,9 @@ fn device_group_id_matches_the_ds_width() {
 /// deterministic for the owner, not computable from the channel id alone.
 #[test]
 fn publisher_group_id_matches_the_ds_width() {
-    let identity = Identity::generate("alice").expect("identity");
+    let identity = Identity::from_seed_bound(&[0xA0; 64], &[0xA1; 32], 1).expect("identity");
     let channel = ChannelId::try_from_slice(&[9u8; 16]).expect("channel id");
-    let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
+    let pg = PublisherGroup::create(&identity, &[0xA1; 32], &channel).expect("publisher group");
 
     assert_eq!(
         pg.group_id().len(),
@@ -208,20 +208,17 @@ fn publisher_group_id_matches_the_ds_width() {
 /// group id and a DeviceGroup id are each 32 bytes on the same DS route.
 #[test]
 fn publisher_group_ids_do_not_collide_with_other_group_ids() {
-    let identity = Identity::generate("alice").expect("identity");
+    let identity = Identity::from_seed_bound(&[0xA0; 64], &[0xA1; 32], 1).expect("identity");
     let channel = ChannelId::try_from_slice(&[0x5C; 16]).expect("channel id");
-    let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
+    let pg = PublisherGroup::create(&identity, &[0xA1; 32], &channel).expect("publisher group");
     assert_eq!(
         pg.group_id(),
-        publisher_group_id_for(&identity.ed25519_seed_bytes(), &channel).to_vec()
+        publisher_group_id_for(&[0xA1; 32], &channel).to_vec()
     );
     let chat = Group::create(&identity, GroupKind::Group).expect("chat group");
     assert_ne!(chat.group_id(), pg.group_id());
     // The same 32-byte seed as a DeviceGroup seed names another journal.
-    assert_ne!(
-        DeviceGroup::group_id_for(&identity.ed25519_seed_bytes()),
-        pg.group_id()
-    );
+    assert_ne!(DeviceGroup::group_id_for(&[0xA1; 32]), pg.group_id());
 }
 
 /// The hex form of a PublisherGroup id — what actually goes on the wire at
@@ -229,9 +226,9 @@ fn publisher_group_ids_do_not_collide_with_other_group_ids() {
 /// `HEX_LEN`. This is the assertion closest to the observed 400.
 #[test]
 fn publisher_group_id_hex_matches_the_ds_path_length() {
-    let identity = Identity::generate("alice").expect("identity");
+    let identity = Identity::from_seed_bound(&[0xA0; 64], &[0xA1; 32], 1).expect("identity");
     let channel = ChannelId::try_from_slice(&[9u8; 16]).expect("channel id");
-    let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
+    let pg = PublisherGroup::create(&identity, &[0xA1; 32], &channel).expect("publisher group");
 
     let id = pg.group_id();
     let hex = id

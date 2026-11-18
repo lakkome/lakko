@@ -21,7 +21,7 @@ vi.mock("./channel-log-store", async (importOriginal) => {
 });
 
 import { settleOwedRecord } from "./owed-record";
-import { channelsActions, hydrateChannelsState } from "../state/channels-state";
+import { channelsActions, hydrateChannelsState, installPublisherProviderPersister } from "../state/channels-state";
 import type { PublisherCommitEntry } from "./publisher-commit-outbox";
 
 function entry(channelIdHex: string): PublisherCommitEntry {
@@ -44,6 +44,9 @@ function entry(channelIdHex: string): PublisherCommitEntry {
 }
 
 beforeAll(async () => {
+  // ADR-0090: the device provider the PublisherGroups live in is written
+  // beside the channel log; here a stand-in that always lands.
+  installPublisherProviderPersister(async () => undefined);
   await hydrateChannelsState({
     accountIdB64: "acct",
     deviceKey: {} as unknown as DeviceCipher,

@@ -38,6 +38,9 @@ describe("notification words for the service worker", () => {
       unsupportedMessage: "This message needs a newer version of Lakko.",
       reactedToYourMessage: expect.stringContaining("reacted"),
       senderPrefixed: expect.stringContaining(":"),
+      channelInvite: expect.stringContaining("Invitation to"),
+      publisherInvite: expect.stringContaining("Invitation to publish in"),
+      channelFallbackName: "Channel",
       reactionsOff: false,
       pollPreview: "Poll: \u0001",
       checklistPreview: "Checklist: \u0001",
@@ -45,6 +48,9 @@ describe("notification words for the service worker", () => {
       contactPreview: "Contact: \u0001",
       articlePreview: "Article: \u0001",
     });
+    // ADR-0087 section 14 — the channel's place in the invitation lines.
+    expect(words.channelInvite).toContain("\u0001");
+    expect(words.publisherInvite).toContain("\u0001");
     expect(words.senderPrefixed).toContain("\u0001");
     expect(words.senderPrefixed).toContain("\u0002");
     expect(words.reactedToYourMessage).toContain("\u0001");

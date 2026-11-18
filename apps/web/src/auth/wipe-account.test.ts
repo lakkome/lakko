@@ -47,6 +47,7 @@ import { writeRenameOwed } from "./username-change";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
+import { addNoPrfPasskey } from "./passkey-no-prf";
 import { markLogoutOwed } from "./logout-owed";
 import { newRemoval, writeRemoval } from "../devices/removal";
 import { markRotatedNotice, newRotation, writeRotation } from "../devices/key-rotation";
@@ -62,7 +63,7 @@ import {
   loadRestoredKnownGroups,
 } from "../backup/restored-known-groups";
 import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
-import { markRestoreFinished } from "../backup/restored-marker";
+import { markRestoreFinished, recordRestoreAnswer } from "../backup/restored-marker";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -247,6 +248,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   // auth" mark, a logout still owed, and a device removal still finishing.
   writeKnownDeviceId(local, acct, "B".repeat(43));
   writeGenesisRecorded(local, acct, "a2V5");
+  // UX 10.2: a passkey this device found cannot carry keys.
+  addNoPrfPasskey(local, acct, "Y3JlZA");
   markLogoutOwed(local, acct);
   writeRemoval(local, acct, "C".repeat(43), newRemoval("C".repeat(43), 1));
   // ADR-0074 part 3: a key rotation this device was finishing, the "keys
@@ -269,8 +272,14 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  // docs/ux/channel-notifications.md section 5: the last post notified per channel.
+  put(`lakko.channels.notified.v1.${acct}`, JSON.stringify({ ["ab".repeat(16)]: 7 }));
   put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
   put(`lakko.channel-feedback.unsent.v1.${acct}`, "1");
+  put(`lakko.channel-subscriptions.unsent.v1.${acct}`, "1");
+  put(`lakko.channel-admission-seeds.unsent.v1.${acct}`, "1");
+  put(`lakko.channels.founded-alone.v1.${acct}`, "1");
+  put(`lakko.channels.held-welcomes.v1.${acct}`, "[]");
   put(`lakko.poll-choice.unsent.v1.${acct}`, "1");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
   put(`lakko.emoji.recent-reactions:${acct}`, "[]");
@@ -293,7 +302,9 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
+  put(`lakko.channels.orphan-removed.v1.${acct}`, JSON.stringify(["ch2"]));
   put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
+  put(`lakko.groups.claimed-handles.v1.${acct}`, JSON.stringify({ team: ["g1"] }));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
   writeFeedSelection(acct, "custom:feed-1");
@@ -316,6 +327,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
   markRestoreFinished(acct, 1);
+  recordRestoreAnswer(acct, "answered");
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -637,6 +649,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:key-reset-owed:": "account",
   "lakko:device-id:": "account",
   "lakko:genesis-recorded:": "account",
+  "lakko:passkey-no-prf:": "account",
   "lakko:logout-owed:": "account",
   "lakko:device-removal-owed:": "account",
   "lakko:key-rotation-owed:": "account",
@@ -670,6 +683,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.channels.claimed-handles.v1.": "account",
+  "lakko.groups.claimed-handles.v1.": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
   "lakko.feed.selection.": "account",
@@ -687,16 +701,23 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.restored-groups.v1.": "account",
   "lakko.backup.restore-owed.v1.": "account",
   "lakko.backup.restored-marker.v1.": "account",
+  "lakko.backup.restore-answer.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
   "lakko.channels.publish-counter.v2.": "account",
+  "lakko.channels.notified.v1.": "account",
   "lakko/publisher-group-unclaimed/v2/": "account",
   "lakko:group-calls:": "account",
   "lakko.emoji.recent:": "account",
   "lakko.emoji.recent-reactions:": "account",
   "lakko.quick-reaction.unsent.v1.": "account",
   "lakko.channel-feedback.unsent.v1.": "account",
+  "lakko.channel-subscriptions.unsent.v1.": "account",
+  "lakko.channel-admission-seeds.unsent.v1.": "account",
+  "lakko.channels.founded-alone.v1.": "account",
+  "lakko.channels.held-welcomes.v1.": "account",
+  "lakko.channels.orphan-removed.v1": "account",
   "lakko.poll-choice.unsent.v1.": "account",
   "lakko.unseen-reactions.v1:": "account",
   "lakko-account-kv": "account",

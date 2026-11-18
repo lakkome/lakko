@@ -229,7 +229,7 @@ pub(crate) enum Scope {
     /// would be spent by the question.
     HandleCheck = 22,
     /// `PUT /auth/anon-credential/commitment` and `POST /auth/anon-credential`,
-    /// keyed on the signed-in account (ADR-0090 section 4.2). Charged after
+    /// keyed on the signed-in account (ADR-0092 section 4.2). Charged after
     /// the body decodes and before the proof is verified.
     AnonCredential = 23,
 }

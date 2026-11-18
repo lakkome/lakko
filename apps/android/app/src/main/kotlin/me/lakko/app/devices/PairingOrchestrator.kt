@@ -76,10 +76,14 @@ public object PairingOrchestrator {
          *  ([prepareJoinFlow]): the restore's key writes are refused when
          *  the account was wiped after it (ADR-0077 decision 4). */
         public val wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+        /** G-56, recovery payload v3: the account's own earlier phrase seeds
+         *  the confirming device carried, oldest first. Secrets: the
+         *  consumer stores them FIRST and zeroes them. */
+        public val predecessors: List<StateBundle.OwnPredecessorSeed> = emptyList(),
     ) {
         /** This outcome, carrying the join flow's wipe mark [mark]. */
         internal fun withWipes(mark: me.lakko.app.account.AccountStoreGate.WipeMark): JoinRecoveryOutcome =
-            JoinRecoveryOutcome(phraseEntropy, session, accountId, persistJoin, mark)
+            JoinRecoveryOutcome(phraseEntropy, session, accountId, persistJoin, mark, predecessors)
 
         public val sessionToken: String? get() = session?.accessToken
 
@@ -141,6 +145,10 @@ public object PairingOrchestrator {
         /** Taken when the flow began: a wipe of the account after it
          *  refuses the flow's key writes ([me.lakko.app.auth.SignInKeyWrites]). */
         private val wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+        /** G-56 — the self-removal proof a re-pairing of a DeviceGroup member
+         *  carries in its payload ([prepareRejoinPairingFlow]); `null` for an
+         *  ordinary join. */
+        private val selfRemovalProof: ByteArray? = null,
     ) {
         private var group: DeviceGroup? = null
         private var disposed = false
@@ -157,6 +165,7 @@ public object PairingOrchestrator {
                 keyPackage = keyPackage,
                 rendezvousPseudonym = rendezvous,
                 deviceCardEnvelope = deviceCardEnvelope,
+                selfRemovalProof = selfRemovalProof,
             )
 
         /** Long-poll the rendezvous mailbox. */
@@ -214,6 +223,12 @@ public object PairingOrchestrator {
                 identity = identity,
                 accountIdB64 = account.accountIdB64,
             )
+            // G-56 — the DeviceGroup id this device joined, for a later
+            // re-pairing that has to name it (the id is a function of the
+            // account's earlier keys, which a parked device lacks).
+            if (!recordJoinedDeviceGroup(JoinedDeviceGroupIdStore.onDevice(context), account.accountIdB64, joined::groupId)) {
+                android.util.Log.w("PairingOrchestrator", "G-56: the joined DeviceGroup id was not recorded")
+            }
             // UX second-device.md section 3 - joined: this device's own card
             // goes to the others at once.
             DeviceCardCenter.noteJoined(account.accountIdB64)
@@ -256,7 +271,7 @@ public object PairingOrchestrator {
                     object : JoinByNameSteps {
                         override suspend fun pollRecoveryRow(): ByteArray? {
                             val row = try {
-                                RecoveryPayload.pollForRecoveryPayload(
+                                RecoveryRow.poll(
                                     rendezvousPseudonym = rendezvous,
                                     afterCursor = welcomeCursor,
                                 )
@@ -266,24 +281,24 @@ public object PairingOrchestrator {
                                 android.util.Log.w("PairingOrchestrator", "recovery payload poll failed", cause)
                                 return null
                             }
-                            return (row as? RecoveryPayload.RecoveryPayloadOutcome.Received)?.sealedBlob
+                            if (row is RecoveryRow.Outcome.Refused) {
+                                android.util.Log.w("PairingOrchestrator", "recovery row of another version refused")
+                            }
+                            return (row as? RecoveryRow.Outcome.Received)?.sealedBlob
                         }
 
-                        override fun openRecoveryRow(sealed: ByteArray): RecoveryPayload.ParsedRecoveryPayload {
+                        override fun openRecoveryRow(sealed: ByteArray): RecoveryRow.Parsed {
                             var key: ByteArray? = null
-                            var payload: ByteArray? = null
                             try {
                                 key = plain.exportSecret(
                                     identity,
-                                    RecoveryPayload.RECOVERY_EXPORTER_LABEL,
+                                    RecoveryRow.Ffi.exporterLabel(),
                                     rendezvous,
-                                    RecoveryPayload.RECOVERY_EXPORTER_KEY_LENGTH.toUInt(),
+                                    RecoveryRow.Ffi.exporterKeyLen(),
                                 )
-                                payload = openWithKey(key, sealed)
-                                return RecoveryPayload.parseRecoveryPayload(payload)
+                                return RecoveryRow.open(key, sealed, ::openWithKey)
                             } finally {
                                 key?.fill(0)
-                                payload?.fill(0)
                             }
                         }
 
@@ -328,6 +343,17 @@ public object PairingOrchestrator {
                                             identity = identity,
                                             accountIdB64 = accountIdB64,
                                         )
+                                        // G-56 — the id a later re-pairing
+                                        // has to name.
+                                        if (!recordJoinedDeviceGroup(
+                                                JoinedDeviceGroupIdStore.onDevice(context), accountIdB64, joined::groupId,
+                                            )
+                                        ) {
+                                            android.util.Log.w(
+                                                "PairingOrchestrator",
+                                                "G-56: the joined DeviceGroup id was not recorded",
+                                            )
+                                        }
                                         // Joined: this device's own card goes
                                         // to the others at once.
                                         DeviceCardCenter.noteJoined(accountIdB64)
@@ -522,10 +548,12 @@ public object PairingOrchestrator {
             welcomeCursor: Long,
         ): JoinRecoveryOutcome? {
             val outcome = try {
-                RecoveryPayload.pollForRecoveryPayload(
+                RecoveryRow.poll(
                     rendezvousPseudonym = rendezvous,
                     afterCursor = welcomeCursor,
                 )
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w(
                     "PairingOrchestrator",
@@ -534,21 +562,25 @@ public object PairingOrchestrator {
                 )
                 return null
             }
-            if (outcome !is RecoveryPayload.RecoveryPayloadOutcome.Received) {
+            if (outcome !is RecoveryRow.Outcome.Received) {
+                if (outcome is RecoveryRow.Outcome.Refused) {
+                    android.util.Log.w("PairingOrchestrator", "recovery row of another version refused")
+                }
                 return null
             }
             var exporterKey: ByteArray? = null
-            var payload: ByteArray? = null
             var grantToken: ByteArray? = null
+            var handedOff = false
+            var parsedRow: RecoveryRow.Parsed? = null
             try {
                 exporterKey = joined.exportSecret(
                     identity,
-                    RecoveryPayload.RECOVERY_EXPORTER_LABEL,
+                    RecoveryRow.Ffi.exporterLabel(),
                     rendezvous,
-                    RecoveryPayload.RECOVERY_EXPORTER_KEY_LENGTH.toUInt(),
+                    RecoveryRow.Ffi.exporterKeyLen(),
                 )
-                payload = openWithKey(exporterKey, outcome.sealedBlob)
-                val parsed = RecoveryPayload.parseRecoveryPayload(payload)
+                val parsed = RecoveryRow.open(exporterKey, outcome.sealedBlob, ::openWithKey)
+                parsedRow = parsed
                 grantToken = parsed.grantToken
                 // Redeem the single-use grant for a session token (the
                 // request carries the grant only, ADR-0056). A redeem
@@ -573,10 +605,12 @@ public object PairingOrchestrator {
                         "device grant redeem failed (keys-only outcome)",
                     )
                 }
+                handedOff = true
                 return JoinRecoveryOutcome(
                     phraseEntropy = parsed.phraseEntropy,
                     session = redeemed?.session,
                     accountId = redeemed?.accountId ?: account.accountIdBytes.copyOf(),
+                    predecessors = parsed.predecessors,
                 )
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
@@ -589,8 +623,8 @@ public object PairingOrchestrator {
                 return null
             } finally {
                 exporterKey?.fill(0)
-                payload?.fill(0)
                 grantToken?.fill(0)
+                if (!handedOff) parsedRow?.zero()
             }
         }
 
@@ -680,6 +714,103 @@ public object PairingOrchestrator {
             context = context.applicationContext,
             wipes = wipes,
         )
+    }
+
+    /**
+     * The join "Another device" starts on a known account: from the parked
+     * earlier-keys screen ([rejoinsHeldLeaf]), [prepareRejoinPairingFlow];
+     * otherwise [prepareJoinFlow].
+     */
+    public suspend fun preparePairingFlow(
+        context: Context,
+        loginHandle: ByteArray,
+        known: KnownAccount?,
+        deviceCardEnvelope: ByteArray?,
+        rejoinsHeldLeaf: Boolean,
+    ): JoinSession =
+        if (rejoinsHeldLeaf && known != null) {
+            prepareRejoinPairingFlow(context, loginHandle, known, deviceCardEnvelope)
+        } else {
+            prepareJoinFlow(context, loginHandle, known, deviceCardEnvelope)
+        }
+
+    /**
+     * G-56 — the join of a device that is ALREADY in the account's
+     * DeviceGroup (it came in by pairing and parked for the account's earlier
+     * keys) and pairs again from the parked screen. The confirming device
+     * cannot add a second leaf under the same device key (the core refuses:
+     * `DuplicateSignatureKey`), so this device keeps its device identity and
+     * signs, with its old leaf key, that its leaf may be replaced by the new
+     * KeyPackage in the commit leaving the DeviceGroup's latest epoch (learned
+     * by an empty knock, the ADR-0081 rejoin probe; this device's own epoch
+     * when the probe gets no answer). The proof rides in the pairing payload
+     * (`buildPairingQrWithSelfRemovalProof`), on the QR and the code routes;
+     * the confirming device replaces the old leaf in one commit
+     * ([buildPairingCommit]).
+     *
+     * Falls back to [prepareJoinFlow] when this device recorded no joined
+     * DeviceGroup, holds no DeviceGroup state it can read, or its leaf is no
+     * longer in it ([planRejoinPairing]).
+     */
+    public suspend fun prepareRejoinPairingFlow(
+        context: Context,
+        loginHandle: ByteArray,
+        known: KnownAccount,
+        deviceCardEnvelope: ByteArray?,
+        ports: RejoinPairingPorts = rejoinPairingPorts(context, known.accountIdBytes, known.accountIdB64),
+    ): JoinSession {
+        val plan = planRejoinPairing(ports)
+        if (plan !is RejoinPairingPlan.Rejoin) {
+            return prepareJoinFlow(context, loginHandle, known, deviceCardEnvelope)
+        }
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
+        // The same device seed (no new one): the joining identity starts on
+        // an empty provider, where the Welcome is processed, as on the
+        // ordinary join.
+        val seed = DeviceIdentityStore.getDeviceIdentitySeed(context, known.accountIdB64)
+            ?: return prepareJoinFlow(context, loginHandle, known, deviceCardEnvelope)
+        val identity = try {
+            Identity.fromSeed(seed)
+        } finally {
+            seed.fill(0)
+        }
+        try {
+            val keyPackage = identity.createKeyPackage()
+            val proof = uniffi.lakko_ffi_uniffi.signDeviceGroupSelfRemoval(
+                identity, plan.groupId, plan.epoch, keyPackage,
+            )
+            val rendezvous = PairingCodec.generateRendezvousPseudonym()
+            val qrPayload = PairingCodec.buildPairingQrPayload(
+                loginHandle = loginHandle,
+                keyPackage = keyPackage,
+                rendezvousPseudonym = rendezvous,
+                deviceCardEnvelope = deviceCardEnvelope,
+                selfRemovalProof = proof,
+            )
+            android.util.Log.i(
+                "PairingOrchestrator",
+                "G-56: this device is in the DeviceGroup already; it pairs again with a self-removal proof",
+            )
+            return JoinSession(
+                qrPayload = qrPayload,
+                loginHandle = loginHandle.copyOf(),
+                keyPackage = keyPackage,
+                rendezvous = rendezvous,
+                identity = identity,
+                known = known,
+                unboundDeviceSeed = null,
+                context = context.applicationContext,
+                wipes = wipes,
+                selfRemovalProof = proof,
+            )
+        } catch (cause: Throwable) {
+            try {
+                identity.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            throw cause
+        }
     }
 
     /** Result of [runScanFlow]. */
@@ -793,22 +924,18 @@ public object PairingOrchestrator {
             accountIdBytes = accountIdBytes,
             accountIdB64 = accountIdB64,
             build = { ensured ->
-                // ADR-0058 section 5.1 — the members before the add, so the
-                // sync runtime can decide whether this device re-sends.
-                val leavesBeforeAdd = runCatching { ensured.group.devices().map { it.leafIndex } }.getOrNull()
-                val addition = ensured.group.addDeviceFromWire(
-                    identity = ensured.identity,
-                    keyPackage = decoded.keyPackage,
-                )
-                // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped;
-                // an add-device commit carries no attestation.
-                DeviceGroupCommits.Built(
-                    kind = DeviceGroupCommitEntry.Kind.ADD,
-                    row = DeviceGroupJournalEnvelope.encode(addition.commit, null),
-                    welcome = addition.welcome,
-                    welcomeRendezvous = decoded.rendezvousPseudonym,
-                    priorLeaves = leavesBeforeAdd,
-                )
+                // The ordinary add; or (G-56) a device already in the
+                // DeviceGroup pairing again with its self-removal proof: its
+                // old leaf out and the new one in, in ONE commit (the ADR-0081
+                // rejoin replacement), the proof in the removal-authorisation
+                // slot. A proof that does not cover this epoch refuses with
+                // nothing committed.
+                try {
+                    buildPairingCommit(decoded, pairingCommitPorts(ensured))
+                } catch (refused: SelfRemovalProofNotCovering) {
+                    android.util.Log.w("PairingOrchestrator", "G-56: a self-removal proof that does not cover this epoch; refused")
+                    throw refused
+                }
             },
             after = { ensured -> sendBundles(context, ensured, decoded, accountIdB64, recovery) },
         )
@@ -895,23 +1022,32 @@ public object PairingOrchestrator {
                 var grant: ByteArray? = null
                 var exporterKey: ByteArray? = null
                 var payload: ByteArray? = null
+                // G-56 (recovery payload v3): the account's own earlier keys
+                // ride in the row. A store that cannot be read is NOT "none":
+                // no row is published, and the joiner shows its error.
+                val predecessors = me.lakko.app.auth.OwnPredecessorStore.onDevice(context).loadOrNull(accountIdB64)
                 try {
+                    if (predecessors == null) {
+                        throw IllegalStateException("own earlier keys unreadable; the keys are not sent")
+                    }
                     grant = base64UrlDecodeNoPad(recovery.deviceAuthorizeStart())
                     exporterKey = ensured.group.exportSecret(
                         ensured.identity,
-                        RecoveryPayload.RECOVERY_EXPORTER_LABEL,
+                        RecoveryRow.Ffi.exporterLabel(),
                         decoded.rendezvousPseudonym,
-                        RecoveryPayload.RECOVERY_EXPORTER_KEY_LENGTH.toUInt(),
+                        RecoveryRow.Ffi.exporterKeyLen(),
                     )
-                    payload = RecoveryPayload.buildRecoveryPayload(
-                        grantToken = grant,
+                    payload = RecoveryRow.compose(
+                        grant = grant,
                         phraseEntropy = recovery.phraseEntropy,
+                        predecessors = predecessors,
                     )
                     val sealed = sealWithKey(exporterKey, payload)
-                    RecoveryPayload.publishRecoveryPayload(
+                    RecoveryRow.publish(
                         rendezvousPseudonym = decoded.rendezvousPseudonym,
                         sealedBlob = sealed,
                     )
+                    android.util.Log.i("PairingOrchestrator", "recovery payload sent with ${predecessors.size} earlier keys")
                     keysSent = true
                 } catch (cause: Throwable) {
                     android.util.Log.w(
@@ -923,6 +1059,7 @@ public object PairingOrchestrator {
                     grant?.fill(0)
                     exporterKey?.fill(0)
                     payload?.fill(0)
+                    predecessors?.forEach { it.zero() }
                 }
             }
 

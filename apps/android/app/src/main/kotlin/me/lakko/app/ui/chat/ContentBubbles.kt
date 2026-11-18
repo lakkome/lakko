@@ -17,9 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -81,18 +78,18 @@ internal class ContentBubbleContext(
     val onEditChecklist: (ChatMessage) -> Unit = {},
     val onEditArticle: (ChatMessage) -> Unit = {},
     val onCopyText: (String) -> Unit = {},
-    /** ADR-0090 section 4.1 — a channel post: every poll is anonymous. */
+    /** ADR-0092 section 4.1 — a channel post: every poll is anonymous. */
     val channel: Boolean = false,
-    /** ADR-0090 section 4 — a channel poll draws the service's counts. */
+    /** ADR-0092 section 4 — a channel poll draws the service's counts. */
     val pollViewOverride: ((ChatMessage) -> me.lakko.app.chat.PollView?)? = null,
-    /** ADR-0090 section 3.6 — this account's choice as its devices recorded it. */
+    /** ADR-0092 section 3.6 — this account's choice as its devices recorded it. */
     val syncedChoiceOf: (Long) -> ByteArray? = { null },
     /** UX 11.2 — an article card's banner: its first image, as a photo bubble draws it. */
     val banner: (@Composable (uniffi.lakko_ffi_uniffi.AttachmentRef) -> Unit)? = null,
 )
 
 /**
- * ADR-0090 / UX 7.3, 8.2, 9.3, 11.3 — the rows a content message adds to its
+ * ADR-0092 / UX 7.3, 8.2, 9.3, 11.3 — the rows a content message adds to its
  * message menu, for this device and person.
  */
 internal fun contentMenuRows(
@@ -229,7 +226,7 @@ private fun PollCard(msg: ChatMessage, content: MessageContent.Poll, ctx: Conten
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(horizontal = 8.dp),
                     ) {
-                        if (mine) Icon(Icons.Filled.Check, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
+                        if (mine) me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_checkmark, contentDescription = null, tint = tint, size = 16.dp)
                         Text(option, fontSize = 15.sp, color = contentColor, modifier = Modifier.weight(1f).padding(start = 4.dp))
                         Text("$percent%", fontSize = 13.sp, color = muted)
                     }
@@ -405,7 +402,7 @@ private fun LocationCard(loc: uniffi.lakko_ffi_uniffi.SharedLocation, ctx: Conte
         Box(
             Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.Place, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+        ) { me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_location, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
         Column {
             loc.name?.let { Text(it, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = contentColor) }
             Text(coords, fontSize = 13.sp, color = contentColor.copy(alpha = 0.7f))

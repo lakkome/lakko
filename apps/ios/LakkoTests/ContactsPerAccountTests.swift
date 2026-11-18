@@ -132,7 +132,7 @@ final class ContactsPerAccountTests: XCTestCase {
 
     func testAPairingBundleIsFiledUnderTheAccountBeingPaired() {
         AcceptedContactsStore.bind(accountIdB64: bob)
-        let bundle = StateBundle.V3(
+        let bundle = StateBundle.V4(
             contacts: [StateBundle.CarriedContact(
                 signaturePubkeyB64: base64Encode(Data(repeating: 0xD4, count: 32)),
                 displayName: "Dan",

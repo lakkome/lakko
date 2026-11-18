@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Routes for channel poll votes ([ADR-0090] section 4.3).
+//! Routes for channel poll votes ([ADR-0092] section 4.3).
 //!
 //! | Method | Path | Body | Answer |
 //! |---|---|---|---|
@@ -34,7 +34,7 @@
 //! No anonymous token is spent: the credential is the rate limit for the
 //! vote itself. The service logs no tag, channel or post.
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 use std::sync::Arc;
 

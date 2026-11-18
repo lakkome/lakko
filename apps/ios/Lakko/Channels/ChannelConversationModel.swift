@@ -93,6 +93,11 @@ final class ChannelConversationModel: ObservableObject {
 
     var isPublisher: Bool { state.keysByChannel[channelId] != nil }
 
+    /// UX second-device 4a — the account owns or co-publishes this channel
+    /// and this device holds no PublisherGroup for it: the line in place of
+    /// the composer; `nil` otherwise.
+    var readerDeviceRole: ChannelReaderDeviceRole? { state.readerDeviceRole(channelId) }
+
     var channelIdBytes: Data? { ChannelsClient.hexToData(channelId) }
 
     private var currentIdentity: Identity? { try? Identity.fromSeed(seed: accountIdentitySeed) }
@@ -295,11 +300,9 @@ final class ChannelConversationModel: ObservableObject {
         ensureListed()
         state.onSubscribedHere?(channelId)
         access = .subscribing
-        let keys = state.subscriberKeysByChannel[channelId] ?? {
-            let fresh = ChannelsComposer.freshSubscriberKeys()
-            state.setSubscriberKeys(channelId: channelId, keys: fresh)
-            return fresh
-        }()
+        // One key per account and channel: a key another device of the
+        // account subscribed with is reused (the subscription register).
+        let keys = state.subscriberKeysForSubscribe(channelId)
         if let readKey = foundReadKey {
             state.updateExtras(channelId) { $0.readKey = readKey }
         }
@@ -329,11 +332,9 @@ final class ChannelConversationModel: ObservableObject {
         state.onSubscribedHere?(channelId)
         access = .subscribing
         guard let id = channelIdBytes else { return }
-        let keys = state.subscriberKeysByChannel[channelId] ?? {
-            let fresh = ChannelsComposer.freshSubscriberKeys()
-            state.setSubscriberKeys(channelId: channelId, keys: fresh)
-            return fresh
-        }()
+        // One key per account and channel: a key another device of the
+        // account subscribed with is reused (the subscription register).
+        let keys = state.subscriberKeysForSubscribe(channelId)
         do {
             let signer = try ChannelInviteSigner.fromInviteSeed(inviteSeed: inviteSeed)
             let ticket = try signer.sealTicket(
@@ -523,7 +524,7 @@ final class ChannelConversationModel: ObservableObject {
         do {
             var ref = try await AttachmentBridge.encryptAndUpload(
                 bytes: bytes, mime: mime, name: name, media: media, idleDays: Self.fileIdleDays)
-            // ADR-0090 section 2 — an audio file's own tags.
+            // ADR-0092 section 2 — an audio file's own tags.
             ref.title = title
             ref.artist = artist
             MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
@@ -617,7 +618,7 @@ final class ChannelConversationModel: ObservableObject {
                 channelIdHex: channelId, posts: chunk.map(\.cursor)) else { return }
             for post in answer {
                 if let count = post.comments { comments[post.cursor] = count }
-                // ADR-0090 section 4.3 — a poll post's votes, per option.
+                // ADR-0092 section 4.3 — a poll post's votes, per option.
                 if let item = chunk.first(where: { $0.cursor == post.cursor }), item.contentEnvelopeB64 != nil {
                     pollCounts[post.cursor] = pollCountsOf(item, voters: post.voters ?? 0, labels: post.votes)
                 }
@@ -630,7 +631,7 @@ final class ChannelConversationModel: ObservableObject {
         countsByPost = next
     }
 
-    // MARK: - ADR-0090 section 4: polls in channels
+    // MARK: - ADR-0092 section 4: polls in channels
 
     /// Votes per option of each poll post, read with the reaction counts.
     @Published private(set) var pollCounts: [UInt64: ChannelPollCounts] = [:]
@@ -693,13 +694,13 @@ final class ChannelConversationModel: ObservableObject {
             pollSendState[item.cursor] = nil
             await refreshCounts()
         } catch {
-            NSLog("ADR-0090: channel vote not sent")
+            NSLog("ADR-0092: channel vote not sent")
             pollSendState[item.cursor] = .failed
         }
     }
 
     /// A publisher's `Close poll`: freeze the tally this app reads now into
-    /// the post (ADR-0090 section 4.3).
+    /// the post (ADR-0092 section 4.3).
     func closePoll(_ item: ChannelTimelineItem) async {
         await refreshCounts()
         let counts = pollCounts[item.cursor]
@@ -711,7 +712,7 @@ final class ChannelConversationModel: ObservableObject {
         _ = await publish(bytes)
     }
 
-    /// A publisher's tick, added item or edit on a checklist post (ADR-0090
+    /// A publisher's tick, added item or edit on a checklist post (ADR-0092
     /// section 5: signed post ops, publishers only).
     func publishContentOp(_ bytes: Data) async {
         guard isPublisher else { return }
@@ -960,6 +961,55 @@ final class ChannelConversationModel: ObservableObject {
         /// Comments that arrived while the thread was open (section 13.2).
         var newSinceOpen = 0
         var failedSends: [Comment] = []
+        /// Rows the service returned so far, opened or not: a row that did
+        /// not open and a banned author's row are still rows read.
+        var rowsRead = 0
+        /// The first page was read.
+        var firstRead = false
+    }
+
+    /// Section 13.2 — what follows the first two comments of a collapsed
+    /// thread.
+    enum CollapsedMore: Equatable {
+        /// Nothing (yet): the first page is not read, or every comment shows.
+        case none
+        /// `Show {n} more comments`.
+        case count(Int)
+        /// `Show more comments`: rows remain and the service gave no count.
+        case unknown
+        /// The quiet `Comment`: there are none.
+        case comment
+    }
+
+    /// The rule behind ``CollapsedMore``: the shared one in
+    /// `crates/lakko-ui-rules` (`comments`), so the three clients cannot
+    /// disagree. The service's count (ADR-0087 phase B) counts every stored
+    /// comment, including those this reader hides (a banned author's, one
+    /// that does not open), so it never stands alone: nothing is said before
+    /// the first page is read, the rows read are judged by themselves, and
+    /// only the rows not read yet are taken from the service.
+    nonisolated static func collapsedMore(
+        visible: Int, rowsRead: Int, firstRead: Bool, mayHaveMore: Bool, serverCount: UInt64?
+    ) -> CollapsedMore {
+        switch collapsedComments(
+            visible: UInt32(clamping: visible), rowsRead: UInt32(clamping: rowsRead),
+            firstPageRead: firstRead, moreRows: mayHaveMore, serverCount: serverCount)
+        {
+        case .nothing: return .none
+        case .count(let n): return .count(Int(n))
+        case .unknown: return .unknown
+        case .comment: return .comment
+        }
+    }
+
+    /// ``collapsedMore(visible:rowsRead:firstRead:mayHaveMore:serverCount:)``
+    /// for the post at `cursor`.
+    func collapsedMore(_ cursor: UInt64) -> CollapsedMore {
+        let thread = threads[cursor]
+        return Self.collapsedMore(
+            visible: visibleComments(cursor).count, rowsRead: thread?.rowsRead ?? 0,
+            firstRead: thread?.firstRead ?? false, mayHaveMore: thread?.mayHaveMore ?? false,
+            serverCount: commentCountByPost[cursor])
     }
 
     /// The comments of a post, the banned authors' hidden.
@@ -984,6 +1034,8 @@ final class ChannelConversationModel: ObservableObject {
                 if let comment = open(row, item: item) { opened.append(comment) }
             }
             thread.comments = opened
+            thread.rowsRead = (more ? thread.rowsRead : 0) + page.rows.count
+            thread.firstRead = true
             thread.nextAfter = page.nextAfter
             thread.mayHaveMore = page.rows.count >= 20
             if more { thread.expanded = true }

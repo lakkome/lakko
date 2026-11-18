@@ -35,7 +35,7 @@ export function AuthLayout(props: { children: JSX.Element }): JSX.Element {
           <p>{t("auth.brand.body")}</p>
         </div>
         <div class="auth-brand-foot">
-          <Icon name="lock" size={16} />
+          <Icon name="lock" size={20} />
           <span>{t("auth.brand.foot")}</span>
         </div>
       </section>
@@ -47,7 +47,7 @@ export function AuthLayout(props: { children: JSX.Element }): JSX.Element {
           title={t("auth.language.button")}
           onClick={() => setLanguageOpen(true)}
         >
-          <Icon name="globe" size={18} />
+          <Icon name="globe" size={20} />
           <bdi lang={currentLanguage()}>{ownName()}</bdi>
         </button>
         <div class="auth-card">{props.children}</div>

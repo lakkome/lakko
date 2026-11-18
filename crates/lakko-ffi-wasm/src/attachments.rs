@@ -305,7 +305,7 @@ impl AttachmentRef {
         }
     }
 
-    /// ADR-0090 — an `audio` attachment's title tag (<= 255 bytes); kept on
+    /// ADR-0092 — an `audio` attachment's title tag (<= 255 bytes); kept on
     /// the wire only on kind `"audio"`.
     #[wasm_bindgen(getter)]
     pub fn title(&self) -> Option<String> {
@@ -318,7 +318,7 @@ impl AttachmentRef {
         self.title = title;
     }
 
-    /// ADR-0090 — an `audio` attachment's artist tag (<= 255 bytes).
+    /// ADR-0092 — an `audio` attachment's artist tag (<= 255 bytes).
     #[wasm_bindgen(getter)]
     pub fn artist(&self) -> Option<String> {
         self.artist.clone()
@@ -841,7 +841,7 @@ impl ParsedBody {
 
 #[wasm_bindgen]
 impl ParsedBody {
-    /// ADR-0090 — the `MessageContent` object of a `"poll"` / `"checklist"`
+    /// ADR-0092 — the `MessageContent` object of a `"poll"` / `"checklist"`
     /// / `"location"` / `"contact-card"` / `"article"` message, or the
     /// replacement of an `"edit-checklist"` / `"edit-article"`; otherwise
     /// `undefined`. Byte fields inside are standard base64.
@@ -852,13 +852,13 @@ impl ParsedBody {
             .map_or(JsValue::UNDEFINED, crate::content::content_to_js)
     }
 
-    /// ADR-0090 — a `"poll-vote"`'s choices (empty = retract).
+    /// ADR-0092 — a `"poll-vote"`'s choices (empty = retract).
     #[wasm_bindgen(getter, js_name = pollChoices)]
     pub fn poll_choices(&self) -> Option<Vec<u8>> {
         self.poll_choices.clone()
     }
 
-    /// ADR-0090 — the `ChecklistItemRef` a `"checklist-tick"` names.
+    /// ADR-0092 — the `ChecklistItemRef` a `"checklist-tick"` names.
     #[wasm_bindgen(getter, js_name = checklistItem, unchecked_return_type = "ChecklistItemRef | undefined")]
     pub fn checklist_item(&self) -> JsValue {
         self.checklist_item.map_or(JsValue::UNDEFINED, |i| {
@@ -866,7 +866,7 @@ impl ParsedBody {
         })
     }
 
-    /// ADR-0090 section 4.3 — a channel poll's frozen tally on a
+    /// ADR-0092 section 4.3 — a channel poll's frozen tally on a
     /// `"poll-close"`, decoded; `undefined` in a group, or when absent or not
     /// decodable (the close stands).
     #[wasm_bindgen(getter, js_name = pollTally)]
@@ -874,7 +874,7 @@ impl ParsedBody {
         self.poll_tally.clone()
     }
 
-    /// ADR-0090 — a `"checklist-tick"`'s done state.
+    /// ADR-0092 — a `"checklist-tick"`'s done state.
     #[wasm_bindgen(getter, js_name = checklistDone)]
     pub fn checklist_done(&self) -> Option<bool> {
         self.checklist_done
@@ -961,7 +961,7 @@ impl ParsedBody {
     }
 
     /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt" |
-    /// "service-envelope" | "unsupported"`, and since ADR-0090 `"poll" |
+    /// "service-envelope" | "unsupported"`, and since ADR-0092 `"poll" |
     /// "checklist" | "location" | "contact-card" | "article"` (the value in
     /// `content`), `"poll-vote" | "poll-close" | "checklist-tick" |
     /// "checklist-add"` (ops on `target`, never a bubble) and

@@ -13,7 +13,7 @@ import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
 
 /**
- * ADR-0090 section 7 — the "my card may be shared" flag of the own profile:
+ * ADR-0092 section 7 — the "my card may be shared" flag of the own profile:
  * off exactly under `Nobody`, carried on compose, and moved under a strictly
  * newer stamp so receivers (strictly-newer-only) take the change.
  */

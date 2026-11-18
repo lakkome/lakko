@@ -162,7 +162,7 @@ export default function Calls(): JSX.Element {
   const subLine = (entry: CallLogEntry): JSX.Element => (
     <div class="lk-row-line">
       <span class="lk-row-sub">
-        <Icon name={callHistoryRowIcon(entry)} size={13} /> {callRowLabel(entry)}
+        <Icon name={callHistoryRowIcon(entry)} size={14} /> {callRowLabel(entry)}
       </span>
     </div>
   );
@@ -177,7 +177,7 @@ export default function Calls(): JSX.Element {
   const standaloneRow = (entry: StandaloneCallEntry): JSX.Element => (
     <div class="lk-row">
       <span class="lk-avatar" data-tone={toneOf(entry.id)} aria-hidden="true">
-        <Icon name="groups" size={20} />
+        <Icon name="person-3-fill" size={20} />
       </span>
       <div class="lk-row-body">
         <div class="lk-row-line">
@@ -191,12 +191,12 @@ export default function Calls(): JSX.Element {
   );
 
   return (
-    <aside class="lk-pane" aria-label={t("nav.calls")}>
+    <aside class="lk-pane lk-pane-page" aria-label={t("nav.calls")}>
       <div class="lk-pane-head">
         <h1>{t("nav.calls")}</h1>
         <div class="lk-actions">
           <button type="button" class="primary" onClick={() => void newCall()}>
-            <Icon name="video" size={16} />
+            <Icon name="video" size={20} />
             {t("call.history.new_call")}
           </button>
         </div>
@@ -209,7 +209,7 @@ export default function Calls(): JSX.Element {
           when={auth.state().kind === "session" && days().length > 0}
           fallback={
             <div class="lk-empty">
-              <Icon name="calls" size={40} strokeWidth={1.4} />
+              <Icon name="phone" size={48} />
               <strong>{t("call.history.empty")}</strong>
             </div>
           }
@@ -257,7 +257,7 @@ export default function Calls(): JSX.Element {
                             aria-label={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
                             onClick={() => callBack(groupIdB64, row.entry)}
                           >
-                            <Icon name={row.entry.video ? "video" : "phone"} size={18} />
+                            <Icon name={row.entry.video ? "video-fill" : "phone-fill"} size={20} />
                           </button>
                         </Show>
                       </div>

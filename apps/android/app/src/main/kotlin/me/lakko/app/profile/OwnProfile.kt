@@ -46,7 +46,7 @@ public data class OwnProfile(
      */
     val avatar: AvatarRefs? = null,
     /**
-     * ADR-0090 section 7 — whether others may share this person's contact
+     * ADR-0092 section 7 — whether others may share this person's contact
      * card (profile v5 flags bit 0). `false` exactly while this account's
      * "who can find me" setting is `Nobody` ([cardShareableUnder]); kept here
      * rather than read at compose time so a change moves [updatedAtMs]
@@ -56,7 +56,7 @@ public data class OwnProfile(
     val cardShareable: Boolean = true,
 )
 
-/** ADR-0090 section 7 — the card-sharing flag a profile carries under the
+/** ADR-0092 section 7 — the card-sharing flag a profile carries under the
  *  "who can find me" [setting]: off exactly for `Nobody`. No setting (before
  *  a session binds) reads as shareable. */
 public fun cardShareableUnder(setting: uniffi.lakko_ffi_uniffi.FfiVisibilitySetting?): Boolean =
@@ -216,7 +216,7 @@ public object OwnProfileStore {
         /** ADR-0084 — sealed under the device's avatar key (the refs carry
          *  the AEAD keys); absent before the profile photo. */
         val avatarSealed: String? = null,
-        /** ADR-0090 section 7; absent before it, read as shareable. */
+        /** ADR-0092 section 7; absent before it, read as shareable. */
         val cardShareable: Boolean? = null,
     )
 
@@ -298,7 +298,7 @@ public object OwnProfileStore {
     }
 
     /**
-     * ADR-0090 section 7 — make the stored profile's card-sharing flag follow
+     * ADR-0092 section 7 — make the stored profile's card-sharing flag follow
      * the "who can find me" [setting] (a local change or one adopted from
      * another device). Returns whether it changed, so the caller republishes
      * the profile everywhere it goes.

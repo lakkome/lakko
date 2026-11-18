@@ -95,6 +95,24 @@ describe("a save into the fold", () => {
     s.free();
   });
 
+  // Base scenario 26: a channel invitation is saved as its line, never as its
+  // text (the `/g/` link with its secret).
+  it("keeps a channel invitation's line, not its link", () => {
+    const e = saveEdit(
+      {
+        ref: G1,
+        messageId: 7,
+        author: "Ann",
+        text: "https://test.lakko.me/g/AAAAAAAA#fakesecretxyz1",
+        invitationLine: "Invitation to Walk 26",
+        attachments: [],
+        sentAtMs: 0,
+      },
+      1000,
+    );
+    expect(e.t === "saved" ? e.excerpt : null).toBe("Invitation to Walk 26");
+  });
+
   it("is removed by an unsave, and comes back saved again", () => {
     const s = new wasm.SyncedState();
     apply(s, [saveEdit({ ref: G1, messageId: 7, author: "", text: "x", attachments: [], sentAtMs: 0 }, 1000)]);

@@ -3,18 +3,7 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Article
-import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
-import androidx.compose.material.icons.filled.BarChart
-import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Place
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.vector.ImageVector
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.components.LakkoMenu
 import me.lakko.app.ui.components.LakkoMenuRow
@@ -42,16 +31,18 @@ internal fun attachmentMenuDisabledKey(reason: AttachmentMenuDisabled): String =
     AttachmentMenuDisabled.NO_LOCATION -> "attach.menu.no_location"
 }
 
-private fun attachmentMenuIcon(item: AttachmentMenuItem): ImageVector = when (item) {
-    AttachmentMenuItem.PHOTO_OR_VIDEO -> Icons.Filled.PhotoLibrary
-    AttachmentMenuItem.CAMERA -> Icons.Filled.PhotoCamera
-    AttachmentMenuItem.FILE -> Icons.AutoMirrored.Filled.InsertDriveFile
-    AttachmentMenuItem.AUDIO -> Icons.Filled.MusicNote
-    AttachmentMenuItem.POLL -> Icons.Filled.BarChart
-    AttachmentMenuItem.CHECKLIST -> Icons.Filled.Checklist
-    AttachmentMenuItem.LOCATION -> Icons.Filled.Place
-    AttachmentMenuItem.CONTACT -> Icons.Filled.Person
-    AttachmentMenuItem.ARTICLE -> Icons.AutoMirrored.Filled.Article
+/** The row's icon of the Lakko set (design system section 8). */
+@androidx.annotation.DrawableRes
+private fun attachmentMenuIcon(item: AttachmentMenuItem): Int = when (item) {
+    AttachmentMenuItem.PHOTO_OR_VIDEO -> me.lakko.app.R.drawable.ic_lk_photo_stack
+    AttachmentMenuItem.CAMERA -> me.lakko.app.R.drawable.ic_lk_camera
+    AttachmentMenuItem.FILE -> me.lakko.app.R.drawable.ic_lk_doc
+    AttachmentMenuItem.AUDIO -> me.lakko.app.R.drawable.ic_lk_music_note
+    AttachmentMenuItem.POLL -> me.lakko.app.R.drawable.ic_lk_chart_bar
+    AttachmentMenuItem.CHECKLIST -> me.lakko.app.R.drawable.ic_lk_checklist
+    AttachmentMenuItem.LOCATION -> me.lakko.app.R.drawable.ic_lk_location
+    AttachmentMenuItem.CONTACT -> me.lakko.app.R.drawable.ic_lk_person
+    AttachmentMenuItem.ARTICLE -> me.lakko.app.R.drawable.ic_lk_doc_text
 }
 
 /**

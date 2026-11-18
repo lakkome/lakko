@@ -46,7 +46,7 @@ import {
   decodeStateBundle,
   encodeStateBundle,
   mergeCarriedPredecessorSeeds,
-  type StateBundleV3,
+  type StateBundle,
 } from "./state-bundle";
 
 beforeAll(async () => {
@@ -78,8 +78,8 @@ function encodeRaw(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-const base: StateBundleV3 = {
-  v: 3,
+const base: StateBundle = {
+  v: 4,
   contacts: [],
   pins: [
     {
@@ -97,6 +97,7 @@ const base: StateBundleV3 = {
   groupNames: [],
   profiles: [],
   pendingContacts: [],
+  channelSeeds: [],
 };
 
 let local: MemoryStorage;
@@ -157,7 +158,7 @@ describe("state bundle v2 codec (ADR-0074)", () => {
 
   it("an account that never rotated carries an empty array", () => {
     const built = buildStateBundle([], SENDER);
-    expect(built.v).toBe(3);
+    expect(built.v).toBe(4);
     expect(built.ownPredecessors).toEqual([]);
     expect(decodeStateBundle(encodeStateBundle(built))).toEqual(built);
   });

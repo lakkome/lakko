@@ -59,7 +59,7 @@ export function PushedScreen(props: {
             title={t("common.back")}
             onClick={() => props.onBack()}
           >
-            <Icon name="back" size={20} />
+            <Icon name="chevron-back" size={24} />
           </button>
           <h1 id={titleId} class="lk-info-title">
             {props.title}

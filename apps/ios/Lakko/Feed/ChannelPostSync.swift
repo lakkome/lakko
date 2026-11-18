@@ -11,10 +11,21 @@ import UIKit
 ///
 /// A channel post is not a conversation turn, so the cadence is a minute
 /// (chosen), not the chat's long poll; a sync also runs at start and whenever
-/// the app becomes active. An app in the background does not sync. When
-/// ADR-0055's socket exists its notices replace the timer.
+/// the app becomes active. The timer does not sync an app in the background;
+/// the background app refresh task does, once per wake
+/// (``ChannelPostBackgroundRefresh``), so a post is noticed for a
+/// notification while Lakko is closed (`docs/ux/channel-notifications.md`
+/// section 3). When ADR-0055's socket exists its notices replace the timer.
 ///
-/// Only one sync runs at a time, and it is the only writer of the log.
+/// Every channel read is handed to ``onChannelReads`` (the notifier,
+/// ``ChannelPostNotifier``) once the log holding it is saved.
+///
+/// Only one sync runs at a time, and it is the only writer of the log. That
+/// holds across instances too: every pass of every ``ChannelPostSync`` in the
+/// process runs under one writer lock (``ChannelPostLogWriter``), so the
+/// session's sync and one the background app refresh task built for its run
+/// never touch the log at the same time; each pass reads the log as the
+/// previous one left it.
 ///
 /// A post is opened under the seed of its own epoch, never another (ADR-0031,
 /// invariant #4). A post whose epoch is newer than every seed this device
@@ -62,6 +73,24 @@ final class ChannelPostSync: ObservableObject {
     /// The account's current phrase seed, for the reaction outbox
     /// (``ChannelBackgroundChecks``). Set by the session root.
     var accountIdentitySeed: (() -> Data?)?
+    /// `docs/ux/channel-notifications.md` — the channels' read markers as
+    /// they stand before a sync (``FeedReading/channelRead``): the rule tells
+    /// a first read after subscribing (no marker yet) from a refetch. Read
+    /// before any slot is synced, since ``onSlotSynced`` seeds markers. While
+    /// unset, no read is reported.
+    var channelReadMarkers: (() -> [String: UInt64])?
+    /// Told every channel read a sync made (slot before and after, the read
+    /// marker before), after the log holding them is saved, so a
+    /// notification's tap finds the post in the channel.
+    var onChannelReads: ((_ accountIdB64: String, _ reads: [ChannelRead]) -> Void)?
+
+    /// The sync the signed-in session runs, while it is started: the
+    /// background app refresh task runs this one rather than a second writer
+    /// of the log.
+    private(set) weak static var active: ChannelPostSync?
+
+    /// The account this sync reads for.
+    var account: String { accountIdB64 }
 
     init(
         accountIdB64: String,
@@ -80,6 +109,7 @@ final class ChannelPostSync: ObservableObject {
     /// Idempotent.
     func start() {
         guard loop == nil else { return }
+        Self.active = self
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
@@ -103,6 +133,7 @@ final class ChannelPostSync: ObservableObject {
     }
 
     func stop() {
+        if Self.active === self { Self.active = nil }
         loop?.cancel()
         loop = nil
         for o in observers { NotificationCenter.default.removeObserver(o) }
@@ -179,15 +210,30 @@ final class ChannelPostSync: ObservableObject {
         return out
     }
 
-    /// One pass over every readable channel. Returns how many channels it
-    /// tried and how many the server answered for.
+    /// One pass over every readable channel, under the process-wide writer
+    /// lock. Returns how many channels it tried and how many the server
+    /// answered for.
     @discardableResult
     private func syncAll() async -> FeedCheckTally {
+        await ChannelPostLogWriter.acquire()
+        defer { ChannelPostLogWriter.release() }
+        return await syncAllHoldingWriter()
+    }
+
+    private func syncAllHoldingWriter() async -> FeedCheckTally {
         var tried = 0
         var failed = 0
         let before = store.get(accountIdB64: accountIdB64) ?? log
+        // Another sync of this process may have written the log since this
+        // one last did (the background run's): what is published follows
+        // the log as it stands, even when this pass changes nothing.
+        if before != log { log = before }
         var next = ChannelPostLog.retain(before, keep: Set(channels.channels.map(\.id)))
         var changed = next.channels.count != before.channels.count
+        // The read markers as they stand before this read (spec section 2:
+        // a first read after subscribing differs from a refetch).
+        let marksBefore = channelReadMarkers?()
+        var reads: [ChannelRead] = []
 
         for channel in readableChannels() {
             var metas: [SharedChannelMeta] = []
@@ -208,13 +254,20 @@ final class ChannelPostSync: ObservableObject {
                     // envelope; an edit or a delete is not a feed item.
                     let body = ChannelPostBody.read(envelope)
                     guard let line = body.feedText else { return .skip }
+                    // The attachments go with the line, so the feed draws a
+                    // photo, GIF, voice or video message in place; a content
+                    // post (ADR-0092) keeps its envelope and an article's
+                    // images.
                     switch body {
-                    case .chat(let text, let attachments, _):
-                        // The raw text: an attachment-only post has none, and
-                        // the feed says what it carries.
-                        return .post(text: text, attachments: attachments, contentEnvelopeB64: nil)
                     case .content(let envelopeB64, let attachments):
-                        return .post(text: line, attachments: attachments, contentEnvelopeB64: envelopeB64)
+                        return .text(
+                            line, caption: attachments.isEmpty ? nil : "",
+                            attachments: attachments.map(PersistedAttachment.init(from:)),
+                            contentEnvelopeB64: envelopeB64)
+                    case .chat(let text, let attachments, _) where !attachments.isEmpty:
+                        return .text(
+                            line, caption: text,
+                            attachments: attachments.map(PersistedAttachment.init(from:)))
                     default:
                         return .text(line)
                     }
@@ -249,6 +302,11 @@ final class ChannelPostSync: ObservableObject {
                     channelsMap[channel.idHex] = updated
                     next = ChannelPostLogPayload(channels: channelsMap)
                     changed = true
+                    if let marksBefore {
+                        reads.append(ChannelRead(
+                            channelIdHex: channel.idHex, slotBefore: slot, slotAfter: updated,
+                            readMarker: marksBefore[channel.idHex]))
+                    }
                 }
                 onSlotSynced?(channel.idHex, updated)
             } catch where ChannelsApiError.isChannelDeleted(error) {
@@ -279,6 +337,39 @@ final class ChannelPostSync: ObservableObject {
         guard changed else { return tally }
         store.put(accountIdB64: accountIdB64, payload: next)
         log = next
+        if !reads.isEmpty { onChannelReads?(accountIdB64, reads) }
         return tally
     }
+}
+
+/// The one writer of the channel-post log in this process: every
+/// ``ChannelPostSync`` pass holds it from reading the log to saving it and
+/// handing its reads to the notifier. Waiters go in arrival order. Held
+/// across waits (the fetches), on the main actor.
+@MainActor
+enum ChannelPostLogWriter {
+    private static var held = false
+    private static var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Wait for the lock, then hold it until ``release()``.
+    static func acquire() async {
+        if !held {
+            held = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Give the lock to the next waiter, or free it.
+    static func release() {
+        if waiters.isEmpty {
+            held = false
+        } else {
+            // Handed over: it stays held, by the waiter resumed.
+            waiters.removeFirst().resume()
+        }
+    }
+
+    /// For tests: whether a pass holds the lock now.
+    static var isHeld: Bool { held }
 }

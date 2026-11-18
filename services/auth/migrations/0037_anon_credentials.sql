@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 --
--- ADR-0090 section 4.2: the anonymous credential for channel polls.
+-- ADR-0092 section 4.2: the anonymous credential for channel polls.
 --
 -- `anon_credential_commitments` holds the one commitment `C = s*G` an account
 -- registered with a proof of knowledge of `s` (`lakko-anon-cred`). `s` is

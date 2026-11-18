@@ -952,7 +952,7 @@ impl WasmProfile {
     }
 
     /// `false` when the person does not let others share their contact card
-    /// (ADR-0090 section 7, profile v5 flags bit 0): a contact picker and
+    /// (ADR-0092 section 7, profile v5 flags bit 0): a contact picker and
     /// the forward of a contact-card message refuse that person.
     #[wasm_bindgen(getter, js_name = cardShareable)]
     pub fn card_shareable(&self) -> bool {
@@ -984,7 +984,7 @@ impl WasmProfile {
 /// throw `"avatar.notSquare"`, `"avatar.dimensions"`, `"avatar.size"`,
 /// `"avatar.duration"`.
 ///
-/// `cardShareable` (ADR-0090 section 7), the last argument, is optional:
+/// `cardShareable` (ADR-0092 section 7), the last argument, is optional:
 /// `undefined` means `true`. Pass `false` exactly when this device's "who
 /// can find me" setting is `Nobody`.
 #[wasm_bindgen(js_name = composeProfileEnvelope)]
@@ -2594,15 +2594,25 @@ pub enum WasmIncomingEnvelopeKind {
     /// PublisherGroup and the MLS sender is a current publisher; requests
     /// before the next rotation collapse into it. Never render it.
     ChannelRotateRequest = 30,
-    /// ADR-0090 section 3.9 — open polls and checklists handed to a
+    /// A co-publisher's device asks an owner device to admit or retire one
+    /// of its account's devices (ADR-0090 section 2.2). `payload` is the
+    /// whole envelope; decode it with `decodePublisherDeviceRequestEnvelope`.
+    /// Only an owner device acts on it. Never render it.
+    PublisherDeviceRequest = 31,
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). `payload` is the whole envelope; decode it with
+    /// `decodeChannelAdmissionMarkEnvelope` and keep the largest mark from a
+    /// current publisher. Never render it.
+    ChannelAdmissionMark = 32,
+    /// ADR-0092 section 3.9 — open polls and checklists handed to a
     /// newcomer. `payload` is the whole envelope: keep it with the sender's
     /// account key when `openItemsSenderTrusted` says so, then
     /// `assembleOpenItems` and `adoptOpenItem`. Never render it.
-    OpenItems = 31,
-    /// ADR-0090 section 3.9 — old ballot rows of one anonymous poll.
+    OpenItems = 33,
+    /// ADR-0092 section 3.9 — old ballot rows of one anonymous poll.
     /// `payload` is the whole envelope; read it with
     /// `decodePollBallotsEnvelope`. Never render it.
-    PollBallots = 32,
+    PollBallots = 34,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -3000,6 +3010,14 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::GroupContactRequest(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::GroupContactRequest)
+        },
+        IncomingEnvelope::PublisherDeviceRequest(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::PublisherDeviceRequest)
+        },
+        IncomingEnvelope::ChannelAdmissionMark(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ChannelAdmissionMark)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -5422,4 +5440,20 @@ pub fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 #[must_use]
 pub fn call_invite_max_uses() -> u32 {
     RUST_CALL_INVITE_MAX_USES
+}
+
+/// ADR-0081 (third amendment): the note a running device posts to a rejoin
+/// knock's rendezvous at once, meaning "a device of this account is online".
+#[wasm_bindgen(js_name = composeRejoinPresent)]
+#[must_use]
+pub fn compose_rejoin_present() -> Vec<u8> {
+    lakko_contacts::rejoin_present::compose_rejoin_present()
+}
+
+/// Is this rendezvous row exactly a rejoin presence note (and so not a
+/// Welcome)?
+#[wasm_bindgen(js_name = isRejoinPresent)]
+#[must_use]
+pub fn is_rejoin_present(row: &[u8]) -> bool {
+    lakko_contacts::rejoin_present::is_rejoin_present(row)
 }

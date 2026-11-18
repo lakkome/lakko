@@ -5,7 +5,7 @@
 # `open_items` — open-items hand-over codec, planner and assembler (spec)
 
 **Module:** `crates/lakko-contacts/src/open_items.rs`
-**One line:** The wire codec of the ADR-0090 section 3.9 hand-over, the committer's row planner, the newcomer's trust rule and the part assembler; bodies, rings and votes stay bytes.
+**One line:** The wire codec of the ADR-0092 section 3.9 hand-over, the committer's row planner, the newcomer's trust rule and the part assembler; bodies, rings and votes stay bytes.
 
 ## Why this module exists
 
@@ -43,4 +43,4 @@ The envelope is an MLS application message any member (or the DS replaying a cor
 
 ## References
 
-ADR-0090 section 3.9; tests in `open_items/tests.rs` (`a_ring_at_the_cap_splits_and_reassembles`, `a_missing_part_or_a_contradiction_gives_nothing`, `plan_then_assemble_is_identity_for_votes`).
+ADR-0092 section 3.9; tests in `open_items/tests.rs` (`a_ring_at_the_cap_splits_and_reassembles`, `a_missing_part_or_a_contradiction_gives_nothing`, `plan_then_assemble_is_identity_for_votes`).

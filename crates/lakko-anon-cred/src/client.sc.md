@@ -30,9 +30,9 @@ Each `decode` requires the exact length and version 1, canonical points (`C`, `U
 
 ## Invariants upheld
 
-- The tag `T = s*H_poll` depends only on `s` and the poll, so one account has one tag per poll in every period and on every device (ADR-0090 4.2), and tags of different polls are unlinkable under DDH.
+- The tag `T = s*H_poll` depends only on `s` and the poll, so one account has one tag per poll in every period and on every device (ADR-0092 4.2), and tags of different polls are unlinkable under DDH.
 - Two presentations of one credential share no value but the tag, and share it only for one poll; none repeats `U`, `U'` or `C` (property tests).
-- A key rotation (ADR-0074) keeps the lineage seed and therefore `s`; a key reset (ADR-0073) gives a new seed, a new `s` and new tags (the residual of ADR-0090 4.6).
+- A key rotation (ADR-0074) keeps the lineage seed and therefore `s`; a key reset (ADR-0073) gives a new seed, a new `s` and new tags (the residual of ADR-0092 4.6).
 
 ## Measured (release build, Apple M3 Pro, this machine under a load average of about 30 from other builds; median of 200 runs per operation, range over five runs; the spread is the load, not a confidence interval)
 
@@ -45,5 +45,5 @@ Each `decode` requires the exact length and version 1, canonical points (`C`, `U
 
 ## References
 
-- ADR-0090 4.2, 4.3, 4.7; the deviation from the ADR's ElGamal wording is stated in the crate root documentation.
+- ADR-0092 4.2, 4.3, 4.7; the deviation from the ADR's ElGamal wording is stated in the crate root documentation.
 - Tests: `tests/protocol.rs`; fuzz target `credential_decode`.

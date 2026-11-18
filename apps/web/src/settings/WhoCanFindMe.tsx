@@ -23,6 +23,7 @@ import { visibilitySetting } from "../reach/visibility-store";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { ChoiceRow } from "../ui/LabelledRows";
 import { loadWasm } from "../wasm";
 import { accountIdsHexOf } from "./contact-visibility";
 import { useFindableContacts } from "./findable-contacts";
@@ -132,18 +133,14 @@ function ModeRow(props: {
   readonly current: ModeName;
 }): JSX.Element {
   return (
-    <label class="lk-card-row lk-privacy-choice">
-      <input
-        type="radio"
-        name="lk-visibility-mode"
-        checked={props.current === props.mode}
-        onChange={() => run(() => actions.chooseMode(props.mode))}
-      />
-      <span class="lk-card-row-body">
-        <span class="lk-card-row-title">{props.label}</span>
-        <Show when={props.helper}>{(h) => <span class="lk-card-row-sub">{h()}</span>}</Show>
-      </span>
-    </label>
+    <ChoiceRow
+      type="radio"
+      name="lk-visibility-mode"
+      title={props.label}
+      sub={props.helper}
+      checked={props.current === props.mode}
+      onChange={() => run(() => actions.chooseMode(props.mode))}
+    />
   );
 }
 
@@ -204,114 +201,83 @@ export function WhoCanFindMeSection(): JSX.Element {
                 <ModeRow mode="some" label={COPY.some()} current={v().mode} />
                 <Show when={rows().parts}>
                   <div class="lk-privacy-nested">
-                    <label class="lk-card-row lk-privacy-choice">
-                      <input
-                        type="checkbox"
-                        checked={v().contactsOfContacts}
-                        onChange={(e) => onContactsOfContacts(e.currentTarget.checked)}
-                      />
-                      <span class="lk-card-row-body">
-                        <span class="lk-card-row-title">{COPY.contactsOfContacts()}</span>
-                        <span class="lk-card-row-sub">
-                          {contactsOfContactsHelper(v(), chosenAmongContacts(), contacts().length, cocSpreading())}
-                        </span>
-                      </span>
-                    </label>
+                    <ChoiceRow
+                      type="checkbox"
+                      title={COPY.contactsOfContacts()}
+                      sub={contactsOfContactsHelper(v(), chosenAmongContacts(), contacts().length, cocSpreading())}
+                      checked={v().contactsOfContacts}
+                      onChange={(on) => onContactsOfContacts(on)}
+                    />
                     <Show when={rows().contactsForm}>
                       <div
                         class="lk-privacy-nested"
                         role="radiogroup"
                         aria-label={COPY.contactsOfContacts()}
                       >
-                        <label class="lk-card-row lk-privacy-choice">
-                          <input
+                        <ChoiceRow
+                          type="radio"
+                          name="lk-visibility-contacts-form"
+                          title={COPY.contactsAll()}
+                          checked={v().contactsForm === "all"}
+                          onChange={() => onContactsForm("all")}
+                        />
+                        <div class="lk-card-row lk-privacy-choice">
+                          <ChoiceRow
+                            class="lk-privacy-choice-label"
                             type="radio"
                             name="lk-visibility-contacts-form"
-                            checked={v().contactsForm === "all"}
-                            onChange={() => onContactsForm("all")}
+                            title={COPY.contactsChosen()}
+                            checked={v().contactsForm === "chosen"}
+                            onChange={() => onContactsForm("chosen")}
                           />
-                          <span class="lk-card-row-body">
-                            <span class="lk-card-row-title">{COPY.contactsAll()}</span>
-                          </span>
-                        </label>
-                        <div class="lk-card-row lk-privacy-choice">
-                          <label class="lk-privacy-choice-label">
-                            <input
-                              type="radio"
-                              name="lk-visibility-contacts-form"
-                              checked={v().contactsForm === "chosen"}
-                              onChange={() => onContactsForm("chosen")}
-                            />
-                            <span class="lk-card-row-body">
-                              <span class="lk-card-row-title">{COPY.contactsChosen()}</span>
-                            </span>
-                          </label>
                           <Show when={rows().contactsDisclosure}>
                             <A
                               href={paths.settingsSection("privacy-contacts")}
                               class="lk-card-row-action lk-privacy-disclosure"
                               aria-label={COPY.contactsChosen()}
                             >
-                              <Icon name="chevron" size={18} />
+                              <Icon name="chevron-forward" size={14} />
                             </A>
                           </Show>
                         </div>
                       </div>
                     </Show>
-                    <label class="lk-card-row lk-privacy-choice">
-                      <input
-                        type="checkbox"
-                        checked={v().groups !== null}
-                        onChange={(e) => {
-                          const on = e.currentTarget.checked;
-                          run(() => actions.setGroupsVisible(on));
-                        }}
-                      />
-                      <span class="lk-card-row-body">
-                        <span class="lk-card-row-title">{COPY.groups()}</span>
-                        <Show when={v().groups !== null}>
-                          <span class="lk-card-row-sub">
-                            {groupsHelper(v(), chosenAmongScopes(), scopes().length)}
-                          </span>
-                        </Show>
-                      </span>
-                    </label>
+                    <ChoiceRow
+                      type="checkbox"
+                      title={COPY.groups()}
+                      sub={v().groups !== null ? groupsHelper(v(), chosenAmongScopes(), scopes().length) : undefined}
+                      checked={v().groups !== null}
+                      onChange={(on) => run(() => actions.setGroupsVisible(on))}
+                    />
                     <Show when={rows().groupsForm}>
                       <div
                         class="lk-privacy-nested"
                         role="radiogroup"
                         aria-label={COPY.groups()}
                       >
-                        <label class="lk-card-row lk-privacy-choice">
-                          <input
+                        <ChoiceRow
+                          type="radio"
+                          name="lk-visibility-form"
+                          title={COPY.all()}
+                          checked={v().groups === "all"}
+                          onChange={() => onForm("all")}
+                        />
+                        <div class="lk-card-row lk-privacy-choice">
+                          <ChoiceRow
+                            class="lk-privacy-choice-label"
                             type="radio"
                             name="lk-visibility-form"
-                            checked={v().groups === "all"}
-                            onChange={() => onForm("all")}
+                            title={COPY.chosen()}
+                            checked={v().groups === "chosen"}
+                            onChange={() => onForm("chosen")}
                           />
-                          <span class="lk-card-row-body">
-                            <span class="lk-card-row-title">{COPY.all()}</span>
-                          </span>
-                        </label>
-                        <div class="lk-card-row lk-privacy-choice">
-                          <label class="lk-privacy-choice-label">
-                            <input
-                              type="radio"
-                              name="lk-visibility-form"
-                              checked={v().groups === "chosen"}
-                              onChange={() => onForm("chosen")}
-                            />
-                            <span class="lk-card-row-body">
-                              <span class="lk-card-row-title">{COPY.chosen()}</span>
-                            </span>
-                          </label>
                           <Show when={rows().listDisclosure}>
                             <A
                               href={paths.settingsSection("privacy-groups")}
                               class="lk-card-row-action lk-privacy-disclosure"
                               aria-label={COPY.chosen()}
                             >
-                              <Icon name="chevron" size={18} />
+                              <Icon name="chevron-forward" size={14} />
                             </A>
                           </Show>
                         </div>
@@ -372,7 +338,7 @@ export function WhoCanFindMeList(): JSX.Element {
         class="ghost small lk-wide-only"
         style={{ "align-self": "flex-start" }}
       >
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {COPY.title()}
       </A>
       <div class="lk-page-head">
@@ -385,7 +351,7 @@ export function WhoCanFindMeList(): JSX.Element {
       >
         <Show when={showsListSearch(scopes().length)}>
           <label class="lk-search" style={{ margin: "0" }}>
-            <Icon name="search" size={16} />
+            <Icon name="search" size={20} />
             <input
               type="search"
               placeholder={COPY.listSearch()}
@@ -453,7 +419,7 @@ export function WhoCanFindMeContactsList(): JSX.Element {
         class="ghost small lk-wide-only"
         style={{ "align-self": "flex-start" }}
       >
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {COPY.title()}
       </A>
       <div class="lk-page-head">
@@ -470,7 +436,7 @@ export function WhoCanFindMeContactsList(): JSX.Element {
       <Show when={contacts().length > 0} fallback={<p class="lk-muted">{COPY.contactsListEmpty()}</p>}>
         <Show when={showsListSearch(contacts().length)}>
           <label class="lk-search" style={{ margin: "0" }}>
-            <Icon name="search" size={16} />
+            <Icon name="search" size={20} />
             <input
               type="search"
               placeholder={COPY.contactsListSearch()}
@@ -537,7 +503,7 @@ export function MembersCanFindMeRow(props: {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="search" size={18} />
+            <Icon name="search" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{COPY.membersCanFindMe()}</span>

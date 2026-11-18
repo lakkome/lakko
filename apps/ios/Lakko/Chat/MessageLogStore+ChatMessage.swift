@@ -92,7 +92,7 @@ extension PersistedMessage {
             }
         self.unsupportedVersion = msg.unsupportedVersion
         self.lastOpId = msg.lastOpId
-        // ADR-0090 — a deleted content message is stored empty too.
+        // ADR-0092 — a deleted content message is stored empty too.
         self.content = msg.deleted ? nil : msg.content
     }
 

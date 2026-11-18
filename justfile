@@ -559,6 +559,10 @@ dev-desktop:
     app=target/debug/Lakko.app
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp target/debug/lakko-desktop "$app/Contents/MacOS/lakko-desktop"
+    # Apple's on-device translation and transcription (ADR-0082 note of
+    # 2026-11-18): the helper the host starts, next to it in the bundle.
+    swiftc -O -swift-version 5 -target arm64-apple-macos26.4 ../macos-engines/main.swift -o target/debug/lakko-engines
+    cp target/debug/lakko-engines "$app/Contents/MacOS/lakko-engines"
     if [ ! -f "$app/Contents/Resources/icon.icns" ] || [ icons/icon.png -nt "$app/Contents/Resources/icon.icns" ]; then
         set_dir=$(mktemp -d)/icon.iconset
         mkdir -p "$set_dir"
@@ -584,6 +588,7 @@ dev-desktop:
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Lakko uses the microphone for calls.</string>
     <key>NSCameraUsageDescription</key><string>Lakko uses the camera for video calls.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Lakko turns voice messages into text on this Mac. They are never sent anywhere to be transcribed.</string>
     <key>CFBundleURLTypes</key><array><dict>
     <key>CFBundleURLName</key><string>$id</string>
     <key>CFBundleURLSchemes</key><array><string>lakko</string></array>
@@ -595,9 +600,11 @@ dev-desktop:
         identity=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1)
     fi
     if [ -n "$identity" ]; then
+        codesign --force --sign "$identity" --identifier "$id.engines" "$app/Contents/MacOS/lakko-engines"
         codesign --force --sign "$identity" --identifier "$id" "$app"
         echo "signed with: $identity"
     else
+        codesign --force --sign - --identifier "$id.engines" "$app/Contents/MacOS/lakko-engines"
         codesign --force --sign - --identifier "$id" "$app"
         echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
     fi
@@ -1050,6 +1057,16 @@ deploy-web:
 gen-release-key:
     cargo run -q -p lakko-release-manifest-tool -- keygen
 
+# The in-app icon set (design system section 8). draw-icons regenerates the
+# SVGs in docs/brand/icons/svg from tools/brand/icon-drawing; export-icons
+# writes the client copies (Android drawables ic_lk_*, the iOS "Icons" asset
+# folder + LkIcon.generated.swift, web icon-paths.generated.ts).
+draw-icons:
+    python3 -B tools/brand/icon-drawing/build.py
+
+export-icons:
+    python3 -B tools/brand/export-icons.py
+
 # ADR-0038 S3 — mint a signed release manifest and write the raw 89-byte
 # blob to release-manifest.bin. Copy it to the server (the tool prints the
 # scp reminder; served at https://lakko.me/.well-known/lakko-release with no
@@ -1059,6 +1076,24 @@ mint-release-manifest latest min_supported:
     cargo run -q -p lakko-release-manifest-tool -- \
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
+
+# docs/ux/donations.md section 3 - generate the OFFLINE donations signing
+# key. Writes the 32-byte private seed to donations-signing-key.seed (mode
+# 0600, keep it OFFLINE, never commit) and PRINTS the base64url public key
+# for the web build (VITE_LAKKO_DONATIONS_KEY) and discovery's optional
+# startup check (LAKKO_DISCOVERY_DONATIONS_KEY). Refuses to overwrite a seed.
+gen-donations-key:
+    cargo run -q -p lakko-donations-tool -- keygen --out donations-signing-key.seed
+
+# docs/ux/donations.md section 3 - sign the plain donation methods file
+# (id, kind, link, qr_file, phone, coin, network, address, countries) into
+# the signed file discovery loads as the `lakko-donations` credential.
+# Install it as root 0600 at /etc/lakko/credstore/lakko-donations.json and
+# restart discovery (infra/README.md, "Donation methods").
+# Example: just sign-donations donations.json
+sign-donations input out="donations.signed.json":
+    cargo run -q -p lakko-donations-tool -- \
+        sign --in {{input}} --key donations-signing-key.seed --out {{out}}
 
 # ADR-0026 - put the anti-censorship tunnel on the test stack: obfs-proxy
 # alone, no other service restarted, and a freshly signed bootstrap config.

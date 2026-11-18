@@ -61,7 +61,7 @@ export interface ChannelComposerProps {
   readonly onCancelEdit: () => void;
   /** The timeline's media hub: a take's object URLs are filed there. */
   readonly hub: MediaHub;
-  /** ADR-0090 — an `Edit checklist` / article `Edit` the timeline asked for. */
+  /** ADR-0092 — an `Edit checklist` / article `Edit` the timeline asked for. */
   readonly contentEdit?: () => AttachEditRequest | null;
   readonly clearContentEdit?: () => void;
 }
@@ -201,7 +201,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
   /** The draft key of this composer (one channel per mounted composer). */
   const draftKeyOf = (): string => "post";
 
-  /** ADR-0090 — a poll, checklist, location, contact card or article post. */
+  /** ADR-0092 — a poll, checklist, location, contact card or article post. */
   async function publishContent(content: MessageContent, refs: AttachmentRefBytes[] = []): Promise<void> {
     setBusy(true);
     setError(null);
@@ -336,7 +336,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
               props.onCancelEdit();
             }}
           >
-            <Icon name="close" size={16} />
+            <Icon name="xmark" size={20} />
           </button>
         </div>
       </Show>
@@ -345,7 +345,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
           <For each={files()}>
             {(f) => (
               <li class="lk-channel-file">
-                <Icon name="clip" size={14} />
+                <Icon name="doc" size={14} />
                 <span>{f.name}</span>
                 <span class="lk-meta">{formatAttachmentSize(f.size)}</span>
                 <button
@@ -355,7 +355,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
                   disabled={busy()}
                   onClick={() => setFiles(files().filter((x) => x !== f))}
                 >
-                  <Icon name="close" size={14} />
+                  <Icon name="xmark-circle-fill" size={14} />
                 </button>
               </li>
             )}
@@ -455,7 +455,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
             disabled={busy()}
             onClick={() => setEmojiOpen((v) => !v)}
           >
-            <Icon name="smile" size={20} />
+            <Icon name="face-smiling" size={20} />
           </button>
           <Show when={emojiOpen()}>
             <EmojiPicker
@@ -490,7 +490,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
           aria-busy={busy() ? "true" : undefined}
           disabled={busy() || empty()}
         >
-          <Icon name="send" size={20} />
+          <Icon name="send-fill" size={20} />
         </button>
         </Show>
       </form>

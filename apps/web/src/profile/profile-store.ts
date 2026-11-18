@@ -66,14 +66,14 @@ export interface StoredProfile {
   /** ADR-0084 — the profile photo references, absent or `null` for none.
    *  Carries blob keys (SECRET); persisted only in the encrypted row. */
   readonly avatar?: AvatarData | null;
-  /** ADR-0090 section 7 — whether the person lets others share their
+  /** ADR-0092 section 7 — whether the person lets others share their
    *  contact card (off exactly when their "who can find me" setting is
    *  `Nobody`). Absent (rows filed before the field) reads as `true`. */
   readonly cardShareable?: boolean;
 }
 
 /** Whether a held profile lets its person's card be shared. No profile, or
- *  one filed before the flag existed, counts as shareable (ADR-0090 section
+ *  one filed before the flag existed, counts as shareable (ADR-0092 section
  *  7: a person who never sent a profile counts as shareable). */
 export function profileCardShareable(p: StoredProfile | undefined): boolean {
   return p?.cardShareable !== false;
@@ -91,7 +91,7 @@ export interface IncomingProfile {
   /** ADR-0084 — the photo, already copied out of the wasm handles
    *  (`AvatarData`), or the wasm `ProfileAvatar` itself, or absent. */
   readonly avatar?: AvatarData | WasmProfileAvatarLike | undefined | null;
-  /** ADR-0090 section 7 — the "my card may be shared" flag; absent = true. */
+  /** ADR-0092 section 7 — the "my card may be shared" flag; absent = true. */
   readonly cardShareable?: boolean | undefined | null;
 }
 
@@ -161,7 +161,7 @@ export function mergeAccountId(
   const learnCert = heldCert === null && incomingCert !== null && incoming.username === held.username;
   if (!learnId && !learnCert) return null;
   // The card flag is not learned here: a switch to or from `Nobody` restamps
-  // the sender's profile (ADR-0090 section 7), so only a strictly newer
+  // the sender's profile (ADR-0092 section 7), so only a strictly newer
   // profile changes it.
   return {
     ...held,

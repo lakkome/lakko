@@ -62,6 +62,7 @@ final class NetworkGuard: NSObject, XCTestObservation {
     private static let lock = NSLock()
     private static var installed = false
     private static var storeGateReset: StoreGateTestReset?
+    private static var defaultsHygiene: TestDefaultsHygiene?
     private static var current: XCTestCase?
     private static var caught: [String] = []
     private static var caughtInCurrent: [String] = []
@@ -74,6 +75,9 @@ final class NetworkGuard: NSObject, XCTestObservation {
         // every test (`StoreGateTestReset`, `AccountStoreGateTests.swift`)
         // is installed from here.
         Self.storeGateReset = StoreGateTestReset()
+        // The per-account preference rows earlier runs left (CFPreferences'
+        // 4 MiB domain limit, `TestDefaultsHygiene.swift`).
+        Self.defaultsHygiene = TestDefaultsHygiene()
     }
 
     /// Install the guard. Idempotent.

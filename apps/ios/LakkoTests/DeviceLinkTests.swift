@@ -25,6 +25,9 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
     var answeredElsewhere = false
     /// Set to make `openRequest` throw, as an offline or cancelled request does.
     var openFails = false
+    /// Set to make `postResult` fail when its task is cancelled, as a
+    /// URLSession request does.
+    var cancellableResult = false
     /// The fresh-auth grants the two gated routes carried, in order.
     var grants: [String] = []
     /// How many of the next gated calls answer `403 fresh-auth-required`.
@@ -81,6 +84,11 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
 
     func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String, freshGrant: String) async throws {
         try gate("/device/requests/result", freshGrant)
+        if cancellableResult {
+            // As URLSession does: a cancelled task's request ends in -999.
+            await Task.yield()
+            try Task.checkCancellation()
+        }
         log.append(confirmB == nil ? "result:wrong_code" : "result:accepted")
         row?.outcome = confirmB == nil ? "wrong_code" : "accepted"
         row?.confirmB = confirmB
@@ -225,6 +233,48 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertEqual(paired.payloads, [payload], "the old device pairs the new device's payload")
         XCTAssertNil(old.modal, "UX 2.1: the prompt simply closes, no result line")
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
+    }
+
+    /// Seen live on an iPhone (2026-11-15): the sheet drives `check()` from
+    /// `.task(id: modal)`, and a right code moves the modal to `.adding`
+    /// before the result is posted, so SwiftUI cancelled the task and the
+    /// result request with it ("Could not add the device"). The result and
+    /// the pairing must survive the cancellation of the task that saw them.
+    func testARightCodeSurvivesTheCancellationOfTheCheckThatSawIt() async throws {
+        let server = FakeDeviceLinkServer()
+        server.cancellableResult = true
+        let paired = Paired()
+        let old = responder(server, limit: try limit(), paired: paired)
+        let payload = try pairingPayload()
+        let new = joiner(server, payload: payload)
+
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code is shown") }
+        while new.phase != .enterCode { await Task.yield() }
+        let submit = Task { await new.submit(code: shown) }
+        while server.row?.confirmA == nil { await Task.yield() }
+
+        // The view's task: cancelled the moment the modal changes, as
+        // `.task(id: flow.modal)` is.
+        let viewTask = Task { await old.check() }
+        while old.modal == .code(shown) { await Task.yield() }
+        viewTask.cancel()
+        await viewTask.value
+        // Bounded: without the fix the modal ends in `.failed` and nothing
+        // pairs, which must fail the test, not hang it.
+        for _ in 0..<500 where paired.payloads.isEmpty && old.modal != .failed {
+            await old.check()
+            await Task.yield()
+        }
+        submit.cancel()
+        start.cancel()
+
+        XCTAssertEqual(paired.payloads, [payload], "the device is added")
+        XCTAssertTrue(server.log.contains("result:accepted"), "the result reached the server")
+        XCTAssertNotEqual(old.modal, .failed)
     }
 
     /// UX section 2.1 (decided 2026-10-29) — on the six-digit code route the

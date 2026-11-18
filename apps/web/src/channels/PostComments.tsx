@@ -28,6 +28,7 @@ import { base64Encode } from "../auth/account-id";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { MessageText } from "../chat/MessageText";
+import { uiRules } from "../chat/ui-rules";
 import { copyMessageText } from "../chat/copy-message";
 import { b64ToBytes, bytesToB64, type AvatarData } from "../profile/avatar-model";
 import { rememberCardAvatar } from "../profile/avatar-runtime";
@@ -241,7 +242,7 @@ export function PostComments(props: {
     if (needsFirstRead(n)) {
       // A count above what was read (someone commented since): read on.
       if (!started) start();
-      else if (status() === "ready" && !thread().expanded && thread().done && n > thread().rows.length) {
+      else if (status() === "ready" && !thread().expanded && thread().done && n > thread().rowsRead) {
         void read(thread().nextAfter, "page").catch(() => undefined);
       }
       return;
@@ -331,6 +332,7 @@ export function PostComments(props: {
     let sealed: Uint8Array;
     const writerKey = wk.publicKey;
     let avatarRef: InstanceType<Wasm["AvatarRef"]> | undefined;
+    let avatarHandedOver = false;
     try {
       const still = own.avatar?.still;
       if (still !== undefined) {
@@ -347,6 +349,7 @@ export function PostComments(props: {
         }
       }
       const target = replyTo();
+      avatarHandedOver = true;
       sealed = w.sealChannelComment(
         id,
         s,
@@ -363,8 +366,10 @@ export function PostComments(props: {
       setError(() => t("channels.comments.invalid"));
       return;
     } finally {
+      // `avatarRef` is not freed once handed over: `sealChannelComment` takes
+      // it by value, and a free on the emptied wrapper throws.
       wk.free();
-      avatarRef?.free();
+      if (!avatarHandedOver) avatarRef?.free();
     }
     // Recorded before it is posted, so any device of the account can delete
     // it whatever happens next.
@@ -427,7 +432,7 @@ export function PostComments(props: {
     }
   }
 
-  const collapsed = createMemo(() => collapsedView(thread(), banned, serverCount()));
+  const collapsed = createMemo(() => collapsedView(thread(), banned, serverCount(), uiRules()));
   const opened = createMemo(() => openView(thread(), banned));
   const shown = (): readonly CommentView[] => (thread().expanded ? opened().shown : collapsed().shown);
 
@@ -591,7 +596,7 @@ export function PostComments(props: {
                   aria-label={t("chat.reply.cancel")}
                   onClick={() => setReplyTo(null)}
                 >
-                  <Icon name="close" size={16} />
+                  <Icon name="xmark" size={20} />
                 </button>
               </div>
             )}
@@ -612,8 +617,14 @@ export function PostComments(props: {
               value={draft()}
               onInput={(e) => setDraft(e.currentTarget.value)}
             />
-            <button type="submit" class="primary small" disabled={draft().trim().length === 0}>
-              {t("chat.composer.send")}
+            <button
+              type="submit"
+              class="lk-send-glyph"
+              aria-label={t("chat.composer.send")}
+              title={t("chat.composer.send")}
+              disabled={draft().trim().length === 0}
+            >
+              <Icon name="arrow-up-circle-fill" size={31} />
             </button>
           </form>
           <Show when={error()}>
@@ -682,7 +693,7 @@ export function PostComments(props: {
                 onDelete={() => void onDelete(m.c)}
                 extraDestructive={
                   props.canModerate && !own
-                    ? [{ label: t("channels.ban.action"), icon: "shieldAlert", onClick: () => void onBan(m.c) }]
+                    ? [{ label: t("channels.ban.action"), icon: "nosign", onClick: () => void onBan(m.c) }]
                     : []
                 }
                 onClose={() => setMenu(null)}

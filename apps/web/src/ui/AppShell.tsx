@@ -45,17 +45,17 @@ import { t } from "../l10n";
  * never an argument against call history, and the design system's own
  * information architecture kept it as destination 4 throughout.
  */
-const ITEMS: ReadonlyArray<{ href: string; labelKey: string; icon: IconName; prefix: string[] }> = [
+const ITEMS: ReadonlyArray<{ href: string; labelKey: string; icon: IconName; selectedIcon: IconName; prefix: string[] }> = [
   // A group conversation still lives under `/groups/<id>`, so that prefix
   // keeps Chats lit while one is open - the list is one list now, and which
   // URL a conversation happens to sit at is not something the rail should
   // show.
-  { href: paths.home, labelKey: "nav.chats", icon: "chat", prefix: ["/chat/", "/groups", "/channels"] },
+  { href: paths.home, labelKey: "nav.chats", icon: "chat", selectedIcon: "chat-fill", prefix: ["/chat/", "/groups", "/channels"] },
   // `docs/ux/feed.md` section 2 - second, one tap from the home.
-  { href: paths.feed, labelKey: "nav.feed", icon: "feed", prefix: [] },
-  { href: paths.contacts, labelKey: "nav.contacts", icon: "contacts", prefix: [] },
-  { href: paths.calls, labelKey: "nav.calls", icon: "calls", prefix: [] },
-  { href: paths.settings, labelKey: "nav.settings", icon: "settings", prefix: ["/devices"] },
+  { href: paths.feed, labelKey: "nav.feed", icon: "feed", selectedIcon: "feed-fill", prefix: [] },
+  { href: paths.contacts, labelKey: "nav.contacts", icon: "person-square", selectedIcon: "person-square-fill", prefix: [] },
+  { href: paths.calls, labelKey: "nav.calls", icon: "phone", selectedIcon: "phone-fill", prefix: [] },
+  { href: paths.settings, labelKey: "nav.settings", icon: "gear", selectedIcon: "gear-fill", prefix: ["/devices"] },
 ];
 
 /**
@@ -111,7 +111,7 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
             aria-label={attention(item) ? t("nav.settings.attention_a11y") : undefined}
           >
             <span class="lk-rail-icon">
-              <Icon name={item.icon} size={22} />
+              <Icon name={isActive(item) ? item.selectedIcon : item.icon} size={24} />
               <Show when={attention(item)}>
                 <AttentionBadge />
               </Show>

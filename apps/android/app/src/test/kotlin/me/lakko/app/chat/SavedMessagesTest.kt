@@ -87,6 +87,11 @@ class SavedMessagesTest {
         assertEquals("", savedAttachmentKind(msg(1, text = "t")))
         assertEquals("doc.pdf", savedExcerpt(msg(1, ref(1, "application/pdf"))))
         assertEquals("caption", savedExcerpt(msg(1, ref(1, "image/jpeg"), text = "caption")))
+        // Base scenario 26: a channel invitation is saved as its card's line,
+        // never as its text (the `/g/` link with its secret).
+        val invite = msg(1, text = "https://test.lakko.me/g/AAAAAAAA#fakesecretxyz1")
+            .copy(channelInvite = byteArrayOf(1, 2, 3))
+        assertEquals("Invitation to Walk 26", savedExcerpt(invite) { if (it != null) "Invitation to Walk 26" else null })
         assertEquals("saved.kind.file", savedKindText("file", "doc.pdf")?.key)
         assertNull(savedKindText("", "x"))
     }

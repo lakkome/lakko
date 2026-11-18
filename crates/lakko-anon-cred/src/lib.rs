@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Keyed-verification anonymous credential for channel polls ([ADR-0090]
+//! Keyed-verification anonymous credential for channel polls ([ADR-0092]
 //! section 4): one account, one vote per poll, without the verifying service
 //! learning the account.
 //!
@@ -28,7 +28,7 @@
 //!
 //! # Deviation from the ADR text, recorded for the review
 //!
-//! ADR-0090 4.2 describes the issuance request as "`s` encrypted to itself
+//! ADR-0092 4.2 describes the issuance request as "`s` encrypted to itself
 //! (ElGamal under a fresh client key) with a proof that the encrypted value is
 //! the discrete log of the stored `C`", following CMZ14's blind issuance. In
 //! CMZ14 that ciphertext encrypts `s*G` so the issuer can compute the MAC
@@ -46,9 +46,9 @@
 //! One [`MasterSecret`] shared by the issuer (`services/auth`) and the
 //! verifier (`services/channels`), separate from the anonymous-token master;
 //! each period's key is derived from it ([`IssuerSecretKey::derive`]). Holding
-//! the master lets a service mint credentials (ADR-0090 4.4).
+//! the master lets a service mint credentials (ADR-0092 4.4).
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 #![forbid(unsafe_code)]
 
@@ -81,7 +81,7 @@ pub use verifier::{
 pub const WIRE_VERSION: u8 = 1;
 
 /// The longest message a presentation may be bound to. Chosen, not measured:
-/// a vote carries at most ten 16-byte labels (ADR-0090 4.3) and an action.
+/// a vote carries at most ten 16-byte labels (ADR-0092 4.3) and an action.
 pub const MAX_MESSAGE_LEN: usize = 1024;
 
 /// Entry points for the fuzz harnesses in `fuzz/`. Not a supported API.

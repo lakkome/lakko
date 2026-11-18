@@ -120,11 +120,11 @@ pub struct AttachmentRef {
     /// ADR-0047 — the poster-frame blob (video note still).
     #[uniffi(default = None)]
     pub thumb: Option<ThumbRef>,
-    /// ADR-0090 — an `audio` attachment's title tag (<= 255 bytes); kept
+    /// ADR-0092 — an `audio` attachment's title tag (<= 255 bytes); kept
     /// only on kind `audio`.
     #[uniffi(default = None)]
     pub title: Option<String>,
-    /// ADR-0090 — an `audio` attachment's artist tag (<= 255 bytes); kept
+    /// ADR-0092 — an `audio` attachment's artist tag (<= 255 bytes); kept
     /// only on kind `audio`.
     #[uniffi(default = None)]
     pub artist: Option<String>,
@@ -540,32 +540,32 @@ pub enum MessageBodyKind {
     /// catalog sentence, never core prose. Appended last so every earlier
     /// variant keeps its ordinal.
     Unsupported,
-    /// ADR-0090 — a poll in `content` (check its signature with
+    /// ADR-0092 — a poll in `content` (check its signature with
     /// `verifyPoll` against the sender's account key, C-68). Appended.
     Poll,
-    /// ADR-0090 — a checklist in `content` (`verifyChecklist`).
+    /// ADR-0092 — a checklist in `content` (`verifyChecklist`).
     Checklist,
-    /// ADR-0090 — a location in `content`.
+    /// ADR-0092 — a location in `content`.
     Location,
-    /// ADR-0090 — a contact card in `content`.
+    /// ADR-0092 — a contact card in `content`.
     ContactCard,
-    /// ADR-0090 — an article in `content`; its images are `attachments`.
+    /// ADR-0092 — an article in `content`; its images are `attachments`.
     Article,
-    /// ADR-0090 — a non-anonymous vote on the poll `target`: `poll_choices`
+    /// ADR-0092 — a non-anonymous vote on the poll `target`: `poll_choices`
     /// (empty = retract). Never a bubble.
     PollVote,
-    /// ADR-0090 — close the poll or checklist `target`. Never a bubble.
+    /// ADR-0092 — close the poll or checklist `target`. Never a bubble.
     PollClose,
-    /// ADR-0090 — tick `checklist_item` of the checklist `target`, done =
+    /// ADR-0092 — tick `checklist_item` of the checklist `target`, done =
     /// `checklist_done`. Never a bubble.
     ChecklistTick,
-    /// ADR-0090 — add an item (`text`) to the checklist `target`; the item's
+    /// ADR-0092 — add an item (`text`) to the checklist `target`; the item's
     /// id is this row's DS `messageId`. Never a bubble.
     ChecklistAdd,
-    /// ADR-0090 — the author's edit of the checklist `target`, the
+    /// ADR-0092 — the author's edit of the checklist `target`, the
     /// replacement in `content` (signature checked by the receiver).
     EditChecklist,
-    /// ADR-0090 — an edit of the article `target`, the replacement in
+    /// ADR-0092 — an edit of the article `target`, the replacement in
     /// `content` and its images in `attachments`.
     EditArticle,
 }
@@ -632,21 +632,21 @@ pub struct ParsedBody {
     /// (`Some` only for `Chat`). Open it with `openChannelInviteCard`.
     #[uniffi(default = None)]
     pub channel_invite: Option<Vec<u8>>,
-    /// ADR-0090 — the content of a `Poll` / `Checklist` / `Location` /
+    /// ADR-0092 — the content of a `Poll` / `Checklist` / `Location` /
     /// `ContactCard` / `Article` message, or the replacement of an
     /// `EditChecklist` / `EditArticle`.
     #[uniffi(default = None)]
     pub content: Option<crate::content::MessageContent>,
-    /// ADR-0090 — a `PollVote`'s choices (empty = retract).
+    /// ADR-0092 — a `PollVote`'s choices (empty = retract).
     #[uniffi(default = None)]
     pub poll_choices: Option<Vec<u8>>,
-    /// ADR-0090 — the item a `ChecklistTick` names.
+    /// ADR-0092 — the item a `ChecklistTick` names.
     #[uniffi(default = None)]
     pub checklist_item: Option<crate::content::ChecklistItemRef>,
-    /// ADR-0090 — a `ChecklistTick`'s done state.
+    /// ADR-0092 — a `ChecklistTick`'s done state.
     #[uniffi(default = None)]
     pub checklist_done: Option<bool>,
-    /// ADR-0090 section 4.3 — a channel poll's frozen tally on a `PollClose`,
+    /// ADR-0092 section 4.3 — a channel poll's frozen tally on a `PollClose`,
     /// decoded; `None` in a group, or when it was absent or did not decode
     /// (the close stands).
     #[uniffi(default = None)]

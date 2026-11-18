@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 4: the client half of the channel-poll credential.
+//! ADR-0092 section 4: the client half of the channel-poll credential.
 //!
 //! Once per account: [`AnonCredentialSecret::registration`] goes to
 //! `PUT /auth/anon-credential/commitment`. Once per period: fetch the

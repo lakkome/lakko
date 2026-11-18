@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 8 — the article editor's model, pure and testable.
+ * ADR-0092 section 8 — the article editor's model, pure and testable.
  *
  * The editor keeps a flat list of {@link EditorBlock}s (one per editable
  * element) whose text is a list of runs. Everything the core requires of an

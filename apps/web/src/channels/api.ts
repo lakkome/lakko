@@ -781,9 +781,13 @@ export async function putChannelAccess(
 }
 
 /** `PUT /v1/channels/:id/public-seed/:epoch` — file a public channel's seed
- *  envelope (ADR-0087 section 6), publisher-signed over the 64 bytes. A
- *  `409 public-seed-exists` for the identical envelope does not happen (the
- *  server answers 204); another envelope is refused. */
+ *  envelope (ADR-0087 section 6), publisher-signed over the 64 bytes. The
+ *  record is immutable: the identical envelope again is a `204`, any other is
+ *  `409 public-seed-exists`. Every seal draws a fresh nonce, so filing the
+ *  same epoch's seed a second time (a later pass, a reload, another
+ *  publisher's device) always sends other bytes; the epoch's seed is the same
+ *  MLS-derived value for every publisher, so `public-seed-exists` means the
+ *  epoch is already filed and is a success here. */
 export async function putPublicSeed(
   channelIdHex: string,
   epoch: number,
@@ -791,19 +795,27 @@ export async function putPublicSeed(
   accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<void> {
-  await sendAsPublisher(
-    accountIdentity,
-    channelIdHex,
-    {
-      method: "PUT",
-      path: `/v1/channels/${channelIdHex}/public-seed/${epoch}`,
-      query: "",
-      body: envelope,
-      contentType: "application/octet-stream",
-    },
-    base,
-  );
+  try {
+    await sendAsPublisher(
+      accountIdentity,
+      channelIdHex,
+      {
+        method: "PUT",
+        path: `/v1/channels/${channelIdHex}/public-seed/${epoch}`,
+        query: "",
+        body: envelope,
+        contentType: "application/octet-stream",
+      },
+      base,
+    );
+  } catch (err) {
+    if (isChannelApiError(err) && err.status === 409 && err.code === PUBLIC_SEED_EXISTS) return;
+    throw err;
+  }
 }
+
+/** The code `PUT .../public-seed/:epoch` answers when the epoch is filed. */
+export const PUBLIC_SEED_EXISTS = "public-seed-exists";
 
 /** `GET /v1/channels/:id/public-seed/:epoch` — the raw 64-byte envelope, or
  *  `null` when none is filed (a private channel, an epoch not filed yet). */
@@ -1098,7 +1110,7 @@ export async function deliverEnvelope(
  *  publisher posts to `POST /v1/channels/:id/rotate`. */
 export interface RotateBatchEntry {
   /** Hex-encoded subscriber public key. */
-  readonly subscriber_pubkey_hex: string;
+  readonly subscriber_id: string;
   /** Base64-encoded `EXPECTED_ENVELOPE_LEN`-byte sealed
    *  HPKE envelope carrying the new content seed under the
    *  subscriber's HPKE public key. */

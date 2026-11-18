@@ -151,6 +151,17 @@ struct FeedReading: Equatable {
         return next
     }
 
+    /// Mark all read in Chats (`docs/ux/chat-folders.md` 2.2) on channels:
+    /// each of `channelIds` is read through the newest post this device holds
+    /// of it (its slot's cursor, never below its newest post), as opening it
+    /// to its newest end would. A channel with no slot is left as it is.
+    func markingChannelsRead(_ channelIds: [String], slots: [String: ChannelPostSlot]) -> FeedReading {
+        channelIds.reduce(self) { reading, id in
+            guard let slot = slots[id] else { return reading }
+            return reading.advancingChannelRead(id, cursor: max(slot.cursor, slot.posts.map(\.cursor).max() ?? 0))
+        }
+    }
+
     /// Give every channel that has no marker one at the newest post this
     /// device holds of it now (its slot's cursor, never below its newest
     /// post), so a fresh subscription starts with no count. A channel already
@@ -175,11 +186,11 @@ struct FeedReading: Equatable {
 // MARK: - Icons (UX spec section 4.1)
 
 /// The twelve feed icons, in the index order the rule file carries, each
-/// mapped to an SF Symbol. An index this client does not know draws the
+/// mapped to an icon of the Lakko set. An index this client does not know draws the
 /// default. Presets keep fixed icons of their own.
 enum FeedIcons {
     struct Entry: Equatable {
-        let symbol: String
+        let icon: LkIcon
         /// The catalog key of the icon's spoken name (ADR-0061).
         let labelKey: String
         /// The icon's name in the interface language, read when shown.
@@ -187,25 +198,25 @@ enum FeedIcons {
     }
 
     static let all: [Entry] = [
-        Entry(symbol: "newspaper", labelKey: "feed.icon.feed"),
-        Entry(symbol: "star", labelKey: "feed.icon.star"),
-        Entry(symbol: "heart", labelKey: "feed.icon.heart"),
-        Entry(symbol: "bolt", labelKey: "feed.icon.lightning"),
-        Entry(symbol: "book", labelKey: "feed.icon.book"),
-        Entry(symbol: "chevron.left.forwardslash.chevron.right", labelKey: "feed.icon.code"),
-        Entry(symbol: "music.note", labelKey: "feed.icon.music"),
-        Entry(symbol: "camera", labelKey: "feed.icon.camera"),
-        Entry(symbol: "globe", labelKey: "feed.icon.globe"),
-        Entry(symbol: "bubble.left", labelKey: "feed.icon.speech_bubble"),
-        Entry(symbol: "bell", labelKey: "feed.icon.bell"),
-        Entry(symbol: "flag", labelKey: "feed.icon.flag"),
+        Entry(icon: .feed, labelKey: "feed.icon.feed"),
+        Entry(icon: .star, labelKey: "feed.icon.star"),
+        Entry(icon: .heart, labelKey: "feed.icon.heart"),
+        Entry(icon: .bolt, labelKey: "feed.icon.lightning"),
+        Entry(icon: .book, labelKey: "feed.icon.book"),
+        Entry(icon: .code, labelKey: "feed.icon.code"),
+        Entry(icon: .musicNote, labelKey: "feed.icon.music"),
+        Entry(icon: .camera, labelKey: "feed.icon.camera"),
+        Entry(icon: .globe, labelKey: "feed.icon.globe"),
+        Entry(icon: .chat, labelKey: "feed.icon.speech_bubble"),
+        Entry(icon: .bell, labelKey: "feed.icon.bell"),
+        Entry(icon: .flag, labelKey: "feed.icon.flag"),
     ]
 
     static let defaultIndex: UInt8 = 0
 
-    /// The symbol for a rule's index; unknown draws the default.
-    static func symbol(_ index: UInt8) -> String {
-        Int(index) < all.count ? all[Int(index)].symbol : all[Int(defaultIndex)].symbol
+    /// The icon for a rule's index; unknown draws the default.
+    static func icon(_ index: UInt8) -> LkIcon {
+        Int(index) < all.count ? all[Int(index)].icon : all[Int(defaultIndex)].icon
     }
 
     static func label(_ index: UInt8) -> String {
@@ -214,15 +225,15 @@ enum FeedIcons {
 
     /// The presets' fixed icons: Latest the feed, Popular lightning, For me a
     /// person, Discover the globe.
-    static func presetSymbol(_ key: FeedPresetKey) -> String {
+    static func presetIcon(_ key: FeedPresetKey) -> LkIcon {
         switch key {
-        case .latest: return "newspaper"
-        case .popular: return "bolt"
-        case .forMe: return "person"
+        case .latest: return .feed
+        case .popular: return .bolt
+        case .forMe: return .person
         }
     }
 
-    static let discoverSymbol = "globe"
+    static let discoverIcon = LkIcon.globe
 }
 
 // MARK: - Store
@@ -334,6 +345,17 @@ final class FeedReadingModel: ObservableObject {
         update { $0.advancingChannelRead(channelIdHex, cursor: cursor) }
     }
 
+    /// The post log as last seen (``bind(postSync:channels:)``): what Mark
+    /// all read reads channels through.
+    private var latestSlots: [String: ChannelPostSlot] = [:]
+
+    /// Mark all read on channels (``FeedReading/markingChannelsRead(_:slots:)``).
+    func markChannelsRead(_ channelIds: [String]) {
+        guard !channelIds.isEmpty else { return }
+        let slots = latestSlots
+        update { $0.markingChannelsRead(channelIds, slots: slots) }
+    }
+
     /// Keep ``channelUnread`` current from the post log and the channels this
     /// device publishes to.
     func bind(postSync: ChannelPostSync, channels: ChannelsUiState) {
@@ -345,6 +367,7 @@ final class FeedReadingModel: ObservableObject {
         .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self, weak channels] log, reading, _ in
             guard let self, let channels else { return }
+            self.latestSlots = log.channels
             let own = Set(channels.keysByChannel.keys)
             var counts: [String: Int] = [:]
             for c in channels.channels {
@@ -389,7 +412,7 @@ enum FeedForward {
         cursor > 0 && UInt64(cursor) > (newestRead ?? 0)
     }
 
-    /// ADR-0090 — Forward is offered unless the item is a poll, a checklist,
+    /// ADR-0092 — Forward is offered unless the item is a poll, a checklist,
     /// or a contact card whose person does not let others share it.
     static func canForward(_ message: FeedMessage, cardShareable: (Data) -> Bool) -> Bool {
         ForwardPayload.isForwardable(content: message.content, cardShareable: cardShareable)

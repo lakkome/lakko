@@ -18,7 +18,7 @@ import kotlinx.serialization.json.put
  * keys. The PRF output for a fixed salt is a stable 32-byte secret per
  * credential that follows a synced passkey to every device the passkey
  * syncs to. The client seals the phrase entropy under it and stores the blob
- * server-side per credential (opt-in per passkey).
+ * server-side per credential (every passkey that can, UX 10.2).
  *
  * Android's `CreatePublicKeyCredentialRequest` and
  * `GetPublicKeyCredentialOption` take the WebAuthn request as a JSON string
@@ -174,21 +174,6 @@ public fun passkeyKeysOutcome(
     opened && matched -> PasskeyKeysOutcome.Restored
     else -> PasskeyKeysOutcome.Unusable
 }
-
-/** What follows creating a passkey. */
-public enum class PasskeyAddOutcome {
-    /** The provider can protect keys with this passkey: show the choice. */
-    OfferKeysChoice,
-
-    /** It cannot: the passkey signs in only, and the result line says so. */
-    SignInOnly,
-}
-
-/** Whether the choice screen follows a registration: the registration
- *  already yielded the PRF output, or the provider reported the new
- *  credential supports it. */
-public fun passkeyAddOutcome(prfOutput: Boolean, prfEnabled: Boolean?): PasskeyAddOutcome =
-    if (prfOutput || prfEnabled == true) PasskeyAddOutcome.OfferKeysChoice else PasskeyAddOutcome.SignInOnly
 
 /** The restore prompt's rule for its passkey row: shown unless the account
  *  is known to have no passkey that carries keys ([passkeysWithKeys] is the

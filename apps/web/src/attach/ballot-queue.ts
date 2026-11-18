@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.6 / UX 7.5 — the anonymous-ballot queue.
+ * ADR-0092 section 3.6 / UX 7.5 — the anonymous-ballot queue.
  *
  * A ballot leaves the device after a random delay uniform in `0..=10 s`, from
  * a queue that survives a restart (one sealed `account-kv` row), never before

@@ -6,10 +6,23 @@
 //! Mirror of `lakko-ffi-uniffi/src/translation.rs` over
 //! [`lakko_ui_rules::translation`] (ADR-0082 section 6). Lists of detections
 //! cross as two parallel arrays (tags and confidences), the shape the other
-//! rules here use for flat data. Nothing here takes message text.
+//! rules here use for flat data. Only [`detect_text_language`] takes message
+//! text: the on-device detector of [`lakko_ui_rules::language_detect`], for a
+//! browser whose own `LanguageDetector` is absent or has no model on the
+//! device.
 
 use wasm_bindgen::prelude::*;
 
+use lakko_ui_rules::language_detect::{
+    candidates_from_hypotheses as rust_candidates_from_hypotheses,
+    conversation_detection as rust_conversation_detection,
+    detect_text_language as rust_detect_text_language,
+    detect_text_language_candidates as rust_detect_text_language_candidates,
+    order_picker_languages as rust_order_picker_languages,
+    resolve_translation_source as rust_resolve_translation_source,
+    ConversationLanguages as RustLanguages, LanguageCandidates as RustCandidates,
+    LanguagePick as RustPick, MessageLanguage as RustMessageLanguage,
+};
 use lakko_ui_rules::translation::{
     canonical_language_tag as rust_canonical_language_tag,
     conversation_bar_language as rust_conversation_bar_language,
@@ -154,6 +167,377 @@ pub fn stored_result_is_current(
     )
 }
 
+/// A language detected in some text: the tag and the confidence in
+/// thousandths, on the scale `translationDetectionConfidentPermille()` reads.
+#[wasm_bindgen(js_name = DetectedTextLanguage)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetectedTextLanguage {
+    tag: String,
+    confidence_permille: u16,
+}
+
+#[wasm_bindgen(js_class = DetectedTextLanguage)]
+impl DetectedTextLanguage {
+    /// The BCP 47 tag (`nl`, `ru`, `pt`, `zh`, ...), never with a region.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tag(&self) -> String {
+        self.tag.clone()
+    }
+
+    /// Confidence 0..=1000; below `translationDetectionConfidentPermille()` it
+    /// is a guess and the translation opens with the language picker.
+    #[wasm_bindgen(getter, js_name = confidencePermille)]
+    #[must_use]
+    // wasm_bindgen cannot export a `const fn`.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn confidence_permille(&self) -> u16 {
+        self.confidence_permille
+    }
+}
+
+/// The language a message's text is in, detected on this device, or
+/// `undefined` when the text has no letters or the language has no tag.
+///
+/// For a browser whose own `LanguageDetector` is absent or has no model on the
+/// device (ADR-0082 note of 2026-11-15). The text is read here and nowhere
+/// else; nothing is stored or logged.
+#[wasm_bindgen(js_name = detectTextLanguage)]
+#[must_use]
+pub fn detect_text_language(text: &str) -> Option<DetectedTextLanguage> {
+    rust_detect_text_language(text).map(|d| DetectedTextLanguage {
+        tag: d.tag,
+        confidence_permille: d.confidence_permille,
+    })
+}
+
+/// A detection and the languages it was a near tie with (ADR-0082 note of
+/// 2026-11-15).
+#[wasm_bindgen(js_name = TextLanguageCandidates)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextLanguageCandidates {
+    tag: String,
+    confidence_permille: u16,
+    alternatives: Vec<String>,
+}
+
+impl From<RustCandidates> for TextLanguageCandidates {
+    fn from(c: RustCandidates) -> Self {
+        Self {
+            tag: c.detected.tag,
+            confidence_permille: c.detected.confidence_permille,
+            alternatives: c.alternatives,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = TextLanguageCandidates)]
+impl TextLanguageCandidates {
+    /// The detected language.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tag(&self) -> String {
+        self.tag.clone()
+    }
+
+    /// The detection's confidence, 0..=1000.
+    #[wasm_bindgen(getter, js_name = confidencePermille)]
+    #[must_use]
+    // wasm_bindgen cannot export a `const fn`.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn confidence_permille(&self) -> u16 {
+        self.confidence_permille
+    }
+
+    /// Up to three other close languages, nearest first; empty when confident.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn alternatives(&self) -> Vec<String> {
+        self.alternatives.clone()
+    }
+}
+
+fn rust_candidates(
+    tag: String,
+    confidence_permille: u16,
+    alternatives: Vec<String>,
+) -> RustCandidates {
+    RustCandidates {
+        detected: RustDetected {
+            tag,
+            confidence_permille,
+        },
+        alternatives,
+    }
+}
+
+/// [`detect_text_language`] with its close candidates, or `undefined`.
+#[wasm_bindgen(js_name = detectTextLanguageCandidates)]
+#[must_use]
+pub fn detect_text_language_candidates(text: &str) -> Option<TextLanguageCandidates> {
+    rust_detect_text_language_candidates(text).map(Into::into)
+}
+
+/// The close candidates from a platform detector's hypotheses (the browser
+/// `LanguageDetector`): tags and probabilities in thousandths, as parallel
+/// arrays.
+#[wasm_bindgen(js_name = languageCandidatesFromHypotheses)]
+#[must_use]
+pub fn language_candidates_from_hypotheses(
+    text: &str,
+    tags: Vec<String>,
+    probabilities_permille: Vec<u16>,
+) -> Option<TextLanguageCandidates> {
+    let list: Vec<(String, u16)> = tags.into_iter().zip(probabilities_permille).collect();
+    rust_candidates_from_hypotheses(text, &list).map(Into::into)
+}
+
+/// The largest integer a JS number holds exactly.
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// A JS number that is a whole number in the safe range, else `None`.
+fn safe_integer(n: f64) -> Option<i64> {
+    if !n.is_finite() || n.fract() != 0.0 || n.abs() > MAX_SAFE_INTEGER {
+        return None;
+    }
+    // Checked above: whole and within 2^53.
+    #[allow(clippy::cast_possible_truncation)]
+    Some(n as i64)
+}
+
+/// What this device knows of a conversation's languages (ADR-0082 note of
+/// 2026-11-15): picks and per-message confident detections, canonical and
+/// bounded. Stored by the client through the four array getters and rebuilt
+/// with the constructor; entries that are not whole numbers in the safe
+/// range are dropped.
+#[wasm_bindgen(js_name = ConversationLanguages)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConversationLanguages {
+    inner: RustLanguages,
+}
+
+#[wasm_bindgen(js_class = ConversationLanguages)]
+impl ConversationLanguages {
+    /// A record from its stored arrays (parallel: tag and time per pick, id
+    /// and tag per detection).
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(
+        pick_tags: Vec<String>,
+        pick_at_ms: Vec<f64>,
+        detection_ids: Vec<f64>,
+        detection_tags: Vec<String>,
+    ) -> Self {
+        let picks = pick_tags
+            .into_iter()
+            .zip(pick_at_ms)
+            .filter_map(|(tag, at)| {
+                let at = safe_integer(at).and_then(|a| u64::try_from(a).ok())?;
+                Some(RustPick { tag, at_ms: at })
+            })
+            .collect();
+        let detections = detection_ids
+            .into_iter()
+            .zip(detection_tags)
+            .filter_map(|(id, tag)| {
+                Some(RustMessageLanguage {
+                    message_id: safe_integer(id)?,
+                    tag,
+                })
+            })
+            .collect();
+        Self {
+            inner: RustLanguages { picks, detections }.normalized(),
+        }
+    }
+
+    /// The record with a pick (`Not X?` or the picker) of `tag` at `at_ms`.
+    #[wasm_bindgen(js_name = withPick)]
+    #[must_use]
+    pub fn with_pick(&self, tag: &str, at_ms: f64) -> Self {
+        match safe_integer(at_ms).and_then(|a| u64::try_from(a).ok()) {
+            Some(at) => Self {
+                inner: self.inner.with_pick(tag, at),
+            },
+            None => self.clone(),
+        }
+    }
+
+    /// The record with message `message_id` confidently detected as `tag`.
+    #[wasm_bindgen(js_name = withDetection)]
+    #[must_use]
+    pub fn with_detection(&self, message_id: f64, tag: &str) -> Self {
+        match safe_integer(message_id) {
+            Some(id) => Self {
+                inner: self.inner.with_detection(id, tag),
+            },
+            None => self.clone(),
+        }
+    }
+
+    /// The conversation's usual language: the latest pick, else the most
+    /// detected one (a tie by tag).
+    #[must_use]
+    pub fn usual(&self) -> Option<String> {
+        self.inner.usual()
+    }
+
+    /// Picked languages.
+    #[wasm_bindgen(getter, js_name = pickTags)]
+    #[must_use]
+    pub fn pick_tags(&self) -> Vec<String> {
+        self.inner.picks.iter().map(|p| p.tag.clone()).collect()
+    }
+
+    /// When each was last picked, ms.
+    #[wasm_bindgen(getter, js_name = pickAtMs)]
+    #[must_use]
+    pub fn pick_at_ms(&self) -> Vec<f64> {
+        // Stored values came in through `safe_integer`, so they fit.
+        #[allow(clippy::cast_precision_loss)]
+        self.inner.picks.iter().map(|p| p.at_ms as f64).collect()
+    }
+
+    /// The message ids with a detection.
+    #[wasm_bindgen(getter, js_name = detectionIds)]
+    #[must_use]
+    pub fn detection_ids(&self) -> Vec<f64> {
+        #[allow(clippy::cast_precision_loss)]
+        self.inner
+            .detections
+            .iter()
+            .map(|d| d.message_id as f64)
+            .collect()
+    }
+
+    /// Each message's detected language.
+    #[wasm_bindgen(getter, js_name = detectionTags)]
+    #[must_use]
+    pub fn detection_tags(&self) -> Vec<String> {
+        self.inner
+            .detections
+            .iter()
+            .map(|d| d.tag.clone())
+            .collect()
+    }
+}
+
+/// The language a message is taken to be in, from its candidates (the
+/// detection's tag, confidence and alternatives) and the conversation's
+/// languages.
+#[wasm_bindgen(js_name = conversationDetection)]
+#[must_use]
+pub fn conversation_detection(
+    tag: String,
+    confidence_permille: u16,
+    alternatives: Vec<String>,
+    languages: &ConversationLanguages,
+) -> Option<DetectedTextLanguage> {
+    let candidates = rust_candidates(tag, confidence_permille, alternatives);
+    rust_conversation_detection(Some(&candidates), &languages.inner).map(|d| DetectedTextLanguage {
+        tag: d.tag,
+        confidence_permille: d.confidence_permille,
+    })
+}
+
+/// What the line under a message names and what `Translate` starts from,
+/// decided once so they cannot disagree (ADR-0082 note of 2026-11-15).
+#[wasm_bindgen(js_name = TranslationSourceResolution)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranslationSourceResolution {
+    line_tag: Option<String>,
+    line_confidence_permille: u16,
+    line_can_translate: bool,
+    translate_source: Option<String>,
+    guess: Option<String>,
+}
+
+#[wasm_bindgen(js_class = TranslationSourceResolution)]
+impl TranslationSourceResolution {
+    /// The language the line names; `undefined` for no line.
+    #[wasm_bindgen(getter, js_name = lineTag)]
+    #[must_use]
+    pub fn line_tag(&self) -> Option<String> {
+        self.line_tag.clone()
+    }
+
+    /// Confidence of the detection the line stands on.
+    #[wasm_bindgen(getter, js_name = lineConfidencePermille)]
+    #[must_use]
+    // wasm_bindgen cannot export a `const fn`.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn line_confidence_permille(&self) -> u16 {
+        self.line_confidence_permille
+    }
+
+    /// Whether the line carries `Translate`; `false` is a name alone.
+    #[wasm_bindgen(getter, js_name = lineCanTranslate)]
+    #[must_use]
+    // wasm_bindgen cannot export a `const fn`.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn line_can_translate(&self) -> bool {
+        self.line_can_translate
+    }
+
+    /// The language `Translate` starts from; `undefined` opens the picker.
+    #[wasm_bindgen(getter, js_name = translateSource)]
+    #[must_use]
+    pub fn translate_source(&self) -> Option<String> {
+        self.translate_source.clone()
+    }
+
+    /// The guess the picker marks.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn guess(&self) -> Option<String> {
+        self.guess.clone()
+    }
+}
+
+/// The source of a message's translation and the language its line names,
+/// from its candidates (the detection's tag, absent for none, confidence and
+/// alternatives), the conversation's languages, the language translated
+/// into and the languages the engine answered it can translate from into it
+/// (ask at least every candidate tag and the usual language).
+#[wasm_bindgen(js_name = resolveTranslationSource)]
+#[must_use]
+pub fn resolve_translation_source(
+    tag: Option<String>,
+    confidence_permille: u16,
+    alternatives: Vec<String>,
+    languages: &ConversationLanguages,
+    target: &str,
+    translatable: Vec<String>,
+) -> TranslationSourceResolution {
+    let candidates = tag.map(|tag| rust_candidates(tag, confidence_permille, alternatives));
+    let r = rust_resolve_translation_source(
+        candidates.as_ref(),
+        &languages.inner,
+        target,
+        &translatable,
+    );
+    TranslationSourceResolution {
+        line_tag: r.line_tag,
+        line_confidence_permille: r.line_confidence_permille,
+        line_can_translate: r.line_can_translate,
+        translate_source: r.translate_source,
+        guess: r.guess,
+    }
+}
+
+/// The `Not X?` list: `languages` with the candidate tags (detection first)
+/// in front.
+#[wasm_bindgen(js_name = orderPickerLanguages)]
+#[must_use]
+pub fn order_picker_languages(languages: Vec<String>, candidate_tags: Vec<String>) -> Vec<String> {
+    let mut tags = candidate_tags.into_iter();
+    let Some(first) = tags.next() else {
+        return languages;
+    };
+    let candidates = rust_candidates(first, 0, tags.collect());
+    rust_order_picker_languages(&languages, Some(&candidates))
+}
+
 /// The stored form of a language tag, or `undefined` for a tag that names no
 /// language.
 #[wasm_bindgen(js_name = canonicalLanguageTag)]
@@ -242,5 +626,96 @@ mod tests {
             Some("de")
         );
         assert!(stored_result_is_current(3, 3, "en", "en-GB"));
+    }
+
+    #[test]
+    fn detection_crosses_the_surface() {
+        let d = detect_text_language(
+            "Ik ga morgen naar de markt om groenten te kopen. Wil je met me mee, of heb je het te druk?",
+        );
+        assert_eq!(
+            d.as_ref().map(DetectedTextLanguage::tag).as_deref(),
+            Some("nl")
+        );
+        assert!(d.is_some_and(|d| d.confidence_permille() >= DETECTION_CONFIDENT_PERMILLE));
+        assert_eq!(detect_text_language("  !! 42"), None);
+    }
+
+    #[test]
+    fn the_source_resolution_crosses_the_surface() {
+        let c = detect_text_language_candidates("hola, qué tal?").unwrap_or_else(|| unreachable!());
+        let r = resolve_translation_source(
+            Some(c.tag()),
+            c.confidence_permille(),
+            c.alternatives(),
+            &ConversationLanguages::default(),
+            "en",
+            vec!["es".into(), "fr".into()],
+        );
+        assert_eq!(r.line_tag().as_deref(), Some("es"));
+        assert!(r.line_can_translate());
+        assert_eq!(r.translate_source().as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn the_conversation_language_crosses_the_surface() {
+        // G55 Two: es and it once each, Spanish first among the candidates.
+        let record = ConversationLanguages::new(
+            vec![],
+            vec![],
+            vec![2.0, 5.0, 1.0, 4.0, 3.0],
+            vec![
+                "it".into(),
+                "ru".into(),
+                "es".into(),
+                "de".into(),
+                "uk".into(),
+            ],
+        );
+        let chosen = conversation_detection(
+            "ca".into(),
+            180,
+            vec!["es".into(), "fr".into(), "it".into()],
+            &record,
+        );
+        assert_eq!(chosen.map(|d| d.tag()), Some("es".to_string()));
+        // Stored and rebuilt, it is the same record.
+        let again = ConversationLanguages::new(
+            record.pick_tags(),
+            record.pick_at_ms(),
+            record.detection_ids(),
+            record.detection_tags(),
+        );
+        assert_eq!(again, record);
+        assert_eq!(record.with_detection(1.5, "it"), record);
+    }
+
+    #[test]
+    fn candidates_cross_the_surface() {
+        let c = detect_text_language_candidates("hola, qué tal?");
+        assert!(c
+            .as_ref()
+            .is_some_and(|c| c.alternatives().iter().any(|a| a == "es")));
+        let c = c.unwrap_or_else(|| unreachable!());
+        let chosen = conversation_detection(
+            c.tag(),
+            c.confidence_permille(),
+            c.alternatives(),
+            &ConversationLanguages::default().with_pick("es", 1.0),
+        );
+        assert_eq!(chosen.map(|d| d.tag()), Some("es".to_string()));
+        let h = language_candidates_from_hypotheses(
+            "hola",
+            vec!["ca".into(), "es".into()],
+            vec![400, 350],
+        );
+        assert_eq!(h.map(|c| c.alternatives()), Some(vec!["es".to_string()]));
+        assert_eq!(
+            order_picker_languages(
+                vec!["de".into(), "es".into()],
+                vec!["ca".into(), "es".into()]
+            ),
+            vec!["es".to_string(), "de".to_string()]
+        );
     }
 }

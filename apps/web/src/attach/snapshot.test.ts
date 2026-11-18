@@ -19,7 +19,7 @@ beforeAll(async () => {
   await init({ module_or_path: readFileSync(wasmPath) });
 });
 
-describe("a restored poll (ADR-0090 section 3.11)", () => {
+describe("a restored poll (ADR-0092 section 3.11)", () => {
   const base = { counts: [2, 1], voters: 3, closed: false };
   it("shows the bundle's totals alone, never adding a live vote to them", () => {
     // A live vote may already be in the bundle's totals: adding it would

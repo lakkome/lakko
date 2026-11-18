@@ -16,10 +16,6 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -74,7 +70,7 @@ internal fun ContentEditorScaffold(
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp),
                 ) {
                     IconButton(onClick = onClose) {
-                        Icon(Icons.Filled.Close, contentDescription = t("common.close"))
+                        me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_xmark, contentDescription = t("common.close"))
                     }
                     Text(
                         title,
@@ -141,13 +137,13 @@ private fun GrowingFieldList(
                     .onFocusLost { if (items[i].isBlank() && i != items.lastIndex && items.size > 2) items.removeAt(i) },
             )
             IconButton(onClick = { if (i > 0) items.add(i - 1, items.removeAt(i)) }, enabled = i > 0) {
-                Icon(Icons.Filled.ArrowUpward, contentDescription = t("poll.editor.move_up"))
+                me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_chevron_up, contentDescription = t("poll.editor.move_up"), size = me.lakko.app.ui.components.LkIconSize.Row)
             }
             IconButton(
                 onClick = { if (i < items.lastIndex) items.add(i + 1, items.removeAt(i)) },
                 enabled = i < items.lastIndex,
             ) {
-                Icon(Icons.Filled.ArrowDownward, contentDescription = t("poll.editor.move_down"))
+                me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_chevron_down, contentDescription = t("poll.editor.move_down"), size = me.lakko.app.ui.components.LkIconSize.Row)
             }
         }
     }

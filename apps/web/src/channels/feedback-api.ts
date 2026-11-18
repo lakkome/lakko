@@ -152,7 +152,7 @@ export interface PostLabelCounts {
   readonly cursor: number;
   readonly labels: ReadonlyMap<string, number>;
   readonly comments: number | undefined;
-  /** ADR-0090 section 4 — a channel poll's distinct voters and votes per
+  /** ADR-0092 section 4 — a channel poll's distinct voters and votes per
    *  opaque option label; `undefined` on a post nobody voted on. */
   readonly votes?: { readonly voters: number; readonly labels: ReadonlyMap<string, number> };
 }

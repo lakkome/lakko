@@ -33,7 +33,7 @@ The statement (every base and left-hand side) is appended by `proof` after these
 
 ## Tag base
 
-`H_poll = hash_to_group("tag base", "lakko/channel-poll/tag-base/v1" || channel_id || post_cursor_be)` - the ADR-0090 4.3 input under this crate's hash-to-group.
+`H_poll = hash_to_group("tag base", "lakko/channel-poll/tag-base/v1" || channel_id || post_cursor_be)` - the ADR-0092 4.3 input under this crate's hash-to-group.
 
 ## What this module does NOT do
 
@@ -41,4 +41,4 @@ The statement (every base and left-hand side) is appended by `proof` after these
 
 ## References
 
-- ADR-0090 4.2, 4.3; CMZ14 sections 4.1-4.2 (MAC_GGM, Issue, Show).
+- ADR-0092 4.2, 4.3; CMZ14 sections 4.1-4.2 (MAC_GGM, Issue, Show).

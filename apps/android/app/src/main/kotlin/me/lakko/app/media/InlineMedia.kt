@@ -70,14 +70,14 @@ public const val KIND_VOICE: String = "voice"
 public const val KIND_VIDEO_NOTE: String = "video_note"
 public const val KIND_GIF: String = "gif"
 
-/** ADR-0090 section 2 — a music or audio file (not a voice message). */
+/** ADR-0092 section 2 — a music or audio file (not a voice message). */
 public const val KIND_AUDIO: String = "audio"
 
 public fun renderDecision(kind: String?, mime: String?, allowlist: MediaAllowlist): RenderDecision {
     val inline = inlineKindOf(mime, allowlist)
     val bubble = when {
         kind == KIND_VOICE && inline == InlineKind.AUDIO -> MediaBubble.VOICE
-        // ADR-0090 section 2 — a music or audio file: title, artist, cover;
+        // ADR-0092 section 2 — a music or audio file: title, artist, cover;
         // playable in the app only when its MIME is on the inline list.
         kind == KIND_AUDIO -> MediaBubble.AUDIO
         kind == KIND_VIDEO_NOTE && inline == InlineKind.VIDEO -> MediaBubble.VIDEO_NOTE

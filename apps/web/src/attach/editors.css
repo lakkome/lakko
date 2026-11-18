@@ -389,13 +389,6 @@
   padding: 24px;
   text-align: center;
 }
-.lk-attach-up {
-  transform: rotate(-90deg);
-}
-.lk-attach-down {
-  transform: rotate(90deg);
-}
-
 /* UX 7.1 / 8.1 — drag handles reorder. */
 .lk-attach-grip {
   display: inline-flex;

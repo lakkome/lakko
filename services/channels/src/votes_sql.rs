@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The MariaDB half of channel poll votes ([ADR-0090] section 4.3;
+//! The MariaDB half of channel poll votes ([ADR-0092] section 4.3;
 //! migration `0013_poll_votes.sql`). Called from
 //! [`crate::SqlChannelStore`]'s `ChannelStore` impl.
 //!
@@ -11,7 +11,7 @@
 //! two transactions on one post take the counter locks in one order), then
 //! write the row.
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 use std::collections::BTreeMap;
 

@@ -184,13 +184,13 @@ final class CallHistoryTests: XCTestCase {
     func testTheDirectionGlyphSaysWhichWayTheCallWent() {
         XCTAssertEqual(
             CallHistory.directionGlyph(entry("a", direction: .outgoing, at: 0)),
-            "phone.arrow.up.right")
+            .phoneOutgoing)
         XCTAssertEqual(
             CallHistory.directionGlyph(entry("b", direction: .incoming, at: 0)),
-            "phone.arrow.down.left")
+            .phoneIncoming)
         XCTAssertEqual(
             CallHistory.directionGlyph(entry("c", direction: .outgoing, outcome: .missed, at: 0)),
-            "phone.down")
+            .phoneDown)
     }
 
     // MARK: - Accessibility
@@ -473,7 +473,7 @@ final class CallHistoryNoConversationTests: XCTestCase {
         XCTAssertEqual(
             CallHistory.rowShape(entry),
             .noConversation(title: Localization.text("call.label.group")))
-        XCTAssertEqual(CallHistory.directionGlyph(entry), "phone.arrow.up.right")
+        XCTAssertEqual(CallHistory.directionGlyph(entry), .phoneOutgoing)
     }
 
     func testAnIncomingRowStillReadsGroupCall() {
@@ -483,7 +483,7 @@ final class CallHistoryNoConversationTests: XCTestCase {
         XCTAssertEqual(
             CallHistory.rowShape(entry),
             .noConversation(title: Localization.text("call.label.group")))
-        XCTAssertEqual(CallHistory.directionGlyph(entry), "phone.arrow.down.left")
+        XCTAssertEqual(CallHistory.directionGlyph(entry), .phoneIncoming)
     }
 
     func testAConversationsCallStillOpensItsConversation() {

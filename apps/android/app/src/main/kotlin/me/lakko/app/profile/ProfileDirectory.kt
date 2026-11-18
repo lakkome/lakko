@@ -323,7 +323,7 @@ public class ProfileDirectory internal constructor(
     public fun accountIdsByKey(): Map<String, String> = profiles.accountIdsByKey()
 
     /**
-     * ADR-0090 section 7 — whether the newest profile held from
+     * ADR-0092 section 7 — whether the newest profile held from
      * [signatureKeyB64] lets others share the person's contact card. A person
      * who never sent a profile counts as shareable.
      */

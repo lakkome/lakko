@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The linkable one-out-of-many proof (ADR-0090 section 3.6).
+//! The linkable one-out-of-many proof (ADR-0092 section 3.6).
 //!
 //! The construction is the Triptych proof of Noether and Goodell (2020), in
 //! its plain linkable form without the commitment-to-zero component, which is

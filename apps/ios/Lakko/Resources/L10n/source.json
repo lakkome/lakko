@@ -7,6 +7,11 @@
       "comment": "Shown after a reset or take-back while the last steps are still owed, for an account that has no saved recovery phrase. Must not mention words or a phrase.",
       "security_critical": true
     },
+    "account.keys_changed.waiting": {
+      "text": "Your account has new keys. The change finishes in {minutes, plural, one {# minute} other {# minutes}}, by itself.",
+      "comment": "Shown after a reset while the directory refuses the new keys because the account's keys already changed less than an hour ago, for an account that has no saved recovery phrase; {minutes} is how long until it accepts them (rounded up). Must not mention words or a phrase. No Try again button: the app retries by itself.",
+      "security_critical": true
+    },
     "app.not_found.body": {
       "text": "There is nothing at this address.",
       "comment": "Line under 'Page not found' on the web page shown for an unknown address."
@@ -133,7 +138,7 @@
     },
     "attach.error.not_sent": {
       "text": "Couldn't send. Try again.",
-      "comment": "Composer error line when a poll, checklist, location, contact card, article or a vote / tick on one could not be sent (ADR-0090)."
+      "comment": "Composer error line when a poll, checklist, location, contact card, article or a vote / tick on one could not be sent (ADR-0092)."
     },
     "attach.menu.article": {
       "text": "Article",
@@ -334,6 +339,10 @@
       "text": "This browser doesn't support passkeys.",
       "comment": "Passkeys are not available in this browser."
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "This device doesn't support passkeys.",
+      "comment": "Desktop app variant of auth.passkey.error.unsupported: passkeys are not available on this device."
+    },
     "auth.passkey.error.wrong_account": {
       "text": "This passkey belongs to a different account than the one on this device. Log in with your password first.",
       "comment": "Passkey sign-in refused: the passkey chosen is for another account than the one saved on this device."
@@ -454,6 +463,42 @@
     "auth.username.label": {
       "text": "Username",
       "comment": "Label of the username field on the sign-in, sign-up and recovery forms."
+    },
+    "auth.username_prompt.continue": {
+      "text": "Continue",
+      "comment": "Button that checks the typed username against this account."
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Couldn't check the username. Check your connection and try again.",
+      "comment": "The check request failed (no network or a server error)."
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "That is not the username of this account.",
+      "comment": "The typed username is valid but belongs to no account or to another account; never say which."
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Too many tries. Try again later.",
+      "comment": "The server refused the check because of too many attempts."
+    },
+    "auth.username_prompt.field": {
+      "text": "Username",
+      "comment": "Label of the text field where the person types their own username."
+    },
+    "auth.username_prompt.forgot": {
+      "text": "I don't remember",
+      "comment": "Button that closes the username prompt without a name; the app asks again at the next start."
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "You can see it in Settings on your other device. Until then this device does not sync with them.",
+      "comment": "Shown after the person said they do not remember their username."
+    },
+    "auth.username_prompt.lede": {
+      "text": "This device does not know your account's username yet. Enter it to sync with your other devices.",
+      "comment": "Explanation under the title of the username prompt. Shown once the session has landed; the app works behind it."
+    },
+    "auth.username_prompt.title": {
+      "text": "What is your username?",
+      "comment": "Title of the prompt shown after a passkey sign-in on a device that does not know the account's username yet."
     },
     "backup.rollback_refused.body": {
       "text": "The server returned an altered or outdated backup. Your account is safe; we continued without restoring the older data.",
@@ -947,6 +992,11 @@
     "call.error.no_media_encryption": {
       "text": "This browser cannot encrypt call media, so the call did not start.",
       "comment": "A group call or a call from a link was refused because this browser cannot end-to-end encrypt call audio and video; Lakko never falls back to an unencrypted call.",
+      "security_critical": true
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "This device cannot encrypt call media, so the call did not start.",
+      "comment": "Desktop app variant of call.error.no_media_encryption: a group call or a call from a link was refused because this device cannot end-to-end encrypt call audio and video; Lakko never falls back to an unencrypted call.",
       "security_critical": true
     },
     "call.error.not_accepting": {
@@ -1509,9 +1559,17 @@
       "text": "Can't share your screen. Allow screen sharing for this site in your browser settings.",
       "comment": "Shown when the browser refused screen sharing."
     },
+    "call.screen_share.refused_desktop": {
+      "text": "Can't share your screen. Allow screen recording for Lakko in your system's privacy settings.",
+      "comment": "Desktop app (not macOS): the system refused screen recording for Lakko."
+    },
     "call.screen_share.refused_macos": {
       "text": "Can't share your screen. Allow screen recording for your browser in System Settings.",
       "comment": "Shown on macOS when the system refused screen recording for the browser."
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Can't share your screen. Allow screen recording for Lakko in System Settings.",
+      "comment": "Desktop app on macOS: the system refused screen recording for Lakko. \"System Settings\" is the name of the macOS app."
     },
     "call.screen_share.started": {
       "text": "{name} started sharing their screen",
@@ -1718,6 +1776,10 @@
       "text": "Allow camera access in your browser's site settings",
       "comment": "Second line in the camera screen on web when camera access was refused."
     },
+    "camera.allow_desktop": {
+      "text": "Allow camera access in your system's privacy settings",
+      "comment": "Desktop app: second line in the camera screen when the system refused camera access."
+    },
     "camera.denied": {
       "text": "Lakko needs camera access to take photos",
       "comment": "Shown in the camera screen when camera access was refused."
@@ -1753,6 +1815,10 @@
     "camera.video_unsupported": {
       "text": "Video can't be recorded in this browser",
       "comment": "Shown in the camera screen when this browser cannot record MP4 video."
+    },
+    "camera.video_unsupported_device": {
+      "text": "Video can't be recorded on this device",
+      "comment": "Desktop app: shown in the camera screen when this device cannot record MP4 video."
     },
     "channel_reactions.all_sub": {
       "text": "Subscribers can react with any emoji.",
@@ -1901,6 +1967,14 @@
     "channels.compose.publishing": {
       "text": "Publishing...",
       "comment": "A channel post is being published."
+    },
+    "channels.reader_device.owner": {
+      "text": "You can post here once Lakko opens on your other device.",
+      "comment": "Channel screen, in place of the post composer, on a device of the channel's owner that is not yet admitted to post (ADR-0090): another device of the owner adds it the next time Lakko runs there. No button, no spinner."
+    },
+    "channels.reader_device.publisher": {
+      "text": "You can post here once Lakko opens on your other device and on the owner's.",
+      "comment": "Channel screen, in place of the post composer, on a device of a channel publisher (co-publisher) that is not yet admitted to post (ADR-0090): the publisher's other device asks, and a device of the channel's owner adds it the next time Lakko runs there. No button, no spinner."
     },
     "channels.copublishers.desc": {
       "text": "People who can post to this channel. Share a link; approve them when they ask.",
@@ -2309,8 +2383,8 @@
       "comment": "A channel cannot be created because this session holds no keys."
     },
     "channels.new.failed": {
-      "text": "Couldn't create this channel. Nothing was created. Try again.",
-      "comment": "New channel: setting the channel up failed; nothing was created."
+      "text": "Couldn't create this channel. Try again.",
+      "comment": "New channel: creating the channel failed. The @name may already be claimed for this channel; a retry takes it back."
     },
     "channels.new.handle_hint": {
       "text": "Others can find and subscribe to the channel by it.",
@@ -2875,19 +2949,19 @@
     },
     "chat.content.preview.article": {
       "text": "Article: {text}",
-      "comment": "Conversation list and notification preview of an article message; {text} is its title (ADR-0090 section 1)."
+      "comment": "Conversation list and notification preview of an article message; {text} is its title (ADR-0092 section 1)."
     },
     "chat.content.preview.checklist": {
       "text": "Checklist: {text}",
-      "comment": "Conversation list and notification preview of a checklist message; {text} is its title (ADR-0090 section 1)."
+      "comment": "Conversation list and notification preview of a checklist message; {text} is its title (ADR-0092 section 1)."
     },
     "chat.content.preview.contact": {
       "text": "Contact: {text}",
-      "comment": "Conversation list and notification preview of a shared contact card; {text} is the contact's name (ADR-0090 section 1)."
+      "comment": "Conversation list and notification preview of a shared contact card; {text} is the contact's name (ADR-0092 section 1)."
     },
     "chat.content.preview.poll": {
       "text": "Poll: {text}",
-      "comment": "Conversation list and notification preview of a poll message; {text} is the poll question (ADR-0090 section 1)."
+      "comment": "Conversation list and notification preview of a poll message; {text} is the poll question (ADR-0092 section 1)."
     },
     "chat.day.today": {
       "text": "Today",
@@ -3842,6 +3916,10 @@
       "text": "Lakko needs camera access to record video messages. Allow camera access in your browser's site settings.",
       "comment": "Card shown when the browser refused the camera."
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko needs camera access to record video messages. Allow it in your system's privacy settings.",
+      "comment": "Desktop app: card shown when the system refused the camera."
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko needs camera access to record video messages",
       "comment": "Card shown when camera access is denied for this app; an Open Settings button follows."
@@ -3849,6 +3927,10 @@
     "chat.record.denied_microphone": {
       "text": "Lakko needs microphone access to record voice messages. Allow microphone access in your browser's site settings.",
       "comment": "Card shown when the browser refused the microphone."
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko needs microphone access to record voice messages. Allow it in your system's privacy settings.",
+      "comment": "Desktop app: card shown when the system refused the microphone."
     },
     "chat.record.denied_microphone_app": {
       "text": "Lakko needs microphone access to record voice messages",
@@ -3961,6 +4043,10 @@
     "chat.record.unsupported_voice": {
       "text": "Voice messages can't be recorded in this browser",
       "comment": "Why the record button is disabled: this browser cannot record voice messages."
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "Voice messages can't be recorded on this device",
+      "comment": "Desktop app: why the record button is disabled: this device cannot record voice messages."
     },
     "chat.record.video": {
       "text": "Record video message",
@@ -4488,10 +4574,6 @@
     "chats.preview.sender": {
       "text": "{name}: {text}",
       "comment": "Chat list row of a group, second line: {name} is who sent the last message, {text} the message or its kind."
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "Your other devices are adding this one to your chats.",
-      "comment": "Banner on the chat list of a restored device while another device of the account is still signed in."
     },
     "chats.restored.card": {
       "text": "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored.",
@@ -5799,7 +5881,7 @@
       "security_critical": true
     },
     "devices.rotate.effect_passkeys": {
-      "text": "Your passkeys still sign you in. \"Restore keys with this passkey\" is turned off until you turn it on again.",
+      "text": "Your passkeys still sign you in. To restore keys with one again, choose “Restore keys with this passkey” on its row.",
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
       "security_critical": true
     },
@@ -5903,6 +5985,10 @@
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko cannot use the camera. Allow camera access in your browser's site settings, then try again.",
       "comment": "Web: camera access for scanning a pairing code was refused by the browser or failed."
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko cannot use the camera. Allow camera access in your system's privacy settings, then try again.",
+      "comment": "Desktop app: camera access for scanning a pairing code was refused by the system."
     },
     "devices.scan.error.camera_failed": {
       "text": "The camera could not start. Try again.",
@@ -6302,6 +6388,66 @@
     "display_name.error.unknown": {
       "text": "This name can't be used",
       "comment": "Shown under a name field for any other refusal."
+    },
+    "donate.button": {
+      "text": "Donate",
+      "comment": "Button on a payment card that opens the payment page outside Lakko."
+    },
+    "donate.copied": {
+      "text": "Copied",
+      "comment": "Shown on a copy button for two seconds after the text was copied."
+    },
+    "donate.copy": {
+      "text": "Copy",
+      "comment": "Button that copies a phone number on the donations page."
+    },
+    "donate.crypto_copy": {
+      "text": "Copy address",
+      "comment": "Button that copies a crypto wallet address."
+    },
+    "donate.crypto_network": {
+      "text": "Network: {network}",
+      "comment": "Line under a crypto coin name on the donations page; network is a blockchain name such as TRON (TRC-20)."
+    },
+    "donate.crypto_warning": {
+      "text": "Send only {coin} on the {network} network to this address. Anything else is lost.",
+      "comment": "Warning under a crypto wallet address. coin is e.g. USDT, network e.g. TRON (TRC-20)."
+    },
+    "donate.error": {
+      "text": "Couldn't load the ways to donate. Check your connection and try again.",
+      "comment": "Donations page when the list could not be loaded."
+    },
+    "donate.lede": {
+      "text": "Donations pay for the servers and keep the work going.",
+      "comment": "Paragraph under the heading of the donations page."
+    },
+    "donate.none": {
+      "text": "No way to donate is available in your country right now.",
+      "comment": "Donations page when no payment method is offered in the visitor's country."
+    },
+    "donate.phone_error": {
+      "text": "Couldn't show the number. Try again.",
+      "comment": "Under a hidden phone number when showing it failed."
+    },
+    "donate.phone_show": {
+      "text": "Show",
+      "comment": "Button next to a hidden phone number on the donations page; shows the number."
+    },
+    "donate.phone_hidden": {
+      "text": "Phone number hidden",
+      "comment": "Read by the screen reader in place of the masked phone number on the donations screen, before the person taps Show."
+    },
+    "donate.section_crypto": {
+      "text": "Crypto",
+      "comment": "Small heading on the donations page above the crypto wallet cards (Bitcoin, USDT and so on)."
+    },
+    "donate.section_payment": {
+      "text": "Bank and card",
+      "comment": "Small heading on the donations page above the bank transfer and card payment methods (SBP, Revolut, Buy Me a Coffee)."
+    },
+    "donate.title": {
+      "text": "Support Lakko",
+      "comment": "Heading of the donations page."
     },
     "ds.clock_skew": {
       "text": "Check this device's date and time.",
@@ -7079,10 +7225,6 @@
       "text": "Request to join",
       "comment": "Button on the group invite page that sends the join request to the group's admins."
     },
-    "group.join.request_again": {
-      "text": "Request again",
-      "comment": "Button on the group invite page that sends the join request again."
-    },
     "group.join.request_failed": {
       "text": "Your request didn't go through. Check your connection and try again.",
       "comment": "Sending the request to join a group failed for a reason with no message of its own."
@@ -7104,12 +7246,8 @@
       "comment": "Heading of the group invite page while it loads, or when the link cannot be used."
     },
     "group.join.wait_primary": {
-      "text": "Request sent. An admin approves it, then the change is applied to the group.",
-      "comment": "Group invite page after the person asked to join: an admin must approve, then the change is applied."
-    },
-    "group.join.wait_secondary": {
-      "text": "If nothing happens, you can send the request again.",
-      "comment": "Second line on the group invite page while a join request is waiting: the request can be sent again."
+      "text": "Request sent. An admin will see it when they next open Lakko.",
+      "comment": "Group invite page after the person asked to join: an admin must approve; the person is never told a request was refused (docs/ux/group-and-channel-privacy.md 6.1)."
     },
     "group_delete.action": {
       "text": "Delete group",
@@ -7588,8 +7726,8 @@
       "comment": "Headline on the contact invite screen when the link has expired. The explanation under it is a separate message."
     },
     "invite.contact.result.failed_title": {
-      "text": "Invite not accepted",
-      "comment": "Headline on the contact invite screen when accepting failed for another reason."
+      "text": "Could not open the invite. Check your connection and try again.",
+      "comment": "Shown on the contact invite screen when the link could not be opened: the network failed or the server answered with an error other than no such link or too many attempts. A Try again button follows."
     },
     "invite.contact.result.not_found_title": {
       "text": "Invite not found",
@@ -8038,6 +8176,10 @@
       "text": "Allow location access in your browser's site settings",
       "comment": "Second line on web when location access was refused."
     },
+    "location.allow_desktop": {
+      "text": "Allow location access in your system's privacy settings",
+      "comment": "Desktop app: second line when the system refused location access."
+    },
     "location.approximate": {
       "text": "Approximate location",
       "comment": "Shown when only an approximate location is available."
@@ -8112,8 +8254,8 @@
       "comment": "Web: back button to the groups list on a narrow screen."
     },
     "new_group.error.secure_setup": {
-      "text": "Couldn't create this group. Nothing was created. Try again.",
-      "comment": "New group form: creating the group failed for another reason."
+      "text": "Couldn't create this group. Try again.",
+      "comment": "New group form: creating the group failed for another reason. The @name may already be claimed when this shows."
     },
     "new_group.error.sign_in": {
       "text": "Sign in again to create a group.",
@@ -8944,7 +9086,7 @@
       "comment": "Recovery method: confirm from another signed-in device."
     },
     "recovery.method.passkey.sub": {
-      "text": "Logs you in. Brings back your chats too if you turned that on for this passkey.",
+      "text": "Logs you in. Brings back your chats too when the passkey can carry your keys.",
       "comment": "Subtitle of the passkey method on the \"Get back in\" screen. A passkey always signs in; it restores the chats only when the person chose that for the passkey in Settings.",
       "security_critical": true
     },
@@ -9024,6 +9166,10 @@
     "recovery.passkey.unsupported": {
       "text": "This device or browser does not support passkeys. Choose another way.",
       "comment": "Shown in place of the passkey form where passkeys are not available."
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "This device does not support passkeys. Choose another way.",
+      "comment": "Desktop app: shown in place of the passkey form where passkeys are not available."
     },
     "recovery.passkey.waiting": {
       "text": "Waiting for your passkey...",
@@ -9312,6 +9458,11 @@
       "comment": "Shown instead of the new recovery phrase when the account keys were reset but telling the directory and the account's device list about the new keys did not finish (for example the connection dropped). Try again repeats only that step (UX identity-recovery 15.4).",
       "security_critical": true
     },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "Your account keys were reset less than an hour after the last change, so they can be published in {minutes, plural, one {# minute} other {# minutes}}. Lakko will finish by itself and then show the new words.",
+      "comment": "Shown instead of the new recovery phrase when the directory refused to publish the new keys because the account's keys were already changed less than an hour ago; {minutes} is how long until it accepts them (rounded up). No Try again button: the app retries by itself at that time and whenever it opens (UX identity-recovery 15.4).",
+      "security_critical": true
+    },
     "recovery_phrase.fresh.publish_refused": {
       "text": "Could not finish publishing the new keys. Try again later.",
       "comment": "Retrying the publishing of the new keys after a reset of the account keys was refused by a server: the reset proof was not accepted, or the server is not set up for it.",
@@ -9382,11 +9533,11 @@
     },
     "requests_sent.ask_again": {
       "text": "Ask again",
-      "comment": "Button on a request with no answer after 7 days: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Sends the same request again."
+      "comment": "Button on a request with no answer after a day: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Sends the same request again."
     },
     "requests_sent.no_answer": {
       "text": "No answer yet.",
-      "comment": "Line of a request sent 7 days ago or more: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Never say it was refused."
+      "comment": "Line of a request sent a day ago or more: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Never say it was refused."
     },
     "requests_sent.title": {
       "text": "Requests sent",
@@ -9394,11 +9545,21 @@
     },
     "requests_sent.waiting": {
       "text": "Waiting for an admin.",
-      "comment": "Line of a request to join sent less than 7 days ago. Never say it was refused."
+      "comment": "Line of a request to join sent less than a day ago. Never say it was refused."
     },
     "restore_identity.device_intro": {
       "text": "A device that is still logged in shows a six-digit code; type it here. No camera needed; a QR code is there if you prefer.",
       "comment": "Line on the restore-identity screen when Another device is chosen: the signed-in device shows a code that the person types here.",
+      "security_critical": true
+    },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Open Lakko on a device that is still logged in.",
+      "comment": "Detail under 'Another device' on the 'Restore your keys' screen of a device that holds the keys but not the earlier keys the account's chats use (after the account's keys were changed).",
+      "security_critical": true
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "You are logged in as {username}, but this device does not have the keys your chats use yet. Bring them from another device that is still logged in.",
+      "comment": "First line of the 'Restore your keys' screen when this device holds the account's keys but not the earlier keys its chats still use (after a key change); {username} is the account (@name, shown bold).",
       "security_critical": true
     },
     "restore_identity.error.bad_saved_account": {
@@ -9471,7 +9632,7 @@
       "security_critical": true
     },
     "restore_identity.method.passkey.sub": {
-      "text": "If you turned on restoring keys for a passkey.",
+      "text": "If you have a passkey for this account.",
       "comment": "Subtitle of the passkey method on the \"Restore your keys\" screen. 'restoring keys' is the wording of the button settings.passkeys.keys.turn_on; no quotation marks.",
       "security_critical": true
     },
@@ -9753,6 +9914,10 @@
       "text": "Keyboard shortcuts",
       "comment": "Card title in Settings > About, desktop app."
     },
+    "settings.about.support": {
+      "text": "Support Lakko",
+      "comment": "Settings > About row that opens the donations page."
+    },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
       "comment": "Settings > About, shown when a signed translation update is active. {date} is a date formatted for the locale."
@@ -9827,6 +9992,11 @@
     "settings.account.forget_device.sub": {
       "text": "Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase.",
       "comment": "What forgetting this device removes and how to come back.",
+      "security_critical": true
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Removes your account data from this device. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase.",
+      "comment": "Desktop app: what forgetting this device removes and how to come back.",
       "security_critical": true
     },
     "settings.account.forget_device.title": {
@@ -10019,6 +10189,10 @@
       "text": "This browser is not set up for your account. Sign in again.",
       "comment": "Web: this browser holds no device key for the account."
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "This device is not set up for your account. Sign in again.",
+      "comment": "Desktop app: this device holds no device key for the account; signing in again fixes it."
+    },
     "settings.devices.error.remove": {
       "text": "Could not remove the device. Try again.",
       "comment": "Removing a device failed or its passkey confirmation was cancelled.",
@@ -10160,6 +10334,10 @@
       "text": "Playback on this device.",
       "comment": "Line under the Media title in Settings."
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Channel posts can arrive late while Lakko is closed.",
+      "comment": "Small line in Settings > Notifications, under the notification switches: channel posts are noticed only when the app reads the channel (there is no push for channels yet), so a notification can come late or only once Lakko is opened. Shown on no other screen."
+    },
     "settings.notifications.off.body": {
       "text": "Notifications are off, so Lakko can only ring while it is open. Turn them on so calls and messages reach you when it is not.",
       "comment": "Shown in Settings only when the system has notifications turned off for Lakko; the row opens the system notification settings."
@@ -10184,6 +10362,11 @@
       "text": "Passkey \"{name}\" added.",
       "comment": "Confirmation after a passkey is created; {name} is the name the person gave it."
     },
+    "settings.passkeys.added_keys_failed": {
+      "text": "The passkey was added. It logs you in only for now; restore keys with it from its row.",
+      "comment": "A passkey was created but storing the keys for it failed (offline or a server error). The row offers Restore keys with this passkey.",
+      "security_critical": true
+    },
     "settings.passkeys.added_last_used": {
       "text": "Added {added} · last used {used}",
       "comment": "Passkey row subtitle; {added} and {used} are dates and times formatted for the locale."
@@ -10197,9 +10380,18 @@
       "comment": "Result line after adding a passkey that cannot protect keys on this device or provider.",
       "security_critical": true
     },
+    "settings.passkeys.added_restores": {
+      "text": "Passkey added. It logs you in and restores your keys.",
+      "comment": "Settings > Security > Passkeys: a passkey was added and the keys were stored for it (docs/ux/identity-recovery.md 10.2).",
+      "security_critical": true
+    },
     "settings.passkeys.empty": {
       "text": "No passkeys yet.",
       "comment": "Empty passkey list."
+    },
+    "settings.passkeys.error.already_exists": {
+      "text": "This device already has a passkey for this account.",
+      "comment": "Adding a passkey (Settings > Passkeys, the signup offer): the device's passkey provider refused because it already holds a passkey for this account (WebAuthn InvalidStateError / excluded credential). Not a failure of the browser or the device."
     },
     "settings.passkeys.error.cancelled": {
       "text": "Cancelled. No passkey was created.",
@@ -10225,23 +10417,22 @@
       "text": "This browser / device can't create passkeys right now.",
       "comment": "The platform refused to create a passkey."
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "This device can't create passkeys right now.",
+      "comment": "Desktop app: the system refused to create a passkey."
+    },
+    "settings.passkeys.keys.error.other_passkey": {
+      "text": "A different passkey answered. Try again and choose this passkey.",
+      "comment": "Row action Restore keys with this passkey: the person picked another passkey in the system sheet.",
+      "security_critical": true
+    },
     "settings.passkeys.keys.turn_on": {
-      "text": "Turn on restoring keys",
-      "comment": "Button on a passkey that only signs in; opens the screen that asks whether this passkey may restore the account's keys."
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "If you leave it off, the passkey only logs you in. You restore keys with your recovery phrase or another device.",
-      "comment": "What leaving it off means.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "If you turn this on, this passkey alone can bring your account's keys to a new device. Passkeys are usually synced by Apple, Google or your password manager. Whoever can get into your Apple, Google or password-manager account can then read your future messages and act as you.",
-      "comment": "What turning it on means: the safety of the keys then also depends on the Apple, Google or password-manager account that syncs the passkey. Apple and Google are company names.",
-      "security_critical": true
+      "text": "Restore keys with this passkey",
+      "comment": "Button on a passkey that holds no keys (created before passkeys always restored keys, on another client, or after the account keys changed): one passkey prompt stores the keys for it."
     },
     "settings.passkeys.keys_choice.cancelled": {
-      "text": "Cancelled. This passkey still only logs you in.",
-      "comment": "The person dismissed the passkey prompt while turning on restoring keys.",
+      "text": "The passkey was added. It logs you in only; restore keys with it from its row.",
+      "comment": "The person dismissed the second passkey prompt that stores the keys for a passkey just added.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.done": {
@@ -10250,7 +10441,7 @@
       "security_critical": true
     },
     "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "A different passkey answered. Try again and choose the passkey you are turning this on for.",
+      "text": "A different passkey answered. Try again and choose the passkey you just added.",
       "comment": "The passkey prompt was answered by another passkey than the one being changed.",
       "security_critical": true
     },
@@ -10259,34 +10450,14 @@
       "comment": "The typed phrase is not this account's; the passkey stays sign-in only.",
       "security_critical": true
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "You can change this later for each passkey.",
-      "comment": "Last line of the passkey choice screen.",
-      "security_critical": true
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "This passkey can log you in, but on this device and passkey provider it cannot carry your keys. Keep your recovery phrase.",
       "comment": "The browser or the passkey provider did not give what is needed to protect keys with this passkey.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Type your recovery phrase to turn this on.",
+      "text": "Type your recovery phrase to restore keys with this passkey.",
       "comment": "Shown above the 12 word fields when this device does not hold the recovery phrase.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Log in only",
-      "comment": "Button: keep this passkey for signing in only. Same weight as the other button; neither is the default.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Let this passkey restore your keys?",
-      "comment": "Title of the screen that asks whether one passkey may restore the account's keys on a new device.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Turn on",
-      "comment": "Button: let this passkey restore the keys. Same weight as the other button; neither is the default.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -10305,11 +10476,11 @@
       "security_critical": true
     },
     "settings.passkeys.lede": {
-      "text": "Log in with Touch ID, Face ID or a security key instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too.",
+      "text": "Log in with Touch ID, Face ID or a security key instead of your password. A passkey also restores your keys on a new device. Your recovery phrase always works too.",
       "comment": "iOS: text at the top of the Passkeys page. A passkey logs in, and restores the account's keys only when the person turned that on for it. Names Apple's Touch ID and Face ID; settings.passkeys.lede_device is the wording for web and Android."
     },
     "settings.passkeys.lede_device": {
-      "text": "Log in with your fingerprint, face or screen lock, or a security key, instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too.",
+      "text": "Log in with your fingerprint, face or screen lock, or a security key, instead of your password. A passkey also restores your keys on a new device. Your recovery phrase always works too.",
       "comment": "Web and Android: text at the top of the Passkeys page. A passkey logs in, and restores the account's keys only when the person turned that on for it. Platform-neutral on purpose (the web runs on any system): fingerprint, face, screen lock or a hardware security key. settings.passkeys.lede is the iOS wording with Touch ID and Face ID."
     },
     "settings.passkeys.name.label": {
@@ -10359,26 +10530,6 @@
       "comment": "Under the empty passkey list after the account keys were reset on this device (UX identity-recovery 15.3).",
       "security_critical": true
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Stop restoring keys",
-      "comment": "Button on a passkey that restores keys, and the action button of its confirmation dialog.",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "This passkey will only log you in. Keys already restored on other devices stay there.",
-      "comment": "Confirmation dialog body before a passkey stops restoring keys.",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "This passkey now only logs you in.",
-      "comment": "Confirmation after a passkey stopped restoring keys.",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Stop restoring keys with this passkey?",
-      "comment": "Confirmation dialog title.",
-      "security_critical": true
-    },
     "settings.passkeys.title": {
       "text": "Passkeys",
       "comment": "Card heading in Settings > Security."
@@ -10390,6 +10541,10 @@
     "settings.passkeys.unsupported_browser": {
       "text": "This browser cannot manage passkeys. Use a recent Safari, Chrome, Firefox or Edge.",
       "comment": "Web only: the browser has no WebAuthn support."
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "This device cannot manage passkeys.",
+      "comment": "Desktop app: passkeys are not available on this device, so the passkey list cannot be shown."
     },
     "settings.password.change": {
       "text": "Change password",
@@ -10723,6 +10878,10 @@
       "text": "Managed by your browser",
       "comment": "Shown instead of Remove for a pack the browser manages."
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Managed by your system",
+      "comment": "Desktop app: shown instead of Remove for a pack the operating system manages."
+    },
     "settings.translation.pack.remove": {
       "text": "Remove",
       "comment": "Button that deletes a pack Lakko downloaded."
@@ -10916,6 +11075,11 @@
       "comment": "Dialog body with the pack size, e.g. '30 MB'. {language} is a language name in the interface language, e.g. 'Spanish'.",
       "security_critical": true
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Translation happens on this device. macOS downloads the {language} pack in System Settings: Language & Region, then Translation Languages. Messages are never sent anywhere to be translated.",
+      "comment": "Desktop app on macOS: dialog body when a translation pack is needed; macOS downloads it in its own settings, which the button opens. 'System Settings', 'Language & Region' and 'Translation Languages' are the names macOS shows; use the names macOS shows in this language. {language} is a language name in the interface language, e.g. 'Spanish'.",
+      "security_critical": true
+    },
     "translate.pack.cancel": {
       "text": "Cancel",
       "comment": "Cancels a pack download in progress."
@@ -10944,6 +11108,10 @@
       "text": "Not now",
       "comment": "Pack dialog: close without downloading."
     },
+    "translate.pack.open_system_settings": {
+      "text": "Open System Settings",
+      "comment": "Desktop app on macOS: pack dialog button that opens System Settings at Language & Region. 'System Settings' is the name of the macOS app, as macOS shows it in this language."
+    },
     "translate.pack.source.android": {
       "text": "The pack comes from Google.",
       "comment": "Second paragraph of the pack dialog on Android: who serves the download.",
@@ -10957,6 +11125,11 @@
     "translate.pack.source.web": {
       "text": "The pack comes from your browser's maker.",
       "comment": "Second paragraph of the pack dialog on the web: who serves the download.",
+      "security_critical": true
+    },
+    "translate.pack.source.desktop": {
+      "text": "The pack comes from your system's maker.",
+      "comment": "Second paragraph of the pack dialog in the desktop app: who serves the download (the company that makes the operating system).",
       "security_critical": true
     },
     "translate.pack.title.transcription": {

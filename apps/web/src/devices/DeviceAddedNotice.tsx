@@ -184,7 +184,7 @@ export function DeviceAddedExplanation(props: { readonly view: AddedNoticeView |
     <Show when={props.view !== null && props.view.visible}>
       <div class="lk-alert accent lk-device-added">
         <span aria-hidden="true">
-          <Icon name="devices" size={18} />
+          <Icon name="shield-exclamation" size={20} />
         </span>
         <div class="lk-fill">
           <strong>{t(props.view?.titleKey ?? "devices.added_notice.title")}</strong>

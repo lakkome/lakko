@@ -10,13 +10,16 @@
  *
  * A row says what is true now. **Request sent** comes from the Sent list and
  * from nothing else: dismissed or accepted, the row goes back to what the
- * check says. A decline is silent, so a person asked earlier keeps the line,
- * and the row offers **Ask again**, which sends a new request in one tap. A
- * refused or failed line lasts until the text changes.
+ * check says. A decline is silent, so a person asked earlier keeps the line;
+ * once that request has stood unanswered for a day (the one ask-again rule,
+ * `../chat/ask-again.ts`), the row also offers **Ask again**, which sends a
+ * new request in one tap. Right after Add contact it does not: the button goes
+ * away. A refused or failed line lasts until the text changes.
  *
  * No Solid: the component keeps one of these per person and renders
  * {@link rowView}.
  */
+import { askAgainState } from "../chat/ask-again";
 import type { SentRequestRecord } from "../contacts/contact-list-model";
 import type { PersonResult } from "./people";
 import { REQUEST_FAILED, REQUEST_REFUSED } from "./search-state";
@@ -41,10 +44,11 @@ export function heldStateAfter(outcome: SendOutcome): RowSendState {
 export interface OutgoingRequests {
   readonly keysB64: ReadonlySet<string>;
   readonly accountIdsHex: ReadonlySet<string>;
-  /** The people the Sent list itself holds, by account id: a request that
-   *  can be sent again. Someone added through their link is not among them:
+  /** The people the Sent list itself holds, by account id, with when the
+   *  latest request to them went out: a request that can be sent again once
+   *  it is a day old. Someone added through their link is not among them:
    *  that request was the link's. */
-  readonly askedAccountIdsHex: ReadonlySet<string>;
+  readonly askedAtMsByAccountIdHex: ReadonlyMap<string, number>;
 }
 
 /**
@@ -58,18 +62,19 @@ export function outgoingOf(
 ): OutgoingRequests {
   const keysB64 = new Set<string>();
   const accountIdsHex = new Set<string>();
-  const askedAccountIdsHex = new Set<string>();
+  const askedAtMsByAccountIdHex = new Map<string, number>();
   for (const r of sent) {
     accountIdsHex.add(r.recipientAccountIdHex);
-    askedAccountIdsHex.add(r.recipientAccountIdHex);
+    const held = askedAtMsByAccountIdHex.get(r.recipientAccountIdHex);
+    if (held === undefined || r.sentAtMs > held) askedAtMsByAccountIdHex.set(r.recipientAccountIdHex, r.sentAtMs);
     if (r.recipientKeyB64 !== undefined) keysB64.add(r.recipientKeyB64);
   }
   for (const p of invited) {
     accountIdsHex.add(p.accountIdHex);
     keysB64.add(p.signaturePubkeyB64);
-    askedAccountIdsHex.delete(p.accountIdHex);
+    askedAtMsByAccountIdHex.delete(p.accountIdHex);
   }
-  return { keysB64, accountIdsHex, askedAccountIdsHex };
+  return { keysB64, accountIdsHex, askedAtMsByAccountIdHex };
 }
 
 /** Whether a request to this person is waiting. By account id too: their key
@@ -93,9 +98,14 @@ export function rowSendState(
   return isOutgoing(person, outgoing) ? "sent" : "idle";
 }
 
-/** Whether a row reading Request sent offers to ask again. */
-export function mayAskAgain(person: PersonResult, outgoing: OutgoingRequests): boolean {
-  return person.accountIdHex !== null && outgoing.askedAccountIdsHex.has(person.accountIdHex);
+/** Whether a row reading Request sent offers to ask again: the request in
+ *  the Sent list has stood unanswered for a day (`docs/ux/who-can-find-me.md`
+ *  section 6.1: right after Add contact the row reads Request sent and the
+ *  button goes away). */
+export function mayAskAgain(person: PersonResult, outgoing: OutgoingRequests, nowMs: number): boolean {
+  if (person.accountIdHex === null) return false;
+  const sentAtMs = outgoing.askedAtMsByAccountIdHex.get(person.accountIdHex);
+  return sentAtMs !== undefined && askAgainState(sentAtMs, nowMs) === "no-answer";
 }
 
 /** The text changed: a refused or failed line goes, so the row reflects the

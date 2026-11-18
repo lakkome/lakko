@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-The hand-over reaches a newcomer through another member. ADR-0090 section 3.9 lets that member speak for what the newcomer cannot check (ring extensions, earlier votes, added items, ticks) but not for the item itself: the newcomer must be able to refuse a poll or checklist invented or altered in someone else's name, and a version 0 of the ring that is not the one the author signed.
+The hand-over reaches a newcomer through another member. ADR-0092 section 3.9 lets that member speak for what the newcomer cannot check (ring extensions, earlier votes, added items, ticks) but not for the item itself: the newcomer must be able to refuse a poll or checklist invented or altered in someone else's name, and a version 0 of the ring that is not the one the author signed.
 
 ## Public contract
 
@@ -32,4 +32,4 @@ It does not decide whose hand-over to take (`lakko_contacts::open_items_sender_t
 
 ## References
 
-ADR-0090 section 3.9; tests in `src/tests.rs`.
+ADR-0092 section 3.9; tests in `src/tests.rs`.

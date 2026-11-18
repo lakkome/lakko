@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.11 — a poll or checklist restored from a history bundle
+ * ADR-0092 section 3.11 — a poll or checklist restored from a history bundle
  * renders from the state the bundle carried; live ops continue on top of it.
  * Pure helpers, tested directly.
  */

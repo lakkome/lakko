@@ -6,7 +6,7 @@ package me.lakko.app.chat
 import android.content.Context
 
 /**
- * ADR-0090 section 3.9 — per account and group, the account key of the member
+ * ADR-0092 section 3.9 — per account and group, the account key of the member
  * whose Welcome admitted this device (the Welcome's sender resolved to its
  * account). An open-items hand-over is kept from that account, or from an owner
  * or admin. Not secret (an account key of a fellow member); kept beside the

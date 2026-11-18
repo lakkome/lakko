@@ -81,7 +81,7 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 
 [dev-dependencies]
-# ADR-0090: the drift tests pin the byte prefixes this crate copies (the
+# ADR-0092: the drift tests pin the byte prefixes this crate copies (the
 # ballot row domain, the poll-choice envelope domain) to their owning
 # crates. Dev-only: neither reaches the iOS link.
 lakko-ballot.workspace = true

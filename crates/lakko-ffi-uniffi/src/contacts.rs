@@ -710,7 +710,7 @@ pub struct FfiProfile {
     #[uniffi(default = None)]
     pub avatar: Option<FfiAvatar>,
     /// `false` when the person does not let others share their contact card
-    /// (ADR-0090 section 7, profile v5 flags bit 0). A client sends `false`
+    /// (ADR-0092 section 7, profile v5 flags bit 0). A client sends `false`
     /// exactly when its own "who can find me" setting is `Nobody`. Defaults
     /// to `true` so existing initialisers compile.
     #[uniffi(default = true)]
@@ -2560,13 +2560,24 @@ pub enum FfiIncomingEnvelopeKind {
     /// publisher; requests before the next rotation collapse into it. Never
     /// render it. Appended last.
     ChannelRotateRequest,
-    /// ADR-0090 section 3.9 — the open polls and checklists a committer
+    /// A co-publisher's device asks an owner device to admit or retire one
+    /// of its account's devices (ADR-0090 section 2.2). `payload` is the
+    /// whole envelope; decode it with `decodePublisherDeviceRequestEnvelope`.
+    /// Only an owner device acts on it, under the rule in that function's
+    /// documentation. Never render it. Appended last.
+    PublisherDeviceRequest,
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). `payload` is the whole envelope; decode it with
+    /// `decodeChannelAdmissionMarkEnvelope` and keep the largest mark from a
+    /// current publisher. Never render it. Appended last.
+    ChannelAdmissionMark,
+    /// ADR-0092 section 3.9 — the open polls and checklists a committer
     /// hands to a newcomer. `payload` is the whole envelope: keep it with the
     /// sender's account key (resolved at receipt, C-68) when
     /// `openItemsSenderTrusted` says so, then `assembleOpenItems` and
     /// `adoptOpenItem`. Never render it. Appended last.
     OpenItems,
-    /// ADR-0090 section 3.9 — old ballot rows of one anonymous poll handed
+    /// ADR-0092 section 3.9 — old ballot rows of one anonymous poll handed
     /// to a newcomer. `payload` is the whole envelope; read it with
     /// `decodePollBallotsEnvelope` and treat each row like a journal ballot
     /// row. Never render it. Appended last.
@@ -2820,6 +2831,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ChannelRotateRequest(channel) => FfiIncomingEnvelope {
             payload: channel.to_vec(),
             ..FfiIncomingEnvelope::of(K::ChannelRotateRequest)
+        },
+        IncomingEnvelope::PublisherDeviceRequest(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PublisherDeviceRequest)
+        },
+        IncomingEnvelope::ChannelAdmissionMark(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelAdmissionMark)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
@@ -6069,4 +6088,20 @@ pub fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 #[must_use]
 pub fn call_invite_max_uses() -> u32 {
     RUST_CALL_INVITE_MAX_USES
+}
+
+/// ADR-0081 (third amendment): the note a running device posts to a rejoin
+/// knock's rendezvous at once, meaning "a device of this account is online".
+#[uniffi::export]
+#[must_use]
+pub fn compose_rejoin_present() -> Vec<u8> {
+    lakko_contacts::rejoin_present::compose_rejoin_present()
+}
+
+/// Is this rendezvous row exactly a rejoin presence note (and so not a
+/// Welcome)?
+#[uniffi::export]
+#[must_use]
+pub fn is_rejoin_present(row: Vec<u8>) -> bool {
+    lakko_contacts::rejoin_present::is_rejoin_present(&row)
 }

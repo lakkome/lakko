@@ -43,3 +43,8 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # Pulled in by `bip39 → rand_core → rand`. Needs `js` to route the
 # CSPRNG through WebCrypto on `wasm32-unknown-unknown`.
 getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+# Property tests for the recovery payload codec; already a dev-dependency
+# of other workspace crates.
+proptest = "1"

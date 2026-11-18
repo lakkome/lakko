@@ -66,7 +66,7 @@ public enum ForwardPayload {
         )
     }
 
-    // MARK: - Content messages (ADR-0090, forwarding amended 2026-11-18)
+    // MARK: - Content messages (ADR-0092, forwarding amended 2026-11-18)
 
     /// Whether `message` may be forwarded, by what it holds. A plain message
     /// may. A location and an article may, sent again as the same content. A

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 — the bubble of a content message in a one-to-one or group: a
+ * ADR-0092 — the bubble of a content message in a one-to-one or group: a
  * poll, a checklist, a location, a contact card or an article. Folds the
  * stored ops through the core and hands the cards a view; a person's action
  * goes back through the {@link ContentHost} the conversation provides (it
@@ -83,7 +83,7 @@ export interface ContentHost {
 interface Props {
   readonly host: ContentHost;
   readonly content: MessageContent;
-  /** ADR-0090 section 3.11 — the state a history bundle carried. */
+  /** ADR-0092 section 3.11 — the state a history bundle carried. */
   readonly snapshot?: ContentState | undefined;
   readonly messageId: number | undefined;
   readonly attachments: readonly AttachmentRefBytes[];
@@ -168,7 +168,7 @@ function PollBubble(props: Props & { content: PollContent }): JSX.Element {
     const e = entryOf(props.host.groupIdB64, props.messageId);
     return e?.kind === "poll" ? e : undefined;
   };
-  // ADR-0090 section 3.11 — a poll restored from a history bundle: its
+  // ADR-0092 section 3.11 — a poll restored from a history bundle: its
   // bundle state until (and under) live ops; a public poll is filed at once
   // (its author found by signature) so this device can vote; an anonymous one
   // waits for the hand-over's ring.
@@ -286,7 +286,7 @@ export async function votePoll(host: ContentHost, entry: PollEntry, choices: rea
 
 /** Where the register has not arrived but the account's own earlier ballot
  *  is readable (found by its tag), that ballot's set version, so a revote
- *  reuses the same anonymity set (ADR-0090 section 3.6). */
+ *  reuses the same anonymity set (ADR-0092 section 3.6). */
 function ownSetVersionFromBallots(entry: PollEntry, groupId: Uint8Array, seed: Uint8Array): number | undefined {
   const anon = entry.signed.body.anonymous;
   const verified = entry.ballots.filter((b) => b.verified != null);
@@ -414,7 +414,7 @@ function authorBySignature(host: ContentHost, verify: (key: Uint8Array) => void)
   return undefined;
 }
 
-/** File a restored poll (ADR-0090 section 3.11). An entry already held (a
+/** File a restored poll (ADR-0092 section 3.11). An entry already held (a
  *  hand-over came first) only gains the bundle's baseline. */
 export async function seedPollFromSnapshot(
   host: ContentHost,
@@ -617,7 +617,7 @@ export function contentMenuActions(args: {
       nowMs: Date.now(),
     });
     if (canRetract(view)) {
-      out.push({ label: t("poll.retract"), icon: "close", onClick: () => void votePoll(host, e, []) });
+      out.push({ label: t("poll.retract"), icon: "xmark", onClick: () => void votePoll(host, e, []) });
     }
     if (canClosePoll({ isAuthor, isAdmin: host.isAdmin(), group: !host.oneToOne(), closed: view.closed })) {
       out.push({

@@ -46,6 +46,18 @@ export function messageKey(slot: string, conversation: string, messageId: number
   return `${slot}|${conversation}|${messageId}`;
 }
 
+/**
+ * Whether this page can tell a mobile connection from another at all: the
+ * browser reports a connection type (Chrome on Android does; desktop
+ * browsers and the desktop app's webview do not). Where it cannot,
+ * {@link onCellular} is always `false` and a mobile-data setting governs
+ * nothing.
+ */
+export function connectionTypeKnown(): boolean {
+  const c = (globalThis.navigator as { connection?: { type?: unknown } } | undefined)?.connection;
+  return typeof c?.type === "string" && c.type.length > 0 && c.type !== "unknown";
+}
+
 /** Whether the device is on a cellular link, where the browser says. */
 export function onCellular(): boolean {
   const c = (globalThis.navigator as { connection?: { type?: string } } | undefined)?.connection;

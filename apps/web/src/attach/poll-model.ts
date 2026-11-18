@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 / UX 7.2, 8.2 — the views a poll card and a checklist card draw,
+ * ADR-0092 / UX 7.2, 8.2 — the views a poll card and a checklist card draw,
  * from a tally the core folded. Pure: no wasm, no store, so the rules here
  * (who may vote, what is shown when, who may tick) are tested directly.
  */

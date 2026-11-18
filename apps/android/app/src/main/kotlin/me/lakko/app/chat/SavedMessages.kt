@@ -27,9 +27,16 @@ public fun savedAttachmentKind(msg: ChatMessage): String {
     }
 }
 
-/** The excerpt a saved snapshot carries: the text, else a file's name. */
-public fun savedExcerpt(msg: ChatMessage): String =
-    msg.text.ifEmpty {
+/** The excerpt a saved snapshot carries: the text, else a file's name. A
+ *  message carrying a channel invitation card carries its card's line, never
+ *  its text (the `/g/` link with its secret, ADR-0087 section 14). */
+public fun savedExcerpt(
+    msg: ChatMessage,
+    inviteLine: (ByteArray?) -> String? = { me.lakko.app.ui.channels.channelInviteLine(it) },
+    /** A bare `/g/` link with no card: the row's line, never its secret. */
+    bareLinkLine: (String) -> String? = { me.lakko.app.ui.channels.bareGroupLinkSnapshotLine(it) },
+): String =
+    (if (msg.deleted) null else inviteLine(msg.channelInvite) ?: bareLinkLine(msg.text)) ?: msg.text.ifEmpty {
         msg.attachments.firstOrNull()?.takeIf { savedAttachmentKind(msg) == "file" }?.name.orEmpty()
     }
 

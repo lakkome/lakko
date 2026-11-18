@@ -65,7 +65,7 @@ struct IncomingCallScreen: View {
                 VStack(spacing: 20) {
                     InitialsAvatar(
                         name: callerName ?? "", identity: callerName ?? "lakko.call",
-                        size: 96, placeholderSymbol: "person.fill",
+                        size: 96, placeholderIcon: .personFill,
                         photo: callerKey.map(AvatarPhoto.person))
 
                     VStack(spacing: 8) {
@@ -114,8 +114,7 @@ struct IncomingCallScreen: View {
     /// that can reach this screen.
     private var encryptedLine: some View {
         HStack(spacing: 6) {
-            Image(systemName: "lock.fill")
-                .font(.caption2)
+            LkIconView(.lockFill, size: 14, relativeTo: .caption2)
             Text(l10n.t("call.e2ee"))
                 .font(.caption)
         }
@@ -144,7 +143,7 @@ struct IncomingCallScreen: View {
             HStack(spacing: 0) {
                 answerButton(
                     label: l10n.t("call.incoming.decline"),
-                    systemImage: "phone.down.fill",
+                    icon: .phoneDownFill,
                     tint: .lakkoDanger,
                     spoken: l10n.t(
                         video ? "call.incoming.decline_video_a11y" : "call.incoming.decline_voice_a11y",
@@ -153,7 +152,7 @@ struct IncomingCallScreen: View {
                 Spacer(minLength: 32)
                 answerButton(
                     label: l10n.t("call.incoming.accept"),
-                    systemImage: video ? "video.fill" : "phone.fill",
+                    icon: video ? .videoFill : .phoneFill,
                     tint: .lakkoSuccess,
                     spoken: l10n.t(
                         video ? "call.incoming.accept_video_a11y" : "call.incoming.accept_voice_a11y",
@@ -167,15 +166,15 @@ struct IncomingCallScreen: View {
     /// A large round button with its word beneath, the same face the in-call
     /// row uses so the surface does not change shape when the call is answered.
     private func answerButton(
-        label: String, systemImage: String, tint: Color, spoken: String,
+        label: String, icon: LkIcon, tint: Color, spoken: String,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             VStack(spacing: 8) {
                 ZStack {
                     Circle().fill(tint)
-                    Image(systemName: systemImage)
-                        .font(.system(size: 30))
+                    // The same proportion as the in-call end button's glyph.
+                    LkIconView(icon, size: 32, relativeTo: nil)
                         .foregroundStyle(.white)
                 }
                 .frame(width: 72, height: 72)

@@ -17,7 +17,7 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-describe("the channel vote retry (ADR-0090 section 4.3)", () => {
+describe("the channel vote retry (ADR-0092 section 4.3)", () => {
   it("retries a stale vote once at stored_at_ms + 1 inside the window", async () => {
     const a = await voteAnswerOf(json(409, { code: "stale-vote", stored_at_ms: 5_000 }));
     expect(a).toEqual({ kind: "stale", storedAtMs: 5_000 });

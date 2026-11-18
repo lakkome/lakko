@@ -8,7 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.MessageContent
 
-/** ADR-0090 — which failed content rows a Retry may send as they are. */
+/** ADR-0092 — which failed content rows a Retry may send as they are. */
 class ContentRetryTest {
     private val hash = ByteArray(32) { 9 }
 

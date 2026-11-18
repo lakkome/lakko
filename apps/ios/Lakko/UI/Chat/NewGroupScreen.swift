@@ -82,6 +82,9 @@ struct NewGroupScreen: View {
         handleRateLimited = false
         guard isPublic, handle.count >= 3, ConversationHandles.wellFormed(handle) else { return }
         let typed = handle
+        // A name a failed create of this account claimed is this account's
+        // (a retry takes it back): the lookup answering it is not "taken".
+        if claimedHere(typed) { return }
         // An answer from the last minute shows at once, with no new question.
         if let held = HandleTakenCheck.held(typed) {
             handleTaken = held == .taken
@@ -95,6 +98,13 @@ struct NewGroupScreen: View {
             handleTaken = answer == .taken
             handleRateLimited = answer == .rateLimited
         }
+    }
+
+    /// Whether a failed New group on this account claimed `typed` (its
+    /// group ids are kept for the retry).
+    private func claimedHere(_ typed: String) -> Bool {
+        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return false }
+        return !PendingGroupHandleStore.groupIds(forHandle: typed, accountIdB64: account).isEmpty
     }
 
     /// Nothing was created: the uploaded photo is never referenced.
@@ -151,7 +161,7 @@ struct NewGroupScreen: View {
                 }
                 .disabled(busy)
                 LakkoPicker(
-                    l10n.t("group_type.who_can_join"), systemImage: "person.2",
+                    l10n.t("group_type.who_can_join"), icon: .person2,
                     selection: $isPublic,
                     options: [
                         LakkoPickerOption(value: false, label: l10n.t("group_type.private")),
@@ -245,7 +255,7 @@ struct NewGroupScreen: View {
                         }
                     }
                     Spacer()
-                    Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    LkIconView(isOn ? .checkmarkCircleFill : .circle, size: 20)
                         .foregroundStyle(isOn ? Color.lakkoAccent : Color.lakkoTextMuted)
                         .accessibilityHidden(true)
                 }
@@ -261,9 +271,15 @@ struct NewGroupScreen: View {
         guard Self.canCreate(name: name, handle: handle, isPublic: isPublic) else { return }
         // A public name the check found taken in the last minute: no claim,
         // the field already says it.
-        if isPublic, HandleTakenCheck.held(handle) == .taken {
+        if isPublic, HandleTakenCheck.held(handle) == .taken, !claimedHere(handle) {
             handleTaken = true
             errorMessage = "group_handle.error.held"
+            return
+        }
+        // The bound account keeps the ids of earlier attempts at this @name,
+        // so a retry takes the name back; no create without it.
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else {
+            errorMessage = "new_group.error.sign_in"
             return
         }
         busy = true
@@ -301,12 +317,20 @@ struct NewGroupScreen: View {
             let typedName = trimmedName
             let photoForRecord = uploadedPhoto
             groupIdHex = try await chatRepository.foundGroupWithNobodyElse(beforePublish: { groupId in
+                // Kept before any request about the name, so a lost answer is
+                // covered too; a retry moves the name from an earlier attempt.
+                let earlier = PendingGroupHandleStore.keep(
+                    handle: wanted, groupIdHex: AttachmentBridge.hex(groupId), accountIdB64: accountIdB64)
                 claimed = try await chatRepository.claimHandleBeforeFounding(
                     groupId: groupId, handle: wanted, isPublic: publicGroup, name: typedName,
-                    avatar: photoForRecord)
+                    avatar: photoForRecord, earlier: earlier.compactMap(ChatRepository.hexToBytes))
             })
+            PendingGroupHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
         } catch let refusal as DiscoveryClient.HandleWriteError {
-            if refusal.code == "name-taken" { HandleTakenCheck.note(handle, .taken) }
+            if refusal.code == "name-taken" {
+                HandleTakenCheck.note(handle, .taken)
+                PendingGroupHandleStore.forget(handle: handle, accountIdB64: accountIdB64)
+            }
             errorMessage = refusal.code == "name-taken"
                 ? "group_handle.error.held"
                 : (refusal.status == 429 ? "common.error.too_many_attempts" : "new_group.error.secure_setup")
@@ -328,9 +352,7 @@ struct NewGroupScreen: View {
             deleteUploaded(uploadedPhoto)
             return
         }
-        if let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 {
-            chatRepository.groupSettingsStore.markCreatedHere(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        }
+        chatRepository.groupSettingsStore.markCreatedHere(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         /// Catalog keys and their arguments, rendered when shown.
         var notices: [(key: String, texts: [String: String])] = []
 

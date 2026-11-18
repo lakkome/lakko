@@ -42,7 +42,9 @@ import { TranslationProvider } from "./translation/TranslationContext";
 import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
+import { ChannelSubscriptionSync } from "./channels/ChannelSubscriptionSync";
 import { ChannelPostSync } from "./feed/ChannelPostSync";
+import { ChannelPostNotifier } from "./feed/ChannelPostNotifier";
 import { ChannelPublisherLoops } from "./channels/ChannelPublisherLoops";
 import { ChannelFeedbackRuntime } from "./channels/ChannelFeedbackRuntime";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
@@ -74,6 +76,7 @@ import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { UsernamePrompt } from "./auth/UsernamePrompt";
 
 /**
  * Router-level layout (G-36). Renders the active route unchanged and
@@ -107,6 +110,11 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
     <Show when={isDesktop()} fallback={<OpenInApp />}>
       <DesktopBridge />
     </Show>
+    {/*
+     * docs/ux/channel-notifications.md - a new channel post this device
+     * read raises a notification. Inside the router: a tap opens the channel.
+     */}
+    <ChannelPostNotifier />
     {props.children}
     <CallHostView />
   </>
@@ -228,6 +236,12 @@ const App: Component = () => (
            */}
           <ChannelsHydration />
           {/*
+           * 2026-11-13: the account's channel subscriptions reach every
+           * device of the account (and a leave on one drops the channel on
+           * the others), through its synced-state registers.
+           */}
+          <ChannelSubscriptionSync />
+          {/*
            * ADR-0063 section 4: while the app is in front, channel posts are
            * fetched and filed into the log the Feed ranks.
            */}
@@ -241,6 +255,12 @@ const App: Component = () => (
           <ChannelPublisherLoops />
           {/* UX section 9: the short notice of an end, anywhere in the app. */}
           <MembershipEndToast />
+          {/*
+           * docs/ux/identity-recovery.md section 8b: a session that landed
+           * with no username (a passkey sign-in on a new device) learns it
+           * from the backup, or asks once.
+           */}
+          <UsernamePrompt />
           {/* ADR-0087 section 13a: kept ban lists and waiting reactions. */}
           <ChannelFeedbackRuntime />
           {/*
@@ -266,7 +286,7 @@ const App: Component = () => (
           <RenameResume />
           {/* ADR-0065 - blob passes, owed deletes and the keep tick. */}
           <BlobAccessRuntime />
-          {/* ADR-0090 - the poll and checklist store and the anonymous
+          {/* ADR-0092 - the poll and checklist store and the anonymous
               ballot queue, bound to the account. */}
           <AttachRuntime />
           {/* ADR-0087 sections 3 to 5 - owed @name writes, lease renewal,

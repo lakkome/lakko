@@ -12,6 +12,7 @@ import {
   OTHER_LETTER,
   sortIncomingRequests,
   sentRowLines,
+  subLineUsername,
   upsertSentRequest,
   waitingSentRequests,
   contactsBadge,
@@ -206,5 +207,17 @@ describe("foundNameOf", () => {
 
   it("a fingerprint names nobody", () => {
     expect(foundNameOf({ ...record, recipientName: fingerprintLabel(key) }, key)).toBeNull();
+  });
+});
+
+describe("subLineUsername", () => {
+  it("drops the line when the row is titled by the username itself", () => {
+    expect(subLineUsername("@qa_ip_626a39", "@qa_ip_626a39")).toBeNull();
+  });
+  it("keeps the line under a display name", () => {
+    expect(subLineUsername("Pixel Four", "@qa_px_34e4ef")).toBe("@qa_px_34e4ef");
+  });
+  it("is null with no username", () => {
+    expect(subLineUsername("Pixel Four", null)).toBeNull();
   });
 });

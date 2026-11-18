@@ -103,7 +103,7 @@ export function saveOwnProfileFields(
 }
 
 /**
- * ADR-0090 section 7 — the own "my card may be shared" flag changed (the
+ * ADR-0092 section 7 — the own "my card may be shared" flag changed (the
  * "who can find me" setting moved to or from `Nobody`): the same name and
  * photo under a strictly newer stamp, so the republished profile replaces
  * what every receiver holds (receivers keep a strictly newer stamp only).

@@ -170,6 +170,18 @@ the account.**
   table. `usernames` and `handles` (section 2) each insert into it in the
   transaction that takes a name, so a person and a group can never hold one name.
   A refused claim is `409 name-taken` on every path.
+  *Note, 2026-11-14:* a claim of a current row by the write key that holds it is
+  not refused: `POST /discovery/handle/claim` answers it as the first claim (a
+  fresh certificate, the lease renewed, the visibility and the public content
+  replaced). A New channel that failed after its claim landed retries under the
+  same kept channel id, hence the same key, and so takes its own name back. A
+  claim by another key, of a username, or of a retired row stays `409 name-taken`;
+  the claim route does not take back a retired name. A New group founds a new group,
+  hence a new key, on every attempt, so its clients keep the group ids of earlier
+  attempts at a name and a retry moves the name with `POST /discovery/handle/rekey`
+  signed by an earlier attempt's key, then writes the new group's content with
+  `PUT /discovery/handle`. A rekey answered `404` (no earlier claim landed) is
+  followed by a plain claim; `401` from every earlier key means the name is held.
 - `POST /discovery/lookup` answers for either kind. `POST /discovery/channel/*`
   goes.
 - A retired name, of any kind, is held 30 days as ADR-0076 holds a username, and
@@ -393,7 +405,7 @@ without.
 
 | Layer | Bound |
 |---|---|
-| Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per 7 days |
+| Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per day (7 days until 2026-11-12) |
 | DS, per journal | new cap: 4,096 rows (chosen, not measured), refused with `429 knock-queue-full` before a token is spent. The count and the insert are not one transaction, so knocks arriving on one journal at the same moment can end the queue at most their own payloads (4 per knock) past the cap; locking would give every unclaimed journal a lock row (decided 2026-11-02) |
 | DS, row | 16 KiB, 7 days (existing) |
 | Admin device | 64 retained (`MAX_PENDING_EXTERNAL_JOINS`); **the knock cursor stops while the queue is full**, so the backlog stays on the DS instead of being lost |
@@ -742,6 +754,20 @@ move out of `RotationPanel` and `CoPublishersPanel` into app-wide loops beside
 owner opens its screen. Each pass reads only channels this device publishes; the rotation
 pass runs only for channels this device owns (2026-11-08, section 15).
 
+**Amended 2026-11-13 (maintainer).** "This device owns" and "this device publishes" mean
+"this device holds the channel's PublisherGroup", not "this account owns the channel".
+The channels now reach every device of the account (the `lakko-sync` channel-subscription
+register, ADR-0050 section 2.9 as amended that day) with the account's one subscriber key,
+so a second device of the owner or of a publisher lists and reads the channel. It runs no
+publisher pass, no rotation and no admission for it, shows no composer and no owner or
+publisher control (UX `second-device.md` section 4a), and never founds a PublisherGroup
+or resets the channel journal: founding happens only in create-channel. A lost
+publishing device leaves the channel without anyone who can post (G-54).
+
+**Amended again 2026-11-13 ([ADR-0090](0090-publisher-group-device-leaves.md), accepted,
+not built).** Every device of the owner and of each publisher will hold its own
+PublisherGroup leaf and post; the reader rule above stays until that is built.
+
 ### 13. A post carries what a message can
 
 **The plaintext of a post is the chat envelope.** `classify_post_plaintext` keeps its
@@ -969,6 +995,18 @@ owner rotates with the remaining publishers. `PublisherGroup::members()` lists t
 publishers with their account keys, which is the member list the `Publishers` block
 and `DELETE .../copublishers/{pk}` needed.
 
+**A day, not 7 days (amended 2026-11-12, maintainer decision).** A device asks once per
+group, and once per channel for a publisher request, per day: "No answer yet." and `Ask
+again` appear a day after the request, not 7 days. Seen walking base scenario 20: the page
+a group's invite link opens offered `Request again` at once (the September invite-page
+spec), while the Requests sent list said "Waiting for an admin." for the same request, so a
+refused person could re-send without limit. The invite page now follows section 6 of the
+UX spec: "Request sent. An admin will see it when they next open Lakko.", no button until
+the day is over, and the chat opens by itself when the join lands. Where this ADR says 7
+days for a request below, read a day; the DS row lifetime of 7 days is unchanged (a second
+request from the same device is the same joiner to the admin's pending list, ADR-0027
+dedup by signature key).
+
 **A publisher request with no answer (amended 2026-11-08, maintainer decision).** A
 publisher request the owner's device rejected or never answered follows a group request
 (UX section 6.2, applied in UX section 15.2.2): the invitation card shows the waiting line
@@ -995,6 +1033,15 @@ owner returns (a removal is itself the owner's commit, so the rotation after it 
 the owner's device at once; a step-down waits for the owner's device anyway). No core or
 server change; the clients drop the rotation pass for channels they
 do not own.
+
+**Any owner device rotates (amended 2026-11-13, maintainer decision,
+[ADR-0090](0090-publisher-group-device-leaves.md)).** "The owner's device alone" above
+becomes: any device of the owner that holds the PublisherGroup runs the rotation policy,
+every PublisherGroup commit is staged and sent through the ADR-0081 commit route, and the
+DS takes exactly one commit per epoch; the loser abandons its staged commit and reseals
+nothing. Co-publisher devices still never rotate. Nothing of ADR-0090 is built yet; until
+it is, the 2026-11-13 note of section 12 holds (only the device holding the
+PublisherGroup publishes).
 
 **A publisher asks the owner to rotate (amended 2026-11-08, maintainer decision).** A
 publisher may remove a subscriber (this section), and a removal is followed by a rotation

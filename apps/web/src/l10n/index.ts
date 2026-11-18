@@ -14,6 +14,8 @@ import sourceJson from "./catalog/source.json?raw";
 import { loadWasm } from "../wasm";
 import { createL10n, type L10nArgs, type L10nWasm } from "./runtime";
 import { deviceLocale, formatLocaleFor } from "./format-locale";
+import { keyForPlatform } from "./desktop-copy";
+import { isDesktop } from "../platform";
 
 export type { L10nArgs, LanguageInfo } from "./runtime";
 export { LANGUAGE_STORAGE_KEY } from "./runtime";
@@ -54,9 +56,13 @@ const runtime = createL10n({
   numberLocale: (language) => formatLocaleFor(language, deviceLocale()),
 });
 
-/** Render a catalog message in the current language. */
+/**
+ * Render a catalog message in the current language. In the desktop app a key
+ * whose web text speaks of a browser renders its desktop key instead
+ * (`./desktop-copy.ts`).
+ */
 export function t(key: string, args?: L10nArgs): string {
-  return runtime.t(key, args);
+  return runtime.t(keyForPlatform(key, isDesktop()), args);
 }
 
 /**

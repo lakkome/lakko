@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The channel poll vote store (ADR-0090 section 4.3), the same scenario
+//! The channel poll vote store (ADR-0092 section 4.3), the same scenario
 //! against both `ChannelStore` impls: the in-memory store always, and
 //! `SqlChannelStore` against a real MariaDB when
 //! `LAKKO_CHANNELS_TEST_DATABASE_URL` is set (else that half skips and says
@@ -46,6 +46,8 @@ async fn sql_store() -> Option<SqlChannelStore> {
     Some(SqlChannelStore::new(pool))
 }
 
+// Short names keep the vote table readable: store, channel, three labels.
+#[allow(clippy::many_single_char_names)]
 async fn exercise(s: &dyn ChannelStore) {
     let c = ChannelId::from_bytes(&random::<16>()).unwrap();
     s.create(c, random::<32>()).await.unwrap();

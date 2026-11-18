@@ -57,7 +57,7 @@ export interface HeldMessage {
   readonly replyGroupIdB64?: string | undefined;
   /** ADR-0052: set for a forward INTO the held conversation. */
   readonly forward?: ForwardRef | undefined;
-  /** ADR-0090: a location, contact card, article, poll or checklist; its
+  /** ADR-0092: a location, contact card, article, poll or checklist; its
    *  `text` is empty and `attached` are an article's images. */
   readonly content?: MessageContent | undefined;
 }

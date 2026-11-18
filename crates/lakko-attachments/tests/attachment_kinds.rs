@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 at the envelope: every new content kind and op through
+//! ADR-0092 at the envelope: every new content kind and op through
 //! `compose_*` and `parse_body`, the strict refusals, and hostile input.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]

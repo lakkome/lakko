@@ -2858,7 +2858,8 @@ public final class ChatViewModel: ObservableObject {
         replyingTo = ReplyArmed(
             messageId: message.messageId,
             snapshot: ReplySnapshot.replySnapshot(
-                for: message, authorLabel: replyAuthorLabel(for: message)),
+                for: message, authorLabel: replyAuthorLabel(for: message),
+                invitationLine: message.snapshotInvitationLine(conversationIdHex: groupIdHex)),
             quotesOwn: message.direction == .outgoing)
         composerFocusRequest += 1
     }
@@ -2922,7 +2923,7 @@ public final class ChatViewModel: ObservableObject {
         forwardingMessage = message
     }
 
-    /// ADR-0090 — whether `message` may be forwarded by what it holds
+    /// ADR-0092 — whether `message` may be forwarded by what it holds
     /// (``ForwardPayload/isForwardable(_:cardShareable:)``), the contact-card
     /// check read from the newest profile this device holds.
     func isForwardable(_ message: ChatMessage) -> Bool {
@@ -3126,7 +3127,8 @@ public final class ChatViewModel: ObservableObject {
             return (author: "", excerpt: ReplySnapshot.missingExcerpt)
         }
         let taken = ReplySnapshot.replySnapshot(
-            for: message, authorLabel: replyAuthorLabel(for: message))
+            for: message, authorLabel: replyAuthorLabel(for: message),
+            invitationLine: message.snapshotInvitationLine(conversationIdHex: groupIdHex))
         let snapshot = message.direction == .outgoing ? ReplySnapshot.shownAsOwn(taken) : taken
         let lines = ReplySnapshot.replyQuoteLines(snapshot)
         switch entry.scope {
@@ -3854,9 +3856,9 @@ public final class ChatViewModel: ObservableObject {
         sendError = copy
     }
 
-    /// ADR-0090 — an attachment prepared elsewhere (an audio file with its
+    /// ADR-0092 — an attachment prepared elsewhere (an audio file with its
     /// tags) joins the composer tray.
-    /// ADR-0090 — the send preview takes what its upload put in the tray.
+    /// ADR-0092 — the send preview takes what its upload put in the tray.
     func takePendingAttachments() -> [AttachmentRef] {
         let taken = pendingAttachments
         pendingAttachments = []

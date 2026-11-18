@@ -152,6 +152,7 @@ public class ChatViewModel(
         mutableSelection.value = me.lakko.app.chat.MessageSelection.starting(
             messageId = message.messageId,
             isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+            isInvitation = me.lakko.app.chat.carriesInvitationCard(message),
         )
     }
 
@@ -164,6 +165,7 @@ public class ChatViewModel(
         mutableSelection.value = current.toggle(
             messageId = message.messageId,
             isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+            isInvitation = me.lakko.app.chat.carriesInvitationCard(message),
         )
     }
 
@@ -3234,7 +3236,7 @@ public class ChatViewModel(
         }
     }
 
-    // -------------------------------------------------------------- ADR-0090
+    // -------------------------------------------------------------- ADR-0092
 
     /** UX 2.4 — the conversation kind and the own role the attachment menu reads. */
     public fun attachmentMenuRows(hasCamera: Boolean, hasLocation: Boolean, callHoldsCamera: Boolean):
@@ -3284,7 +3286,7 @@ public class ChatViewModel(
     public fun isOwnerOrAdmin(): Boolean = ownRole().let { it == Role.OWNER || it == Role.ADMIN }
 
     /**
-     * ADR-0090 — send a poll, checklist, location, contact card or article. A
+     * ADR-0092 — send a poll, checklist, location, contact card or article. A
      * poll or checklist is signed here by the account key the conversation
      * leaves are bound to (section 3.1), over this group's id.
      */
@@ -3337,7 +3339,7 @@ public class ChatViewModel(
         }
     }
 
-    /** ADR-0090 section 3.6 — the ring version 0 hash of a new anonymous poll. */
+    /** ADR-0092 section 3.6 — the ring version 0 hash of a new anonymous poll. */
     public fun currentRingHash(): ByteArray? = try {
         uniffi.lakko_ffi_uniffi.pollRingHash(repo.rosterAccountKeys(groupIdHex))
     } catch (_: Throwable) {
@@ -3480,7 +3482,7 @@ public class ChatViewModel(
         }
     }
 
-    /** ADR-0090 section 3.6 — the own choice, synced to the account's other devices. */
+    /** ADR-0092 section 3.6 — the own choice, synced to the account's other devices. */
     private fun recordOwnPollChoice(pollMessageId: Long, choices: ByteArray, setVersion: UInt) {
         val ref = folderRef() ?: return
         me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.recordPollChoice(ref, pollMessageId, choices, setVersion)

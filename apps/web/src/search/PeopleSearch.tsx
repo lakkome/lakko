@@ -417,7 +417,7 @@ function PersonRow(props: {
       ? "idle"
       : rowSendState(props.person, rowStateOf(props.person.keyHex), props.outgoing());
   const view = () =>
-    rowView(state(), canAddContact(props.person), mayAskAgain(props.person, props.outgoing()));
+    rowView(state(), canAddContact(props.person), mayAskAgain(props.person, props.outgoing(), Date.now()));
   /** A refusal takes the grant away, and with it what the row may show; the
    *  row keeps the username its card still has while it says so. The next
    *  text asks again, and a person who cannot be reached is a name alone. */

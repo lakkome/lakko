@@ -194,6 +194,44 @@ const [publisherCommits, setPublisherCommits] = createSignal<readonly PublisherC
  */
 let poisoned = false;
 
+/**
+ * ADR-0090 — writes the DEVICE identity's provider (where the PublisherGroups
+ * live since the device leaves) durably: the conversation MLS snapshot
+ * (`chats.persistSnapshotDurable`). Installed by the session
+ * (`ChannelsHydration`); without it every durable PublisherGroup write is
+ * refused (fail-closed).
+ */
+let providerPersister: (() => Promise<void>) | null = null;
+
+/** Install (or with `null` withdraw) the device-provider persister. Returns
+ *  the uninstaller. */
+export function installPublisherProviderPersister(fn: (() => Promise<void>) | null): () => void {
+  providerPersister = fn;
+  return () => {
+    if (providerPersister === fn) providerPersister = null;
+  };
+}
+
+let providerTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Coalesce best-effort device-provider writes (`FLUSH_DELAY_MS`). */
+function scheduleProviderPersist(): void {
+  if (providerPersister === null || providerTimer !== null) return;
+  providerTimer = setTimeout(() => {
+    providerTimer = null;
+    void persistProvider().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("PublisherGroup provider persist failed", err instanceof Error ? err.name : "");
+    });
+  }, FLUSH_DELAY_MS);
+}
+
+function persistProvider(): Promise<void> {
+  const fn = providerPersister;
+  if (fn === null) return Promise.reject(new ChannelLogUnavailableError("no device provider persister"));
+  return fn();
+}
+
 export const channelsState: ChannelsStateInternal = {
   channels,
   postsByChannel,
@@ -366,10 +404,15 @@ function settleHydration(): void {
 export interface HydrateChannelsArgs {
   readonly accountIdB64: string;
   readonly deviceKey: DeviceCipher;
-  /** The session-long ACCOUNT identity the PublisherGroups live in.
-   *  Its provider is restored from the blob and re-snapshotted on every
-   *  flush; it must be the same instance the channel routes use. */
+  /** The session-long ACCOUNT (lineage) identity: its seed is the owner's
+   *  account seed a PublisherGroup is loaded with. Its own provider is still
+   *  restored from the blob and snapshotted (it held the PublisherGroups
+   *  before ADR-0090; nothing is opened in it any more). */
   readonly identity: WasmIdentity;
+  /** ADR-0090: the bound DEVICE identity the PublisherGroups live in
+   *  (`chats.identity()`). Its provider is restored by the MLS rehydrate,
+   *  which the caller awaited. Absent: no publisher keys are re-opened. */
+  readonly device?: WasmIdentity | null;
   /** Reads the account identity's provider at flush time; `null` when
    *  the session has ended. Defaults to snapshotting `identity`. */
   readonly snapshotProvider?: () => Uint8Array | null;
@@ -492,6 +535,9 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     return next;
   });
   setCoPublisherGroupIds((map) => new Map([...stored.coPublisherGroupIds, ...map]));
+  // v4 pairing bundle: seeds the confirming device carried, offered before
+  // this session's state existed. Never over a seed held for an epoch.
+  takeCarriedChannelSeeds(args.accountIdB64);
   setAccessByChannel((map) => new Map([...(stored.channelAccess ?? new Map()), ...map]));
   // G-50 — the stored entries belong to the restored provider; one already
   // in memory (recorded before this settled) wins on its id.
@@ -514,7 +560,9 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
   });
 
   // 3. Publisher keys: re-derive the content seed from the restored group.
-  if (providerRestored && stored.publisherSigningSeeds.size > 0) {
+  void providerRestored;
+  const device = args.device ?? null;
+  if (device !== null && stored.publisherSigningSeeds.size > 0) {
     try {
       const wasm = await loadWasm();
       for (const [id, signingKeySeed] of stored.publisherSigningSeeds) {
@@ -527,18 +575,22 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
           const joinedId = coPublisherGroupIds().get(id);
           const group =
             joinedId === undefined
-              ? wasm.PublisherGroup.load(args.identity, channelIdFromHex(id))
-              : wasm.PublisherGroup.loadJoined(args.identity, hexBytes(joinedId), channelIdFromHex(id));
+              ? wasm.PublisherGroup.load(device, args.identity.ed25519Seed, channelIdFromHex(id))
+              : wasm.PublisherGroup.loadJoined(device, hexBytes(joinedId), channelIdFromHex(id));
           if (group === undefined) {
+            // ADR-0090: this device holds no leaf (yet): a reader that waits
+            // to be admitted by a sibling. Its signing seed stays in the log.
             // eslint-disable-next-line no-console
-            console.warn(`channel ${id}: publisher group missing from the restored provider`);
+            console.info(`channel ${id}: no publisher group on this device; reading`);
             continue;
           }
           let seed: Uint8Array;
           let seedEpoch: number;
           try {
-            seed = group.channelSeed(args.identity);
-            seedEpoch = Number(group.epoch());
+            if (!group.isActive()) continue;
+            seed = group.channelSeed(device);
+            // ADR-0090: the channel epoch this group epoch serves.
+            seedEpoch = Number(group.epoch()) + (accessByChannel().get(id)?.epochOffset ?? 0);
           } finally {
             group.free();
           }
@@ -627,6 +679,70 @@ function dropChannelsMemory(): void {
   setHydrated(false);
 }
 
+// ---------------------------------------------------------
+// Seeds a pairing carried (state bundle v4)
+// ---------------------------------------------------------
+
+/** Per account: the carried seeds not yet added to its channel state. In this
+ *  page's memory only: the restore route lands the session in the page that
+ *  applied the bundle. */
+const carriedSeeds = new Map<string, Map<string, Map<number, Uint8Array>>>();
+
+/** Add carried seeds to the channel state, each only where no seed is held
+ *  for its epoch. Pure over the two maps; returns the merged map, or `null`
+ *  when nothing is added. */
+export function mergeCarriedSeeds(
+  held: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+  carried: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+): Map<string, ReadonlyMap<number, Uint8Array>> | null {
+  let next: Map<string, ReadonlyMap<number, Uint8Array>> | null = null;
+  for (const [idHex, inner] of carried) {
+    const have = held.get(idHex);
+    let merged: Map<number, Uint8Array> | null = null;
+    for (const [epoch, seed] of inner) {
+      if (have?.has(epoch) === true || seed.length !== 32) continue;
+      merged ??= new Map(have ?? []);
+      merged.set(epoch, seed.slice());
+    }
+    if (merged === null) continue;
+    next ??= new Map(held);
+    next.set(idHex, merged);
+  }
+  return next;
+}
+
+function takeCarriedChannelSeeds(accountIdB64: string): void {
+  const offered = carriedSeeds.get(accountIdB64);
+  if (offered === undefined) return;
+  carriedSeeds.delete(accountIdB64);
+  const merged = mergeCarriedSeeds(untrack(subscribedSeedsByChannel), offered);
+  if (merged !== null) setSubscribedSeedsByChannel(merged);
+}
+
+/**
+ * State bundle v4, receiving device: the seeds the confirming device carried.
+ * Added now when this account's channel state is loaded, else when it is.
+ * Kept for a channel whose register has not arrived yet (it is in the
+ * channel log under its id); the subscription runtime drops them if the
+ * account left the channel.
+ */
+export function offerCarriedChannelSeeds(
+  accountIdB64: string,
+  seeds: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+): void {
+  const held = carriedSeeds.get(accountIdB64) ?? new Map<string, Map<number, Uint8Array>>();
+  for (const [idHex, inner] of seeds) {
+    const into = held.get(idHex) ?? new Map<number, Uint8Array>();
+    for (const [epoch, seed] of inner) if (!into.has(epoch)) into.set(epoch, seed.slice());
+    held.set(idHex, into);
+  }
+  carriedSeeds.set(accountIdB64, held);
+  if (sink !== null && sink.accountIdB64 === accountIdB64 && hydrated()) {
+    takeCarriedChannelSeeds(accountIdB64);
+    schedulePersist();
+  }
+}
+
 function hexBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -641,6 +757,7 @@ function hexBytes(hex: string): Uint8Array {
 // is the session's; it is dropped when it belongs to one of `ids` or to
 // nobody (the session already ended), never when another account owns it.
 registerAccountMemory("channels-state", (ids) => {
+  for (const id of ids) carriedSeeds.delete(id);
   const owner = sink?.accountIdB64 ?? counterOwner;
   if (owner !== null && !ids.includes(owner)) return;
   if (flushTimer !== null) {
@@ -928,6 +1045,9 @@ export const channelsActions = {
    *  Schedules a flush so the next snapshot carries it. */
   notePublisherGroupChanged(): void {
     schedulePersist();
+    // ADR-0090: the group lives in the device provider; written best effort
+    // (a durable caller uses `persistPublisherGroupDurable`).
+    scheduleProviderPersist();
   },
   /** The FAIL-CLOSED sibling of {@link notePublisherGroupChanged}: write the
    *  account identity's provider into the channel log NOW and reject when
@@ -935,7 +1055,9 @@ export const channelsActions = {
    *  state is recorded (the co-publisher knock): a refused persist means
    *  nothing was published. */
   persistPublisherGroupDurable(): Promise<void> {
-    return flushDurable();
+    // ADR-0090: the group lives in the device provider; the channel log
+    // carries the bookkeeping beside it.
+    return flushDurable().then(() => persistProvider());
   },
   /** ADR-0078 section 6 — remember the PublisherGroup id of a channel this
    *  account co-publishes (from its `/g/` capability). Written with the next
@@ -973,11 +1095,12 @@ export const channelsActions = {
     return publisherCommits();
   },
   /**
-   * G-50 — record a PublisherGroup commit together with the provider
-   * snapshot that holds its N+1, in ONE durable write, BEFORE any of its
-   * steps runs. Rejects when the write did not land; the caller then runs
-   * no step, and the store refuses every later write this session so the
-   * unrecorded N+1 never becomes durable (a reload rehydrates N).
+   * G-50, ADR-0090 section 3 — record a STAGED PublisherGroup commit before
+   * any of it leaves the device: the entry in the channel log, then the
+   * device provider carrying the stage, both durably. Rejects when either
+   * write did not land; the caller then abandons the stage and sends nothing
+   * (the entry is withdrawn here, best effort: a restart that finds it
+   * without its stage drops it).
    */
   async recordPublisherCommit(entry: PublisherCommitEntry): Promise<void> {
     setPublisherCommits((list) => [...list.filter((e) => e.id !== entry.id), entry]);
@@ -990,6 +1113,7 @@ export const channelsActions = {
     );
     try {
       await flushDurable();
+      await persistProvider();
     } catch (err) {
       setPublisherCommits((list) => list.filter((e) => e.id !== entry.id));
       setAccessByChannel((map) => {
@@ -998,9 +1122,9 @@ export const channelsActions = {
         else next.set(entry.channelIdHex, priorAccess);
         return next;
       });
-      poisoned = true;
       // eslint-disable-next-line no-console
-      console.error("G-50: a PublisherGroup commit could not be recorded; channel writes are refused until reload");
+      console.error("ADR-0090: a PublisherGroup commit could not be recorded; it is not sent");
+      void flushNow();
       throw err;
     }
   },

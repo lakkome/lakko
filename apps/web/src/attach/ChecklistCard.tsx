@@ -117,7 +117,7 @@ function ItemBody(props: { readonly item: ChecklistItemView }): JSX.Element {
     <>
       <span class={`lk-poll-mark box${props.item.done ? " on" : ""}`} aria-hidden="true">
         <Show when={props.item.done}>
-          <Icon name="check" size={12} strokeWidth={3} />
+          <Icon name="checkmark" size={12} />
         </Show>
       </span>
       <span class="lk-checklist-text" aria-hidden="true">{props.item.text}</span>

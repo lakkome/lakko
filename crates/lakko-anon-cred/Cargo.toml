@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Keyed-verification anonymous credential for channel polls (ADR-0090 section 4): a CMZ14 algebraic MAC on Ristretto255, issuance against a registered commitment, and a presentation carrying a per-poll tag"
+description = "Keyed-verification anonymous credential for channel polls (ADR-0092 section 4): a CMZ14 algebraic MAC on Ristretto255, issuance against a registered commitment, and a presentation carrying a per-poll tag"
 
 [lints]
 workspace = true
@@ -20,7 +20,7 @@ thiserror.workspace = true
 
 # Ristretto255 points and scalars, constant-time arithmetic and the
 # variable-time multiscalar multiplication the verifiers use. Already in the
-# tree (4.1.3, through ed25519-dalek, x25519-dalek and voprf); ADR-0090
+# tree (4.1.3, through ed25519-dalek, x25519-dalek and voprf); ADR-0092
 # section 4.7 names it. Default features (alloc, precomputed-tables,
 # zeroize).
 curve25519-dalek = "4.1.3"

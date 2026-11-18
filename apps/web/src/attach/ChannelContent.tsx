@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 / UX 7.7 — a content post in a channel: a poll (one vote per
+ * ADR-0092 / UX 7.7 — a content post in a channel: a poll (one vote per
  * account through the anonymous credential, counts per opaque label from the
  * channel service), a checklist (read here; publishers' ticks are not built
  * on web), a location, a contact card, an article.

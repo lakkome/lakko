@@ -20,8 +20,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -61,6 +59,9 @@ import org.webrtc.GlRectDrawer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 import org.webrtc.VideoTrack
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * A shared screen as a receiver shows it (ADR-0083, `docs/ux/screen-share.md`
@@ -146,11 +147,11 @@ internal fun ScreenSharePicture(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(12.dp).clearAndSetSemantics { },
             ) {
-                Icon(
-                    Icons.Filled.ScreenShare,
+                LkIcon(
+                    R.drawable.ic_lk_display,
                     contentDescription = null,
                     tint = LakkoDark.textMuted,
-                    modifier = Modifier.size(if (compact) 20.dp else 32.dp),
+                    size = if (compact) LkIconSize.Row else 33.dp,
                 )
                 CircularProgressIndicator(
                     modifier = Modifier.size(if (compact) 14.dp else 20.dp),
@@ -187,11 +188,11 @@ internal fun ScreenShareNameStrip(sharerName: String, short: Boolean, modifier: 
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (short) 4.dp else 8.dp),
     ) {
-        Icon(
-            Icons.Filled.ScreenShare,
+        LkIcon(
+            R.drawable.ic_lk_display,
             contentDescription = null,
             tint = LakkoDark.text,
-            modifier = Modifier.size(12.dp),
+            size = LkIconSize.Mark,
         )
         Text(
             text = strings.format("call.screen_share.tile", mapOf("name" to sharerName)),
@@ -219,11 +220,11 @@ internal fun ScreenShareOfferChip(sharerName: String, onView: () -> Unit, modifi
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Icon(
-            Icons.Filled.ScreenShare,
+        LkIcon(
+            R.drawable.ic_lk_display,
             contentDescription = null,
             tint = LakkoDark.text,
-            modifier = Modifier.size(14.dp),
+            size = LkIconSize.Mark,
         )
         Text(
             text = strings.format("call.screen_share.pinned_chip", mapOf("name" to sharerName)),

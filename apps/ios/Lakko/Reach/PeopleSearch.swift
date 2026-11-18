@@ -1224,6 +1224,9 @@ public final class PeopleSearchSession: ObservableObject {
     private var answers: [String: (answer: PeopleSearchAnswer, at: TimeInterval)] = [:]
     /// A clock that never runs backwards, in seconds.
     private let uptime: @MainActor () -> TimeInterval
+    /// The wall clock in milliseconds since the Unix epoch, which a Sent
+    /// row's `createdAt` is compared with (injected for tests).
+    private let nowMs: @MainActor () -> Int64
     private var inFlight: [String: Task<PeopleSearchAnswer, Never>] = [:]
     /// The people whose last check could not be asked.
     private var unansweredChecks: Set<Data> = []
@@ -1232,10 +1235,12 @@ public final class PeopleSearchSession: ObservableObject {
 
     public init(
         ports: Ports,
-        uptime: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+        uptime: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        nowMs: @escaping @MainActor () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
     ) {
         self.ports = ports
         self.uptime = uptime
+        self.nowMs = nowMs
     }
 
     /// The answer remembered for `key`, while it is young enough to reuse.
@@ -1397,11 +1402,18 @@ public final class PeopleSearchSession: ObservableObject {
         }
     }
 
-    /// Whether the row offers **Ask again**: an earlier request stands
-    /// unanswered under Sent. A decline tells the sender nothing, so the row
-    /// keeps "Request sent" and this is the way on.
+    /// Whether the row offers **Ask again**: an earlier request has stood
+    /// unanswered under Sent for a day (the one ask-again rule,
+    /// ``RequestsSentStore/mayAskAgain(sentAtMs:nowMs:)``). A decline tells
+    /// the sender nothing, so the row keeps "Request sent" and this is the
+    /// way on; right after Add contact the row reads "Request sent" and the
+    /// button goes away (`docs/ux/who-can-find-me.md` section 6.1). A row
+    /// whose time does not parse offers nothing.
     public func canAskAgain(_ person: FoundPerson) -> Bool {
-        person.canAddContact && ports.sentRow(person) != nil
+        guard person.canAddContact, let row = ports.sentRow(person),
+              let sentAtMs = DsTimestamp.parseMs(row.createdAt)
+        else { return false }
+        return RequestsSentStore.mayAskAgain(sentAtMs: sentAtMs, nowMs: nowMs())
     }
 
     /// **Ask again**: what Contacts > Sent > Dismiss and then Add contact do,

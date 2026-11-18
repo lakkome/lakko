@@ -4,7 +4,7 @@
 import LakkoCore
 import SwiftUI
 
-// ADR-0090 / `docs/ux/attachments.md` — the paperclip menu (section 2) and
+// ADR-0092 / `docs/ux/attachments.md` — the paperclip menu (section 2) and
 // Lakko's own editors for a poll (section 7.1) and a checklist (section 8.1).
 
 // MARK: - The menu
@@ -26,8 +26,7 @@ struct AttachmentMenuSheet: View {
                 }
                 Button { onPick(row.item) } label: {
                     HStack(spacing: 14) {
-                        Image(systemName: AttachmentMenuCopy.icon(row.item))
-                            .font(.body)
+                        LkIconView(AttachmentMenuCopy.icon(row.item), size: 20)
                             .frame(width: 28)
                             .foregroundStyle(Color.lakkoAccent)
                         VStack(alignment: .leading, spacing: 2) {
@@ -79,17 +78,17 @@ enum AttachmentMenuCopy {
         }
     }
 
-    static func icon(_ item: AttachmentMenuItem) -> String {
+    static func icon(_ item: AttachmentMenuItem) -> LkIcon {
         switch item {
-        case .photoOrVideo: return "photo"
-        case .camera: return "camera"
-        case .file: return "doc"
-        case .audio: return "music.note"
-        case .poll: return "chart.bar"
-        case .checklist: return "checklist"
-        case .location: return "mappin.and.ellipse"
-        case .contact: return "person.crop.circle"
-        case .article: return "doc.richtext"
+        case .photoOrVideo: return .photoStack
+        case .camera: return .camera
+        case .file: return .doc
+        case .audio: return .musicNote
+        case .poll: return .chartBar
+        case .checklist: return .checklist
+        case .location: return .location
+        case .contact: return .person
+        case .article: return .docText
         }
     }
 
@@ -193,7 +192,7 @@ struct PollEditorScreen: View {
                                 Button {
                                     correct = option.id
                                 } label: {
-                                    Image(systemName: correct == option.id ? "largecircle.fill.circle" : "circle")
+                                    LkIconView(correct == option.id ? .radioOn : .circle, size: 20)
                                         .foregroundStyle(correct == option.id ? Color.lakkoSuccess : Color.lakkoTextMuted)
                                 }
                                 .buttonStyle(.plain)

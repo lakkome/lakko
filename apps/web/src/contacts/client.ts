@@ -954,7 +954,7 @@ function sweepPortsFor(
         // The MLS apply is what the verdict reads, so it is deliberately OUTSIDE
         // the guard below: a throw here must reach `adjudicate`, which skips the
         // row exactly as the poll loop does.
-        // ADR-0090 — an anonymous ballot row is not an MLS message.
+        // ADR-0092 — an anonymous ballot row is not an MLS message.
         if (attachReceiveHook().isBallotRow(row.payload)) {
           await attachReceiveHook().ballotRow(group, base64Encode(groupIdBytes), row.id, row.createdAt, row.payload);
           return;
@@ -984,7 +984,7 @@ function sweepPortsFor(
           } else if (event.kind === "serviceEnvelope") {
             // An unrecognised `lakko/…` service envelope: dropped, never shown.
           } else if (event.kind === "contentOp") {
-            // ADR-0090 — filed at receipt, as the poll does.
+            // ADR-0092 — filed at receipt, as the poll does.
             await attachReceiveHook().contentOp(group, base64Encode(groupIdBytes), event);
           } else if (event.kind === "openItems") {
             for (const adopted of await attachReceiveHook().openItems(group, base64Encode(groupIdBytes), event)) {
@@ -1563,7 +1563,7 @@ export class ContactsClient {
         ),
       ),
     );
-    // ADR-0090 section 3.9 — the rings and the hand-over after our commit.
+    // ADR-0092 section 3.9 — the rings and the hand-over after our commit.
     if (swept.kind === "committed") void afterOwnCommit(group, base64Encode(group.groupId), swept.addedCount);
     return swept;
   }
@@ -1622,7 +1622,7 @@ export class ContactsClient {
         owedOutcome = await withGroupMlsLock(base64Encode(group.groupId), async () =>
           resolveOwedVerdict(ports),
         );
-        // ADR-0090 section 3.9 — an owed sweep merged at restart is our
+        // ADR-0092 section 3.9 — an owed sweep merged at restart is our
         // commit too.
         if (owedOutcome?.kind === "committed") {
           void afterOwnCommit(group, base64Encode(group.groupId), owedOutcome.addedCount);
@@ -3769,7 +3769,7 @@ export class ContactsClient {
   ): Promise<WasmGroup> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
-    // ADR-0090 section 3.9 — who sent this Welcome, resolved to its account
+    // ADR-0092 section 3.9 — who sent this Welcome, resolved to its account
     // key, read before the join consumes it: the account that admitted us.
     let admitterKeyB64: string | undefined;
     try {
@@ -5427,7 +5427,7 @@ export function decodeContactRequestBody(
           const avatar = avatarFromWasm(p.avatar);
           return avatar === null ? {} : { avatar };
         })(),
-        // ADR-0090 section 7 - the "my card may be shared" flag.
+        // ADR-0092 section 7 - the "my card may be shared" flag.
         ...(p.cardShareable === false ? { cardShareable: false } : {}),
       };
       p.free();

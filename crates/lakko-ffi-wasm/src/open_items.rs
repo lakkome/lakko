@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 3.9 on the wasm surface: the open-items and old-ballot
+//! ADR-0092 section 3.9 on the wasm surface: the open-items and old-ballot
 //! hand-overs. The UniFFI mirror (with the flow) is
 //! `lakko-ffi-uniffi/src/open_items.rs`.
 //!

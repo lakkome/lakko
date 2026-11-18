@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -21,9 +22,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -72,6 +70,9 @@ import me.lakko.app.search.PeopleSearchService
 import me.lakko.app.search.searchNormalizer
 import me.lakko.app.search.searchStateMessage
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Add members (`docs/ux/conversation-info.md` section 2.4): pushed over the
@@ -155,7 +156,7 @@ internal fun AddMembersScreen(
                 title = { Text(t("chat.members.add.title")) },
                 navigationIcon = {
                     IconButton(onClick = viewModel::closeAddMembers) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
                 actions = {
@@ -171,6 +172,10 @@ internal fun AddMembersScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // The Scaffold's safeDrawing padding already holds the keyboard;
+                // without consuming it, imePadding subtracts the keyboard twice and
+                // the list under a picked chip is left a few pixels tall.
+                .consumeWindowInsets(padding)
                 .imePadding(),
         ) {
             OutlinedTextField(
@@ -253,10 +258,10 @@ private fun PickChip(pick: AddMemberPick, onRemove: () -> Unit) {
             )
         },
         trailingIcon = {
-            Icon(
-                Icons.Filled.Close,
+            LkIcon(
+                R.drawable.ic_lk_xmark,
                 contentDescription = removeLabel,
-                modifier = Modifier.size(InputChipDefaults.IconSize),
+                size = LkIconSize.Row,
             )
         },
     )
@@ -287,7 +292,9 @@ private fun PickRow(
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.titleMedium)
-            line?.let {
+            // A person with no display name is titled "@username"; the line would
+            // repeat it.
+            line?.takeIf { it != name }?.let {
                 Text(
                     it,
                     style = MaterialTheme.typography.bodySmall,

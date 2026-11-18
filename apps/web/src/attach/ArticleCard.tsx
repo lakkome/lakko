@@ -30,7 +30,7 @@ export function ArticleCard(props: {
       </Show>
       <span class="lk-article-read">
         {t("article.read")}
-        <Icon name="chevron" size={16} />
+        <Icon name="chevron-forward" size={16} />
       </span>
     </button>
   );

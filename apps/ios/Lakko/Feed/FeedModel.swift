@@ -70,14 +70,14 @@ struct FeedMessage: Equatable {
     let replyTarget: Int64?
     /// One label per attachment ("Photo", "Voice message", ...).
     let attachmentLabels: [String]
-    /// The attachments themselves, for the media bubbles. Empty for a channel
-    /// post, which carries none yet.
+    /// The attachments themselves, for the media bubbles (a channel post's
+    /// from the references its log entry keeps).
     let attachments: [AttachmentRef]
     let edited: Bool
     let deleted: Bool
     /// The original author's name when forwarded.
     let forwardAuthor: String?
-    /// ADR-0090 — the content of a content message or post, `nil` for none.
+    /// ADR-0092 — the content of a content message or post, `nil` for none.
     let content: PersistedContent?
 
     init(
@@ -245,8 +245,14 @@ enum FeedModel {
                 continue
             }
             let id = Int64(p.cursor)
+            // A post shows its words and its attachments, as a group's
+            // message does (`docs/ux/feed.md` section 3, base scenario 32).
+            // Its stored line names a caption-less photo for the Chats row;
+            // here the bubble says it, so the text is the caption alone. A
+            // content post (ADR-0092) keeps its feed line.
             let attachments = p.attachmentRefs
-            let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(p.text, $0) } == true
+            let text = attachments.isEmpty || p.contentEnvelopeB64 != nil ? p.text : (p.caption ?? "")
+            let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(text, $0) } == true
             candidates.append(
                 FeedCandidate(
                     conversation: conversation,
@@ -259,7 +265,7 @@ enum FeedModel {
                     repliesToMe: false,
                     reactionsDistinct: 0,
                     hasMedia: !attachments.isEmpty,
-                    text: p.text
+                    text: text
                 ))
             refs.append(
                 FeedCandidateRef(
@@ -267,7 +273,7 @@ enum FeedModel {
                     message: FeedMessage(
                         messageId: id,
                         direction: fromSelf ? .outgoing : .incoming,
-                        text: p.text,
+                        text: text,
                         timeMs: p.serverTsMs,
                         attachmentLabels: attachments.map {
                             ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
@@ -342,7 +348,7 @@ enum FeedCopy {
 
     /// What stands in for text when a message carries only attachments.
     static func attachmentLine(_ message: FeedMessage) -> String? {
-        // ADR-0090 — a content message with no text says what it is.
+        // ADR-0092 — a content message with no text says what it is.
         if let content = message.content, message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            let line = ContentPreview.line(content: ContentModel.content(content)) {
             return line

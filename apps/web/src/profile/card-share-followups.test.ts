@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 7 / UX `attachments.md` section 11a, the follow-ups:
+ * ADR-0092 section 7 / UX `attachments.md` section 11a, the follow-ups:
  *
  *   - a switch to or from `Nobody` restamps the OWN profile (receivers keep
  *     a strictly newer one only);
@@ -29,7 +29,7 @@ import { composeHeldEnvelope, heldFromPersisted, heldToPersisted } from "../chat
 import { parseBodyEnvelope, type AttachmentRefBytes } from "../chat/attachments";
 import { persistedFromAttachmentRef } from "../chat/persisted-attachment";
 import { eventToPersistedMessage } from "../chat/background-log";
-import { decodeChannelPostLog, syncChannelSlot } from "../feed/channel-post-log";
+import { CHANNEL_POST_LOG_VERSION, decodeChannelPostLog, syncChannelSlot } from "../feed/channel-post-log";
 import { buildFeedInput, type FeedSource } from "../feed/feed-model";
 import { feedForwardPayload } from "../feed/feed-forward";
 import { contentRetryAllowed, pollBodyOf } from "../attach/actions";
@@ -169,14 +169,14 @@ describe("channel posts in the feed keep their files and content", () => {
         }),
         decode: async (_id, payload) =>
           payload === "a"
-            ? { kind: "text", text: "photo post", attachments: [file] }
-            : { kind: "text", text: "", attachments: [file], content: article },
+            ? { kind: "text", text: "photo post", media: [{ mime: file.mime ?? null, kind: file.kind ?? null, ref: file }] }
+            : { kind: "text", text: "", media: [{ mime: file.mime ?? null, kind: file.kind ?? null, ref: file }], content: article },
       },
       NOW,
     );
-    const log = decodeChannelPostLog(JSON.parse(JSON.stringify({ version: 1, channels: { [CHANNEL.idHex]: slot } })));
+    const log = decodeChannelPostLog(JSON.parse(JSON.stringify({ version: CHANNEL_POST_LOG_VERSION, channels: { [CHANNEL.idHex]: slot } })));
     const stored = log?.channels[CHANNEL.idHex];
-    expect(stored?.posts.map((p) => p.attachments?.length)).toEqual([1, 1]);
+    expect(stored?.posts.map((p) => p.media?.length)).toEqual([1, 1]);
     expect(stored?.posts[1]?.content).toEqual(article);
 
     const input = buildFeedInput({

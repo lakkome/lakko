@@ -42,7 +42,7 @@ export interface ForwardSource<A = AttachmentRefBytes> {
   readonly messageId: number;
   /** Set when the source is itself a forward: its attribution is kept. */
   readonly forward?: ForwardRef | undefined;
-  /** ADR-0090 — the source's content (a location, contact card, article,
+  /** ADR-0092 — the source's content (a location, contact card, article,
    *  poll or checklist), absent on an ordinary message. */
   readonly content?: MessageContent | undefined;
 }
@@ -61,7 +61,7 @@ export interface ForwardPayload<A = AttachmentRefBytes> {
 }
 
 /**
- * UX `attachments.md` section 11a / ADR-0090 section 7 — whether a message
+ * UX `attachments.md` section 11a / ADR-0092 section 7 — whether a message
  * whose content is `content` may be forwarded: text and files always; a
  * location or an article; a contact card only while the newest profile held
  * from the person on it does not say no (`cardShareableOf`, true for a

@@ -133,7 +133,7 @@ pub struct AppState {
     /// the service database under the SQL store and process memory under the
     /// in-memory store.
     pub anon_tokens: TokenVerifier,
-    /// ADR-0090 section 4.4 — the verifier of channel poll votes: the
+    /// ADR-0092 section 4.4 — the verifier of channel poll votes: the
     /// anonymous-credential master shared with auth
     /// (`LAKKO_ANON_CRED_MASTER_SECRET`). `None`: the vote routes answer
     /// `503 anon-credential-disabled`.
@@ -156,7 +156,7 @@ impl AppState {
         Self::new_with_votes(cfg, store, anon_tokens, None)
     }
 
-    /// [`Self::new`] with the channel poll vote verifier (ADR-0090 section
+    /// [`Self::new`] with the channel poll vote verifier (ADR-0092 section
     /// 4.4).
     #[must_use]
     pub fn new_with_votes(
@@ -2932,7 +2932,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/version", get(version))
         // ADR-0087 section 13a — comments and reactions.
         .merge(crate::feedback_api::routes())
-        // ADR-0090 section 4.3 — channel poll votes.
+        // ADR-0092 section 4.3 — channel poll votes.
         .merge(crate::votes_api::routes())
         // ADR-0087 phase B: a deleted channel's `unknown-channel` is a 410.
         .layer(axum::middleware::from_fn_with_state(

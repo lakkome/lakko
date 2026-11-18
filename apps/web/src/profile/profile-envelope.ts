@@ -49,7 +49,7 @@ export interface ReceivedProfile {
   /** ADR-0084 — the profile photo references, or `null` for none. Copied out
    *  of the wasm handle (blob keys inside: SECRET). */
   readonly avatar?: AvatarData | null;
-  /** ADR-0090 section 7 — `false` when the sender does not let others share
+  /** ADR-0092 section 7 — `false` when the sender does not let others share
    *  their contact card; absent or `true` otherwise. */
   readonly cardShareable?: boolean;
 }

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `docs/ux/attachments.md` section 9 / ADR-0090 section 6 — a shared location
+ * `docs/ux/attachments.md` section 9 / ADR-0092 section 6 — a shared location
  * in fixed point (1e-7 degree), formatted for the person's locale. Nothing
  * here asks any server anything; `osmUrl` is opened only after a tap.
  */

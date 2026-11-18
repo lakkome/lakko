@@ -115,7 +115,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// ``offered(canReply:canForward:canEditOrDelete:hasText:pin:canSelect:save:translate:)``.
     case ban
 
-    /// ADR-0090 / UX 7.3 — back to the unvoted card (a poll not closed).
+    /// ADR-0092 / UX 7.3 — back to the unvoted card (a poll not closed).
     case retractVote
     /// UX 7.3 — the creator, or an owner / admin: close a poll (final).
     case closePoll
@@ -151,25 +151,26 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    public var systemImage: String {
+    /// The row's icon (design system section 8).
+    var icon: LkIcon {
         switch self {
-        case .reply: return "arrowshape.turn.up.left"
-        case .forward: return "arrowshape.turn.up.right"
-        case .pin: return "pin"
-        case .unpin: return "pin.slash"
-        case .save: return "bookmark"
-        case .unsave: return "bookmark.slash"
-        case .copy: return "doc.on.doc"
-        case .translate: return "character.bubble"
-        case .showOriginal: return "text.bubble"
-        case .select: return "checkmark.circle"
-        case .edit: return "pencil"
-        case .delete: return "trash"
-        case .ban: return "nosign"
-        case .retractVote: return "arrow.uturn.backward"
-        case .closePoll, .closeChecklist: return "lock"
-        case .editChecklist: return "pencil"
-        case .copyCoordinates: return "doc.on.doc"
+        case .reply: return .reply
+        case .forward: return .forward
+        case .pin: return .pin
+        case .unpin: return .pinSlash
+        case .save: return .bookmark
+        case .unsave: return .bookmarkSlash
+        case .copy: return .copy
+        case .translate: return .translate
+        case .showOriginal: return .textBubble
+        case .select: return .checkmarkCircle
+        case .edit: return .pencil
+        case .delete: return .trash
+        case .ban: return .nosign
+        case .retractVote: return .xmark
+        case .closePoll, .closeChecklist: return .lock
+        case .editChecklist: return .pencil
+        case .copyCoordinates: return .copy
         }
     }
 
@@ -195,7 +196,11 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         pin: PinMenuState = .unavailable,
         canSelect: Bool = false,
         save: SaveMenuState = .unavailable,
-        translate: MessageTranslateMenuState = .unavailable
+        translate: MessageTranslateMenuState = .unavailable,
+        // ADR-0087 section 14 — `false` for a message drawn as a channel
+        // invitation card: its text is the `/g/` link with its secret, so it
+        // is never edited. Delete stays.
+        canEdit: Bool = true
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -231,7 +236,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .unavailable: break
         }
         if canEditOrDelete {
-            actions.append(.edit)
+            if canEdit { actions.append(.edit) }
             actions.append(.delete)
         }
         return actions
@@ -757,8 +762,7 @@ struct MessageReactionRow: View {
                 }
                 if model.showsExpand {
                     Button(action: onMore) {
-                        Image(systemName: "plus")
-                            .font(.system(size: side * 18 / Self.target, weight: .semibold))
+                        LkIconView(.plus, size: side * 21 / Self.target, relativeTo: nil)
                             .foregroundStyle(Color.lakkoTextMuted)
                             .frame(width: side, height: side)
                             .contentShape(Rectangle())
@@ -794,7 +798,7 @@ struct MessageActionCard: View {
                 Button {
                     perform(action)
                 } label: {
-                    Label(action.title, systemImage: action.systemImage)
+                    Label(action.title, icon: action.icon)
                         .font(.body)
                         .foregroundStyle(action.isDestructive ? Color.lakkoDanger : Color.lakkoText)
                         .padding(.horizontal, 14)

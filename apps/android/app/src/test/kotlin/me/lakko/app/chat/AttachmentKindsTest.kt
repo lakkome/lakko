@@ -15,7 +15,7 @@ import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.SharedLocation
 
 /**
- * ADR-0090 on the Android host JVM: the receive classifier routes content
+ * ADR-0092 on the Android host JVM: the receive classifier routes content
  * kinds to a row and ops to the content-op event; the ballot schedule waits a
  * uniform 0..=10 s; the content summary keys; the op kind mapping.
  */

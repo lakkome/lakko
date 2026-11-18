@@ -589,10 +589,10 @@ pub struct VaultAttachment {
     pub height: Option<u32>,
     /// Poster frame.
     pub thumb: Option<VaultThumb>,
-    /// ADR-0090 audio title tag.
+    /// ADR-0092 audio title tag.
     #[uniffi(default = None)]
     pub title: Option<String>,
-    /// ADR-0090 audio artist tag.
+    /// ADR-0092 audio artist tag.
     #[uniffi(default = None)]
     pub artist: Option<String>,
 }
@@ -693,7 +693,7 @@ pub struct VaultMessage {
     /// Set when the message was of a wire version the saving device could
     /// not read: that version.
     pub unsupported_version: Option<u32>,
-    /// ADR-0090 — the content of a poll, checklist, location, contact card
+    /// ADR-0092 — the content of a poll, checklist, location, contact card
     /// or article message and its saved state. On decode a payload that does
     /// not decode is `None` and a state that does not belong is dropped.
     #[uniffi(default = None)]
@@ -747,14 +747,32 @@ pub struct VaultChunkEntry {
     pub version: u64,
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14).
+///
+/// **`ds_access_seed` is secret**: the 32-byte Delivery Service access seed
+/// of `epoch` (`PublisherGroup.dsAccessSeed` / `stagedDsAccessSeed`), from
+/// which an entering device rebuilds the epoch's access signer
+/// (`dsAccessSignerFromSeed`). Never log it.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct VaultReentryEpoch {
     /// The epoch the GroupInfo describes.
     pub epoch: u64,
+    /// The 32-byte Delivery Service access seed of `epoch`. Secret.
+    pub ds_access_seed: Vec<u8>,
     /// The GroupInfo with its ratchet tree, as MLS encodes it. Opaque to the
     /// codec; 1 byte to 1 MiB.
     pub group_info: Vec<u8>,
+}
+
+impl std::fmt::Debug for VaultReentryEpoch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultReentryEpoch")
+            .field("epoch", &self.epoch)
+            .field("ds_access_seed", &"<redacted>")
+            .field("group_info_len", &self.group_info.len())
+            .finish()
+    }
 }
 
 /// The account's registrar seed for a conversation's journal (ADR-0057).
@@ -1087,12 +1105,19 @@ fn messages_from_core(messages: Vec<rec::VaultMessage>) -> Vec<VaultMessage> {
     messages.into_iter().map(message_from_core).collect()
 }
 
-fn reentry_to_core(reentry: Vec<VaultReentryEpoch>) -> Vec<rec::ReentryEpoch> {
+fn reentry_to_core(reentry: Vec<VaultReentryEpoch>) -> Result<Vec<rec::ReentryEpoch>, FfiError> {
     reentry
         .into_iter()
-        .map(|e| rec::ReentryEpoch {
-            epoch: e.epoch,
-            group_info: e.group_info,
+        .map(|e| {
+            Ok(rec::ReentryEpoch {
+                epoch: e.epoch,
+                ds_access_seed: SecretBytes::new(fixed::<32>(
+                    &e.ds_access_seed,
+                    "seedLength",
+                    "re-entry access seed",
+                )?),
+                group_info: e.group_info,
+            })
         })
         .collect()
 }
@@ -1102,6 +1127,7 @@ fn reentry_from_core(reentry: Vec<rec::ReentryEpoch>) -> Vec<VaultReentryEpoch> 
         .into_iter()
         .map(|e| VaultReentryEpoch {
             epoch: e.epoch,
+            ds_access_seed: e.ds_access_seed.as_bytes().to_vec(),
             group_info: e.group_info,
         })
         .collect()
@@ -1164,7 +1190,7 @@ fn head_to_core(head: VaultConversationHead) -> Result<rec::ConversationHead, Ff
             })
             .collect(),
         tail: messages_to_core(head.tail)?,
-        reentry: reentry_to_core(head.reentry),
+        reentry: reentry_to_core(head.reentry)?,
         registrar_seed,
     })
 }
@@ -1331,7 +1357,7 @@ pub fn decode_vault_index(bytes: Vec<u8>) -> Result<Vec<VaultIndexEntry>, FfiErr
 #[uniffi::export]
 pub fn encode_devices_head(reentry: Vec<VaultReentryEpoch>) -> Result<Vec<u8>, FfiError> {
     let head = rec::DevicesHead {
-        reentry: reentry_to_core(reentry),
+        reentry: reentry_to_core(reentry)?,
     };
     Ok(head.encode()?)
 }
@@ -1517,10 +1543,12 @@ mod tests {
             reentry: vec![
                 VaultReentryEpoch {
                     epoch: 11,
+                    ds_access_seed: vec![0xA1; 32],
                     group_info: vec![0x11; 40],
                 },
                 VaultReentryEpoch {
                     epoch: 12,
+                    ds_access_seed: vec![0xA2; 32],
                     group_info: vec![0x12; 40],
                 },
             ],
@@ -1688,6 +1716,7 @@ mod tests {
 
         let reentry = vec![VaultReentryEpoch {
             epoch: 4,
+            ds_access_seed: vec![0x44; 32],
             group_info: vec![9; 12],
         }];
         let bytes = encode_devices_head(reentry.clone()).unwrap();
@@ -1711,12 +1740,34 @@ mod tests {
             code(
                 &encode_devices_head(vec![VaultReentryEpoch {
                     epoch: 1,
+                    ds_access_seed: vec![0; 32],
                     group_info: vec![],
                 }])
                 .unwrap_err()
             ),
             "reentry"
         );
+        // A re-entry access seed is exactly 32 bytes.
+        assert_eq!(
+            code(
+                &encode_devices_head(vec![VaultReentryEpoch {
+                    epoch: 1,
+                    ds_access_seed: vec![0; 31],
+                    group_info: vec![1],
+                }])
+                .unwrap_err()
+            ),
+            "seedLength"
+        );
+        assert!(!format!(
+            "{:?}",
+            VaultReentryEpoch {
+                epoch: 1,
+                ds_access_seed: vec![0xA7; 32],
+                group_info: vec![1],
+            }
+        )
+        .contains("167"));
         // Hostile bytes.
         assert_eq!(
             code(&decode_conversation_head(vec![]).unwrap_err()),

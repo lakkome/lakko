@@ -36,11 +36,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FlashOff
-import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -215,13 +210,13 @@ internal fun CameraCaptureScreen(onCaptured: (Uri) -> Unit, onClose: () -> Unit)
                     else -> {
                         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
                         Row(Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(8.dp)) {
-                            IconButton(onClick = onClose) { Icon(Icons.Filled.Close, t("common.close"), tint = Color.White) }
+                            IconButton(onClick = onClose) { me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_xmark, t("common.close"), tint = Color.White) }
                             Box(Modifier.weight(1f))
                             IconButton(onClick = { flash = !flash }) {
-                                Icon(if (flash) Icons.Filled.FlashOn else Icons.Filled.FlashOff, null, tint = Color.White)
+                                me.lakko.app.ui.components.LkIcon(if (flash) me.lakko.app.R.drawable.ic_lk_bolt else me.lakko.app.R.drawable.ic_lk_bolt_slash, null, tint = Color.White)
                             }
                             IconButton(onClick = { back = !back }, enabled = recording == null) {
-                                Icon(Icons.Filled.Cameraswitch, t("camera.switch"), tint = Color.White)
+                                me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_camera_flip, t("camera.switch"), tint = Color.White)
                             }
                         }
                         Column(

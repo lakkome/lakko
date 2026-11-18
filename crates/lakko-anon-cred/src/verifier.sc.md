@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-`services/channels` must refuse a second vote by one account in one poll while learning neither the account nor any link between one account's votes in two polls (ADR-0090 4.1, 4.3).
+`services/channels` must refuse a second vote by one account in one poll while learning neither the account nor any link between one account's votes in two polls (ADR-0092 4.1, 4.3).
 
 ## Public contract
 
@@ -41,5 +41,5 @@ Every vote request's presentation is attacker-controlled and reaches `verify` be
 
 ## References
 
-- ADR-0090 4.3, 4.4; CMZ14 section 4.2 (Show).
+- ADR-0092 4.3, 4.4; CMZ14 section 4.2 (Show).
 - Tests: `presentation_verifies_only_for_its_post_and_message`, `period_window_is_own_period_and_the_next`, `a_presentation_relabelled_to_another_period_is_refused`, `a_credential_under_another_master_does_not_verify`, `identity_u_is_refused_at_decode`, `any_tampered_byte_is_refused`.

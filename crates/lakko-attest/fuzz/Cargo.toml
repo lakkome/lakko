@@ -118,3 +118,15 @@ path = "fuzz_targets/handle_cert_open.rs"
 test = false
 doc = false
 bench = false
+
+# The donation statements (docs/ux/donations.md section 3): a payment method
+# or its phone number, signed offline and served by discovery, which a hostile
+# operator controls, so a malformed statement is fully attacker-controlled and
+# reaches the length-prefixed parsers before anything is shown. Any panic /
+# slice-out-of-bounds / oversized allocation here is a vulnerability.
+[[bin]]
+name = "donation_open"
+path = "fuzz_targets/donation_open.rs"
+test = false
+doc = false
+bench = false

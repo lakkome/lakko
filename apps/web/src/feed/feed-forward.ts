@@ -11,7 +11,7 @@
  * log keeps the current, edited text), its attachments (re-encrypted by the
  * sender), the original author's name, and the origin reference — or, when
  * it is itself a forward, the attribution it already carries. A channel post
- * carries its text, its files (re-encrypted by the sender) and, for a
+ * carries its text, its attachments (re-encrypted the same way) and, for a
  * location, contact card or article, its content (UX `attachments.md`
  * section 11a), with the channel's name and no origin: the origin
  * reference names a conversation by its group id, and a channel is not one.

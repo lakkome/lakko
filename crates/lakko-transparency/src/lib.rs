@@ -30,7 +30,9 @@ pub mod supersession;
 pub mod witness;
 
 pub use account::{account_username_hash, ACCOUNT_KEY_DOMAIN};
-pub use conversation_link::{verify_conversation_link, ConversationLink, CONVERSATION_LINK_LEN};
+pub use conversation_link::{
+    own_conversation_key, verify_conversation_link, ConversationLink, CONVERSATION_LINK_LEN,
+};
 pub use error::{Error, Result};
 pub use leaf_auth::{sign_leaf_genesis, verify_leaf_genesis};
 pub use log::{

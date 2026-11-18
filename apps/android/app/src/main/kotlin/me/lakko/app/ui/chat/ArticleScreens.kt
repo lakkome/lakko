@@ -23,9 +23,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -677,13 +674,13 @@ internal fun ArticleReader(
         Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
-                    IconButton(onClick = onClose) { Icon(Icons.Filled.Close, contentDescription = t("common.close")) }
+                    IconButton(onClick = onClose) { me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_xmark, contentDescription = t("common.close")) }
                     Column(Modifier.weight(1f)) {
                         Text(author, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Text(date, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (onMenu != null) {
-                        IconButton(onClick = onMenu) { Icon(Icons.Filled.MoreVert, contentDescription = t("article.more")) }
+                        IconButton(onClick = onMenu) { me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_ellipsis_circle, contentDescription = t("article.more")) }
                     }
                 }
                 me.lakko.app.ui.theme.ChatTextScale {

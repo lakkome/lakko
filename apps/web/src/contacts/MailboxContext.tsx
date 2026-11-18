@@ -140,6 +140,8 @@ import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { conversationWithContact } from "./contact-conversation";
 import { duplicateOneToOneFolds, type HeldConversationGroup } from "./duplicate-one-to-one";
 import { landPendingPublisherWelcome } from "../channels/channel-publishers";
+import { landPublisherDeviceWelcome } from "../channels/publisher-devices";
+import { refusalReasonOf } from "../chat/membership-refusal";
 import { buildLineage } from "../chat/lineage";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
@@ -381,7 +383,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   async function landPublisherWelcome(accountIdB64: string, welcome: Uint8Array): Promise<boolean> {
     const identity = chats.conversationAccountIdentity();
     if (identity === null) return false;
-    return landPendingPublisherWelcome(identity, accountIdB64, welcome);
+    if (await landPendingPublisherWelcome(identity, accountIdB64, welcome)) return true;
+    // ADR-0090 section 2.3: a sibling (or the owner) admitted this device to
+    // a channel the account owns or co-publishes.
+    return landPublisherDeviceWelcome(identity, welcome);
   }
 
   /** Whether this device holds a live one-to-one with the person. */
@@ -1089,7 +1094,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       // co-publisher's (opened by that flow under the account identity).
       // Neither holds a KeyPackage of this device, and that is not a failed
       // join the user needs to hear about.
-      return isWelcomeForAnotherLeaf(err) ? { kind: "not-ours" } : { kind: "failed" };
+      // A Welcome the core refuses as not a conversation (C-86, typed
+      // `noRoleTable`) is a channel PublisherGroup's or a DeviceGroup's, which
+      // their own flows open; not a failed join either (walk of 2026-11-14:
+      // a returning owner device showed the banner for its channel's Welcome).
+      return isWelcomeForAnotherLeaf(err) || isWelcomeNotAConversation(err) ? { kind: "not-ours" } : { kind: "failed" };
     }
   }
 
@@ -1695,6 +1704,23 @@ export function isWelcomeForAnotherLeaf(err: unknown): boolean {
       ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
       : String(err);
   return /NoMatchingKeyPackage|no matching key ?package/i.test(text);
+}
+
+/**
+ * Whether `joinFromWelcome` refused a Welcome because its group is not a
+ * conversation (no role table, C-86): a channel PublisherGroup's or a
+ * DeviceGroup's Welcome read from the shared account mailbox. The typed
+ * refusal (`refusalReason === "noRoleTable"`, followed through wrappers) is
+ * read first; the core's sentence only where no reason travelled.
+ */
+export function isWelcomeNotAConversation(err: unknown): boolean {
+  const reason = refusalReasonOf(err);
+  if (reason !== undefined) return reason === "noRoleTable";
+  const text =
+    err instanceof Error
+      ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
+      : String(err);
+  return /carries no role table, so it is not a conversation/i.test(text);
 }
 
 /** The founder of a conversation: the role table's owner (a one-to-one's

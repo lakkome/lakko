@@ -24,7 +24,6 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -36,7 +35,8 @@ import androidx.compose.ui.unit.sp
 /** One row of a [LakkoMenu]. */
 public data class LakkoMenuRow(
     val label: String,
-    val icon: ImageVector?,
+    /** A Lakko icon drawable (`R.drawable.ic_lk_*`), or `null`. */
+    @androidx.annotation.DrawableRes val icon: Int?,
     /** Rows with different sections are separated by a hairline. */
     val section: Int = 0,
     /** A disabled row says why (design system: the reason is read out). */
@@ -109,7 +109,7 @@ public fun LakkoMenu(
                         .padding(horizontal = 16.dp, vertical = 6.dp),
                 ) {
                     if (row.icon != null) {
-                        Icon(row.icon, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
+                        LkIcon(row.icon, contentDescription = null, tint = tint, size = LkIconSize.Toolbar)
                     }
                     Column {
                         Text(row.label, fontSize = 16.sp, color = tint)

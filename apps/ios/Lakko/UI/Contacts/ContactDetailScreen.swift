@@ -131,7 +131,7 @@ struct ContactDetailScreen: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 72,
-                        placeholderSymbol: "person.fill",
+                        placeholderIcon: .personFill,
                         photo: .person(contact.request.fromPubkey),
                         playsVideo: true
                     )
@@ -188,7 +188,7 @@ struct ContactDetailScreen: View {
                             // this device holds, or starts a new one-to-one
                             // with the contact and opens it.
                             ContactActionButton(
-                                title: l10n.t("contacts.detail.message"), systemImage: "bubble.left.fill",
+                                title: l10n.t("contacts.detail.message"), icon: .chatFill,
                                 enabled: chat != nil || contact.request.fromAccountId != nil,
                                 busy: viewModel.startingChat.contains(contact.request.messageId)
                             ) {
@@ -205,12 +205,12 @@ struct ContactDetailScreen: View {
                         }
                         if sections.contains(.call) {
                             ContactActionButton(
-                                title: l10n.t("chat.call.voice"), systemImage: "phone.fill", enabled: callable
+                                title: l10n.t("chat.call.voice"), icon: .phoneFill, enabled: callable
                             ) {
                                 if let chat { onCall(chat, false) }
                             }
                             ContactActionButton(
-                                title: l10n.t("chat.media.video"), systemImage: "video.fill", enabled: callable
+                                title: l10n.t("chat.media.video"), icon: .videoFill, enabled: callable
                             ) {
                                 if let chat { onCall(chat, true) }
                             }
@@ -233,7 +233,7 @@ struct ContactDetailScreen: View {
             Section {
                 if sections.contains(.safetyNumber) {
                     NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
-                        Label(l10n.t("contacts.safety.title"), systemImage: "checkmark.shield")
+                        Label(l10n.t("contacts.safety.title"), icon: .shieldCheck)
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -242,7 +242,7 @@ struct ContactDetailScreen: View {
                         draftName = contact.displayName ?? ""
                         renaming = true
                     } label: {
-                        Label(l10n.t("contacts.rename.action"), systemImage: "pencil")
+                        Label(l10n.t("contacts.rename.action"), icon: .pencil)
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -266,7 +266,7 @@ struct ContactDetailScreen: View {
                         viewModel.onAddContactClicked(person: contact)
                     } label: {
                         HStack {
-                            Label(l10n.t("contacts.add_back.control"), systemImage: "person.badge.plus")
+                            Label(l10n.t("contacts.add_back.control"), icon: .personPlus)
                                 .foregroundStyle(Color.lakkoText)
                             Spacer()
                             Text(l10n.t("contacts.add_back.action"))
@@ -288,7 +288,7 @@ struct ContactDetailScreen: View {
                 Section {
                     if sections.contains(.removeContact) {
                         Button(role: .destructive) { confirmingRemove = true } label: {
-                            Label(l10n.t("contacts.remove.control"), systemImage: "person.badge.minus")
+                            Label(l10n.t("contacts.remove.control"), icon: .personMinus)
                                 // A destructive row is red end to end; the
                                 // symbol used to keep the platform's blue tint
                                 // (seen live 2026-09-26).
@@ -359,7 +359,7 @@ struct ContactDetailScreen: View {
 /// One of the three actions under the header: icon over a label, on a card.
 private struct ContactActionButton: View {
     let title: String
-    let systemImage: String
+    let icon: LkIcon
     let enabled: Bool
     /// Work started by this button is running: a spinner in place of the icon.
     var busy: Bool = false
@@ -371,8 +371,7 @@ private struct ContactActionButton: View {
                 if busy {
                     ProgressView().frame(height: 22)
                 } else {
-                    Image(systemName: systemImage)
-                        .font(.title3)
+                    LkIconView(icon, size: 24, relativeTo: .title3)
                 }
                 Text(title)
                     .font(.caption.weight(.medium))
@@ -426,7 +425,7 @@ struct SafetyNumberScreen: View {
                                 copied = false
                             }
                         } label: {
-                            Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
+                            Label(l10n.t(copied ? "common.copied" : "common.copy"), icon: copied ? .checkmark : .copy)
                         }
                         .buttonStyle(.bordered)
                     } else {

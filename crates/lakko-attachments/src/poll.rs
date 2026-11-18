@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Polls (ADR-0090 section 3): the canonical binary poll body, the author
+//! Polls (ADR-0092 section 3): the canonical binary poll body, the author
 //! signature over it, and the fold of non-anonymous votes and closes.
 //!
 //! ```text
@@ -82,7 +82,7 @@ pub struct PollQuiz {
     pub explanation: String,
 }
 
-/// The anonymous part of a poll (ADR-0090 section 3.6): the poll secret the
+/// The anonymous part of a poll (ADR-0092 section 3.6): the poll secret the
 /// ballot seal key derives from, and the hash of ring version 0. Its
 /// `Debug` hides the secret.
 #[derive(Clone, PartialEq, Eq)]
@@ -103,7 +103,7 @@ impl fmt::Debug for PollAnonymous {
     }
 }
 
-/// A poll body (ADR-0090 section 3.1).
+/// A poll body (ADR-0092 section 3.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PollBody {
     /// Random id.
@@ -304,7 +304,7 @@ impl PollBody {
 
 /// The poll as it rides in the envelope: the body and the author signature.
 /// The signature is absent only in a channel post, where the post signature
-/// authenticates the publisher (ADR-0090 section 4.1); a group receiver
+/// authenticates the publisher (ADR-0092 section 4.1); a group receiver
 /// refuses a poll without one ([`SignedPoll::verify`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedPoll {
@@ -360,7 +360,7 @@ impl SignedPoll {
     }
 }
 
-/// The longest frozen channel-poll tally a close carries (ADR-0090 section
+/// The longest frozen channel-poll tally a close carries (ADR-0092 section
 /// 4.3): `lakko_channels::POLL_TALLY_MAX_LEN`, copied because
 /// `lakko-channels` depends on this crate; the FFI crates pin the two equal.
 pub const MAX_POLL_CLOSE_TALLY_BYTES: usize = 118;
@@ -451,7 +451,7 @@ pub fn effective_close(
         .min()
 }
 
-/// Fold the non-anonymous votes of a poll (ADR-0090 section 3.2): last
+/// Fold the non-anonymous votes of a poll (ADR-0092 section 3.2): last
 /// writer wins per voter in DS `messageId` order; a vote counts only when it
 /// follows the poll row, precedes the effective close and the automatic
 /// close time, and its choices are valid for this poll; an empty vote

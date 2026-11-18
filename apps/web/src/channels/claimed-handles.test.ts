@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MemoryStorage } from "../test/fake-storage";
-import { channelIdForHandle, clearClaimedHandles, forgetClaimedHandle } from "./claimed-handles";
+import { channelIdForHandle, clearClaimedHandles, forgetClaimedHandle, isClaimedHandle } from "./claimed-handles";
 
 describe("the channel id kept for a claimed handle (D5)", () => {
   it("a retry reuses the id of the attempt that claimed the handle", () => {
@@ -32,6 +32,16 @@ describe("the channel id kept for a claimed handle (D5)", () => {
     channelIdForHandle("a", "news", "id1", s);
     clearClaimedHandles("a", s);
     expect(channelIdForHandle("a", "news", "id2", s)).toBe("id2");
+  });
+
+  it("a kept name is this account's, not taken, until it is forgotten", () => {
+    const s = new MemoryStorage();
+    expect(isClaimedHandle("a", "news", s)).toBe(false);
+    channelIdForHandle("a", "news", "id1", s);
+    expect(isClaimedHandle("a", "@News ", s)).toBe(true);
+    expect(isClaimedHandle("b", "news", s)).toBe(false);
+    forgetClaimedHandle("a", "news", s);
+    expect(isClaimedHandle("a", "news", s)).toBe(false);
   });
 
   it("an unreadable row reads as none", () => {

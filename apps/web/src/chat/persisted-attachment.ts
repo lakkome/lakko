@@ -67,7 +67,7 @@ export function boundedDuration(kind: string | undefined, v: unknown): number | 
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return undefined;
   if (kind === "voice") return v <= MAX_VOICE_DURATION_MS ? v : undefined;
   if (kind === "video_note") return v <= MAX_VIDEO_NOTE_DURATION_MS ? v : undefined;
-  // ADR-0090 section 2 — an audio file, `1..=86_400_000`.
+  // ADR-0092 section 2 — an audio file, `1..=86_400_000`.
   if (kind === "audio") return v >= 1 && v <= 86_400_000 ? v : undefined;
   return undefined;
 }

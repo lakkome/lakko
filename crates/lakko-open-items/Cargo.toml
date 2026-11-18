@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "ADR-0090 section 3.9: the typed half of the open-items hand-over (building items from a committer's polls and checklists, checking and adopting them on a newcomer)"
+description = "ADR-0092 section 3.9: the typed half of the open-items hand-over (building items from a committer's polls and checklists, checking and adopting them on a newcomer)"
 
 [lints]
 workspace = true

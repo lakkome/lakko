@@ -14,7 +14,7 @@ import uniffi.lakko_ffi_uniffi.AttachmentMenuItem
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.SharedLocation
 
-/** ADR-0090 / attachments UX — the menu's words, the editors' rules, the cards' formatting. */
+/** ADR-0092 / attachments UX — the menu's words, the editors' rules, the cards' formatting. */
 class AttachmentMenuTest {
 
     private val catalog: Map<String, String> by lazy {

@@ -14,12 +14,13 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * G-50 — the durable record of a PublisherGroup commit: the steps run in order
- * and each is recorded as it lands; a failure leaves the entry with what
- * landed and the next run resumes there; a restart drops an entry whose group
- * never reached its target epoch; a reseal already on the channels service is
- * not sent twice; a rotation's registration stays best effort while an
- * approve's is required. Mirrors the web and iOS suites.
+ * G-50 / ADR-0090 section 3 — the durable record of a STAGED PublisherGroup
+ * commit: the journal step comes first and decides (taken: the stage merges,
+ * then the other steps run in order, each recorded as it lands; `409`: the
+ * stage is abandoned, the entry dropped and nothing else happens; unanswered:
+ * the stage and the entry wait for the next run). The reseal follows the
+ * merge, never the stage. A restart replays an entry whose group holds its
+ * staged commit or reached its target.
  */
 class PublisherCommitOutboxTest {
 
@@ -67,7 +68,10 @@ class PublisherCommitOutboxTest {
             step("commit:${commit.decodeToString()}")
         }
         override fun isLost(cause: Throwable): Boolean = lost
-        override suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray) =
+        override suspend fun merge() = step("merge")
+        override suspend fun abandon() = step("abandon")
+        override suspend fun handOver(accountKey: ByteArray) = step("handover")
+        override suspend fun deliverWelcome(entry: PublisherCommitEntry, welcome: ByteArray, accountKey: ByteArray) =
             step("welcome:${welcome.decodeToString()}")
         override suspend fun serverEpoch(): Long {
             step("server-epoch")
@@ -91,10 +95,10 @@ class PublisherCommitOutboxTest {
         val r = Recorder()
         runPublisherCommit(approve, r, quiet)
         assertEquals(
-            listOf("commit:commit", "welcome:welcome", "server-epoch", "reseal:8", "appoint"),
+            listOf("commit:commit", "merge", "server-epoch", "reseal:8", "welcome:welcome", "appoint"),
             r.calls,
         )
-        val steps = PublisherCommitEntry.Step.entries
+        val steps = PublisherCommitEntry.stepsOf(PublisherCommitEntry.Kind.APPROVE)
         assertEquals(listOf(steps.take(1), steps.take(2), steps.take(3), steps.take(4)), r.saved.map { it.done })
         assertEquals(approve.id, r.finished?.id)
     }
@@ -103,7 +107,7 @@ class PublisherCommitOutboxTest {
     fun `a rotation commits its epoch with its commit and reseals`() = runTest {
         val r = Recorder()
         runPublisherCommit(rotation, r, quiet)
-        assertEquals(listOf("commit:rotation", "server-epoch", "reseal:8"), r.calls)
+        assertEquals(listOf("commit:rotation", "merge", "server-epoch", "reseal:8"), r.calls)
     }
 
     @Test
@@ -116,12 +120,20 @@ class PublisherCommitOutboxTest {
         }
         assertNull(first.finished)
         val recorded = first.saved.last()
-        assertEquals(listOf(PublisherCommitEntry.Step.RESEAL, PublisherCommitEntry.Step.APPOINT), recorded.remainingSteps)
+        assertEquals(
+            listOf(PublisherCommitEntry.Step.RESEAL, PublisherCommitEntry.Step.WELCOME, PublisherCommitEntry.Step.APPOINT),
+            recorded.remainingSteps,
+        )
         val second = Recorder()
         runPublisherCommit(recorded, second, quiet)
-        assertEquals(listOf("server-epoch", "reseal:8", "appoint"), second.calls)
+        assertEquals(listOf("server-epoch", "reseal:8", "welcome:welcome", "appoint"), second.calls)
         assertEquals(
-            PublisherCommitEntry.Step.entries.filterNot { it == PublisherCommitEntry.Step.UNAPPOINT },
+            listOf(
+                PublisherCommitEntry.Step.JOURNAL,
+                PublisherCommitEntry.Step.RESEAL,
+                PublisherCommitEntry.Step.WELCOME,
+                PublisherCommitEntry.Step.APPOINT,
+            ),
             second.finished?.done,
         )
     }
@@ -144,34 +156,37 @@ class PublisherCommitOutboxTest {
     }
 
     @Test
-    fun `a rotation commit the DS did not answer defers only its journal step`() = runTest {
+    fun `an unanswered rotation commit stages on and reseals nothing`() = runTest {
+        // ADR-0090 C-90: no seed reaches subscribers from a commit the
+        // journal did not take; the stage and the entry wait for the owed
+        // verdict.
         val r = Recorder(failAt = "commit:rotation")
-        runPublisherCommit(rotation, r, quiet)
-        assertEquals(listOf("commit:rotation", "server-epoch", "reseal:8"), r.calls)
+        try {
+            runPublisherCommit(rotation, r, quiet)
+            fail("the unanswered commit must surface")
+        } catch (_: IllegalStateException) {
+        }
+        assertEquals(listOf("commit:rotation"), r.calls)
+        assertTrue(r.saved.isEmpty())
         assertNull(r.finished)
-        val kept = r.saved.last()
-        assertEquals(listOf(PublisherCommitEntry.Step.JOURNAL), kept.remainingSteps)
-        val again = Recorder(serverEpoch = 8)
-        runPublisherCommit(kept, again, quiet)
-        assertEquals(listOf("commit:rotation"), again.calls)
-        assertEquals(listOf(PublisherCommitEntry.Step.RESEAL, PublisherCommitEntry.Step.JOURNAL), again.finished?.done)
+        val again = Recorder()
+        assertEquals(PublisherCommitOutcome.LANDED, runPublisherCommit(rotation, again, quiet))
+        assertEquals(listOf("commit:rotation", "merge", "server-epoch", "reseal:8"), again.calls)
     }
 
     @Test
-    fun `a lost rotation commit does not hold the rotation`() = runTest {
+    fun `a lost rotation is abandoned and reseals nothing`() = runTest {
         val r = Recorder(failAt = "commit:rotation", lost = true)
-        runPublisherCommit(rotation, r, quiet)
-        assertEquals(listOf("commit:rotation", "server-epoch", "reseal:8"), r.calls)
+        assertEquals(PublisherCommitOutcome.LOST, runPublisherCommit(rotation, r, quiet))
+        assertEquals(listOf("commit:rotation", "abandon"), r.calls)
         assertNotNull(r.finished)
-        assertTrue(r.finished!!.journalLost)
     }
 
     @Test
-    fun `a lost approve delivers no Welcome and appoints nobody but reseals`() = runTest {
+    fun `a lost approve is abandoned with no Welcome, reseal or appointment`() = runTest {
         val r = Recorder(failAt = "commit:commit", lost = true)
-        runPublisherCommit(approve, r, quiet)
-        assertEquals(listOf("commit:commit", "server-epoch", "reseal:8"), r.calls)
-        assertTrue(r.finished!!.journalLost)
+        assertEquals(PublisherCommitOutcome.LOST, runPublisherCommit(approve, r, quiet))
+        assertEquals(listOf("commit:commit", "abandon"), r.calls)
     }
 
     @Test
@@ -188,6 +203,30 @@ class PublisherCommitOutboxTest {
     }
 
     @Test
+    fun `an admission runs the journal, the merge, the reseal, the Welcome and the hand-over`() = runTest {
+        val admission = approve.copy(id = "0d".repeat(16), kind = PublisherCommitEntry.Kind.ADMIT, commitB64 = b64("admit"))
+        val r = Recorder()
+        assertEquals(PublisherCommitOutcome.LANDED, runPublisherCommit(admission, r, quiet))
+        // The Welcome after the reseal: the admitted device learns the channel
+        // epoch its group's epoch serves from the service when it lands.
+        assertEquals(listOf("commit:admit", "merge", "server-epoch", "reseal:8", "welcome:welcome", "handover"), r.calls)
+    }
+
+    @Test
+    fun `a retirement alone sends no Welcome and hands nothing over`() = runTest {
+        val retirement = approve.copy(
+            id = "0e".repeat(16),
+            kind = PublisherCommitEntry.Kind.ADMIT,
+            commitB64 = b64("retire"),
+            welcomeB64 = null,
+            joinerKeyB64 = null,
+        )
+        val r = Recorder()
+        runPublisherCommit(retirement, r, quiet)
+        assertEquals(listOf("commit:retire", "merge", "server-epoch", "reseal:8"), r.calls)
+    }
+
+    @Test
     fun `a failed appointment never holds the entry`() = runTest {
         val r = Recorder(failAt = "appoint")
         val done = listOf(PublisherCommitEntry.Step.JOURNAL, PublisherCommitEntry.Step.WELCOME, PublisherCommitEntry.Step.RESEAL)
@@ -201,6 +240,15 @@ class PublisherCommitOutboxTest {
         assertEquals(PublisherCommitReplay.DISCARD, replayVerdict(approve, null))
         assertEquals(PublisherCommitReplay.REPLAY, replayVerdict(approve, 5))
         assertEquals(PublisherCommitReplay.REPLAY, replayVerdict(approve, 6))
+    }
+
+    @Test
+    fun `a restart replays a commit still staged one epoch below its target`() {
+        // ADR-0090 — the staged commit was recorded with its snapshot; the DS
+        // has not answered yet.
+        assertEquals(PublisherCommitReplay.REPLAY, replayVerdict(approve, 4, staged = true))
+        assertEquals(PublisherCommitReplay.DISCARD, replayVerdict(approve, 3, staged = true))
+        assertEquals(PublisherCommitReplay.DISCARD, replayVerdict(approve, 4, staged = false))
     }
 
     private class MemoryStorage : SealedBlobStorage {
@@ -245,7 +293,7 @@ class PublisherCommitOutboxTest {
     fun `a removal commits, reseals and then withdraws the appointment`() = runTest {
         val r = Recorder()
         runPublisherCommit(removal, r, quiet)
-        assertEquals(listOf("commit:remove", "server-epoch", "reseal:8", "unappoint"), r.calls)
+        assertEquals(listOf("commit:remove", "merge", "server-epoch", "reseal:8", "unappoint"), r.calls)
         assertEquals(removal.id, r.finished?.id)
     }
 

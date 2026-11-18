@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 content messages on the wasm surface: polls, checklists,
+//! ADR-0092 content messages on the wasm surface: polls, checklists,
 //! locations, contact cards, articles; their ops, folds, saved state and
 //! limits. The UniFFI mirror is `lakko-ffi-uniffi/src/content.rs`; every
 //! rule is `lakko-attachments`'.
@@ -827,7 +827,7 @@ impl WTally {
     }
 }
 
-/// Fold a non-anonymous poll's votes and closes (ADR-0090 section 3.2).
+/// Fold a non-anonymous poll's votes and closes (ADR-0092 section 3.2).
 ///
 /// # Errors
 ///
@@ -1048,7 +1048,7 @@ impl WChecklistState {
     }
 }
 
-/// Fold a checklist (ADR-0090 section 5).
+/// Fold a checklist (ADR-0092 section 5).
 ///
 /// # Errors
 ///
@@ -1185,7 +1185,7 @@ struct WParts {
     forward_origin_message_id: Option<i64>,
 }
 
-/// Build an ADR-0090 content message. `attachments` are an article's
+/// Build an ADR-0092 content message. `attachments` are an article's
 /// images (empty for any other content); `parts` an optional reply /
 /// forward.
 ///
@@ -1578,7 +1578,7 @@ struct WLimits {
     max_audio_duration_ms: u32,
 }
 
-/// The ADR-0090 editor limits.
+/// The ADR-0092 editor limits.
 ///
 /// # Errors
 ///

@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0090 — polls, checklists, locations, contact cards and articles in a
+// ADR-0092 — polls, checklists, locations, contact cards and articles in a
 // group conversation: how they are stored with their message, how the ops on
 // them are folded (always by the core: `foldPoll`, `foldChecklist`,
 // `foldPollBallots`), and how the receive path files each event.
@@ -12,7 +12,7 @@ import LakkoCore
 // Every rule that decides a tally or a tick lives in Rust; this file only
 // gathers the ops a message received and hands them over.
 
-/// ADR-0090 section 3.4 — ring version 0 of an anonymous poll, as checked at
+/// ADR-0092 section 3.4 — ring version 0 of an anonymous poll, as checked at
 /// receipt.
 public enum ContentRingCheck: Equatable {
     /// The encoded ring (`PollRing.encode()`), version 0 matched the poll's
@@ -23,7 +23,7 @@ public enum ContentRingCheck: Equatable {
     case mismatch
 }
 
-/// ADR-0090 section 3.4 — the ring from a group's roster.
+/// ADR-0092 section 3.4 — the ring from a group's roster.
 enum ContentRing {
     /// The distinct account keys of `group`'s roster, sorted bytewise.
     static func accountKeys(of group: Group) -> [Data] {
@@ -64,7 +64,7 @@ enum ContentRing {
 
 // MARK: - Reading a stored content message
 
-/// ADR-0090 — the read side of a stored content message.
+/// ADR-0092 — the read side of a stored content message.
 enum ContentModel {
 
     /// The parsed envelope a content message is stored as.
@@ -235,7 +235,7 @@ enum ContentModel {
 
 // MARK: - Poll view model
 
-/// ADR-0090 section 3 / UX section 7.2 — what a poll card shows.
+/// ADR-0092 section 3 / UX section 7.2 — what a poll card shows.
 struct PollView: Equatable {
     let poll: SignedPoll
     let counts: [UInt32]
@@ -326,7 +326,7 @@ struct PollView: Equatable {
 
 // MARK: - Checklist view model
 
-/// ADR-0090 section 5 / UX section 8.2 — what a checklist card shows.
+/// ADR-0092 section 5 / UX section 8.2 — what a checklist card shows.
 struct ChecklistView: Equatable {
     let signed: SignedChecklist
     let state: ChecklistState
@@ -388,7 +388,7 @@ extension GroupRecord {
         ((try? group.committerRank(signatureKey: accountKey)) ?? nil) != nil
     }
 
-    /// ADR-0090 — file one content event. Returns `true` when the timeline
+    /// ADR-0092 — file one content event. Returns `true` when the timeline
     /// changed.
     @discardableResult
     func applyContentEvent(_ event: IncomingChatEvent, ownAuthorKey: MemberIdentity?) -> Bool {
@@ -417,7 +417,7 @@ extension GroupRecord {
             return false
         }
         // The author signature binds a poll or checklist to its author and
-        // this group (ADR-0090 section 3.1); one that fails is dropped.
+        // this group (ADR-0092 section 3.1); one that fails is dropped.
         switch content {
         case .poll(let poll):
             guard (try? verifyPoll(poll: poll, groupId: groupId, authorKey: author)) != nil else { return false }
@@ -561,7 +561,7 @@ extension GroupRecord {
         }
     }
 
-    /// ADR-0090 section 3.4 — append the accounts a merged commit added to the
+    /// ADR-0092 section 3.4 — append the accounts a merged commit added to the
     /// ring of every open anonymous poll.
     private func extendRings(with keys: [Data]) -> Bool {
         var changed = false
@@ -592,7 +592,7 @@ enum ContentTime {
     }
 }
 
-/// ADR-0090 section 1 — the one-line preview of a content message (the
+/// ADR-0092 section 1 — the one-line preview of a content message (the
 /// conversation list; the notification extension builds the same line).
 enum ContentPreview {
     static func line(_ message: ChatMessage) -> String? {

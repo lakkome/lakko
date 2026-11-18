@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// Where the DeviceGroup receive loop resumes after a restart.
 ///
@@ -158,5 +159,190 @@ struct JournalCursorTracker {
 
     mutating func cursorWritten(_ value: Int64) {
         if value > written { written = value }
+    }
+}
+
+// MARK: - The one read of a superseded device (ADR-0074 section 3.3)
+
+/// What reading the account's DeviceGroup journal to its head came to, for a
+/// device whose session the server refused as superseded and that holds no
+/// key-rotation envelope.
+enum JournalHeadRead: Equatable {
+    /// Read to the head; every service envelope on the way was handed to the
+    /// key-rotation intake.
+    case reached
+    /// This device holds no DeviceGroup state it can read the journal with.
+    case noState
+    /// The DS refused the read (`401`, `403`, `404`): this device's epoch
+    /// key is no longer the journal's.
+    case refused
+    /// No answer within the bound (offline, a timeout, a `5xx`): nothing is
+    /// decided; the read is tried again later, and nothing is wiped.
+    case noAnswer
+}
+
+/// ADR-0074 section 3.3 — a superseded device with no stored rotation
+/// envelope READS its DeviceGroup journal once before it treats the refusal
+/// as a reset; the DS needs no session token. When the sync runtime is not
+/// running (a launch whose refresh was refused before any session landed),
+/// waiting for it would read nothing: this opens the persisted DeviceGroup
+/// state on a handle of its own, fetches from the persisted cursor to the
+/// head under the epoch-key DS proof, hands each service envelope over, and
+/// persists NOTHING (no snapshot, no cursor): the sync runtime reads the
+/// same rows again when it runs.
+enum DeviceGroupJournalOneShot {
+
+    /// The whole read is bounded by this; chosen, not measured.
+    static let deadlineMs: Int64 = 40_000
+
+    struct Page: Equatable {
+        let rows: [Row]
+        let hasMore: Bool
+    }
+
+    struct Row: Equatable {
+        let id: Int64
+        let payload: Data
+    }
+
+    enum FetchFailure: Error, Equatable {
+        case refused
+        case noAnswer
+    }
+
+    /// One open DeviceGroup handle: how to fetch a page after a cursor, and
+    /// how to apply one row to the in-memory handle, returning the service
+    /// envelope it carried (or `nil`).
+    struct Reader {
+        let startCursor: Int64
+        let fetch: (_ after: Int64) async throws -> Page
+        let serviceEnvelope: (_ payload: Data) -> Data?
+    }
+
+    /// Read to the head with `reader` (`nil`: no state), handing every
+    /// service envelope to `deliver`. Pure over its ports.
+    static func drain(
+        reader: Reader?,
+        deliver: (Data) -> Void,
+        nowMs: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
+        deadlineMs: Int64 = DeviceGroupJournalOneShot.deadlineMs
+    ) async -> JournalHeadRead {
+        guard let reader else { return .noState }
+        let end = nowMs() + deadlineMs
+        var cursor = reader.startCursor
+        while true {
+            let left = end - nowMs()
+            guard left > 0 else { return .noAnswer }
+            let page: Page
+            do {
+                page = try await withDeadline(ms: left) { try await reader.fetch(cursor) }
+            } catch FetchFailure.refused {
+                return .refused
+            } catch {
+                return .noAnswer
+            }
+            for row in page.rows {
+                cursor = max(cursor, row.id)
+                if let envelope = reader.serviceEnvelope(row.payload) { deliver(envelope) }
+            }
+            if !page.hasMore { return .reached }
+            if page.rows.isEmpty { return .noAnswer }
+        }
+    }
+
+    /// `body`, or ``FetchFailure/noAnswer`` once `ms` ran out.
+    private static func withDeadline<T: Sendable>(
+        ms: Int64, _ body: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await body() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+                throw FetchFailure.noAnswer
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw FetchFailure.noAnswer }
+            return first
+        }
+    }
+
+    /// The reader over this device's persisted DeviceGroup state, or `nil`
+    /// when it holds none it can read with. Writes nothing: the snapshot is
+    /// restored into a handle of its own that is never persisted.
+    static func live(
+        accountIdBytes: Data,
+        accountIdB64: String,
+        snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore(),
+        ds: DsClient = DsClient()
+    ) async -> Reader? {
+        guard let seed = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64),
+              let lineage = try? Identity.fromSeed(seed: seed),
+              let deviceSeed = try? DeviceIdentityStore.getDeviceIdentitySeed(accountIdB64: accountIdB64),
+              let snapshot = snapshotStore.getSnapshot(accountIdB64: accountIdB64),
+              let identity = try? Identity.fromSeed(seed: deviceSeed),
+              (try? identity.restoreStorage(snapshot: snapshot)) != nil,
+              let group = try? loadDeviceGroup(identity: identity, accountId: accountIdBytes, accountIdentity: lineage),
+              let groupId = try? group.groupId() else {
+            return nil
+        }
+        // Removals under the attested-removal policy are verified as the
+        // sync runtime verifies them; without the key the batch could not be
+        // applied faithfully, so the read gets no answer.
+        let attestVk: Data
+        do {
+            attestVk = try await DeviceAttestKey.fetch()
+        } catch {
+            return Reader(
+                startCursor: 0,
+                fetch: { _ in throw FetchFailure.noAnswer },
+                serviceEnvelope: { _ in nil })
+        }
+        return Reader(
+            startCursor: DeviceGroupJournalCursor.read(
+                accountIdB64: accountIdB64, groupId: groupId, store: snapshotStore),
+            fetch: { after in
+                // Signed under the handle's epoch at each page: a commit on
+                // the way moves it. No reclaim: this read claims nothing.
+                guard let signer = try? group.dsAccessSigner(identity: identity) else {
+                    throw FetchFailure.refused
+                }
+                do {
+                    let result = try await ds.fetchGroup(
+                        groupId: groupId, after: after, limit: nil, waitSecs: 0,
+                        auth: DsAuth(signer: signer))
+                    return Page(
+                        rows: result.messages.map { Row(id: $0.id, payload: $0.payload) },
+                        hasMore: result.hasMore)
+                } catch DsClientError.http(let status, _, _) where [401, 403, 404].contains(status) {
+                    throw FetchFailure.refused
+                } catch {
+                    throw FetchFailure.noAnswer
+                }
+            },
+            serviceEnvelope: { payload in
+                guard let entry = try? DeviceGroupJournalEnvelope.decode(payload) else { return nil }
+                let localEpoch = try? group.epoch()
+                let processed: ProcessedMessage
+                do {
+                    processed = try group.processIncomingVerifyingRemovals(
+                        identity: identity,
+                        messageBytes: entry.message,
+                        attestations: entry.attestation.map { [$0] } ?? [],
+                        attestVerifyingKey: attestVk,
+                        nowUnixSecs: Int64(Date().timeIntervalSince1970))
+                } catch {
+                    // ADR-0091 phase 1 — logged, no identifier; behaviour
+                    // unchanged (this read persists nothing).
+                    RegisteredCommitLog.skipped(
+                        error: error, payload: entry.message, localEpoch: localEpoch, latestEpoch: nil)
+                    return nil
+                }
+                guard case .application(let data, _, _) = processed,
+                      let parsed = try? parseDevicegroupPayload(plaintext: data),
+                      case .serviceEnvelope(let envelope) = parsed.body else {
+                    return nil
+                }
+                return envelope
+            })
     }
 }

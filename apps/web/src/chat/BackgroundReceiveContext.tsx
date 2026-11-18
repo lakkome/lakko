@@ -316,7 +316,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
-  // ADR-0090 section 3.9 — the quiet send the open-items hand-over uses after
+  // ADR-0092 section 3.9 — the quiet send the open-items hand-over uses after
   // any commit of this device that added a leaf (`attach/admission-hook.ts`).
   onCleanup(
     installHandoverPublisher((group, row) =>

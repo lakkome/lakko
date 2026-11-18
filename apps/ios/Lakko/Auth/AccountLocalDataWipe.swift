@@ -123,7 +123,7 @@ enum AccountLocalDataWipe {
         // derived from the account seed (the conversation seed), not from any
         // id, so they are read here, before the steps below delete the seeds,
         // for the founding marks of steps 3 and 6.
-        let lineageAccount = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64)
+        let lineageAccount = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64, conversationKeys: nil)
             .flatMap { try? Identity.fromSeed(seed: $0) }
         let deviceGroupJournalHex = lineageAccount.map {
             DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: $0))
@@ -164,6 +164,7 @@ enum AccountLocalDataWipe {
         step("device-key") { DeviceKeyStore.deleteDeviceKey(accountIdB64: accountIdB64) }
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         step("three-words-budget") { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
+        step("passkeys-no-prf") { PasskeyNoPrfStore().clear(accountIdB64: accountIdB64) }
         step("recovery-markers") { RecoveryMarkers().clear(accountIdB64: accountIdB64) }
         // ADR-0075 — the protection flags, the notice cursor and the "I did
         // this" markers.
@@ -178,6 +179,9 @@ enum AccountLocalDataWipe {
         step("key-rotation-owed") { KeyRotationStore().clear(accountIdB64: accountIdB64) }
         step("key-rotation-pending") { KeychainKeyRotationPendingStore().clear(accountIdB64: accountIdB64) }
         step("own-predecessor-seed") { KeychainOwnPredecessorStore().clear(accountIdB64: accountIdB64) }
+        // G-56 — the recorded own conversation key goes with the seeds.
+        step("own-conversation-key") { KeychainOwnConversationKeyStore().clear(accountIdB64: accountIdB64) }
+        step("joined-device-group-id") { JoinedDeviceGroupIdStore().clear(accountIdB64: accountIdB64) }
         step("keys-rotated-notice") { KeysRotatedNoticeStore().clear(accountIdB64: accountIdB64) }
         step("profile-resend-owed") { ProfileResendOwed.Store().clear(accountIdB64: accountIdB64) }
         step("predecessor-inbox-cursor") {
@@ -211,8 +215,14 @@ enum AccountLocalDataWipe {
         step("backup-restored-device") {
             RestoredDeviceStore.clear(accountIdB64: accountIdB64)
         }
+        step("devicegroup-rejoin-answer") {
+            RestoredRejoinAnswerStore.clear(accountIdB64: accountIdB64)
+        }
         step("channel-pending-handles") {
             PendingChannelHandleStore.clear(accountIdB64: accountIdB64)
+        }
+        step("group-pending-handles") {
+            PendingGroupHandleStore.clear(accountIdB64: accountIdB64)
         }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
         step("account-identity-seed") {
@@ -242,6 +252,8 @@ enum AccountLocalDataWipe {
         }
         step("reach") { ReachCenter.shared.forget(accountIdB64: accountIdB64) }
         step("copublisher-keys") { CoPublisherKeyBook.clear(accountIdB64: accountIdB64) }
+        // ADR-0090 — owed own-account hand-overs and queued device requests.
+        step("channel-device-admission") { ChannelDeviceAdmissionStore.clear(accountIdB64: accountIdB64) }
         step("publisher-links") { PublisherLinkApproval.clear(accountIdB64: accountIdB64) }
 
         // 3. The DeviceGroup and the cross-device synced state. The founding
@@ -303,7 +315,7 @@ enum AccountLocalDataWipe {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
-        // ADR-0090 — the channel-poll credentials, the article drafts, the
+        // ADR-0092 — the channel-poll credentials, the article drafts, the
         // queued ballots and who admitted this device to each group.
         step("content-kinds") {
             removeKeys(in: standard, withPrefix: "lakko.anon-credential.v1." + accountIdB64 + ".")
@@ -350,6 +362,13 @@ enum AccountLocalDataWipe {
         step("link-records-unsent") {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.linkRecordsUnsentKey(accountIdB64: accountIdB64))
+        }
+        // ADR-0050 section 2.9 (amended 2026-11-13) — the unsent channel
+        // subscription marker and the channel intents not folded yet.
+        step("channel-subscriptions-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.channelSubscriptionsUnsentKey(accountIdB64: accountIdB64))
+            ChannelSubscriptionSync.OwedStore.clear(accountIdB64: accountIdB64, defaults: standard)
         }
         step("pending-contacts") { PendingContactStore.clear(accountIdB64: accountIdB64) }
         // ADR-0079 (reworked 2026-10-17) — the link requests not decided yet
@@ -416,6 +435,12 @@ enum AccountLocalDataWipe {
         step("publisher-commits") { PublisherCommitStore.deleteAll(accountIdB64: accountIdB64) }
         // ADR-0063 — the decrypted channel posts the feed reads.
         step("channel-post-log") { ChannelPostLogStore().delete(accountIdB64: accountIdB64) }
+        // `docs/ux/channel-notifications.md` section 5 — the per-channel
+        // "last notified post" cursors (the delivered notifications go with
+        // the `delivered-notifications` step).
+        step("channel-notified") {
+            ChannelNotifiedStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
         // ADR-0059 — G-43 publisher roles learned this session (in memory,
         // keyed per (account, channel) owner key; cleared whole).
         step("publisher-roles") { ChannelPublisherRoleCache.shared.clearAll() }

@@ -232,7 +232,7 @@ export function DesktopCallWindowPage(): JSX.Element {
             </Show>
             <Show when={v().picture.kind === "blank"}>
               <div class="lk-call-tile-blank" aria-hidden="true">
-                <Icon name="video" size={22} strokeWidth={1.4} />
+                <Icon name="video" size={24} />
               </div>
             </Show>
             <Show when={v().picture.kind === "initials"}>
@@ -254,7 +254,7 @@ export function DesktopCallWindowPage(): JSX.Element {
             <span class="lk-call-window-state">{v().status}</span>
             <Show when={v().encrypted}>
               <span class="lk-call-window-mark">
-                <Icon name="lock" size={12} />
+                <Icon name="lock-fill" size={14} />
               </span>
             </Show>
           </div>
@@ -293,7 +293,7 @@ export function DesktopCallWindowPage(): JSX.Element {
                   void postCallWindowAction("mute");
                 }}
               >
-                <Show when={iconOf(m().icon)}>{(name) => <Icon name={name()} size={16} />}</Show>
+                <Show when={iconOf(m().icon)}>{(name) => <Icon name={name()} size={20} />}</Show>
               </button>
             )}
           </Show>

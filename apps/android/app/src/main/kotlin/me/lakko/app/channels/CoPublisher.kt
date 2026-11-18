@@ -27,7 +27,6 @@ import uniffi.lakko_ffi_uniffi.composeChannelCopublisherBinding
 import uniffi.lakko_ffi_uniffi.decodeChannelCopublisherBinding
 import uniffi.lakko_ffi_uniffi.publisherGroupLoad
 import uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined
-import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate
 
 /**
  * ADR-0028 OQ3 — channel co-publisher management (owner + joiner side, Android).
@@ -98,23 +97,28 @@ public object CoPublisher {
     // Owner side
     // -----------------------------------------------------------------
 
-    /** Open (or create) the persistent PublisherGroup handle for a channel. The
-     *  caller owns the returned handle and MUST `.close()` it when done. A
-     *  co-published channel ([coPublished]) is opened under the group id its
-     *  link conveyed and never founded here (ADR-0078 section 6). */
-    public fun openPublisherGroup(
-        identity: Identity,
+    /** Open the persistent PublisherGroup handle for a channel. The caller
+     *  owns the returned handle and MUST `.close()` it when done. ADR-0090:
+     *  the group lives on this device's bound identity ([ChannelIdentity]).
+     *  A co-published channel ([coPublished]) is opened under the group id
+     *  its link conveyed and never founded here (ADR-0078 section 6). An
+     *  owned channel is founded only when [allowFound] (New channel, and the
+     *  re-founding of ADR-0090 decision A); everywhere else a miss throws
+     *  [ChannelsComposerException.NotPublishedHere]: this device has no leaf
+     *  and reads until another device of the account admits it
+     *  (docs/ux/second-device.md section 4a). */
+    public suspend fun openPublisherGroup(
+        ids: ChannelIdentity,
         channelIdHex: String,
         coPublished: CoPublishedJournalMarks? = null,
+        allowFound: Boolean = false,
     ): PublisherGroup {
-        val channelId = hexToBytes(channelIdHex)
-            ?: throw CoPublisherException.BadChannelId(channelIdHex)
+        val joined = coPublished?.journalIdOf(channelIdHex)?.let(::hexToBytes)
         return try {
-            loadPublisherGroup(identity, channelIdHex, coPublished)
-                ?: if (coPublished?.journalIdOf(channelIdHex) != null) {
-                    throw CoPublisherException.NotAChannelGroup
-                } else {
-                    publisherGroupOpenOrCreate(identity, channelId)
+            openPublisherGroupOn(ids, channelIdHex, joined, allowFound)
+                ?: when (publisherGroupOpenMode(joined = joined != null, allowFound = allowFound)) {
+                    PublisherGroupOpenMode.LOAD_JOINED -> throw CoPublisherException.NotAChannelGroup
+                    else -> throw ChannelsComposerException.NotPublishedHere()
                 }
         } catch (e: Throwable) {
             // A channel minted under the retired v1 derivation refuses here and
@@ -123,22 +127,43 @@ public object CoPublisher {
         }
     }
 
-    /** The channel's PublisherGroup from [identity]'s provider, or `null`.
-     *  A co-published channel is opened under the group id its link conveyed,
-     *  an owned one under the owner's derivation (ADR-0078 section 6). Never
-     *  creates. The caller owns the returned handle. */
-    public fun loadPublisherGroup(
-        identity: Identity,
+    /** The channel's PublisherGroup on this device, or `null` (no leaf
+     *  here). A co-published channel is opened under the group id its link
+     *  conveyed, an owned one under the owner's derivation (ADR-0078 section
+     *  6). Never creates. The caller owns the returned handle. */
+    public suspend fun loadPublisherGroup(
+        ids: ChannelIdentity,
         channelIdHex: String,
         coPublished: CoPublishedJournalMarks? = null,
+    ): PublisherGroup? =
+        openPublisherGroupOn(ids, channelIdHex, coPublished?.journalIdOf(channelIdHex)?.let(::hexToBytes), allowFound = false)
+
+    /**
+     * ADR-0090 section 1 - the one place a PublisherGroup is opened: a
+     * co-published channel by [joinedGroupId] (`publisherGroupLoadJoined`),
+     * an owned one by the owner account seed (`publisherGroupLoad`), and,
+     * only with [allowFound], founded (`PublisherGroup(...)`, New channel and
+     * decision A). `null` when this device holds no group for it.
+     */
+    public suspend fun openPublisherGroupOn(
+        ids: ChannelIdentity,
+        channelIdHex: String,
+        joinedGroupId: ByteArray?,
+        allowFound: Boolean,
     ): PublisherGroup? {
         val channelId = hexToBytes(channelIdHex)
             ?: throw CoPublisherException.BadChannelId(channelIdHex)
-        val joinedId = coPublished?.journalIdOf(channelIdHex)?.let(::hexToBytes)
-        return if (joinedId != null) {
-            publisherGroupLoadJoined(identity, joinedId, channelId)
-        } else {
-            publisherGroupLoad(identity, channelId)
+        if (joinedGroupId != null) {
+            return ids.mls { device -> publisherGroupLoadJoined(device, joinedGroupId, channelId) }
+        }
+        val ownerSeed = ids.ownerAccountSeed()
+        try {
+            return ids.mls { device ->
+                publisherGroupLoad(device, ownerSeed, channelId)
+                    ?: if (allowFound) PublisherGroup.create(device, ownerSeed, channelId) else null
+            }
+        } finally {
+            ownerSeed.fill(0)
         }
     }
 
@@ -203,6 +228,8 @@ public object CoPublisher {
          *  publisher link ([LinkRecordKind.PUBLISHER]) is always one use,
          *  whatever is passed: it names one person (UX 15.2). */
         maxUses: Long = 0L,
+        /** Section 14.2 — when the link stops working (unix ms), `0` never. */
+        expiryMs: Long = 0L,
         /** Phase B (item 8) — how the link is filed in the account's synced
          *  link register, so every device of the account lists and revokes
          *  it; `null` files nothing there. */
@@ -218,7 +245,7 @@ public object CoPublisher {
                 me.lakko.app.discovery.SealedInviteUpload(
                     sealed = sealed,
                     revocationPubkey = revocationPubkey,
-                    expiryMs = 0L,
+                    expiryMs = expiryMs.coerceAtLeast(0L),
                     maxUses = maxUses,
                 ),
             )
@@ -242,6 +269,7 @@ public object CoPublisher {
                     revocationSeed = seed,
                     capability = sealed,
                     maxUses = maxUses,
+                    expiryMs = expiryMs,
                 )
             }
             return me.lakko.app.discovery.composeSealedInviteUrl(
@@ -256,52 +284,62 @@ public object CoPublisher {
     }
 
     /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
-     *  (external-join proposals from prospective co-publishers + any co-publisher
-     *  commits) via the role-gated path. Surfaces external-join proposals into
-     *  the PublisherGroup's retained pending set, reading both the journal and
-     *  (ADR-0053) the knock queue. Non-MLS rows and our own already-merged
-     *  commits throw and are skipped.
-     *  Returns how many entries were applied (the caller snapshots the
-     *  provider when that is non-zero — an applied commit advanced the
-     *  group's epoch) and the number of pending requests after the poll. */
+     *  (commits of an owner device, the publishers' application messages)
+     *  through the gated receive (ADR-0090: a commit whose committer is not a
+     *  device of the owner's account is refused, never merged). Surfaces
+     *  external-join requests into the retained pending set from the knock
+     *  queue (ADR-0053). Non-MLS rows and own already-merged commits throw and
+     *  are skipped. Returns how many entries were applied, the pending
+     *  requests after the poll, and the DS time of the newest applied commit
+     *  that moved the epoch (the start of the channel epoch, section 4). */
     public suspend fun pollJournal(
         ds: DsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         publisherGroup: PublisherGroup,
-        /** ADR-0087 section 7 — a retained request's joiner key and the
-         *  account id its profile carried (for the admission seeds). */
-        onRequest: (joinerKey: ByteArray, accountId: ByteArray?) -> Unit = { _, _ -> },
+        /** ADR-0087 section 7 — a retained request's joiner ACCOUNT key (its
+         *  KeyPackage's binding) and the account id its profile carried. */
+        onRequest: (joinerAccountKey: ByteArray, accountId: ByteArray?) -> Unit = { _, _ -> },
         /** The journal row id already read (0 reads from the start). */
         after: Long = 0L,
         /** The knock row id already read, or `null` to skip the knocks. */
         knockAfter: Long? = 0L,
     ): JournalPoll {
         val groupId = publisherGroup.groupId()
-        // ADR-0053 — the journal is claimed: every read carries a proof under
-        // the current epoch's key. ADR-0057: nobody "heals" a registration on
-        // apply any more; the committer (the owner's root) registers.
-        //
-        // Read from the caller's cursor and paged to the end: a read that
-        // always started at 0 fetched the whole journal every pass and, with
-        // the DS paging at 100 rows, never saw a row past the first page.
         var cursor = after
         var applied = 0
         val applications = ArrayList<ByteArray>()
         val senders = ArrayList<ByteArray?>()
+        var lastCommitAtMs: Long? = null
+        var epochMoved = false
+        var latestEpoch: ULong? = null
         while (true) {
-            val raw = ds.fetchGroup(groupId, after = cursor, waitSecs = 0, signer = signerOf(publisherGroup, identity))
+            val raw = ds.fetchGroup(groupId, after = cursor, waitSecs = 0, signer = signerOf(publisherGroup, ids))
+            raw.latestEpoch?.let { latestEpoch = it }
             for (m in raw.messages) {
+                var localBeforeRow: ULong? = null
                 try {
-                    val processed = publisherGroup.processIncomingVerifyingRoles(identity, m.payload)
+                    val (processed, moved) = ids.mls { device ->
+                        val before = publisherGroup.epoch()
+                        localBeforeRow = before
+                        val p = publisherGroup.processIncomingVerifyingRoles(device, m.payload)
+                        p to (publisherGroup.epoch() != before)
+                    }
                     if (processed is uniffi.lakko_ffi_uniffi.ProcessedMessage.Application) {
                         applications += processed.`data`
                         // The account the MLS sender resolves to at receipt.
                         senders += processed.senderAccount?.takeIf { it.size == 32 }
                     }
+                    if (moved) {
+                        epochMoved = true
+                        lastCommitAtMs = isoMillis(m.createdAt) ?: lastCommitAtMs
+                    }
                     applied += 1
-                } catch (_: Throwable) {
-                    // A commit we have already merged (epoch mismatch) or a
-                    // non-MLS row — skip.
+                } catch (failure: Throwable) {
+                    // A commit we have already merged (epoch mismatch), a commit
+                    // the ADR-0090 gate refused, or a non-MLS row — skip. ADR-0091
+                    // phase 1: logged with the identifier-free line, behaviour
+                    // unchanged.
+                    logSkippedPublisherRow(m.payload, failure, localBeforeRow, latestEpoch)
                 }
                 cursor = maxOf(cursor, m.id)
             }
@@ -309,19 +347,14 @@ public object CoPublisher {
         }
         var knockCursor = knockAfter
         // ADR-0087 section 5 (phase B) — a prospective co-publisher knocks a
-        // SEALED row: a fresh KeyPackage, a reply grant and the /g/
-        // capability, sealed to the PublisherGroup's knock key (the owner's
-        // journal root over the group id, as the link names it). It carries no
-        // epoch, so it survives every commit. The co-publisher key binding
-        // rides beside it in the same knock. Read from the start: retaining a
-        // KeyPackage already pending is idempotent.
+        // SEALED row: a fresh KeyPackage of its device, a reply grant and the
+        // /g/ capability, sealed to the PublisherGroup's knock key (the
+        // owner's journal root over the group id, as the link names it). The
+        // co-publisher key binding rides beside it in the same knock.
         if (knockAfter != null) try {
-            val knocks = ds.fetchKnocks(groupId, after = knockAfter, waitSecs = 0, signer = signerOf(publisherGroup, identity))
+            val knocks = ds.fetchKnocks(groupId, after = knockAfter, waitSecs = 0, signer = signerOf(publisherGroup, ids))
             val channelId = publisherGroup.channelId()
             for (row in knocks.messages) {
-                // The cursor moves past every row read, except one the
-                // pending set had no room for (read again once a request is
-                // decided) and one whose keeping failed (read again).
                 knockCursor = maxOf(knockCursor ?: 0L, row.id)
                 val bytes = row.payload
                 val version = uniffi.lakko_ffi_uniffi.knockRowVersion(bytes)
@@ -330,7 +363,7 @@ public object CoPublisher {
                     recordCoPublisherBinding(groupId, channelId, bytes)
                     continue
                 }
-                val root = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(identity.ed25519Seed(), groupId)
+                val root = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(ids.account.ed25519Seed(), groupId)
                 val request = try {
                     val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(root, version)
                     try {
@@ -352,8 +385,16 @@ public object CoPublisher {
                     }
                 } == true
                 if (!byLink) continue
+                // ADR-0090 — the joiner's leaf is a bound device: the account
+                // it belongs to is its KeyPackage's binding. An unbound one is
+                // never approved (the core refuses it).
+                val joinerAccount = try {
+                    uniffi.lakko_ffi_uniffi.keyPackageAccountKey(request.keyPackage)
+                } catch (_: Throwable) {
+                    null
+                }?.takeIf { it.size == 32 } ?: continue
                 val kept = try {
-                    publisherGroup.retainJoinRequest(identity, request.keyPackage)
+                    ids.mls { device -> publisherGroup.retainJoinRequest(device, request.keyPackage) }
                 } catch (_: Throwable) {
                     knockCursor = row.id - 1
                     break
@@ -365,14 +406,11 @@ public object CoPublisher {
                     }
                     uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED -> {
                         applied += 1
-                        keepCapability(groupId, kept.joinerSignatureKey, request.capability)
-                        keepReplyGrant(kept.joinerSignatureKey, request.replyGrant)
-                        onRequest(kept.joinerSignatureKey, request.profile?.accountId)
+                        keepJoiner(groupId, kept.joinerSignatureKey, joinerAccount, request.capability, request.replyGrant)
+                        onRequest(joinerAccount, request.profile?.accountId)
                     }
-                    uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING -> {
-                        keepCapability(groupId, kept.joinerSignatureKey, request.capability)
-                        keepReplyGrant(kept.joinerSignatureKey, request.replyGrant)
-                    }
+                    uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING ->
+                        keepJoiner(groupId, kept.joinerSignatureKey, joinerAccount, request.capability, request.replyGrant)
                     else -> Unit
                 }
             }
@@ -383,45 +421,71 @@ public object CoPublisher {
         }
         return JournalPoll(
             applied = applied,
-            pending = publisherGroup.pendingExternalJoins().size,
+            pending = ids.mls { publisherGroup.pendingExternalJoins().size },
             applications = applications,
             senders = senders,
             journalCursor = cursor,
             knockCursor = knockCursor,
+            lastCommitAtMs = lastCommitAtMs,
+            latestEpoch = latestEpoch,
+            epochMoved = epochMoved,
         )
     }
 
+    private fun keepJoiner(
+        groupId: ByteArray,
+        joinerKey: ByteArray,
+        joinerAccount: ByteArray,
+        capability: ByteArray?,
+        replyGrant: uniffi.lakko_ffi_uniffi.FfiReachGrant,
+    ) {
+        keepCapability(groupId, joinerKey, capability)
+        joinerAccounts[me.lakko.app.reach.reachHex(joinerKey)] = joinerAccount
+        keepReplyGrant(joinerAccount, replyGrant)
+    }
+
+    /** ADR-0090 — each pending joiner's ACCOUNT key, by its device leaf key
+     *  (hex). Process memory; the knock read refills it. */
+    private val joinerAccounts = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    /** The account a pending joiner's device belongs to, or `null`. */
+    public fun joinerAccountOf(joinerKey: ByteArray): ByteArray? = joinerAccounts[me.lakko.app.reach.reachHex(joinerKey)]
+
+    /** The millisecond time of an ISO-8601 DS timestamp, or `null`. */
+    internal fun isoMillis(iso: String): Long? =
+        try {
+            java.time.Instant.parse(iso).toEpochMilli()
+        } catch (_: Throwable) {
+            null
+        }
+
     /** ADR-0053 — the PublisherGroup journal's signer at its current epoch,
      *  or `null` when the handle cannot derive one. */
-    public fun signerOf(publisherGroup: PublisherGroup, identity: Identity): DsJournalSigner? =
+    public suspend fun signerOf(publisherGroup: PublisherGroup, ids: ChannelIdentity): DsJournalSigner? =
         try {
-            FfiDsJournalSigner(publisherGroup.dsAccessSigner(identity))
+            ids.mls { device -> FfiDsJournalSigner(publisherGroup.dsAccessSigner(device)) }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
         } catch (_: Throwable) {
             null
         }
 
     /**
      * ADR-0057 obligations 1 and 7 — the channel owner claims the
-     * PublisherGroup journal with its ROOT (derived from the account identity
-     * the publisher runs on) at the current epoch: at creation the first
-     * claim, on every later open an idempotent re-send. A `409` while the
-     * group sits at its founding epoch 0 means the group was re-founded under
-     * its deterministic id after lost state, and the root RESETS the chain the
-     * gone group left; at any later epoch a `409` is left alone. Best effort:
-     * a failure is logged and the next open retries.
-     *
-     * Only the CHANNEL OWNER claims. A co-publisher's root is derived from its
-     * own account seed, so its claim would squat the journal against the
-     * owner; a device in [coPublished] never claims or resets, and while the
-     * journal is still unclaimed it waits for the owner.
+     * PublisherGroup journal with its ROOT (derived from the owner account
+     * seed, the same on every owner device) at the current epoch: an
+     * idempotent re-send of the claim New channel made. A `409` is left alone:
+     * a group is founded only in New channel and in the re-founding of
+     * ADR-0090 decision A, which reset there. Best effort. A co-publisher
+     * ([coPublished]) never claims.
      */
     public suspend fun claimJournal(
         ds: DsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         publisherGroup: PublisherGroup,
         coPublished: CoPublishedJournalMarks,
     ) {
-        val signer = signerOf(publisherGroup, identity) ?: return
+        val signer = signerOf(publisherGroup, ids) ?: return
         val groupId = publisherGroup.groupId()
         try {
             val outcome = claimPublisherJournal(
@@ -429,9 +493,8 @@ public object CoPublisher {
                 journalIdHex = DsClient.pseudonymHex(groupId),
                 epoch = signer.epoch,
                 epochKey = signer.verifyingKey,
-                refounded = signer.epoch == 0uL,
                 coPublished = coPublished,
-                root = { me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId) },
+                root = { me.lakko.app.ds.FfiDsStatementSigning.root(ids.account, groupId) },
                 put = { make -> ds.putStatement(make) },
             )
             android.util.Log.i("CoPublisher", "ADR-0057: publisher journal claim $outcome")
@@ -444,22 +507,26 @@ public object CoPublisher {
 
     /**
      * ADR-0057 second security pass, finding 3 — creating a channel: found its
-     * PublisherGroup and claim the journal with the owner's ROOT, requiring
-     * the 204 (a `409` on the fresh founding epoch is a root reset), BEFORE
-     * the channel is announced (its handle registered, the channel created on
-     * the service, a post published). Throws when the claim does not land;
-     * the caller then announces nothing. The founded group stays in the
-     * provider; the channel id is minted fresh per attempt, so a retry founds
-     * and claims anew.
+     * PublisherGroup on this device's leaf and claim the journal with the
+     * owner's ROOT, requiring the 204 (a `409` on the fresh founding epoch is
+     * a root reset), BEFORE the channel is announced. Throws when the claim
+     * does not land.
+     *
+     * [refound] — ADR-0090 decision A: this device founded the account's
+     * DeviceGroup alone, so it founds the PublisherGroup of an owned channel
+     * again at the same id: any state it holds under that id is deleted
+     * first, and the journal is reset under the same root.
      */
     public suspend fun foundAndClaimAtCreation(
         ds: DsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         channelIdHex: String,
+        refound: Boolean = false,
     ) {
-        val publisherGroup = openPublisherGroup(identity, channelIdHex)
+        if (refound) deleteLocalPublisherGroup(ids, channelIdHex, joinedGroupId = null)
+        val publisherGroup = openPublisherGroup(ids, channelIdHex, allowFound = true)
         try {
-            val signer = signerOf(publisherGroup, identity)
+            val signer = signerOf(publisherGroup, ids)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the channel journal key could not be derived")
             val groupId = publisherGroup.groupId()
             me.lakko.app.ds.requireClaim {
@@ -467,14 +534,52 @@ public object CoPublisher {
                     journalId = groupId,
                     epoch = signer.epoch,
                     epochKey = signer.verifyingKey,
-                    statements = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId),
+                    statements = me.lakko.app.ds.FfiDsStatementSigning.root(ids.account, groupId),
                     refounded = signer.epoch == 0uL,
                     put = { make -> ds.putStatement(make) },
                 )
             }
+            // ADR-0064 section 7 — a channel created (or founded again) now
+            // has its head from the start. Best effort.
+            // Security pass — a re-founding REPLACES the head (the dead
+            // group's higher epochs must not survive a merge).
+            ChannelVaultHeads.writeCurrent(ids, publisherGroup, replace = refound)
         } finally {
             publisherGroup.close()
         }
+    }
+
+    /**
+     * ADR-0090 section 2.5 — drop this device's PublisherGroup state for
+     * [channelIdHex] (an old owner device whose journal was reset under it,
+     * or before a re-founding). `true` when a group was held and deleted.
+     */
+    public suspend fun deleteLocalPublisherGroup(
+        ids: ChannelIdentity,
+        channelIdHex: String,
+        joinedGroupId: ByteArray?,
+    ): Boolean {
+        val held = openPublisherGroupOn(ids, channelIdHex, joinedGroupId, allowFound = false) ?: return false
+        val heldEpoch = try {
+            ids.mls { device ->
+                val e = held.epoch()
+                held.delete(device)
+                e
+            }
+        } finally {
+            held.close()
+        }
+        ids.persist()
+        // Security pass F3 (2026-11-15) - a later join with no group held is
+        // refused at or below this epoch outside a reset suspicion.
+        val context = SubscriberAdmission.appContext
+        val account = ChannelEpochOffsets.boundAccount
+        if (context != null && account != null &&
+            !DeletedPublisherGroupEpochs.save(context, account, channelIdHex, heldEpoch)
+        ) {
+            android.util.Log.w("CoPublisher", "the deleted publisher group's epoch was not kept")
+        }
+        return true
     }
 
     /** What one [pollJournal] pass did. */
@@ -492,100 +597,100 @@ public object CoPublisher {
         val journalCursor: Long = 0L,
         /** The knock row id read through, or `null` when knocks were skipped. */
         val knockCursor: Long? = null,
+        /** ADR-0090 section 4 — the DS time of the newest applied commit that
+         *  moved the epoch this pass, or `null`. */
+        val lastCommitAtMs: Long? = null,
+        /** The newest epoch the DS has registered for the journal. */
+        val latestEpoch: ULong? = null,
+        /** ADR-0064 section 7 — a commit applied this pass moved the epoch. */
+        val epochMoved: Boolean = false,
     )
 
     /** The pending co-publisher external-join requests — each a 32-byte joiner
      *  leaf signature key (the `proposalRef` for approve / reject). */
-    public fun pending(publisherGroup: PublisherGroup): List<ByteArray> =
-        publisherGroup.pendingExternalJoins()
+    public suspend fun pending(ids: ChannelIdentity, publisherGroup: PublisherGroup): List<ByteArray> =
+        ids.mls { publisherGroup.pendingExternalJoins() }
 
-    /** Approve a pending co-publisher. Commits the Add (advances the
-     *  PublisherGroup epoch), then, in order: registers the new epoch's journal
-     *  key and publishes the commit (ADR-0053), sends the Welcome to the
-     *  joiner's own mailbox, RESEALS the new-epoch channel seed to all
-     *  subscribers (the Add changed the exporter output, so existing
-     *  subscribers must get the new seed or they break), and appoints the
-     *  newcomer's co-publisher key (ADR-0059).
-     *
-     *  G-50 — the server epoch the reseal binds to is read BEFORE the Add:
-     *  after the eager merge nothing may fail before the commit's record is
-     *  durable. The record goes to [store] and then the N+1 provider snapshot
-     *  ([persistNow], `withIdentityPersistingFirst`), both fail-closed; on a
-     *  failure of either the provider is restored to its state before the
-     *  Add and the error is rethrown (the caller must reopen [publisherGroup],
-     *  whose in-memory state is the rolled-back one). Then the steps run. */
+    /** A PublisherGroup commit of this device lost the race at the DS (`409`):
+     *  another owner device committed at that epoch. The staged commit was
+     *  abandoned and nothing of it left the device; the journal read applies
+     *  the winner. */
+    public class PublisherCommitLost : IllegalStateException("another device committed to the channel first")
+
+    /**
+     * Approve a pending co-publisher (ADR-0090 section 3: STAGED). The server
+     * epoch the reseal binds to is read first; the approve is staged, the
+     * entry recorded with the staged snapshot and the epoch-N access seed
+     * ([recordCommit]); then the commit route decides: taken, it merges and
+     * the Welcome goes to the joiner's mailbox, the new seed is resealed to
+     * every subscriber and the joiner's key appointed; `409`, the stage is
+     * abandoned and [PublisherCommitLost] thrown.
+     */
     public suspend fun approve(
         ds: DsClient,
         channelsClient: ChannelsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         publisherGroup: PublisherGroup,
         proposalRef: ByteArray,
         channelIdHex: String,
         accountIdB64: String,
         store: PublisherCommitStore,
-        persistNow: () -> Unit,
     ) {
-        val current = channelsClient.fetchEpoch(channelIdHex)
-        if (current == UInt.MAX_VALUE) throw CoPublisherException.UnexpectedServerEpoch(current)
-        val serverTarget = (current + 1u).toLong()
-        // ADR-0081 — the proof of the epoch the Add leaves, taken before the
-        // eager merge and recorded with the approve: the commit route is
-        // proven under it, live and on a replay after a restart.
-        val entry = recordCommit(identity, accountIdB64, store, persistNow) {
+        val joinerAccount = joinerAccountOf(proposalRef)
+            ?: throw IllegalStateException("the request's account is not known yet")
+        val serverTarget = nextServerEpoch(channelsClient, channelIdHex)
+        val entry = recordCommit(ids, publisherGroup, accountIdB64, store) { device ->
             val proofEpoch = publisherGroup.epoch().toLong()
-            val proofSeed = publisherGroup.dsAccessSeed(identity)
-            val added = publisherGroup.approveExternalJoin(identity, proposalRef)
+            val proofSeed = publisherGroup.dsAccessSeed(device)
+            val added = publisherGroup.stageApproveExternalJoin(device, proposalRef)
             PublisherCommitEntry(
                 id = PublisherCommitEntry.newId(),
                 kind = PublisherCommitEntry.Kind.APPROVE,
                 channelIdHex = channelIdHex.lowercase(),
                 groupIdHex = DsClient.pseudonymHex(publisherGroup.groupId()),
-                targetEpoch = publisherGroup.epoch().toLong(),
+                targetEpoch = proofEpoch + 1,
                 serverTargetEpoch = serverTarget,
                 commitB64 = Base64.encodeToString(added.commit, Base64.NO_WRAP),
                 welcomeB64 = Base64.encodeToString(added.welcome, Base64.NO_WRAP),
-                joinerKeyB64 = Base64.encodeToString(proposalRef, Base64.NO_WRAP),
+                joinerKeyB64 = Base64.encodeToString(joinerAccount, Base64.NO_WRAP),
                 proofEpoch = proofEpoch,
                 proofSeedB64 = Base64.encodeToString(proofSeed, Base64.NO_WRAP),
             ).also { proofSeed.fill(0) }
         }
-        runPublisherCommit(
+        val outcome = runPublisherCommit(
             entry,
-            commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
+            commitPorts(ds, channelsClient, ids, publisherGroup, channelIdHex, accountIdB64, store),
         )
+        if (outcome == PublisherCommitOutcome.LOST) throw PublisherCommitLost()
     }
 
     /**
-     * ADR-0087 section 15 (phase B) — the owner removes the publisher
-     * [accountKey]: the epoch-N access seed first, then the commit (every leaf
-     * of that account, merged at once), recorded before anything leaves the
-     * device (G-50), then the commit route, the reseal to every subscriber
-     * under the new seed, and the appointment withdrawn.
+     * ADR-0087 section 15 (phase B), ADR-0090 section 3 — an owner device
+     * removes the publisher [accountKey] (every leaf of it), STAGED: recorded,
+     * then the commit route; taken, it merges, reseals and withdraws the
+     * appointment; `409` throws [PublisherCommitLost].
      */
     public suspend fun removePublisher(
         ds: DsClient,
         channelsClient: ChannelsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         publisherGroup: PublisherGroup,
         accountKey: ByteArray,
         channelIdHex: String,
         accountIdB64: String,
         store: PublisherCommitStore,
-        persistNow: () -> Unit,
     ) {
-        val current = channelsClient.fetchEpoch(channelIdHex)
-        if (current == UInt.MAX_VALUE) throw CoPublisherException.UnexpectedServerEpoch(current)
-        val serverTarget = (current + 1u).toLong()
-        val entry = recordCommit(identity, accountIdB64, store, persistNow) {
+        val serverTarget = nextServerEpoch(channelsClient, channelIdHex)
+        val entry = recordCommit(ids, publisherGroup, accountIdB64, store) { device ->
             val proofEpoch = publisherGroup.epoch().toLong()
-            val proofSeed = publisherGroup.dsAccessSeed(identity)
-            val commit = publisherGroup.removePublisher(identity, accountKey)
+            val proofSeed = publisherGroup.dsAccessSeed(device)
+            val commit = publisherGroup.stageRemovePublisher(device, accountKey)
             PublisherCommitEntry(
                 id = PublisherCommitEntry.newId(),
                 kind = PublisherCommitEntry.Kind.REMOVE,
                 channelIdHex = channelIdHex.lowercase(),
                 groupIdHex = DsClient.pseudonymHex(publisherGroup.groupId()),
-                targetEpoch = publisherGroup.epoch().toLong(),
+                targetEpoch = proofEpoch + 1,
                 serverTargetEpoch = serverTarget,
                 commitB64 = Base64.encodeToString(commit, Base64.NO_WRAP),
                 joinerKeyB64 = Base64.encodeToString(accountKey, Base64.NO_WRAP),
@@ -593,107 +698,293 @@ public object CoPublisher {
                 proofSeedB64 = Base64.encodeToString(proofSeed, Base64.NO_WRAP),
             ).also { proofSeed.fill(0) }
         }
-        runPublisherCommit(
+        val outcome = runPublisherCommit(
             entry,
-            commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
+            commitPorts(ds, channelsClient, ids, publisherGroup, channelIdHex, accountIdB64, store),
+        )
+        if (outcome == PublisherCommitOutcome.LOST) throw PublisherCommitLost()
+    }
+
+    /**
+     * ADR-0090 sections 2.1 / 2.2 — an owner device admits [admit] (wire
+     * KeyPackages of devices of an account that already publishes) and retires
+     * [retire] (32-byte leaf keys) in ONE staged commit. The Welcome goes to
+     * [welcomeAccount]'s mailbox: this account's own (its own `contact` key)
+     * or a co-publisher's ([delegationHeader] / [delegationBinding], the
+     * committer delegation its request carried, else a held grant). After the
+     * merge the new seed is resealed and the account of the added devices is
+     * owed the hand-over again (read key, admission seeds, epoch seeds).
+     * Returns the outcome; `LOST` when another owner device committed first.
+     */
+    public suspend fun admitDevices(
+        ds: DsClient,
+        channelsClient: ChannelsClient,
+        ids: ChannelIdentity,
+        publisherGroup: PublisherGroup,
+        admit: List<ByteArray>,
+        retire: List<ByteArray>,
+        welcomeAccount: ByteArray?,
+        channelIdHex: String,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+        delegationHeader: String? = null,
+        delegationBinding: ByteArray? = null,
+    ): PublisherCommitOutcome {
+        val serverTarget = nextServerEpoch(channelsClient, channelIdHex)
+        val entry = recordCommit(ids, publisherGroup, accountIdB64, store) { device ->
+            val proofEpoch = publisherGroup.epoch().toLong()
+            val proofSeed = publisherGroup.dsAccessSeed(device)
+            val staged = publisherGroup.stageCommit(device, admit, retire, false)
+            PublisherCommitEntry(
+                id = PublisherCommitEntry.newId(),
+                kind = PublisherCommitEntry.Kind.ADMIT,
+                channelIdHex = channelIdHex.lowercase(),
+                groupIdHex = DsClient.pseudonymHex(publisherGroup.groupId()),
+                targetEpoch = proofEpoch + 1,
+                serverTargetEpoch = serverTarget,
+                commitB64 = Base64.encodeToString(staged.commit, Base64.NO_WRAP),
+                welcomeB64 = staged.welcome?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+                joinerKeyB64 = welcomeAccount?.takeIf { staged.welcome != null }
+                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+                proofEpoch = proofEpoch,
+                proofSeedB64 = Base64.encodeToString(proofSeed, Base64.NO_WRAP),
+                delegationHeader = delegationHeader,
+                delegationBindingB64 = delegationBinding?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+            ).also { proofSeed.fill(0) }
+        }
+        return runPublisherCommit(
+            entry,
+            commitPorts(ds, channelsClient, ids, publisherGroup, channelIdHex, accountIdB64, store),
         )
     }
 
     /**
-     * ADR-0087 section 15 (phase B) — a co-publisher steps down: one
-     * application message on the PublisherGroup journal the owner's device
-     * applies as a removal of the sender's account.
+     * ADR-0064 section 7 (amendment of 2026-11-14) — this owner device holds
+     * no PublisherGroup for [channelIdHex]: enter from the saved epoch
+     * [saved] by an external commit (ExternalInit alone, this device's bound
+     * leaf), HELD until the Delivery Service answers. Recorded like any
+     * staged PublisherGroup commit (the entry, then the provider snapshot
+     * carrying the hold), sent through the commit route signed with the
+     * journal root and proven under the saved epoch's access seed; taken, it
+     * merges, the new seed is resealed to the subscribers and the head
+     * written. [EntryAttempt.NOT_TAKEN] when the core refuses the GroupInfo or
+     * the DS refuses the commit (the entry abandoned: the handle then holds
+     * nothing). A throw (no answer) leaves the hold and the entry for the
+     * replay.
      */
-    public suspend fun stepDown(ds: DsClient, identity: Identity, publisherGroup: PublisherGroup, persistNow: () -> Unit) {
-        val message = publisherGroup.stepDown(identity)
-        // The sealed message advanced the ratchet: on disk before it leaves.
-        persistNow()
-        ds.publishGroup(publisherGroup.groupId(), message, signer = signerOf(publisherGroup, identity))
-    }
-
-    /**
-     * G-50 — create a PublisherGroup commit with [create] and record it: the
-     * entry FIRST, then the N+1 provider snapshot, both fail-closed. On a
-     * failure of the create, the record or the snapshot, the provider is
-     * restored to the snapshot taken before, a written entry is removed, and
-     * the error is rethrown: nothing runs.
-     */
-    internal fun recordCommit(
-        identity: Identity,
+    public suspend fun enterFromSaved(
+        ds: DsClient,
+        channelsClient: ChannelsClient,
+        ids: ChannelIdentity,
+        channelIdHex: String,
+        saved: ReentryEpoch,
         accountIdB64: String,
         store: PublisherCommitStore,
-        persistNow: () -> Unit,
-        create: () -> PublisherCommitEntry,
-    ): PublisherCommitEntry {
-        val before = identity.snapshotStorage()
-        var recorded: PublisherCommitEntry? = null
-        try {
-            val entry = create()
-            store.put(accountIdB64, entry)
-            recorded = entry
-            persistNow()
-            return entry
-        } catch (e: Throwable) {
-            recorded?.let { store.remove(accountIdB64, it.id) }
-            try {
-                identity.restoreStorage(before)
-            } catch (restore: Throwable) {
-                android.util.Log.w("CoPublisher", "G-50: the provider was not rolled back after a failed record", restore)
+    ): EntryAttempt {
+        val channelId = hexToBytes(channelIdHex) ?: throw CoPublisherException.BadChannelId(channelIdHex)
+        val serverTarget = nextServerEpoch(channelsClient, channelIdHex)
+        val ownerSeed = ids.ownerAccountSeed()
+        val entered = try {
+            // G-55: the commit comes back wrapped under the saved epoch's access
+            // seed; the Delivery Service never reads the leaf's binding.
+            ids.mls { device ->
+                uniffi.lakko_ffi_uniffi.publisherGroupEnter(device, saved.groupInfo, ownerSeed, channelId, saved.dsAccessSeed)
             }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
+        } catch (e: Throwable) {
+            android.util.Log.i("CoPublisher", "ADR-0064: a saved channel epoch was refused by the core: ${e.javaClass.simpleName}")
+            return EntryAttempt.NOT_TAKEN
         } finally {
-            before.fill(0)
+            ownerSeed.fill(0)
+        }
+        val pg = entered.group
+        try {
+            val entry = PublisherCommitEntry(
+                id = PublisherCommitEntry.newId(),
+                kind = PublisherCommitEntry.Kind.ENTER,
+                channelIdHex = channelIdHex.lowercase(),
+                groupIdHex = DsClient.pseudonymHex(pg.groupId()),
+                targetEpoch = saved.epoch + 1,
+                serverTargetEpoch = serverTarget,
+                commitB64 = Base64.encodeToString(entered.commit, Base64.NO_WRAP),
+                proofEpoch = saved.epoch,
+                proofSeedB64 = Base64.encodeToString(saved.dsAccessSeed, Base64.NO_WRAP),
+            )
+            var recorded = false
+            try {
+                store.put(accountIdB64, entry)
+                recorded = true
+                ids.persist()
+            } catch (e: Throwable) {
+                if (recorded) store.remove(accountIdB64, entry.id)
+                try {
+                    ids.mls { device -> pg.abandonStagedCommit(device) }
+                    ids.persist()
+                } catch (abandon: Throwable) {
+                    android.util.Log.w("CoPublisher", "ADR-0064: an entry was not abandoned after a failed record", abandon)
+                }
+                throw e
+            }
+            // The channel epoch the entered group's epoch serves (the reseal
+            // moves the service to [serverTarget] as the group reaches the
+            // saved epoch + 1).
+            ChannelEpochOffsets.set(channelIdHex, serverTarget - (saved.epoch + 1))
+            val outcome = runPublisherCommit(
+                entry,
+                commitPorts(ds, channelsClient, ids, pg, channelIdHex, accountIdB64, store, entering = true),
+            )
+            return if (outcome == PublisherCommitOutcome.LANDED) EntryAttempt.ENTERED else EntryAttempt.NOT_TAKEN
+        } finally {
+            pg.close()
         }
     }
 
-    /** G-50 — the ports a recorded commit of [publisherGroup] runs through. */
+    /** ADR-0064 section 7 — a refusal of an entry commit that will not change
+     *  on a re-send: a refused proof (not a skewed clock) or any other 4xx
+     *  but a rate limit. */
+    internal fun entryRefused(cause: Throwable): Boolean = when (cause) {
+        is me.lakko.app.ds.DsProofRefusedError -> !cause.clockSkewed
+        is me.lakko.app.ds.DsHttpError -> cause.status in 400..499 && cause.status != 408 && cause.status != 429
+        else -> false
+    }
+
+    /** The channels-service epoch a reseal after the next commit binds to. */
+    internal suspend fun nextServerEpoch(channelsClient: ChannelsClient, channelIdHex: String): Long {
+        val current = channelsClient.fetchEpoch(channelIdHex)
+        if (current == UInt.MAX_VALUE) throw CoPublisherException.UnexpectedServerEpoch(current)
+        return (current + 1u).toLong()
+    }
+
+    /**
+     * ADR-0087 section 15 (phase B) — a co-publisher steps down: one
+     * application message on the PublisherGroup journal an owner device
+     * applies as a removal of the sender's account.
+     */
+    public suspend fun stepDown(ds: DsClient, ids: ChannelIdentity, publisherGroup: PublisherGroup) {
+        val message = ids.mls { device -> publisherGroup.stepDown(device) }
+        // The sealed message advanced the ratchet: on disk before it leaves.
+        ids.persist()
+        ds.publishGroup(publisherGroup.groupId(), message, signer = signerOf(publisherGroup, ids))
+    }
+
+    /** ADR-0090 — seal [plaintext] as a PublisherGroup application message
+     *  and publish it, the ratchet step on disk first (G-34 class). */
+    public suspend fun publishApplication(
+        ds: DsClient,
+        ids: ChannelIdentity,
+        publisherGroup: PublisherGroup,
+        plaintext: ByteArray,
+    ) {
+        val message = ids.mls { device -> publisherGroup.createApplicationMessage(device, plaintext) }
+        ids.persist()
+        ds.publishGroup(publisherGroup.groupId(), message, signer = signerOf(publisherGroup, ids))
+    }
+
+    /**
+     * ADR-0090 section 3 — STAGE a PublisherGroup commit with [create] and
+     * record it: the stage (under the provider lock), then the entry, then
+     * the provider snapshot carrying the staged commit, both fail-closed. On
+     * a failure of the record or the snapshot the stage is abandoned and the
+     * entry removed: nothing leaves the device.
+     */
+    internal suspend fun recordCommit(
+        ids: ChannelIdentity,
+        publisherGroup: PublisherGroup,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+        create: (device: Identity) -> PublisherCommitEntry,
+    ): PublisherCommitEntry {
+        val entry = ids.mls { device -> create(device) }
+        var recorded = false
+        try {
+            store.put(accountIdB64, entry)
+            recorded = true
+            ids.persist()
+            return entry
+        } catch (e: Throwable) {
+            if (recorded) store.remove(accountIdB64, entry.id)
+            try {
+                ids.mls { device -> publisherGroup.abandonStagedCommit(device) }
+            } catch (abandon: Throwable) {
+                android.util.Log.w("CoPublisher", "ADR-0090: a staged commit was not abandoned after a failed record", abandon)
+            }
+            throw e
+        }
+    }
+
+    /** ADR-0090 — the ports a recorded commit of [publisherGroup] runs through. */
     internal fun commitPorts(
         ds: DsClient,
         channelsClient: ChannelsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         publisherGroup: PublisherGroup,
         channelIdHex: String,
         accountIdB64: String,
         store: PublisherCommitStore,
+        /** ADR-0064 section 7 — an entry from a saved epoch: a refused proof
+         *  (the saved epoch is no longer one the DS keeps) or any other
+         *  definitive refusal is also lost, so the older epoch is tried. */
+        entering: Boolean = false,
     ): PublisherCommitPorts = object : PublisherCommitPorts {
-        /** ADR-0081 — proven under the recorded seed of the epoch the commit
-         *  left, live and on a replay alike; an entry without one can complete
-         *  only an identical re-send (any retained key proves that). */
+        override suspend fun beforeSend() {
+            if (ids.mls { publisherGroup.hasStagedCommit() }) ChannelVaultHeads.writeStaged(ids, publisherGroup)
+        }
+
+        override suspend fun writeHead() {
+            ChannelVaultHeads.writeCurrent(ids, publisherGroup)
+        }
+
+        /** ADR-0081 / ADR-0090 — registers the epoch the staged commit moves
+         *  to (its key from `dsStagedAccessSigner`; after a merge the current
+         *  one) and appends the commit in one request, proven under the
+         *  recorded seed of the epoch it leaves. */
         override suspend fun commitToJournal(commit: ByteArray, proofEpoch: Long?, proofSeed: ByteArray?) {
             val groupId = publisherGroup.groupId()
-            val next = signerOf(publisherGroup, identity)
-                ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the channel journal key could not be derived")
+            val next: DsJournalSigner = ids.mls { device ->
+                val staged = if (publisherGroup.hasStagedCommit()) publisherGroup.dsStagedAccessSigner(device) else null
+                FfiDsJournalSigner(staged ?: publisherGroup.dsAccessSigner(device))
+            }
             val proof: DsJournalSigner = if (proofEpoch != null && proofSeed != null) {
-                me.lakko.app.ds.FfiDsJournalSigner(
-                    uniffi.lakko_ffi_uniffi.DsProofSigner.forGroup(proofEpoch.toULong(), proofSeed),
-                )
+                FfiDsJournalSigner(uniffi.lakko_ffi_uniffi.DsProofSigner.forGroup(proofEpoch.toULong(), proofSeed))
             } else {
                 next
             }
-            val root = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId)
-            ds.postCommit(
-                { root.commit(groupId, next.epoch, next.verifyingKey, emptyList(), commit) },
-                proof,
-            )
+            val root = me.lakko.app.ds.FfiDsStatementSigning.root(ids.account, groupId)
+            val started = System.currentTimeMillis()
+            try {
+                ds.postCommit(
+                    { root.commit(groupId, next.epoch, next.verifyingKey, emptyList(), commit) },
+                    proof,
+                )
+                // ADR-0090 open question 1 — the commit-route outcome is
+                // logged (no identifiers), so the rotation jitter can be set
+                // from what is seen.
+                android.util.Log.i("CoPublisher", "ADR-0090: publisher commit taken after ${System.currentTimeMillis() - started} ms")
+            } catch (e: me.lakko.app.ds.DsCommitConflictError) {
+                android.util.Log.i("CoPublisher", "ADR-0090: publisher commit lost (409) after ${System.currentTimeMillis() - started} ms")
+                throw e
+            }
         }
 
         override fun isLost(cause: Throwable): Boolean =
             cause is me.lakko.app.ds.DsCommitConflictError ||
-                me.lakko.app.chat.SweepRegistrationBackoff.isBackoffRefusal(cause)
+                me.lakko.app.chat.SweepRegistrationBackoff.isBackoffRefusal(cause) ||
+                (entering && entryRefused(cause))
 
-        override suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray) {
-            // ADR-0053 client contract point 8 — the Welcome goes to the
-            // joiner's own mailbox. ADR-0060 §6 — written with the reply key
-            // the joiner's attribution carried, re-read from the retained
-            // knock on every poll. ADR-0078 — sealed as a WELCOME_RENDEZVOUS
-            // row to the mailbox that grant's binding names, verified against
-            // the joiner's account (a PublisherGroup leaf IS the account key).
-            // With no verified grant yet the step stays owed.
-            val dest = joinerReplyGrants[me.lakko.app.reach.reachHex(joinerKey)]?.let { grant ->
-                verifiedGrantDest(grant, joinerKey, mailboxCrypto) { seed ->
-                    me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
-                }
-            } ?: throw IllegalStateException("no verified reply grant for the joiner yet")
+        override suspend fun merge() {
+            ids.mls { device -> if (publisherGroup.hasStagedCommit()) publisherGroup.mergeStagedCommit(device) }
+            ids.persist()
+        }
+
+        override suspend fun abandon() {
+            ids.mls { device -> if (publisherGroup.hasStagedCommit()) publisherGroup.abandonStagedCommit(device) }
+            ids.persist()
+        }
+
+        override suspend fun deliverWelcome(entry: PublisherCommitEntry, welcome: ByteArray, accountKey: ByteArray) {
+            val dest = welcomeDest(ids, entry, accountKey)
+                ?: throw IllegalStateException("no verified way to the account's mailbox yet")
             val sealed = mailboxCrypto.sealFor(dest, MailboxRowKind.WELCOME_RENDEZVOUS, welcome)
             ds.publishMailbox(sealed.address, sealed.row, reach = dest.auth)
         }
@@ -701,18 +992,24 @@ public object CoPublisher {
         override suspend fun serverEpoch(): Long = channelsClient.fetchEpoch(channelIdHex).toLong()
 
         override suspend fun reseal(targetEpoch: Long) {
-            resealToSubscribers(channelsClient, identity, publisherGroup, channelIdHex, targetEpoch)
+            resealToSubscribers(
+                channelsClient,
+                ids,
+                publisherGroup,
+                channelIdHex,
+                targetEpoch,
+                ChannelReseal.throughFor(accountIdB64, channelIdHex),
+                ChannelReseal.accountKeysFor(accountIdB64, channelIdHex),
+            )
         }
 
         override suspend fun appoint(joinerKey: ByteArray) {
-            // Only the owner can appoint: a co-publisher approving another
-            // gets a 401 here, logged by the runner.
             val key = bindingFor(publisherGroup.groupId(), joinerKey)
             if (key == null) {
                 android.util.Log.w("CoPublisher", "ADR-0059: no binding read for the approved joiner; not appointed")
                 return
             }
-            channelsClient.setCoPublisherAppointment(true, channelIdHex, identity, key)
+            channelsClient.setCoPublisherAppointment(true, channelIdHex, ids.account, key)
         }
 
         override suspend fun unappoint(accountKey: ByteArray) {
@@ -721,7 +1018,11 @@ public object CoPublisher {
                 android.util.Log.w("CoPublisher", "ADR-0087: no binding read for the removed publisher; appointment left")
                 return
             }
-            channelsClient.setCoPublisherAppointment(false, channelIdHex, identity, key)
+            channelsClient.setCoPublisherAppointment(false, channelIdHex, ids.account, key)
+        }
+
+        override suspend fun handOver(accountKey: ByteArray) {
+            ChannelAdmissionSeedShare.owedAgain(accountIdB64, channelIdHex, accountKey, ids.accountKey())
         }
 
         override fun save(entry: PublisherCommitEntry) = store.put(accountIdB64, entry)
@@ -730,43 +1031,94 @@ public object CoPublisher {
     }
 
     /**
-     * G-50 — resume every recorded commit of [accountIdB64] whose steps had
-     * not all landed (a restart, a failed step), on the channel provider
-     * [identity]. An entry whose group did not reach its target epoch is
-     * dropped ([replayVerdict]). Errors are logged; the entry stays for the
-     * next run. Returns the channels whose commit finished (their content
-     * seed changed).
+     * ADR-0090 section 2.3 — where the Welcome of [entry] to [accountKey]
+     * goes: this account's own mailbox with its own `contact` key; a
+     * co-publisher's with the committer delegation its device request carried;
+     * a joiner's (an approve) with the reply grant its knock carried; else any
+     * grant this account holds for the person. `null` keeps it owed.
+     */
+    private fun welcomeDest(ids: ChannelIdentity, entry: PublisherCommitEntry, accountKey: ByteArray): me.lakko.app.contacts.MailboxDest? {
+        val reach = me.lakko.app.reach.ReachManager.peek()
+        if (accountKey.contentEquals(ids.accountKey())) {
+            return reach?.reachAuthFor(accountKey, me.lakko.app.reach.WritePurpose.WELCOME)
+        }
+        val header = entry.delegationHeader
+        val binding = entry.delegationBindingB64?.let { Base64.decode(it, Base64.NO_WRAP) }
+        if (header != null && binding != null) {
+            val pk = mailboxCryptoBinding(binding, accountKey)
+            if (pk != null) {
+                val seed = ids.account.ed25519Seed()
+                try {
+                    return me.lakko.app.contacts.MailboxDest(
+                        pk,
+                        me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed), delegationHeader = header),
+                    )
+                } finally {
+                    seed.fill(0)
+                }
+            }
+        }
+        joinerReplyGrants[me.lakko.app.reach.reachHex(accountKey)]?.let { grant ->
+            verifiedGrantDest(grant, accountKey, mailboxCrypto) { seed ->
+                me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
+            }?.let { return it }
+        }
+        return reach?.reachAuthFor(accountKey, me.lakko.app.reach.WritePurpose.WELCOME)
+    }
+
+    /**
+     * Resume every recorded commit of [accountIdB64] whose steps had not all
+     * landed (a restart, an unanswered commit route), on this device's
+     * [ids]. ADR-0090: a staged commit is sent again (the DS answers the
+     * identical re-send `200`, or `409`, which abandons it); an entry whose
+     * group neither reached nor staged its target is dropped
+     * ([replayVerdict]); a staged commit no entry names is abandoned.
+     * Returns the channels whose commit finished (their content seed
+     * changed).
      */
     public suspend fun replayPublisherCommits(
         ds: DsClient,
         channelsClient: ChannelsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         accountIdB64: String,
         store: PublisherCommitStore,
         coPublished: CoPublishedJournalMarks?,
+        /** Only this channel's entries, or every channel's when `null`. */
+        onlyChannel: String? = null,
     ): List<String> {
         val finished = ArrayList<String>()
         for (entry in store.entries(accountIdB64)) {
+            if (onlyChannel != null && entry.channelIdHex != onlyChannel.lowercase()) continue
             val group = try {
-                loadPublisherGroup(identity, entry.channelIdHex, coPublished)
+                loadPublisherGroup(ids, entry.channelIdHex, coPublished)
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                 throw e
             } catch (_: Throwable) {
                 null
             }
             try {
-                when (replayVerdict(entry, group?.epoch()?.toLong())) {
+                val restored = group?.let { g -> ids.mls { g.epoch().toLong() to g.hasStagedCommit() } }
+                when (replayVerdict(entry, restored?.first, restored?.second == true)) {
                     PublisherCommitReplay.DISCARD -> {
                         android.util.Log.w("CoPublisher", "G-50: a commit whose epoch never became durable was dropped")
                         store.remove(accountIdB64, entry.id)
                     }
                     PublisherCommitReplay.REPLAY -> {
                         val pg = group ?: continue
-                        runPublisherCommit(
+                        val outcome = runPublisherCommit(
                             entry,
-                            commitPorts(ds, channelsClient, identity, pg, entry.channelIdHex, accountIdB64, store),
+                            commitPorts(
+                                ds,
+                                channelsClient,
+                                ids,
+                                pg,
+                                entry.channelIdHex,
+                                accountIdB64,
+                                store,
+                                entering = entry.kind == PublisherCommitEntry.Kind.ENTER,
+                            ),
                         )
-                        finished += entry.channelIdHex
+                        if (outcome == PublisherCommitOutcome.LANDED) finished += entry.channelIdHex
                     }
                 }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
@@ -778,6 +1130,23 @@ public object CoPublisher {
             }
         }
         return finished
+    }
+
+    /** ADR-0090 — abandon a staged commit of [publisherGroup] that no recorded
+     *  entry names (its record failed before a crash): it never left the
+     *  device. `true` when one was abandoned. */
+    public suspend fun abandonOrphanStage(
+        ids: ChannelIdentity,
+        publisherGroup: PublisherGroup,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+    ): Boolean {
+        if (!ids.mls { publisherGroup.hasStagedCommit() }) return false
+        val groupHex = DsClient.pseudonymHex(publisherGroup.groupId())
+        if (store.entries(accountIdB64).any { it.groupIdHex == groupHex }) return false
+        ids.mls { device -> publisherGroup.abandonStagedCommit(device) }
+        ids.persist()
+        return true
     }
 
     private const val HTTP_CONFLICT: Int = 409
@@ -845,16 +1214,13 @@ public object CoPublisher {
      *  appointment, including one that did not approve it. */
     public suspend fun postBinding(
         ds: DsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         publisherGroup: PublisherGroup,
         channelId: ByteArray,
-        persistNow: () -> Unit,
     ) {
-        val binding = composeChannelCopublisherBinding(identity, channelId)
-        val message = publisherGroup.createApplicationMessage(identity, binding)
-        // The sealed message advanced the ratchet: on disk before it leaves.
-        persistNow()
-        ds.publishGroup(publisherGroup.groupId(), message, signer = signerOf(publisherGroup, identity))
+        // Signed by the ACCOUNT identity: the binding names the account.
+        val binding = composeChannelCopublisherBinding(ids.account, channelId)
+        publishApplication(ds, ids, publisherGroup, binding)
     }
 
     /** The co-publisher key appointed for [accountKey] in [groupId]: this
@@ -867,8 +1233,9 @@ public object CoPublisher {
      *  storage, so the drop is written there through [identity]; the caller
      *  persists the provider snapshot afterwards or the request is back after
      *  a restart. */
-    public fun reject(identity: Identity, publisherGroup: PublisherGroup, proposalRef: ByteArray) {
-        publisherGroup.rejectExternalJoin(identity, proposalRef)
+    public suspend fun reject(ids: ChannelIdentity, publisherGroup: PublisherGroup, proposalRef: ByteArray) {
+        ids.mls { device -> publisherGroup.rejectExternalJoin(device, proposalRef) }
+        ids.persist()
     }
 
     // -----------------------------------------------------------------
@@ -899,9 +1266,10 @@ public object CoPublisher {
         /** The 32-char lowercase-hex channel id the link's sealed preview
          *  carried (ADR-0078 section 6). */
         val channelIdHex: String,
-        /** This identity's signature key — the one its proposal carried, whose
-         *  mailbox the owner's Welcome is sent to. */
+        /** This device's leaf key — the one its KeyPackage carried. */
         val joinerKey: ByteArray,
+        /** ADR-0090 — the owner's account key (the capability's issuer). */
+        val ownerAccountKey: ByteArray,
     )
 
     /** ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
@@ -914,13 +1282,9 @@ public object CoPublisher {
      *  with [pollForCoPublishWelcome]. */
     public suspend fun requestToCoPublish(
         ds: DsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         link: String,
         coPublished: CoPublishedJournalMarks,
-        /** Snapshot [identity]'s provider durably, throwing when it was not
-         *  written ([ChannelPublisherIdentity.withIdentityPersistingFirst]).
-         *  Called after the proposal is built and before it is knocked. */
-        persistProposalKeys: () -> Unit,
         /** The ledger fetch of a `/g/` row by its id; `null` when it is gone. */
         fetchSealed: suspend (blobId: ByteArray) -> ByteArray?,
         /** ADR-0087 section 7 — this account's profile envelope with its
@@ -955,8 +1319,12 @@ public object CoPublisher {
         val wire: ByteArray
         val previewChannelId: ByteArray?
         val knockKey: uniffi.lakko_ffi_uniffi.FfiGroupKnockKey?
+        val ownerAccountKey: ByteArray
         try {
             groupId = cap.groupId()
+            // ADR-0090 — the capability's issuer is the channel owner's
+            // account key: the Welcome must come from one of its devices.
+            ownerAccountKey = cap.issuerSignaturePubkey()
             // The knock row carries the PLAINTEXT capability.
             wire = cap.wire()
             knockKey = cap.knock()
@@ -991,16 +1359,19 @@ public object CoPublisher {
         // ADR-0059 section 1 — this account's co-publisher key for the
         // channel, signed by its account identity key, rides beside it.
         val key = knockKey ?: throw CoPublisherException.NotAChannelGroup
-        val binding = composeChannelCopublisherBinding(identity, channelIdBytes)
-        val replyGrant = registerReplyKey(ds, identity)
-        val keyPackage = identity.createKeyPackage()
+        val binding = composeChannelCopublisherBinding(ids.account, channelIdBytes)
+        // The Welcome goes to the ACCOUNT mailbox (ADR-0060: one inbound
+        // mailbox per person); the KeyPackage is this device's leaf (ADR-0090).
+        val replyGrant = registerReplyKey(ds, ids.account)
+        val keyPackage = ids.mls { device -> device.createKeyPackage() }
         // The KeyPackage's private key is what opens the owner's Welcome: on
         // disk before the knock, fail-closed.
-        persistProposalKeys()
+        ids.persist()
         val request = CoPublishRequest(
             groupId = groupId,
             channelIdHex = channelIdHex,
-            joinerKey = identity.signaturePublicKey(),
+            joinerKey = ids.device.signaturePublicKey(),
+            ownerAccountKey = ownerAccountKey,
         )
         beforeKnock(request)
         val row = uniffi.lakko_ffi_uniffi.sealKnockRow(
@@ -1024,9 +1395,9 @@ public object CoPublisher {
      *  success, or `null` if no Welcome has arrived yet (keep polling). */
     public suspend fun pollForCoPublishWelcome(
         ds: DsClient,
-        identity: Identity,
+        ids: ChannelIdentity,
         groupId: ByteArray,
-        joinerKey: ByteArray,
+        ownerAccountKey: ByteArray,
         channelIdHex: String,
         coPublished: CoPublishedJournalMarks,
         // G-29 — reuse the persisted per-channel signing seed if this device
@@ -1038,10 +1409,10 @@ public object CoPublisher {
         // proposal carried), never to the journal. The mailbox is claimed, so
         // the read is signed under the identity key. Paged to the end: the
         // Welcome is among the newest rows.
-        val mailboxSigner = dsMailboxSigner(identity)
+        val mailboxSigner = dsMailboxSigner(ids.account)
         val pseudonym = mailboxSigner.mailboxAddress()
         val signer = FfiDsJournalSigner(mailboxSigner)
-        val own = NativeOwnMailbox.of(identity)
+        val own = NativeOwnMailbox.of(ids.account)
         val candidates = ArrayList<ByteArray>()
         JournalHeadEpoch.scan<Unit>(
             fetchPage = { after, limit ->
@@ -1074,7 +1445,7 @@ public object CoPublisher {
         // its Welcome, and this one refuses a Welcome for any other group (or
         // a chat's) before anything is written.
         for (welcome in candidates.asReversed()) {
-            val keys = joinCoPublishWelcome(identity, welcome, groupId, channelIdHex, coPublished, existingSigningSeed)
+            val keys = joinCoPublishWelcome(ids, welcome, groupId, ownerAccountKey, channelIdHex, coPublished, existingSigningSeed)
             if (keys != null) return keys
             // else try an older candidate
         }
@@ -1089,41 +1460,311 @@ public object CoPublisher {
      * by the Accept wait ([pollForCoPublishWelcome]) and the account mailbox
      * loop, which lands a late approval (`landPendingPublisherWelcome`).
      */
-    public fun joinCoPublishWelcome(
-        identity: Identity,
+    public suspend fun joinCoPublishWelcome(
+        ids: ChannelIdentity,
         welcome: ByteArray,
         groupId: ByteArray,
+        ownerAccountKey: ByteArray,
         channelIdHex: String,
         coPublished: CoPublishedJournalMarks,
         existingSigningSeed: ByteArray? = null,
     ): ChannelPublisherKeys? {
         val channelId = hexToBytes(channelIdHex)
             ?: throw CoPublisherException.BadChannelId(channelIdHex)
-        try {
-            uniffi.lakko_ffi_uniffi.publisherGroupJoinFromWelcome(identity, welcome, groupId, channelId).close()
-        } catch (_: Throwable) {
-            return null
-        }
+        val joinedEpoch = joinReplacingHeld(ids, welcome, groupId, channelId, channelIdHex, ownerAccountKey, joinedGroupId = groupId)
+            ?: return null
+        learnEpochOffset(channelIdHex, joinedEpoch)
+        // ADR-0090 section 2.3 — the owner key this device took the Welcome
+        // under; written into the account's register by the reconcile, so the
+        // account's other devices take a Welcome only from that account.
+        coPublished.markOwner(channelIdHex, ownerAccountKey)
         // ADR-0059 section 9 — this account now publishes as a co-publisher;
         // its signed writes go out once under that key.
-        ChannelPublisherRoles.rememberFor(identity, channelIdHex, ChannelPublisherRole.COPUBLISHER)
+        ChannelPublisherRoles.rememberFor(ids.account, channelIdHex, ChannelPublisherRole.COPUBLISHER)
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
-        coPublished.mark(DsClient.pseudonymHex(groupId))
+        coPublished.markChannel(DsClient.pseudonymHex(groupId), channelIdHex)
         return ChannelsComposer.freshPublisherKeys(
-            identity, channelIdHex, existingSigningSeed, joinedGroupId = groupId)
+            ids, channelIdHex, existingSigningSeed, joinedGroupId = groupId)
+    }
+
+    /**
+     * ADR-0090 sections 2.3 / 2.5, security pass — join a PublisherGroup
+     * Welcome under [ownerKey], replacing a group this device still holds
+     * under [groupId] (a suspected reset keeps it) only when the Welcome is
+     * for that group and its signer verifies as a device of [ownerKey]; the
+     * held state is deleted immediately before the join. Returns the joined
+     * group's epoch, or `null` when the Welcome is not this one's (nothing
+     * is deleted then). The device posts again afterwards.
+     */
+    private suspend fun joinReplacingHeld(
+        ids: ChannelIdentity,
+        welcome: ByteArray,
+        groupId: ByteArray,
+        channelId: ByteArray,
+        channelIdHex: String,
+        ownerKey: ByteArray,
+        joinedGroupId: ByteArray?,
+    ): ULong? {
+        val held = try {
+            openPublisherGroupOn(ids, channelIdHex, joinedGroupId, allowFound = false)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        // Security pass F2/F3 (2026-11-15) - the replay records live per
+        // account; without the session's context nothing is joined (fail
+        // closed: a join this device could not record could be replayed).
+        val replayContext = SubscriberAdmission.appContext
+        val replayAccount = ChannelEpochOffsets.boundAccount
+        if (replayContext == null || replayAccount == null) {
+            held?.close()
+            return null
+        }
+        // F2: a Welcome this device already joined for the channel is an old
+        // one replayed (the KeyPackage is last-resort): refused on every
+        // landing path, before anything is deleted or held.
+        if (JoinedPublisherWelcomes.contains(replayContext, replayAccount, channelIdHex, welcome)) {
+            held?.close()
+            android.util.Log.i("CoPublisher", "a publisher Welcome this device already joined was refused")
+            return null
+        }
+        val suspected = ChannelSuspensions.isSuspended(replayContext, replayAccount, channelIdHex)
+        // F3: the epoch of the group this device last deleted for the channel.
+        val deletedEpoch = DeletedPublisherGroupEpochs.get(replayContext, replayAccount, channelIdHex)
+        var holdForLater = false
+        val epoch = try {
+            ids.mls { device ->
+                val join = {
+                    uniffi.lakko_ffi_uniffi.publisherGroupJoinFromWelcome(device, welcome, groupId, channelId, ownerKey)
+                        .use { it.epoch() }
+                }
+                if (held == null) {
+                    if (deletedEpoch == null) return@mls join()
+                    // F3: no group held, but one was deleted: a joined group
+                    // not above its epoch (outside a reset suspicion) counts
+                    // as a failed join and is undone.
+                    return@mls replaceHeldThenJoin(
+                        snapshot = { device.snapshotStorage() },
+                        delete = {},
+                        join = {
+                            val joined = join()
+                            if (!joinWithoutHeldGroupAllowed(joined, deletedEpoch, suspected)) throw StaleWelcomeRefused()
+                            joined
+                        },
+                        restore = { before -> device.restoreStorage(before) },
+                        wipe = { before -> before.fill(0) },
+                    )
+                }
+                // Replay guard, rule 1: an active, unsuspected held group is
+                // never replaced; the Welcome is ignored for this channel.
+                val heldActive = held.isActive()
+                // Verified first: a Welcome that is not an owner device's for
+                // this group deletes nothing (and is not held).
+                val founder = uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcome, device)
+                if (!welcomeReplacesHeldGroup(founder.groupId, groupId, founder.founderAccountKey, ownerKey)) {
+                    return@mls null
+                }
+                if (!heldGroupReplaceable(heldActive, suspected)) {
+                    // Part B: this group's removal may be behind it in the
+                    // journal; kept and tried again by the publisher pass.
+                    holdForLater = true
+                    return@mls null
+                }
+                val heldEpoch = held.epoch()
+                // The held group comes back if the join fails: the provider
+                // is snapshotted first and restored on a failed join, all in
+                // this one provider-lock region (nothing else ran between).
+                // Replay guard, rule 2: a joined group not newer than the held
+                // one counts as a failed join (restored).
+                replaceHeldThenJoin(
+                    snapshot = { device.snapshotStorage() },
+                    delete = { held.delete(device) },
+                    join = {
+                        val joined = join()
+                        if (!joinedGroupReplacesHeld(joined, heldEpoch, heldActive)) throw StaleWelcomeRefused()
+                        joined
+                    },
+                    restore = { before -> device.restoreStorage(before) },
+                    wipe = { before -> before.fill(0) },
+                )
+            }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        } finally {
+            held?.close()
+        }
+        // Persisted only after a join that landed: a failed one restored the
+        // held group in memory, and the disk still holds it.
+        if (epoch != null) ids.persist()
+        val context = replayContext
+        val account = replayAccount
+        if (epoch != null) {
+            // F2: this Welcome can never be joined again on this device.
+            if (!JoinedPublisherWelcomes.record(context, account, channelIdHex, welcome)) {
+                android.util.Log.w("CoPublisher", "a joined publisher Welcome was not recorded")
+            }
+            DeletedPublisherGroupEpochs.clear(context, account, channelIdHex)
+            ChannelSuspensions.clear(context, account, channelIdHex)
+            HeldPublisherWelcomes.clear(context, account, channelIdHex)
+        }
+        if (holdForLater) {
+            if (!HeldPublisherWelcomes.hold(context, account, channelIdHex, welcome)) {
+                android.util.Log.w("CoPublisher", "a publisher Welcome for a held group was not kept")
+            }
+        }
+        return epoch
+    }
+
+    /**
+     * Part B - whether the PublisherGroup this device holds for
+     * [channelIdHex] is still active and unsuspected (the removal of this
+     * device's leaf is not applied yet), so a held Welcome waits. `false`
+     * when no group is held.
+     */
+    public suspend fun heldGroupWaitsForRemoval(ids: ChannelIdentity, channelIdHex: String, joinedGroupId: ByteArray?): Boolean {
+        val suspected = SubscriberAdmission.appContext?.let { ctx ->
+            ChannelEpochOffsets.boundAccount?.let { acct -> ChannelSuspensions.isSuspended(ctx, acct, channelIdHex) }
+        } ?: false
+        val held = try {
+            openPublisherGroupOn(ids, channelIdHex, joinedGroupId, allowFound = false)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        } ?: return false
+        return try {
+            !heldGroupReplaceable(ids.mls { held.isActive() }, suspected)
+        } finally {
+            held.close()
+        }
+    }
+
+    /** ADR-0090 decision A — the committing device resealed before it sent
+     *  the Welcome, so the service's epoch now is the one the joined group's
+     *  epoch serves: the offset between them is learned here. A failed read
+     *  leaves none recorded (the channel was never founded again: 0). */
+    private suspend fun learnEpochOffset(channelIdHex: String, groupEpoch: ULong) {
+        try {
+            val service = ChannelsClient().use { it.fetchEpoch(channelIdHex) }
+            ChannelEpochOffsets.learn(channelIdHex, groupEpoch, service)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.w("CoPublisher", "ADR-0090: the channel epoch offset was not learned: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * The MLS group id a [welcome] from the account mailbox is for, read
+     * without joining (`peekWelcomeFounder` writes nothing); `null` when this
+     * device cannot read it (sealed to another device of the account, or not
+     * a Welcome). Lets the mailbox loop pick the one channel a PublisherGroup
+     * Welcome is for before touching any held group.
+     */
+    public suspend fun welcomeGroupId(ids: ChannelIdentity, welcome: ByteArray): ByteArray? =
+        try {
+            ids.mls { device -> uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcome, device).groupId }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+
+    /**
+     * The PublisherGroup id of [channelIdHex] for this account: the owner-seed
+     * derivation for an [owned] channel, [joinedGroupId] (the register's) for
+     * a co-published one; `null` when none can be named.
+     */
+    public fun expectedPublisherGroupId(
+        ids: ChannelIdentity,
+        channelIdHex: String,
+        owned: Boolean,
+        joinedGroupId: ByteArray?,
+    ): ByteArray? {
+        if (!owned) return joinedGroupId?.takeIf { it.size == 32 }
+        val channelId = hexToBytes(channelIdHex) ?: return null
+        val seed = ids.ownerAccountSeed()
+        return try {
+            uniffi.lakko_ffi_uniffi.publisherGroupIdForSeed(seed, channelId)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /**
+     * ADR-0090 section 2.3 — this device was admitted to an account's
+     * PublisherGroup by an owner device (its own account's, or a channel it
+     * co-publishes): join from the Welcome under the id it computes (owner:
+     * `publisherGroupIdForSeed`) or the register names (co-publisher), and
+     * mint its publisher keys. `null` when the Welcome is not for that group.
+     */
+    public suspend fun joinAdmissionWelcome(
+        ids: ChannelIdentity,
+        welcome: ByteArray,
+        channelIdHex: String,
+        owned: Boolean,
+        /** A co-published channel's group id (the register's
+         *  `publisherGroupId`); ignored for an owned one. */
+        joinedGroupId: ByteArray?,
+        /** A co-published channel's owner account key as the account's
+         *  register records it (ADR-0090 section 2.3); ignored for an owned
+         *  one. Without it this device does not join. */
+        ownerAccountKey: ByteArray?,
+        coPublished: CoPublishedJournalMarks?,
+        existingSigningSeed: ByteArray? = null,
+    ): ChannelPublisherKeys? {
+        val channelId = hexToBytes(channelIdHex)
+            ?: throw CoPublisherException.BadChannelId(channelIdHex)
+        if (owned) {
+            val seed = ids.ownerAccountSeed()
+            val groupId: ByteArray
+            val ownerKey: ByteArray
+            try {
+                groupId = uniffi.lakko_ffi_uniffi.publisherGroupIdForSeed(seed, channelId)
+                ownerKey = uniffi.lakko_ffi_uniffi.publisherOwnerAccountKey(seed)
+            } finally {
+                seed.fill(0)
+            }
+            val joinedEpoch = joinReplacingHeld(ids, welcome, groupId, channelId, channelIdHex, ownerKey, joinedGroupId = null)
+                ?: return null
+            learnEpochOffset(channelIdHex, joinedEpoch)
+            return ChannelsComposer.freshPublisherKeys(ids, channelIdHex, existingSigningSeed)
+        }
+        val groupId = joinedGroupId ?: return null
+        // ADR-0090 section 2.3 — only under the owner key the account
+        // recorded when it joined (the /g/ capability's verified issuer): the
+        // core refuses a Welcome whose sender is not a device of that key.
+        // Never a key read off the Welcome itself.
+        val owner = ownerAccountKey?.takeIf { it.size == 32 } ?: return null
+        return coPublished?.let {
+            joinCoPublishWelcome(ids, welcome, groupId, owner, channelIdHex, it, existingSigningSeed)
+        }
     }
 
     // -----------------------------------------------------------------
     // ADR-0060 §6 — reply keys
     // -----------------------------------------------------------------
 
-    private fun keepReplyGrant(joinerKey: ByteArray, grant: uniffi.lakko_ffi_uniffi.FfiReachGrant) {
+    private fun keepReplyGrant(joinerAccount: ByteArray, grant: uniffi.lakko_ffi_uniffi.FfiReachGrant) {
         if (grant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) return
-        joinerReplyGrants[me.lakko.app.reach.reachHex(joinerKey)] = grant
+        joinerReplyGrants[me.lakko.app.reach.reachHex(joinerAccount)] = grant
     }
 
-    /** Each pending joiner's reply grant, by its leaf key (hex). SECRET;
+    /** The mailbox key [binding] names when it verifies against [accountKey]. */
+    private fun mailboxCryptoBinding(binding: ByteArray, accountKey: ByteArray): ByteArray? =
+        try {
+            mailboxCrypto.verifyBinding(binding, accountKey)
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** Each pending joiner's reply grant, by its ACCOUNT key (hex). SECRET;
      *  process memory only — a restart re-reads the retained knocks. */
     private val joinerReplyGrants =
         java.util.concurrent.ConcurrentHashMap<String, uniffi.lakko_ffi_uniffi.FfiReachGrant>()
@@ -1176,4 +1817,25 @@ public object CoPublisher {
     /** Bytes of a channel id. */
     private const val CHANNEL_ID_LEN: Int = 16
 
+}
+
+/** ADR-0091 phase 1 — the identifier-free failed-row line for a PublisherGroup
+ *  journal row this device skipped. Never throws. */
+private fun logSkippedPublisherRow(payload: ByteArray, failure: Throwable, localEpoch: ULong?, latestEpoch: ULong?) {
+    try {
+        android.util.Log.w(
+            me.lakko.app.chat.FAILED_ROW_LOG_TAG,
+            me.lakko.app.chat.failedRowLine(
+                kind = me.lakko.app.chat.failedRowKind(failure),
+                sealedEpoch = runCatching { uniffi.lakko_ffi_uniffi.epochOfMessage(payload) }.getOrNull(),
+                epochAfter = runCatching { uniffi.lakko_ffi_uniffi.epochAfterMessage(payload) }.getOrNull(),
+                localEpoch = localEpoch,
+                latestEpoch = latestEpoch,
+                verdict = me.lakko.app.chat.RegisteredCommitVerdict.SKIP,
+                attempt = null,
+            ),
+        )
+    } catch (_: Throwable) {
+        // A log line never changes what the loop does.
+    }
 }

@@ -84,7 +84,7 @@ public fun forwardPayloadOf(
 }
 
 /**
- * ADR-0090 / `docs/ux/attachments.md` sections 10.1 and 11a — whether a
+ * ADR-0092 / `docs/ux/attachments.md` sections 10.1 and 11a — whether a
  * message carrying [content] may be forwarded. A poll and a checklist never
  * are: their votes and ticks belong to the conversation they were cast in. A
  * contact card is forwarded only when [cardShareable] says the person on it

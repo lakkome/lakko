@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The anonymous ballot and its journal row (ADR-0090 section 3.6).
+//! The anonymous ballot and its journal row (ADR-0092 section 3.6).
 //!
 //! ```text
 //! row      = "lakko/poll-ballot/v1\0" || 0x01 || nonce(24)
@@ -63,7 +63,7 @@ pub const NONCE_LEN: usize = 24;
 /// The padding block of the sealed plaintext. Chosen, not measured: it hides
 /// how many options a multiple-choice ballot names.
 pub const PAD_BLOCK: usize = 256;
-/// The largest number of options a poll has (ADR-0090 section 3.1).
+/// The largest number of options a poll has (ADR-0092 section 3.1).
 pub const MAX_OPTIONS: usize = 10;
 /// The longest group id accepted.
 pub const MAX_GROUP_ID_LEN: usize = 255;
@@ -400,7 +400,7 @@ fn selected(ring: &Ring, set: &AnonymitySet) -> Result<(Vec<[u8; POINT_LEN]>, Ve
     Ok((keys, points))
 }
 
-/// The voter's anonymity set in this poll (ADR-0090 section 3.6, as amended
+/// The voter's anonymity set in this poll (ADR-0092 section 3.6, as amended
 /// 2026-11-15), drawn from ring version `set_version`, or from the newest
 /// version this device holds when `set_version` is `None` (the account's
 /// first vote in the poll).

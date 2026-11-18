@@ -31,8 +31,7 @@ struct UpdateAvailableBanner: View {
             // Leading glyph so the meaning survives color-blindness / greyscale
             // (UX §10 — icon + label, never color alone). Decorative; the text
             // carries the accessible content.
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.subheadline)
+            LkIconView(.arrowDownCircleFill, size: 20, relativeTo: .subheadline)
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
 

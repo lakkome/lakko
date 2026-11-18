@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Open-items hand-over — [ADR-0090] section 3.9.
+//! Open-items hand-over — [ADR-0092] section 3.9.
 //!
 //! A device admitted to a group reads nothing sealed before its admission,
 //! so it would not see an open poll or checklist. The device that commits an
@@ -81,7 +81,7 @@
 //! as many votes as ring keys. A ring at the cap (8 MiB) spans about ten
 //! envelopes.
 //!
-//! [ADR-0090]: ../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../docs/adr/0092-attachment-kinds.md
 
 use core::result::Result as CoreResult;
 use std::collections::{BTreeMap, BTreeSet};
@@ -840,7 +840,7 @@ pub struct OpenItem {
 }
 
 /// Whether a commit calls for a hand-over: it added at least one leaf (a new
-/// account, or a new device of an account already in the group; ADR-0090
+/// account, or a new device of an account already in the group; ADR-0092
 /// section 3.9, "When it is sent") and the committer holds something to
 /// hand over (an open item, or an old ballot row).
 #[must_use]
@@ -1021,7 +1021,7 @@ pub fn plan_open_items_rows(items: &[OpenItem]) -> Result<Vec<Vec<u8>>> {
 // =============================================================================
 
 /// Whether to take a hand-over from `sender_account_key` (the account its
-/// MLS sender resolves to at receipt, C-68). ADR-0090 section 3.9 rests the
+/// MLS sender resolves to at receipt, C-68). ADR-0092 section 3.9 rests the
 /// ring extensions and earlier votes and ticks on the committer's word, and
 /// the committer is the account that committed this device's admission (the
 /// sender of its Welcome, `admitting_account_key`) or an owner or admin of
@@ -1180,7 +1180,7 @@ impl Bucket {
     }
 }
 
-/// Put received parts back together (the newcomer's side of ADR-0090
+/// Put received parts back together (the newcomer's side of ADR-0092
 /// section 3.9). `received` is every hand-over envelope the caller accepted
 /// through [`open_items_sender_trusted`], in journal order; `held` the
 /// `poll_ref`s this device already holds, which are skipped (a member that

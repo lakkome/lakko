@@ -68,12 +68,6 @@ public const val GROUP_NOT_ACCEPTING_REQUESTS: String =
 /** What the joiner reads when the group cannot take requests yet. */
 public val GROUP_NOT_ACCEPTING_REQUESTS_TEXT: UiText = UiText("group.join.not_taking_requests")
 
-/** The join screen after the joiner's device joined the group. */
-public val JOIN_SUCCESS_TEXT: UiText = UiText("group.join.succeeded")
-
-/** The join screen's button that opens the joined group. */
-public val JOIN_OPEN_CHAT_TEXT: UiText = UiText("common.open_chat")
-
 /** Every join failure that is neither [GROUP_NOT_ACCEPTING_REQUESTS_TEXT] nor a
  *  wrong device clock. The raw cause is logged, never shown. */
 public val JOIN_FAILED_TEXT: UiText = UiText("group.join.request_failed")

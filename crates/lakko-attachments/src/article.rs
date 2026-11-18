@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Articles (ADR-0090 section 8): a closed, bounded, canonical block format.
+//! Articles (ADR-0092 section 8): a closed, bounded, canonical block format.
 //! Neither HTML nor Markdown; clients build native views from the decoded
 //! tree and never produce an HTML string.
 //!

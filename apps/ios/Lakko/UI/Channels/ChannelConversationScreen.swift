@@ -46,7 +46,7 @@ struct ChannelConversationScreen: View {
     @State private var photoPickerOpen = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var fileImporterOpen = false
-    /// ADR-0090 — the menu row picked, the editor on screen, the audio picker.
+    /// ADR-0092 — the menu row picked, the editor on screen, the audio picker.
     @State private var pendingMenuItem: AttachmentMenuItem?
     @State private var contentScreen: ContentScreenRequest?
     @State private var audioOpen = false
@@ -212,7 +212,7 @@ struct ChannelConversationScreen: View {
             .lakkoDialog(
                 isPresented: $anonymousNote, title: l10n.t("channels.reactions.anonymous")
             ) { [.primary(l10n.t("common.ok")) {}] }
-            // ADR-0090 / UX section 2 — the same menu as a conversation; in
+            // ADR-0092 / UX section 2 — the same menu as a conversation; in
             // a channel only the owner and publishers have a paperclip.
             .sheet(isPresented: $attachSheet, onDismiss: runPendingMenuItem) {
                 AttachmentMenuSheet(rows: attachmentMenu(
@@ -438,7 +438,7 @@ struct ChannelConversationScreen: View {
         }
     }
 
-    // MARK: - ADR-0090: the content kinds in a channel
+    // MARK: - ADR-0092: the content kinds in a channel
 
     private func runPendingMenuItem() {
         guard let item = pendingMenuItem else { return }
@@ -515,7 +515,7 @@ struct ChannelConversationScreen: View {
                     article: article, attachments: message.attachments, author: title, date: message.createdAt,
                     onClose: { contentScreen = nil },
                     menu: {
-                        [.action(l10n.t("common.copy"), systemImage: "doc.on.doc") {
+                        [.action(l10n.t("common.copy"), icon: .copy) {
                             MessageClipboard.copy(ArticleReaderScreen.plainText(article))
                         }]
                     })
@@ -563,7 +563,7 @@ struct ChannelConversationScreen: View {
     private func channelContentContext(_ item: ChannelTimelineItem) -> ContentBubbleContext {
         ContentBubbleContext(
             groupIdHex: "channel-" + channelId,
-            // Publishers tick and add as the channel (ADR-0090 section 5).
+            // Publishers tick and add as the channel (ADR-0092 section 5).
             ownAccountKey: model.isPublisher ? Data(base64Encoded: ChannelTimeline.channelKeyB64) : nil,
             nameOf: { _ in nil },
             isOwnerOrAdmin: { _ in false },
@@ -614,10 +614,29 @@ struct ChannelConversationScreen: View {
         case .failed(let copy):
             statusBar(copy.text, danger: true, retry: true)
         case .reading:
-            // Section 12 — a subscriber has no composer: the timeline runs to
-            // the bottom of the pane.
-            EmptyView()
+            if let reader = model.readerDeviceRole {
+                // UX second-device 4a — the owner's or a publisher's device
+                // that cannot post: one line in place of the composer.
+                readerDeviceLine(reader)
+            } else {
+                // Section 12 — a subscriber has no composer: the timeline runs
+                // to the bottom of the pane.
+                EmptyView()
+            }
         }
+    }
+
+    /// No button, no link: secondary text where the composer would be.
+    private func readerDeviceLine(_ reader: ChannelReaderDeviceRole) -> some View {
+        Text(l10n.t(reader.lineKey))
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
+            .padding(12)
+            .background(Color.lakkoSurface)
+            .overlay(alignment: .top) { Rectangle().fill(Color.lakkoBorder).frame(height: 1) }
     }
 
     private var subscribeBar: some View {
@@ -673,7 +692,7 @@ struct ChannelConversationScreen: View {
                                     .font(.footnote)
                                     .lineLimit(1)
                                 Button { model.removePendingAttachment(at: index) } label: {
-                                    Image(systemName: "xmark.circle.fill")
+                                    LkIconView(.xmarkCircleFill, size: 20)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                                 .buttonStyle(.plain)
@@ -694,7 +713,7 @@ struct ChannelConversationScreen: View {
                 if showsRecordingBar {
                     RecordingBar(media: media).frame(maxWidth: .infinity, minHeight: 44)
                 } else {
-                    Button { attachSheet = true } label: { composerIcon("paperclip") }
+                    Button { attachSheet = true } label: { composerIcon(.paperclip) }
                         .buttonStyle(.plain)
                         .disabled(model.uploading || model.sending)
                         .accessibilityLabel(l10n.t("chat.composer.attach"))
@@ -703,7 +722,7 @@ struct ChannelConversationScreen: View {
                         onReturn: { Task { await model.sendDraft() } },
                         focus: $composerFocused)
                     Button { picker = PickerRequest(mode: .compose, item: nil) } label: {
-                        composerIcon("face.smiling")
+                        composerIcon(.faceSmiling)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(l10n.t("chat.composer.emoji_gifs"))
@@ -734,7 +753,7 @@ struct ChannelConversationScreen: View {
             Button { media.stopLocked() } label: {
                 ZStack {
                     Circle().fill(Color.lakkoDanger)
-                    Image(systemName: "stop.fill").foregroundStyle(Color.white)
+                    LkIconView(.stopFill, size: 20).foregroundStyle(Color.white)
                 }
                 .frame(width: 40, height: 40)
                 .padding(2)
@@ -765,16 +784,15 @@ struct ChannelConversationScreen: View {
             if model.sending {
                 ProgressView().controlSize(.small).tint(Color.lakkoAccentForeground)
             } else {
-                Image(systemName: "paperplane.fill").foregroundStyle(Color.lakkoAccentForeground)
+                LkIconView(.sendFill, size: 20).foregroundStyle(Color.lakkoAccentForeground)
             }
         }
         .frame(width: 40, height: 40)
         .padding(2)
     }
 
-    private func composerIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 22))
+    private func composerIcon(_ icon: LkIcon) -> some View {
+        LkIconView(icon, size: 20, relativeTo: nil)
             .foregroundStyle(Color.lakkoTextMuted)
             .frame(width: 40, height: 40)
             .contentShape(Rectangle())
@@ -856,7 +874,7 @@ struct ChannelTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: channelId, size: 32,
-                placeholderSymbol: "megaphone.fill", photo: .group(channelId),
+                placeholderIcon: .megaphoneFill, photo: .group(channelId),
                 // UX profile-screen section 7: the chat header plays the
                 // video always on a touch platform.
                 playsVideo: true)
@@ -913,7 +931,7 @@ struct ChannelOrphanedView: View {
                 HStack(spacing: 12) {
                     InitialsAvatar(
                         name: state.channels.first(where: { $0.id == channelId })?.title ?? "",
-                        identity: channelId, size: 48, placeholderSymbol: "megaphone.fill",
+                        identity: channelId, size: 48, placeholderIcon: .megaphoneFill,
                         photo: .group(channelId))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(state.channels.first(where: { $0.id == channelId })?.title ?? "")
@@ -925,7 +943,7 @@ struct ChannelOrphanedView: View {
                     }
                 }
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.shield")
+                    LkIconView(.shieldExclamation, size: 20)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .accessibilityHidden(true)
                     Text(l10n.t("channels.keys_reset.notice"))

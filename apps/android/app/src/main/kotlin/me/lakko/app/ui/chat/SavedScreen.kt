@@ -14,14 +14,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -60,6 +59,9 @@ import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * docs/ux/saved-messages-and-file-lifetime.md section 3 — Saved: the
@@ -97,7 +99,7 @@ public fun SavedScreen(
                 title = { Text(t("saved.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -114,11 +116,20 @@ public fun SavedScreen(
             }
             if (rows.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        t("saved.empty"),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        LkIcon(
+                            R.drawable.ic_lk_bookmark,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            size = LkIconSize.Empty,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            t("saved.empty"),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 return@Column
             }

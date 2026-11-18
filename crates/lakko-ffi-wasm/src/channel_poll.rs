@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 4.3 channel polls on the wasm surface (UniFFI mirror:
+//! ADR-0092 section 4.3 channel polls on the wasm surface (UniFFI mirror:
 //! `lakko-ffi-uniffi/src/channel_poll.rs`). Label lists cross
 //! flat-concatenated, 16 bytes each.
 //!

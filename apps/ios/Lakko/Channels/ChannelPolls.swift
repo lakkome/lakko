@@ -4,14 +4,14 @@
 import Foundation
 import LakkoCore
 
-// ADR-0090 section 4 — polls in channels: one account, one vote, through a
+// ADR-0092 section 4 — polls in channels: one account, one vote, through a
 // keyed-verification anonymous credential auth issues per period (CMZ, the
 // core's `lakko-anon-cred`), presented to the channel service with a tag per
 // poll. The service learns counts per opaque option label, never the account.
 
 /// The pure rules of a channel vote request.
 public enum ChannelVoteRule {
-    /// ADR-0090 section 4.3 — the service takes `|at_ms - server| <= 120 s`.
+    /// ADR-0092 section 4.3 — the service takes `|at_ms - server| <= 120 s`.
     public static let windowMs: Int64 = 120_000
 
     /// What to do after the service refused a vote.
@@ -67,7 +67,7 @@ public enum ChannelVoteError: Error, Equatable {
     case network
 }
 
-/// ADR-0090 section 4.2 — the account's credential for the current period,
+/// ADR-0092 section 4.2 — the account's credential for the current period,
 /// asked for in the background the first time a vote needs it in a period.
 @MainActor
 public final class ChannelPollCredentials {
@@ -166,7 +166,7 @@ public final class ChannelPollCredentials {
 }
 
 extension ChannelsClient {
-    /// ADR-0090 section 4.3 — `PUT` (vote, `labels` 1..=10) or `DELETE`
+    /// ADR-0092 section 4.3 — `PUT` (vote, `labels` 1..=10) or `DELETE`
     /// (retract, no labels) `/v1/channels/{id}/posts/{post}/votes/{tag_hex}`.
     func sendPollVote(
         channelIdHex: String, channelId: Data, postCursor: UInt64, labels: [Data],

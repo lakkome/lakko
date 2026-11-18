@@ -431,6 +431,51 @@ async fn one_namespace_holds_people_groups_and_channels() {
 }
 
 #[tokio::test]
+async fn a_claim_retried_with_the_same_key_answers_as_the_first() {
+    let Some(c) = Client::new("handles_claim_retry").await else {
+        return;
+    };
+    let group = Group::new();
+    let (status, first) = c.claim(group.claim_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(c.lookup(group.lookup_key()).await.0, StatusCode::NOT_FOUND);
+
+    // The same key claims again (its first answer was lost): a fresh
+    // certificate, a lease, and the new content is applied.
+    let (status, again) = c.claim(group.claim_body(true)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(c.certified(&again, group.lookup_key()), group.write_pk());
+    assert!(again["lease_until_ms"].as_u64().unwrap() > now_ms());
+    let rows = c.handle_rows(group.write_pk()).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(!rows[0].1 && rows[0].2, "current and public: {rows:?}");
+    assert_eq!(c.lookup(group.lookup_key()).await.0, StatusCode::OK);
+    assert_eq!(c.name_lookup(group.term_key()).await.len(), 1);
+
+    // Another key still meets the name taken.
+    let mut rival = Group::new();
+    rival.name_output = group.name_output;
+    let (status, answer) = c.claim(rival.claim_body(false)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&answer), "name-taken");
+
+    // The same key claiming a different name while it holds this one.
+    let mut second = Group::new();
+    second.seed = group.seed;
+    let (status, answer) = c.claim(second.claim_body(false)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&answer), "handle-already-set");
+
+    // A retired name is not taken back by a claim, even by its key.
+    let body = group.body(group.lookup_key(), HandleStatementBody::Retire, false);
+    let (status, _) = c.call("DELETE", "/discovery/handle", false, body).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, answer) = c.claim(group.claim_body(false)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&answer), "name-taken");
+}
+
+#[tokio::test]
 async fn statements_are_checked_before_any_row_is_touched() {
     let Some(c) = Client::new("handles_statement_checks").await else {
         return;

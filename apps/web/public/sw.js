@@ -1070,6 +1070,31 @@ self.addEventListener("notificationclick", (event) => {
     return;
   }
 
+  // docs/ux/channel-notifications.md: a channel post the page noticed and
+  // could only show from here. An open tab is told to open the channel, else
+  // a new one opens on it. Only a channel path is followed.
+  const openPath = event.notification.data?.lakkoOpenPath;
+  if (typeof openPath === "string" && /^\/channel\/[0-9a-f]{32}$/.test(openPath)) {
+    event.waitUntil(
+      (async () => {
+        const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        for (const c of clients) {
+          if (c.url.startsWith(self.location.origin)) {
+            try {
+              c.postMessage({ type: "LAKKO_OPEN_PATH", path: openPath });
+            } catch {
+              // The client went away between `matchAll` and here.
+            }
+            await c.focus();
+            return;
+          }
+        }
+        await self.clients.openWindow(openPath);
+      })(),
+    );
+    return;
+  }
+
   const wake = event.notification.data?.wake;
   // ADR-0042 — `wake.groupHex` is the OPAQUE `push_gid`, which no SPA
   // surface can match against a group. `handlePush` already resolved it

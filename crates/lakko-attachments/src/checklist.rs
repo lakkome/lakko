@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Checklists (ADR-0090 section 5): the canonical body, the author signature
+//! Checklists (ADR-0092 section 5): the canonical body, the author signature
 //! over it, and the fold of edits, ticks, added items and closes.
 //!
 //! ```text
@@ -258,7 +258,7 @@ pub struct ChecklistTickRecord {
     pub message_id: i64,
     /// The ticker's account key, resolved at receipt (C-68).
     pub ticker: [u8; ACCOUNT_KEY_LEN],
-    /// `true` for a channel publisher, who may always tick (ADR-0090
+    /// `true` for a channel publisher, who may always tick (ADR-0092
     /// section 5); `false` in a group or one-to-one.
     pub privileged: bool,
     /// Which item.
@@ -348,7 +348,7 @@ impl Event<'_> {
     }
 }
 
-/// Fold a checklist (ADR-0090 section 5) in DS `messageId` order:
+/// Fold a checklist (ADR-0092 section 5) in DS `messageId` order:
 ///
 /// - only the author edits; an edit replaces title, flags, item texts and
 ///   order, ticks stay with item ids and a tick on an item the edit removed

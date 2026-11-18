@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 3.9 on the UniFFI surface: the hand-over of open polls
+//! ADR-0092 section 3.9 on the UniFFI surface: the hand-over of open polls
 //! and checklists, and of old ballot rows, to a device a commit admitted.
 //!
 //! Committer: build an [`OpenItem`] per held open poll / checklist

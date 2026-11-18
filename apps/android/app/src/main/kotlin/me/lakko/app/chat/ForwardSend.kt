@@ -73,7 +73,7 @@ public class ForwardSender(
             originGroupIdHex = request.sourceGroupIdHex,
             sourceIsOneToOne = request.sourceIsOneToOne,
         )
-        // ADR-0090 / UX 11a — a location, contact card or article goes as the
+        // ADR-0092 / UX 11a — a location, contact card or article goes as the
         // same content; an article's images are its attachments, re-encrypted
         // below in order so each image block's index still names its image. A
         // poll or a checklist is never forwarded (the menu does not offer it).

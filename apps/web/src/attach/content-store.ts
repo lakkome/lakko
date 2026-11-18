@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 — the polls and checklists of each conversation and everything
+ * ADR-0092 — the polls and checklists of each conversation and everything
  * that changes them: votes, closes, ticks, added items, edits, anonymous
  * ballot rows, and an anonymous poll's electorate (the ring and its
  * versions). One sealed `account-kv` row per conversation
@@ -68,7 +68,7 @@ export interface PollEntry {
   readonly ballots: readonly BallotRow[];
   /** A channel poll's frozen final tally, when closed by its publisher. */
   readonly frozenTally?: unknown;
-  /** ADR-0090 section 3.11 — the state a history bundle carried (counts,
+  /** ADR-0092 section 3.11 — the state a history bundle carried (counts,
    *  voters, closed). Shown ALONE while the entry is `fromSnapshot`: the
    *  bundle's totals already include an unknown set of votes, so live votes
    *  are never added to them (that would count a vote twice). The hand-over
@@ -106,7 +106,7 @@ export type HeldOp =
   | { readonly kind: "add"; readonly target: number; readonly record: ChecklistAddRecord }
   | { readonly kind: "edit"; readonly target: number; readonly record: ChecklistEditRecord };
 
-/** The latest edit of an article, by its target (ADR-0090 section 1: an
+/** The latest edit of an article, by its target (ADR-0092 section 1: an
  *  edit replaces the whole article). Shown only when `editor` is the
  *  article's author. Attachments in the message-log persisted form. */
 export interface ArticleEdit {
@@ -219,7 +219,7 @@ export function withBallotRow(entry: PollEntry, row: BallotRow): PollEntry {
 }
 
 /**
- * ADR-0090 sections 3.9 and 3.11 — the hand-over's per-voter state replaces a
+ * ADR-0092 sections 3.9 and 3.11 — the hand-over's per-voter state replaces a
  * poll or checklist filed from a history bundle: its records, plus every
  * live op this device received meanwhile (the fold orders them by DS id, so
  * a voter's latest vote and an item's latest tick win). The bundle's totals
@@ -250,7 +250,7 @@ export function replacingSnapshot(held: ContentEntry, adopted: ContentEntry): Co
 }
 
 /** Accounts of a roster not yet in a ring, sorted bytewise: the one
- *  version a commit adds (ADR-0090 section 3.4; members who left stay). */
+ *  version a commit adds (ADR-0092 section 3.4; members who left stay). */
 export function ringAdditions(ringHas: (keyB64: string) => boolean, rosterAccountKeys: readonly string[]): string[] {
   const fresh = [...new Set(rosterAccountKeys)].filter((k) => !ringHas(k));
   return fresh.sort(compareKeyB64);

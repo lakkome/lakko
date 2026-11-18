@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 content messages on the UniFFI surface: polls, checklists,
+//! ADR-0092 content messages on the UniFFI surface: polls, checklists,
 //! locations, contact cards and articles; the ops on them (vote, close,
 //! tick, add, edit); the folds; the state snapshot a history bundle or the
 //! vault carries; and the editor limits.
@@ -42,7 +42,7 @@ fn opt_sig(v: Option<Vec<u8>>) -> Result<Option<[u8; 64]>, FfiError> {
 // Poll
 // ============================================================================
 
-/// A quiz poll's answer (ADR-0090 section 3.3).
+/// A quiz poll's answer (ADR-0092 section 3.3).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct PollQuiz {
     /// Index of the correct option.
@@ -51,7 +51,7 @@ pub struct PollQuiz {
     pub explanation: String,
 }
 
-/// The anonymous-poll material (ADR-0090 section 3.6). Secret: the poll's
+/// The anonymous-poll material (ADR-0092 section 3.6). Secret: the poll's
 /// ballot seal key is derived from `secret`.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct PollAnonymous {
@@ -70,7 +70,7 @@ impl std::fmt::Debug for PollAnonymous {
     }
 }
 
-/// A poll's body (ADR-0090 section 3).
+/// A poll's body (ADR-0092 section 3).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct PollBody {
     /// 16 random bytes naming the poll.
@@ -216,7 +216,7 @@ pub fn poll_choices_valid(body: PollBody, choices: Vec<u8>) -> Result<bool, FfiE
     Ok(poll::PollBody::try_from(body)?.choices_valid(&choices))
 }
 
-/// One non-anonymous vote as stored at receipt (ADR-0090 section 3.2).
+/// One non-anonymous vote as stored at receipt (ADR-0092 section 3.2).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct PollVoteRecord {
     /// DS `messageId` of the vote row.
@@ -313,7 +313,7 @@ fn close_records(closes: Vec<PollCloseRecord>) -> Result<Vec<poll::PollCloseReco
         .collect()
 }
 
-/// Fold a non-anonymous poll's votes and closes (ADR-0090 section 3.2):
+/// Fold a non-anonymous poll's votes and closes (ADR-0092 section 3.2):
 /// last writer per voter, only votes after the poll row and before the
 /// effective close. Independent of input order.
 ///
@@ -371,7 +371,7 @@ pub struct ChecklistItem {
     pub text: String,
 }
 
-/// A checklist's body (ADR-0090 section 5).
+/// A checklist's body (ADR-0092 section 5).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct ChecklistBody {
     /// The title.
@@ -638,7 +638,7 @@ impl TryFrom<ChecklistState> for checklist::ChecklistState {
     }
 }
 
-/// Fold a checklist (ADR-0090 section 5): author edits, adds, ticks and the
+/// Fold a checklist (ADR-0092 section 5): author edits, adds, ticks and the
 /// author's close, in DS `messageId` order. Independent of input order.
 ///
 /// # Errors
@@ -713,7 +713,7 @@ pub fn fold_checklist(
 // Location, contact card
 // ============================================================================
 
-/// A shared location (ADR-0090 section 6), coordinates in 1e-7 degrees.
+/// A shared location (ADR-0092 section 6), coordinates in 1e-7 degrees.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct SharedLocation {
     /// Latitude, 1e-7 degrees.
@@ -752,7 +752,7 @@ impl From<inner::Location> for SharedLocation {
     }
 }
 
-/// A contact card (ADR-0090 section 7). Carries no reach grant.
+/// A contact card (ADR-0092 section 7). Carries no reach grant.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct SharedContactCard {
     /// The display name as the sender knows it.
@@ -871,7 +871,7 @@ pub enum ArticleBlock {
     Divider,
 }
 
-/// An article (ADR-0090 section 8).
+/// An article (ADR-0092 section 8).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct Article {
     /// The title.
@@ -1042,7 +1042,7 @@ pub fn article_url_valid(url: String) -> bool {
 // Content
 // ============================================================================
 
-/// One ADR-0090 content payload.
+/// One ADR-0092 content payload.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
 pub enum MessageContent {
     /// A poll.
@@ -1123,7 +1123,7 @@ pub struct ContentEnvelopeParts {
     pub forward_origin_message_id: Option<i64>,
 }
 
-/// Build an ADR-0090 content message: the content, attachments (an article
+/// Build an ADR-0092 content message: the content, attachments (an article
 /// only: its images), and an optional reply / forward. Refuses exactly what
 /// a receiver refuses.
 ///
@@ -1497,7 +1497,7 @@ pub(crate) fn content_message_from_core(
 // Limits
 // ============================================================================
 
-/// The editor limits of ADR-0090, from the core constants.
+/// The editor limits of ADR-0092, from the core constants.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct ContentLimits {
     /// Longest poll question, UTF-8 bytes.
@@ -1538,7 +1538,7 @@ fn u32_of(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// The ADR-0090 editor limits.
+/// The ADR-0092 editor limits.
 #[uniffi::export]
 #[must_use]
 pub fn content_limits() -> ContentLimits {

@@ -22,4 +22,4 @@ It does not decide whether the item is open, and does not plan rows (`lakko_cont
 
 ## References
 
-ADR-0090 section 3.9; tests in `src/tests.rs`.
+ADR-0092 section 3.9; tests in `src/tests.rs`.

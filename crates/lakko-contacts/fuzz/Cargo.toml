@@ -357,8 +357,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "publisher_device_request_decode"
+path = "fuzz_targets/publisher_device_request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "open_items_decode"
 path = "fuzz_targets/open_items_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_admission_mark_decode"
+path = "fuzz_targets/channel_admission_mark_decode.rs"
 test = false
 doc = false
 bench = false

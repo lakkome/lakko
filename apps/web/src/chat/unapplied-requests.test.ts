@@ -24,9 +24,7 @@ import {
   unappliedFromRequest,
   unappliedLine,
   type UnappliedRequest,
-  JOIN_REQUEST_AGAIN,
   JOIN_WAIT_PRIMARY,
-  JOIN_WAIT_SECONDARY,
   UNAPPLIED_EXPLANATION,
 } from "./unapplied-requests";
 
@@ -182,34 +180,21 @@ describe("the copy", () => {
 
 describe("the joiner's half", () => {
   /**
-   * The finding, pinned: the joiner cannot be TOLD anything, so what it gets is
-   * the truth about the wait plus the one repair available to it. Both lines
-   * must state the unbounded wait; neither may claim a cause.
-   *
-   * DISCRIMINATION (RUN, then reverted): with `JOIN_WAIT_SECONDARY` reverted to
-   * the pre-change copy `Request sent. Waiting for an admin to approve, then
-   * for the change to be applied to the group.` this went red on the
-   * time-limit assertion:
-   *
-   *     AssertionError: expected 'Request sent. Waiting for an admin to …' to
-   *     contain 'time limit'
+   * The joiner cannot be TOLD anything (no honest channel), so the page says
+   * only what is true of the wait: the request was sent and an admin sees it
+   * when they next open Lakko. Amended 2026-11-12: no second line and no
+   * `Request again`; `Ask again` comes after a day (`./ask-again.ts`).
    */
-  it("says what the wait is, and offers the one repair", () => {
-    expect(JOIN_WAIT_PRIMARY()).toBe(
-      "Request sent. An admin approves it, then the change is applied to the group.",
-    );
-    expect(JOIN_WAIT_SECONDARY()).toContain("send the request again");
-    expect(JOIN_REQUEST_AGAIN()).toBe("Request again");
+  it("says what the wait is, in one line", () => {
+    expect(JOIN_WAIT_PRIMARY()).toBe("Request sent. An admin will see it when they next open Lakko.");
   });
 
   /** The same no-reason rule as the group side. The joiner knows even less than
    *  the admin does, so it may claim even less. */
   it("never states a reason either", () => {
-    for (const s of [JOIN_WAIT_PRIMARY(), JOIN_WAIT_SECONDARY(), JOIN_REQUEST_AGAIN()]) {
-      expect(s.toLowerCase()).not.toMatch(
-        /expired|refused|rejected|invalid|failed|error|because/,
-      );
-    }
+    expect(JOIN_WAIT_PRIMARY().toLowerCase()).not.toMatch(
+      /expired|refused|rejected|invalid|failed|error|because/,
+    );
   });
 });
 

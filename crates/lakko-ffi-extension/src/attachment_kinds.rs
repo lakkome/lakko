@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Slim RECOGNISE surface for the ADR-0090 rows a push wake can land on that
+//! Slim RECOGNISE surface for the ADR-0092 rows a push wake can land on that
 //! are not chat: a sealed anonymous ballot row on a group journal, the
 //! open-items and poll-ballots hand-overs (ordinary MLS application
 //! messages), and the account's own poll-choice register on the DeviceGroup.

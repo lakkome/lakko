@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-An anonymous group-poll ballot (ADR-0090 section 3.6) must show that its voter is in the poll's electorate and must carry a tag that is the same for every ballot one voter casts in one poll, so members count one vote per person without learning who. The maintainer chose a proof whose size grows with the logarithm of the ring (no LSAG, no fallback). This module is that proof and nothing else; the ballot module decides what it is bound to.
+An anonymous group-poll ballot (ADR-0092 section 3.6) must show that its voter is in the poll's electorate and must carry a tag that is the same for every ballot one voter casts in one poll, so members count one vote per person without learning who. The maintainer chose a proof whose size grows with the logarithm of the ring (no LSAG, no fallback). This module is that proof and nothing else; the ballot module decides what it is bound to.
 
 ## Construction
 
@@ -87,6 +87,6 @@ Every error is a `BallotError`; nothing panics on any input. `ProofRejected` cov
 
 ## References
 
-- ADR-0090 sections 3.4, 3.6, 3.7, 10; ADR-0046 (G-39).
+- ADR-0092 sections 3.4, 3.6, 3.7, 10; ADR-0046 (G-39).
 - Groth and Kohlweiss, EUROCRYPT 2015; Bootle et al., ESORICS 2015; Noether and Goodell, "Triptych", 2020.
 - Tests: `proof::tests::completeness_at_every_position_for_small_rings`, `a_tag_of_another_secret_does_not_verify`; `tests/properties.rs` `every_tampered_proof_byte_is_refused`, `a_non_member_cannot_produce_a_verifying_ballot`.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The tally of an anonymous poll (ADR-0090 sections 3.5 and 3.6).
+//! The tally of an anonymous poll (ADR-0092 sections 3.5 and 3.6).
 //!
 //! For each tag, the last valid ballot in DS order before the close counts;
 //! its choices are added up, and an empty choice list is a retracted vote.

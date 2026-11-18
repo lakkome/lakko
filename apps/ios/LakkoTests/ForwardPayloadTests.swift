@@ -225,7 +225,7 @@ final class ForwardPayloadTests: XCTestCase {
         XCTAssertFalse(b.hasOrigin)
     }
 
-    // MARK: - ADR-0090 — forwarding content messages (amended 2026-11-18)
+    // MARK: - ADR-0092 — forwarding content messages (amended 2026-11-18)
 
     private func contentMessage(_ content: MessageContent) throws -> ChatMessage {
         let bytes = try composeContentEnvelope(content: content, attachments: [], parts: ContentModel.emptyParts)

@@ -36,16 +36,24 @@ enum MessageLanguageDetector {
     /// The most likely language of `text` and how sure the recognizer is, in
     /// thousandths. `nil` when it names no language.
     static func detect(_ text: String) -> DetectedLanguage? {
+        candidates(text)?.detected
+    }
+
+    /// The detection with its close candidates (ADR-0082 note of 2026-11-15):
+    /// the recognizer's hypotheses, as probabilities, through the shared rule
+    /// `languageCandidatesFromHypotheses`, the rule the core detector and the
+    /// browser's detector use too.
+    static func candidates(_ text: String) -> LanguageCandidates? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let recognizer = NLLanguageRecognizer()
         recognizer.processString(trimmed)
-        guard let best = recognizer.languageHypotheses(withMaximum: 1).max(by: { $0.value < $1.value }),
-              best.key != .undetermined,
-              let tag = canonicalLanguageTag(tag: best.key.rawValue)
-        else { return nil }
-        let permille = UInt16(max(0, min(1000, (best.value * 1000).rounded())))
-        return DetectedLanguage(tag: tag, confidencePermille: permille)
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 6)
+            .filter { $0.key != .undetermined }
+            .map { LanguageHypothesis(
+                tag: $0.key.rawValue,
+                probabilityPermille: UInt16(max(0, min(1000, ($0.value * 1000).rounded())))) }
+        return languageCandidatesFromHypotheses(text: trimmed, hypotheses: hypotheses)
     }
 }
 
@@ -135,7 +143,17 @@ enum TranslationSessionFactory {
 final class AppleTranslationEngine: MessageTranslationEngine {
 
     let runner = TranslationTaskRunner()
-    private let availability = LanguageAvailability()
+    /// Asked with the strategy the sessions use (`lowLatency` on iOS 26.4+).
+    /// A plain `LanguageAvailability()` answered `installed` for pairs whose
+    /// `lowLatency` model was not on the device, so the session then threw
+    /// `notInstalled` and every such message ended in "Couldn't translate"
+    /// instead of offering the pack (seen on an iPhone, iOS 27.2, 2026-11-15).
+    private let availability: LanguageAvailability = {
+        if #available(iOS 26.4, *) {
+            return LanguageAvailability(preferredStrategy: .lowLatency)
+        }
+        return LanguageAvailability()
+    }()
 
     var isSupported: Bool { true }
 

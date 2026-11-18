@@ -54,7 +54,7 @@ internal sealed interface ContentScreen {
     data class ConfirmClose(val messageId: Long, val poll: Boolean) : ContentScreen
 }
 
-/** ADR-0090 section 3.1 — the poll body from the editor's draft. */
+/** ADR-0092 section 3.1 — the poll body from the editor's draft. */
 internal fun pollBodyOf(draft: PollDraft, ringHash: ByteArray?, nowMs: Long): uniffi.lakko_ffi_uniffi.PollBody? {
     val random = java.security.SecureRandom()
     val id = ByteArray(16).also(random::nextBytes)
@@ -75,7 +75,7 @@ internal fun pollBodyOf(draft: PollDraft, ringHash: ByteArray?, nowMs: Long): un
     )
 }
 
-/** ADR-0090 section 5 — the checklist body from the editor's draft (item ids 0..n). */
+/** ADR-0092 section 5 — the checklist body from the editor's draft (item ids 0..n). */
 internal fun checklistBodyOf(draft: ChecklistDraft): uniffi.lakko_ffi_uniffi.ChecklistBody =
     uniffi.lakko_ffi_uniffi.ChecklistBody(
         title = draft.title,
@@ -188,7 +188,7 @@ internal fun rememberContentBubbleContext(
 }
 
 /**
- * ADR-0090 / attachments UX — the paperclip's menu and every Lakko screen it
+ * ADR-0092 / attachments UX — the paperclip's menu and every Lakko screen it
  * opens, drawn over the conversation.
  */
 @Composable

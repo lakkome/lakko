@@ -303,7 +303,8 @@ final class LoginByNameFlowTests: XCTestCase {
             persistence: NoPersistence(),
             nowMs: { 1_000_000 },
             accountDirectory: directory,
-            restoreDirectory: OfflineRestoreDirectory()
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 

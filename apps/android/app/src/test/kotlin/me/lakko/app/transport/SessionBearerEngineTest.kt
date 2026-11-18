@@ -188,6 +188,40 @@ class SessionBearerEngineTest {
     }
 
     @Test
+    fun `after a second reset elsewhere, the directory still serving this device's key does not hide auth's answer`() = runTest {
+        // Base scenario 4b: this device reset the keys and published them
+        // (generation 1 here); another device reset again, but its publish is
+        // owed, so the directory still serves THIS device's key at THIS
+        // device's generation and answers its token. Auth is one generation
+        // above: the bind (the "Done" step, a landing) is the first refusal.
+        install(pair(1))
+        client(
+            HttpStatusCode.OK to """{"signature_pubkey":"OWN","x25519_pubkey":"OWN","key_generation":1}""",
+            HttpStatusCode.Unauthorized to """{"error":"key-generation-superseded"}""",
+            HttpStatusCode.Unauthorized to """{"error":"key-generation-superseded"}""",
+        ).use { http ->
+            val published = http.get("https://api.test/discovery/identity/$acct") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+            }
+            assertEquals(HttpStatusCode.OK, published.status)
+            assertTrue(refusals.isEmpty())
+            val bind = http.post("https://api.test/auth/session/bind-device") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+                setBody("{}")
+            }
+            assertEquals(HttpStatusCode.Unauthorized, bind.status)
+            // Any later request is refused the same way and reported no more:
+            // the device is already on its way to the signed-out screen.
+            http.post("https://api.test/auth/tokens") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+                setBody("{}")
+            }
+        }
+        assertEquals(0, refresher.calls)
+        assertEquals(listOf(SessionRefusal.KeysReset), refusals)
+    }
+
+    @Test
     fun `a late superseded answer to a replaced token goes out again and wipes nothing`() = runTest {
         // This device's own key rotation: the request left with the old token,
         // the new pair was installed, and the refusal arrived after that.

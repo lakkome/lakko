@@ -64,6 +64,7 @@ pub(crate) fn state(db: MySqlPool, enabled: bool) -> AppState {
         username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
         key_reset_attest_key: None,
         city_lookup: std::sync::Arc::new(crate::locate::NoCityLookup),
+        donations: std::sync::Arc::new(crate::donate::Donations::default()),
     }
 }
 

@@ -5,12 +5,12 @@ import Combine
 import Foundation
 import LakkoCore
 
-// ADR-0090 section 3.6 — anonymous poll ballots: the device's queue (a
+// ADR-0092 section 3.6 — anonymous poll ballots: the device's queue (a
 // random 0..=10 s wait, survives a restart, retried at the next open), the
 // proof computed off the main actor, and the account's own choice kept in the
 // DeviceGroup synced register.
 
-/// ADR-0090 section 3.4a — no ballot is posted in a run before its session
+/// ADR-0092 section 3.4a — no ballot is posted in a run before its session
 /// landing succeeded (an old device kept offline across a reset must not
 /// vote under the old key).
 public enum BallotGate {
@@ -70,7 +70,7 @@ public final class BallotQueue: ObservableObject {
     nonisolated static func storeKey(_ account: String) -> String { "lakko.poll-ballot-queue.v1.\(account)" }
 
     /// Bind to the account's chat repository and resume every queued ballot
-    /// (the "retried at the next open" of ADR-0090 section 3.6).
+    /// (the "retried at the next open" of ADR-0092 section 3.6).
     public func bind(chat: ChatRepository?, accountIdB64: String) {
         self.chat = chat
         self.accountIdB64 = accountIdB64
@@ -182,7 +182,7 @@ public final class BallotQueue: ObservableObject {
     }
 }
 
-/// ADR-0090 section 3.6 — the account's own choices in polls, from the
+/// ADR-0092 section 3.6 — the account's own choices in polls, from the
 /// DeviceGroup synced register, plus what this device chose and has not
 /// recorded yet.
 @MainActor
@@ -237,7 +237,7 @@ public final class PollChoiceCenter: ObservableObject {
     }
 }
 
-// MARK: - ADR-0090 section 3.9: the open-items hand-over
+// MARK: - ADR-0092 section 3.9: the open-items hand-over
 
 extension ChatRepository {
 
@@ -256,7 +256,7 @@ extension ChatRepository {
                 do {
                     try await self?.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: row)
                 } catch {
-                    NSLog("ADR-0090: open-items hand-over row not sent")
+                    NSLog("ADR-0092: open-items hand-over row not sent")
                     return
                 }
             }
@@ -406,7 +406,7 @@ extension ChatRepository {
         return !(m.content.map { $0.state != nil && $0.ops == PersistedContentOps() } ?? false)
     }
 
-    /// ADR-0090 section 3.9 — the ballots of an open anonymous poll that
+    /// ADR-0092 section 3.9 — the ballots of an open anonymous poll that
     /// were posted before this device's admission are rows on the journal it
     /// never read (its cursor starts at the join): fetch the journal from the
     /// oldest open anonymous poll onward and file only its ballot rows. The
@@ -443,7 +443,7 @@ extension ChatRepository {
     }
 }
 
-/// ADR-0090 section 3.9 — the account that committed this device's admission
+/// ADR-0092 section 3.9 — the account that committed this device's admission
 /// to each group, per account.
 enum ContentAdmitters {
     static func key(_ account: String) -> String { "lakko.content-admitters.v1.\(account)" }

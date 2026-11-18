@@ -4,7 +4,7 @@
 //! Which parts of a message's text are links (`docs/ux/message-links.md`).
 //!
 //! The rule is defined once, in `lakko_attachments::message_links`, so the
-//! ADR-0090 article codec checks link URLs with the same rule. Re-exported
+//! ADR-0092 article codec checks link URLs with the same rule. Re-exported
 //! here so every caller of this crate keeps its path.
 
 pub use lakko_attachments::message_links::{

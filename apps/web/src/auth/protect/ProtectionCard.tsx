@@ -175,7 +175,7 @@ export function ProtectionCard(): JSX.Element {
             {(email) => (
               <div class="lk-card-row">
                 <span class="lk-card-row-icon">
-                  <Icon name="mail" size={18} />
+                  <Icon name="envelope" size={20} />
                 </span>
                 <div class="lk-card-row-body">
                   <span class="lk-card-row-title">{t("recovery_email.title")}</span>
@@ -207,7 +207,7 @@ export function ProtectionCard(): JSX.Element {
           </Show>
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="key" size={18} />
+              <Icon name="key" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("recovery_phrase.label")}</span>

@@ -70,7 +70,7 @@ public data class PeerProfile(
     /** ADR-0084 — the person's profile photo references, or `null`. */
     val avatar: AvatarRefs? = null,
     /**
-     * ADR-0090 section 7 — `false` when the person does not let others share
+     * ADR-0092 section 7 — `false` when the person does not let others share
      * their contact card (their "who can find me" is `Nobody`). A row stored
      * before the field, or a person who never sent a profile, is shareable.
      */

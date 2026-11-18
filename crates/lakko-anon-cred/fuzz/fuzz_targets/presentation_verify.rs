@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - `lakko_anon_cred::fuzz_api::presentation_verify` (ADR-0090 4.7). The
+//! Fuzz target - `lakko_anon_cred::fuzz_api::presentation_verify` (ADR-0092 4.7). The
 //! assertions live in the fuzz API so the harness stays a one-liner.
 
 #![no_main]

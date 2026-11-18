@@ -5,7 +5,7 @@ import CoreLocation
 import LakkoCore
 import SwiftUI
 
-// ADR-0090 / `docs/ux/attachments.md` — the location screen (section 9) and
+// ADR-0092 / `docs/ux/attachments.md` — the location screen (section 9) and
 // the contact picker (section 10).
 
 // MARK: - Location
@@ -89,7 +89,7 @@ final class LocationFix: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 
-    /// The fix as sent (1e-7 degree fixed point, ADR-0090 section 6).
+    /// The fix as sent (1e-7 degree fixed point, ADR-0092 section 6).
     func shared(name: String) -> SharedLocation? {
         guard let location else { return nil }
         let limits = contentLimits()
@@ -152,8 +152,7 @@ struct LocationScreen: View {
         NavigationStack {
             VStack(spacing: 20) {
                 Spacer()
-                Image(systemName: "mappin.circle.fill")
-                    .font(.system(size: 72))
+                LkIconView(.location, size: 72, relativeTo: nil)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 content
@@ -227,7 +226,7 @@ struct ContactCardCandidate: Identifiable, Equatable {
     let name: String
     let username: String?
     let accountKey: Data
-    /// ADR-0090 section 7 — the newest profile held from this contact lets
+    /// ADR-0092 section 7 — the newest profile held from this contact lets
     /// others share their card (`true` when none is held).
     var shareable: Bool = true
 

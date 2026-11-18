@@ -8,7 +8,7 @@
 //! `EnvironmentFile=/etc/lakko/lakko.env` in production.
 //!
 //! `LAKKO_ANON_CRED_MASTER_SECRET` (64 hex characters, the value auth issues
-//! the channel-poll credential under; ADR-0090 section 4.4) arms the vote
+//! the channel-poll credential under; ADR-0092 section 4.4) arms the vote
 //! routes; unset, they answer `503 anon-credential-disabled`.
 
 #![forbid(unsafe_code)]
@@ -30,6 +30,25 @@ use lakko_svc_channels::{
     VERSION,
 };
 
+/// ADR-0092 section 4.4 — the channel-poll credential master shared with
+/// auth. Unset: the vote routes answer 503.
+fn load_poll_vote_verifier() -> anyhow::Result<Option<lakko_anon_cred::CredentialVerifier>> {
+    match std::env::var("LAKKO_ANON_CRED_MASTER_SECRET") {
+        Ok(v) if !v.trim().is_empty() => Ok(Some(lakko_anon_cred::CredentialVerifier::new(
+            lakko_anon_cred::MasterSecret::from_hex(&v).map_err(|_| {
+                anyhow::anyhow!("LAKKO_ANON_CRED_MASTER_SECRET must be 64 hex characters")
+            })?,
+        ))),
+        _ => {
+            warn!(
+                "channel poll votes DISABLED: LAKKO_ANON_CRED_MASTER_SECRET is not set; \
+                 the vote routes answer 503"
+            );
+            Ok(None)
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -39,22 +58,7 @@ async fn main() -> anyhow::Result<()> {
     info!(bind = %cfg.bind, "lakko-svc-channels starting (v{})", VERSION);
     let anon_config = AnonTokenServerConfig::from_env()?;
     let internal_secret = load_internal_secret().map_err(anyhow::Error::msg)?;
-    // ADR-0090 section 4.4 — the channel-poll credential master shared with
-    // auth. Unset: the vote routes answer 503.
-    let votes = match std::env::var("LAKKO_ANON_CRED_MASTER_SECRET") {
-        Ok(v) if !v.trim().is_empty() => Some(lakko_anon_cred::CredentialVerifier::new(
-            lakko_anon_cred::MasterSecret::from_hex(&v).map_err(|_| {
-                anyhow::anyhow!("LAKKO_ANON_CRED_MASTER_SECRET must be 64 hex characters")
-            })?,
-        )),
-        _ => {
-            warn!(
-                "channel poll votes DISABLED: LAKKO_ANON_CRED_MASTER_SECRET is not set; \
-                 the vote routes answer 503"
-            );
-            None
-        },
-    };
+    let votes = load_poll_vote_verifier()?;
 
     let (store, anon_tokens): (Arc<dyn ChannelStore + Send + Sync>, TokenVerifier) =
         if let Some(url) = &cfg.database_url {

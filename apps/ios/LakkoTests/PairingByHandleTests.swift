@@ -152,10 +152,10 @@ final class JoinByNameTests: XCTestCase {
         let context = randomBytes(32)
         XCTAssertEqual(
             try plain.exportSecret(
-                identity: joiner, label: RecoveryPayload.recoveryExporterLabel,
+                identity: joiner, label: recoveryExporterLabel(),
                 context: context, length: 32),
             try founder.exportSecret(
-                identity: founderIdentity, label: RecoveryPayload.recoveryExporterLabel,
+                identity: founderIdentity, label: recoveryExporterLabel(),
                 context: context, length: 32))
 
         // ADR-0078 section 6: the group is adopted under its own id (the
@@ -357,7 +357,8 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
             nowMs: { 1_000_000 },
             accountDirectory: NoAccountDirectory(),
             loginHandleBinds: LoginHandleBindLedger(),
-            restoreDirectory: directory
+            restoreDirectory: directory,
+            earlierKeysInputs: skipEarlierKeysGate
         )
         let model = RecoverViewModel(repository: repository, cachedUsername: nil)
         model.mode = .anotherDevice

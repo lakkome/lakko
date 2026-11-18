@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 4: the client half of the channel-poll credential on the
+//! ADR-0092 section 4: the client half of the channel-poll credential on the
 //! wasm surface (UniFFI mirror: `lakko-ffi-uniffi/src/anon_cred.rs`). No
 //! issuer or verifier here.
 //!

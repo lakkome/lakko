@@ -142,7 +142,7 @@ struct SendPreviewScreen: View {
             if let image = item.thumbnail {
                 Image(uiImage: image).resizable().scaledToFit()
             } else {
-                Image(systemName: item.isMedia ? "video" : "doc").font(.system(size: 56))
+                LkIconView(item.isMedia ? .video : .doc, size: 56, relativeTo: nil)
                     .foregroundStyle(Color.lakkoTextMuted)
                 Text(item.displayName).font(.footnote)
             }
@@ -161,7 +161,7 @@ struct SendPreviewScreen: View {
                         Image(uiImage: image).resizable().scaledToFill().frame(width: 64, height: 64)
                     } else {
                         VStack(spacing: 2) {
-                            Image(systemName: item.isMedia ? "video" : "doc")
+                            LkIconView(item.isMedia ? .video : .doc, size: 20)
                             Text(item.displayName).font(.caption2).lineLimit(1)
                         }
                         .frame(width: item.isMedia ? 64 : 120, height: item.isMedia ? 64 : 52)
@@ -177,7 +177,9 @@ struct SendPreviewScreen: View {
                 items.removeAll { $0.id == item.id }
                 if items.isEmpty { onCancel() }
             } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.white, Color.black.opacity(0.6))
+                LkIconView(.xmarkCircleFill, size: 20)
+                    .foregroundStyle(.white)
+                    .background(Circle().fill(Color.black.opacity(0.6)))
             }
             .accessibilityLabel(l10n.t("attach.preview.remove", texts: ["name": item.displayName]))
         }

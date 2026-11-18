@@ -22,10 +22,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,7 +33,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -54,6 +49,9 @@ import me.lakko.app.calls.ParticipantsMenuItem
 import me.lakko.app.calls.anchoredMenuLeft
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.theme.LakkoDark
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * What Participants opens on a call that can hand out a link to itself: a menu of
@@ -113,9 +111,9 @@ internal fun BoxScope.CallParticipantsMenu(
         for (item in items) {
             CallMenuRow(
                 icon = when (item) {
-                    ParticipantsMenuItem.PARTICIPANTS -> Icons.Filled.Group
-                    ParticipantsMenuItem.COPY_LINK -> Icons.Filled.ContentCopy
-                    ParticipantsMenuItem.INVITE_CONTACTS -> Icons.Filled.PersonAdd
+                    ParticipantsMenuItem.PARTICIPANTS -> R.drawable.ic_lk_person_2
+                    ParticipantsMenuItem.COPY_LINK -> R.drawable.ic_lk_copy
+                    ParticipantsMenuItem.INVITE_CONTACTS -> R.drawable.ic_lk_person_plus
                 },
                 label = t(
                     when (item) {
@@ -180,7 +178,7 @@ internal fun BoxScope.anchoredAboveControl(
 /** One row of a call-screen menu. [color] is the icon's and the words'. */
 @Composable
 internal fun CallMenuRow(
-    icon: ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     label: String,
     onClick: () -> Unit,
     color: Color = LakkoDark.text,
@@ -194,7 +192,7 @@ internal fun CallMenuRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
+        LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row)
         Text(label, color = color, fontSize = 15.sp, maxLines = 1)
     }
 }

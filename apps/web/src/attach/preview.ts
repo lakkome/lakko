@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 1 — the one-line preview of a content message (chat list,
+ * ADR-0092 section 1 — the one-line preview of a content message (chat list,
  * notifications): `Poll: {question}`, `Checklist: {title}`, `Location`,
  * `Contact: {name}`, `Article: {title}`. Never JSON, never raw text.
  */

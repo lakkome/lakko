@@ -184,8 +184,10 @@ public interface JoinByNameSteps {
     /** The scanner's sealed recovery row, or `null` when it never came. */
     public suspend fun pollRecoveryRow(): ByteArray?
 
-    /** Open the row under the joined group's exporter key and parse it. */
-    public fun openRecoveryRow(sealed: ByteArray): RecoveryPayload.ParsedRecoveryPayload
+    /** Open the row under the joined group's exporter key and parse it
+     *  (recovery payload v3: the grant, the phrase entropy and the account's
+     *  own earlier keys). */
+    public fun openRecoveryRow(sealed: ByteArray): RecoveryRow.Parsed
 
     /** The MLS group id of the group the Welcome joined. */
     public fun joinedGroupId(): ByteArray
@@ -236,6 +238,7 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
     val sealed = steps.pollRecoveryRow() ?: return null
     val parsed = steps.openRecoveryRow(sealed)
     var phraseEntropy: ByteArray? = parsed.phraseEntropy
+    var predecessors: List<StateBundle.OwnPredecessorSeed>? = parsed.predecessors
     try {
         val result = completeJoinByName(
             grantToken = parsed.grantToken,
@@ -253,13 +256,17 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
                     session = result.session,
                     accountId = result.accountId,
                     persistJoin = { pending.persist() },
+                    predecessors = parsed.predecessors,
                 )
             }
         }
         phraseEntropy = null
+        // The keys-only outcome carries none: nothing can be stored for it.
+        if (outcome.accountId != null) predecessors = null
         return outcome
     } finally {
         phraseEntropy?.fill(0)
+        predecessors?.forEach { it.seed.fill(0) }
         parsed.grantToken.fill(0)
     }
 }

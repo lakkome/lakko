@@ -55,8 +55,15 @@ public class ChannelFeedback(
         val avatar: uniffi.lakko_ffi_uniffi.FfiAvatarRef? = null,
     )
 
-    /** One page of a thread. */
-    public data class CommentPage(val comments: List<Comment>, val nextAfter: Long, val more: Boolean)
+    /** One page of a thread. [rowsRead] is how many rows the service
+     *  returned, opened or not: a row that did not open and a banned
+     *  author's row are left out of [comments] but were read. */
+    public data class CommentPage(
+        val comments: List<Comment>,
+        val nextAfter: Long,
+        val more: Boolean,
+        val rowsRead: Int = comments.size,
+    )
 
     private fun account(): String = state.boundAccount ?: throw IllegalStateException("no account bound")
 
@@ -104,12 +111,12 @@ public class ChannelFeedback(
         return out
     }
 
-    // ------------------------------------------------------- ADR-0090 section 4
+    // ------------------------------------------------------- ADR-0092 section 4
 
     /** Per poll post: voters and per-label counts as the last [chips] read them. */
     private val pollVotes = java.util.concurrent.ConcurrentHashMap<Long, Pair<Long, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>>>()
 
-    /** ADR-0090 section 3.6 — the own-choice register names a channel poll by
+    /** ADR-0092 section 3.6 — the own-choice register names a channel poll by
      *  the channel and the post cursor (set version 0: no ring here). */
     private val channelRef: uniffi.lakko_ffi_uniffi.FolderConversationRef
         get() = uniffi.lakko_ffi_uniffi.FolderConversationRef(
@@ -330,7 +337,7 @@ public class ChannelFeedback(
                 avatar = opened.comment.avatar,
             )
         }
-        return CommentPage(out, page.nextAfter, page.rows.size >= COMMENT_PAGE_LEN)
+        return CommentPage(out, page.nextAfter, page.rows.size >= COMMENT_PAGE_LEN, rowsRead = page.rows.size)
     }
 
     /** Write a comment under the post at [cursor]. Returns its cursor. */

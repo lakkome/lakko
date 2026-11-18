@@ -12,7 +12,10 @@
  * further step); a sent request waits on the card until the owner's device
  * approves it.
  *
- * The link is opened on this device the first time the bubble is drawn; a
+ * A message that carries the card is drawn from it, opened on this device
+ * with no network (`channel-invite-preview.ts` `openStoredCard`), so it
+ * stays an invitation after its link is used up. A message with the link
+ * alone opens it through the ledger the first time the bubble is drawn; a
  * link that is not a channel's (a group invitation) leaves the bubble as text.
  */
 import { createResource, createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
@@ -55,21 +58,28 @@ export function publisherInviteLine(o: Pick<OpenedChannelInvite, "name" | "invit
 }
 
 export function ChannelInviteCard(props: {
-  readonly link: { readonly href: string; readonly url: string };
+  /** The message's link, opened through the ledger when there is no card. */
+  readonly link?: { readonly href: string; readonly url: string };
+  /** The invitation the message's own card opened to, on this device. */
+  readonly opened?: OpenedChannelInvite;
   /** Called with `true` once the link proves to be a channel's. */
-  readonly onResolved: (isChannel: boolean) => void;
+  readonly onResolved?: (isChannel: boolean) => void;
 }): JSX.Element {
   const navigate = useNavigate();
   const auth = useAuth();
   const chats = useChats();
-  const [invite] = createResource(
-    () => props.link.url,
+  const [fromLink] = createResource(
+    () => (props.opened === undefined ? props.link?.url : undefined),
     async (url) => {
       const o = await openOnce(url);
-      props.onResolved(o !== null);
+      props.onResolved?.(o !== null);
       return o;
     },
   );
+  const invite = (): OpenedChannelInvite | null | undefined => props.opened ?? fromLink();
+  /** The link Accept and Ask again go through: the card's own, else the
+   *  message's. */
+  const linkUrl = (): string | undefined => props.opened?.link ?? props.link?.url;
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -101,7 +111,7 @@ export function ChannelInviteCard(props: {
     if (account === null) return null;
     return loadPendingPublisherRequests(account).find((r) => r.channelIdHex === channelIdHex) ?? null;
   };
-  // The 7 days are crossed while the card is on screen too.
+  // The day is crossed while the card is on screen too.
   const [now, setNow] = createSignal(Date.now());
   const clock = setInterval(() => setNow(Date.now()), 60_000);
   onCleanup(() => clearInterval(clock));
@@ -115,18 +125,19 @@ export function ChannelInviteCard(props: {
 
   /** UX 15.2.2 — `Ask again`: the same link, fetched again; when it still
    *  works, the request goes out once more exactly as the first `Accept`
-   *  (the record is replaced and the 7 days start again). A dead link keeps
+   *  (the record is replaced and the day starts again). A dead link keeps
    *  the earlier record (a late approval still lands) and the card keeps the
    *  invalid-link line; no network keeps `Ask again`. */
   async function askAgain(): Promise<void> {
     const identity = chats.conversationAccountIdentity();
     const account = accountIdB64();
-    if (identity === null || account === null || busy()) return;
+    const url = linkUrl();
+    if (identity === null || account === null || url === undefined || busy()) return;
     setBusy(true);
     setError(null);
     let outcome: AskAgainOutcome;
     try {
-      const fresh = await openChannelLink(props.link.url);
+      const fresh = await openChannelLink(url);
       if (fresh === null || !fresh.publisherInvite) {
         outcome = { kind: "dead" };
       } else {

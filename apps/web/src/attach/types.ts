@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 / `docs/ux/attachments.md` — the shapes the attachment screens and
+ * ADR-0092 / `docs/ux/attachments.md` — the shapes the attachment screens and
  * bubbles exchange with the conversation that hosts them. The screens hold no
  * keys and call no server: they return a draft, and the conversation signs,
  * composes and sends it; the bubbles get a view already folded and report a
@@ -88,7 +88,7 @@ export interface ShareableContact {
   readonly username?: string;
   /** Standard base64 of the 32-byte account key. */
   readonly accountKeyB64: string;
-  /** ADR-0090 section 7 — `false` when the newest profile held from the
+  /** ADR-0092 section 7 — `false` when the newest profile held from the
    *  contact says their card may not be shared (shown disabled). Absent:
    *  shareable. */
   readonly cardShareable?: boolean;

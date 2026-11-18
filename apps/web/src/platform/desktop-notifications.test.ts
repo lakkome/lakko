@@ -44,6 +44,12 @@ describe("messageNotifications", () => {
     expect(messageNotifications(prev, [row({ unread: 0 })], hidden, "x").notify).toEqual([]);
   });
 
+  it("leaves a channel's posts to the channel rule", () => {
+    const prev = new Map([["channel:c", 0]]);
+    const channel = row({ key: "channel:c", unread: 1, href: "/channel/c", channel: true });
+    expect(messageNotifications(prev, [channel], hidden, "x").notify).toEqual([]);
+  });
+
   it("never announces a muted conversation", () => {
     const prev = new Map([["chat:a", 0]]);
     expect(messageNotifications(prev, [row({ unread: 1, muted: true })], hidden, "x").notify).toEqual([]);

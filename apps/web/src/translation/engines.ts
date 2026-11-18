@@ -21,10 +21,24 @@ export type EngineState = "ready" | "needs-pack" | "unavailable";
 export interface Detection {
   readonly tag: string;
   readonly permille: number;
+  /** The other languages the detection was a near tie with, nearest first
+   *  (ADR-0082 note of 2026-11-15); absent or empty when confident. */
+  readonly alternatives?: readonly string[];
 }
 
 /** Progress of a pack download, 0..1. */
 export type ProgressListener = (fraction: number) => void;
+
+/**
+ * Who fetches a pack a pair needs (ADR-0082 note of 2026-11-18):
+ * - `engine`: the engine itself, when `translate()` is called after the
+ *   person agreed (the browser `Translator`, Lakko's own engine);
+ * - `system-settings`: only the operating system's own settings can, as on
+ *   macOS, where a translation language is downloaded in System Settings; the
+ *   engine opens them with `openPackSettings()` and translates once the pack
+ *   is there.
+ */
+export type PackFetch = "engine" | "system-settings";
 
 /** On-device translation (the browser `Translator` API on web). */
 export interface TranslationEngine {
@@ -42,13 +56,25 @@ export interface TranslationEngine {
     text: string,
     options?: { readonly onProgress?: ProgressListener; readonly signal?: AbortSignal },
   ): Promise<string>;
+  /** Who fetches the pack of a `needs-pack` pair; absent means `engine`. */
+  packFetch?(source: string, target: string): PackFetch;
+  /**
+   * Whether this engine ever downloads a pack itself (absent means it does).
+   * `false` where every pack comes from the system's own settings (macOS):
+   * then nothing Lakko does touches the connection, and the mobile-data
+   * setting has nothing to govern (UX section 6).
+   */
+  readonly fetchesPacks?: boolean;
+  /** Open the system's settings where its packs are downloaded. */
+  openPackSettings?(): Promise<void>;
 }
 
 /** On-device language detection (the browser `LanguageDetector` API). */
 export interface DetectionEngine {
   /** Whether a detector is usable now, without a download. */
   readonly present: boolean;
-  /** The most likely language, or `null` when there is none or no detector. */
+  /** The most likely language, with its close candidates, or `null` when
+   *  there is none or no detector. */
   detect(text: string): Promise<Detection | null>;
 }
 
@@ -74,11 +100,36 @@ export interface TranscriptionEngine {
   ): Promise<TranscriptOutcome>;
 }
 
+/**
+ * The languages whose packs are on this device and managed by its operating
+ * system, as the system reports them (UX section 6: listed with `Managed by
+ * your system` and no Remove). Tags are the system's own; the caller merges
+ * them with the shared language rules.
+ */
+export interface SystemPacks {
+  /** Languages that translate into the target with a pack already here. */
+  readonly translation: readonly string[];
+  /** Languages whose speech model is here. */
+  readonly transcription: readonly string[];
+}
+
 /** The three engines a client runs with. */
 export interface Engines {
   readonly translation: TranslationEngine;
   readonly detection: DetectionEngine;
   readonly transcription: TranscriptionEngine;
+  /**
+   * Whether no pack may be downloaded now: anti-censorship is on, and a
+   * vendor download would leave the device outside it (ADR-0082 section 4).
+   * Absent where the client has no anti-censorship (the browser).
+   */
+  packsBlocked?(): Promise<boolean>;
+  /**
+   * The packs the system holds for these engines, where it can list them
+   * (the desktop app on macOS). Absent where it cannot: a browser lists no
+   * pack, and only the ones Lakko asked for are recorded (`settings.ts`).
+   */
+  systemPacks?(target: string): Promise<SystemPacks>;
 }
 
 /**

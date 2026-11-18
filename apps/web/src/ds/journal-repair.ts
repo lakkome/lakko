@@ -38,6 +38,8 @@
  * Every step is logged at info level; no key material is logged.
  */
 import { journalHex } from "./access";
+import { base64Encode } from "../auth/account-id";
+import { registeredCommitHolds } from "../chat/registered-commit-hold";
 import {
   RANK_ADMIN,
   isStatus,
@@ -74,6 +76,10 @@ export interface JournalRepairPorts {
    *  `null` when the group is not held (or cannot derive: evicted). */
   currentEpochKey(groupId: Uint8Array): { readonly epoch: bigint; readonly key: Uint8Array } | null;
   readonly sender: StatementSender;
+  /** ADR-0091 phase 1: `true` when this device holds a registered commit of
+   *  the group, or is behind at or above `epoch`. The epochs above are then
+   *  real and a Replace would cut them. Defaults to the chat poll's holds. */
+  registeredCommitKnown?(groupId: Uint8Array, epoch: bigint): boolean;
   /** `setTimeout`, injectable for tests; returns the canceller. */
   schedule?(run: () => void, ms: number): () => void;
 }
@@ -95,6 +101,9 @@ export type RepairOutcome =
   | "poll-failed"
   /** The group is no longer held here, or its key could not be derived. */
   | "no-key"
+  /** ADR-0091 phase 1: this device holds a registered commit of the group
+   *  above this epoch (or is behind there): the epochs above are real. */
+  | "registered-commit-known"
   /** The Replace failed for any other reason. */
   | "failed";
 
@@ -232,6 +241,19 @@ export class JournalRepair {
     if (current.epoch !== epoch) {
       log(`the group moved from epoch ${epoch} to ${current.epoch}; nothing to repair`);
       return "moved";
+    }
+    let known: boolean;
+    try {
+      known =
+        ports.registeredCommitKnown?.(groupId, epoch) ??
+        registeredCommitHolds.blocksRepair(base64Encode(groupId), epoch);
+    } catch {
+      // Unknown is not "nothing above": no Replace.
+      known = true;
+    }
+    if (known) {
+      log("a registered commit is known above this epoch; not repaired");
+      return "registered-commit-known";
     }
     const authority = ports.authority(groupId);
     try {

@@ -58,6 +58,7 @@ pub mod device_card;
 pub mod device_link;
 pub mod discover;
 pub mod discovery;
+pub mod donation;
 pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;
@@ -79,8 +80,10 @@ pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;
 pub mod pow;
+pub mod publisher_devices;
 pub mod push_wake;
 pub mod reaction_rules;
+pub mod recovery_payload;
 pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
@@ -799,10 +802,39 @@ pub enum FfiError {
     MembershipGroupStillActive(String),
 
     // ------------------------------------------------------------------
-    // ADR-0090 attachment kinds - APPENDED last: a `flat_error` lowers by
+    // ADR-0074 "Joining after a rotation" (G-56): the recovery payload v3
+    // and the own binding verdict. APPENDED last: a `flat_error` lowers by
     // ordinal.
     // ------------------------------------------------------------------
-    /// An ADR-0090 content payload or op was refused (`content.rs`). The
+    /// A recovery payload, row or binding input was refused
+    /// (`recovery_payload.rs`). The message is `"<code>: <reason>"` with the
+    /// frozen codes of `lakko_mnemonic::recovery_payload::RecoveryPayloadError`
+    /// (`bad-grant-length`, `bad-entropy-length`, `too-many-predecessors`,
+    /// `bad-length`, `duplicate-predecessor`, `current-key-predecessor`,
+    /// `unsupported-row`) or `bad-seed-length` / `bad-key-length` for an
+    /// argument of the wrong length. Any refusal of a received payload or row
+    /// means the keys were not handed over.
+    #[error("{0}")]
+    RecoveryPayload(String),
+
+    // ------------------------------------------------------------------
+    // Donation statements (`docs/ux/donations.md` section 3, G-57).
+    // APPENDED last: a `flat_error` lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// A donation method or phone statement was refused (`donation.rs`). The
+    /// message is `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_attest::DonationError` (`bad-length`, `bad-version`,
+    /// `bad-kind`, `bad-field`, `kind-mismatch`, `bad-signature`,
+    /// `id-mismatch`) or `bad-key` when the pinned donations key is not an
+    /// Ed25519 key. The screen shows nothing for a refused statement.
+    #[error("{0}")]
+    Donation(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0092 attachment kinds - APPENDED last: a `flat_error` lowers by
+    // ordinal.
+    // ------------------------------------------------------------------
+    /// An ADR-0092 content payload or op was refused (`content.rs`). The
     /// message is `"<code>: <reason>"`; the code is
     /// `lakko_attachments::ContentError::code` (`truncated`, `wrongDomain`,
     /// `<field>.tooLong`, `<field>.outOfRange`, `signatureMissing`,
@@ -827,7 +859,7 @@ pub enum FfiError {
     #[error("{0}")]
     AnonCred(String),
 
-    /// An open-items or poll-ballots hand-over (ADR-0090 section 3.9) was
+    /// An open-items or poll-ballots hand-over (ADR-0092 section 3.9) was
     /// refused (`open_items.rs`). The message is `"<code>: <reason>"` with
     /// the codes of `lakko_contacts::OpenItemsError` / `PollBallotsError` /
     /// `lakko_open_items::BuildError` / `AdoptError`, or `badLength`.
@@ -3066,91 +3098,81 @@ impl From<lakko_mls::JoinRequest> for FfiJoinRequest {
     }
 }
 
-/// Persistent MLS-group wrapper for one Lakko channel's
-/// publisher tier (ADR-0010 Tier 1).
+/// Persistent MLS-group wrapper for one Lakko channel's publisher tier
+/// (ADR-0010 Tier 1), a group of **devices** since ADR-0090: every leaf is a
+/// bound device identity, every commit is staged and merged only when the
+/// Delivery Service took it (`mergeStagedCommit` on `201` / `200`,
+/// `abandonStagedCommit` on `409`), and every peer refuses a commit whose
+/// committer is not a device of the owner's account.
 ///
-/// Mirror of [`Group`] but with the channel-id keyed
-/// persistence + the `channel_seed` exporter shortcut baked
-/// in. The iOS / Android channels composer should construct
-/// via [`PublisherGroup::open_or_create`] on every publish —
-/// the load-or-create dance ensures the MLS state from a
-/// prior session is reused (so the exporter output is stable
-/// across app restarts).
+/// Opened with [`publisher_group_load`] (an owner device),
+/// [`publisher_group_load_joined`] (by the id kept, a co-publisher device) or
+/// [`publisher_group_join_from_welcome`]; founded only with
+/// [`PublisherGroup::create`] (create-channel, and ADR-0090 decision A's
+/// re-founding). There is no load-or-create.
 #[derive(uniffi::Object)]
 pub struct PublisherGroup {
     inner: Mutex<MlsPublisherGroup>,
 }
 
+/// A staged PublisherGroup commit (ADR-0090 section 3): the commit to send
+/// through `POST /ds/group/{hex}/commit` and, when it adds leaves, the
+/// Welcome to deliver once it merged.
+#[derive(uniffi::Record)]
+pub struct FfiPublisherCommit {
+    /// The encoded commit.
+    pub commit: Vec<u8>,
+    /// The encoded Welcome, `None` when the commit adds nobody.
+    pub welcome: Option<Vec<u8>>,
+}
+
+fn owner_seed32(owner_account_seed: &[u8]) -> Result<[u8; 32], FfiError> {
+    owner_account_seed
+        .try_into()
+        .map_err(|_| FfiError::Codec("ownerAccountSeed must be 32 bytes".to_string()))
+}
+
+fn account_key32(key: &[u8]) -> Result<[u8; 32], FfiError> {
+    key.try_into()
+        .map_err(|_| FfiError::Codec("ownerAccountKey must be 32 bytes".to_string()))
+}
+
 #[uniffi::export]
 impl PublisherGroup {
-    /// Load the persisted PublisherGroup for `channel_id`.
-    /// Returns `null` if no group exists yet for this channel
-    /// under the caller's identity — pair with
-    /// [`PublisherGroup::create`] or use the
-    /// [`publisher_group_open_or_create`] free function for
-    /// the load-or-create shortcut.
-    ///
-    /// Free-function shape (not a constructor) because UniFFI
-    /// 0.28 rejects `Option<Self>` in `#[uniffi::constructor]`
-    /// signatures — same workaround as [`load_group`].
+    /// Found the PublisherGroup of `channel_id` with `identity` (this
+    /// device's bound identity) as its only leaf. `owner_account_seed` is
+    /// the owner's 32-byte account seed: it derives the group id and the
+    /// owner's account key, and `identity` must be bound to that account.
+    /// Only create-channel and the re-founding of ADR-0090 decision A call
+    /// it; refused when this device already holds a group under that id.
     #[uniffi::constructor]
-    pub fn create(identity: &Identity, channel_id: Vec<u8>) -> Result<Self, FfiError> {
+    pub fn create(
+        identity: &Identity,
+        owner_account_seed: Vec<u8>,
+        channel_id: Vec<u8>,
+    ) -> Result<Self, FfiError> {
         let cid = MlsChannelId::try_from_slice(&channel_id)?;
-        let inner = MlsPublisherGroup::create(&identity.inner, &cid)?;
+        let seed = owner_seed32(&owner_account_seed)?;
+        let inner = MlsPublisherGroup::create(&identity.inner, &seed, &cid)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
     }
 
-    /// 32-byte channel content-key seed derived from the MLS
-    /// exporter at the **current** group epoch. Stable across
-    /// process restarts once the group has been persisted —
-    /// that is the load-bearing invariant
-    /// G4-2-mls-persistence closes.
-    ///
-    /// Wire shape matches the existing
-    /// `channel_seed_from_mls_exporter_output` byte-pipe:
-    /// 32 bytes the channels composer hands to
-    /// `compose_channel_post` as the per-channel content seed.
+    /// 32-byte channel content-key seed at the **current** epoch.
     pub fn channel_seed(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let seed = g.channel_seed(&identity.inner)?;
-        Ok(seed.to_vec())
+        Ok(g.channel_seed(&identity.inner)?.to_vec())
     }
 
-    /// Channel id this group was minted for.
+    /// Channel id this group was opened for.
     pub fn channel_id(&self) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.channel_id().as_bytes().to_vec())
     }
 
-    /// G4-2-mls-persistence step 4 — rotate the channel
-    /// content-key seed by advancing the MLS group epoch
-    /// via a self-update commit. Returns the wire-encoded
-    /// commit bytes; the caller broadcasts them to every
-    /// other PublisherGroup member so they advance to the
-    /// same epoch in lock-step.
-    ///
-    /// After `rotate` returns, the next [`channel_seed`]
-    /// call against this handle (or any future
-    /// [`publisher_group_load`]) yields the **new-epoch**
-    /// seed. Pair with `seal_subscriber_seed_envelope` +
-    /// the services/channels batch fanout to reseal the
-    /// seed to every subscriber under the new epoch id.
-    pub fn rotate(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
-        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        Ok(g.rotate(&identity.inner)?)
-    }
-
-    // ADR-0028 OQ3 — co-publisher external-join surface. A PublisherGroup is a
-    // vanilla MLS group, so adding a publisher reuses the group join-ticket +
-    // external-join machinery (ADR-0027/0028) verbatim. These delegate to the
-    // inner Group; the owner mints a `/g/` link over `group_id`, applies the
-    // joiner's external-add via `process_incoming_verifying_roles`, and approves.
-
     /// The ADR-0053 access signer for the publisher journal at the current
-    /// epoch - the same derivation as `Group.dsAccessSigner` over the
-    /// underlying group. Re-derive after every commit (every rotation).
+    /// epoch. Re-derive after every merged commit.
     pub fn ds_access_signer(
         &self,
         identity: &Identity,
@@ -3159,107 +3181,112 @@ impl PublisherGroup {
         ds_proof::group_signer(g.inner(), &identity.inner)
     }
 
-    /// ADR-0081 - the 32-byte access seed of the current epoch, to record
-    /// with a commit before it merges (a rotation, an approve) so a re-send
-    /// after a restart can prove the epoch the commit left
-    /// ([`ds_proof::DsProofSigner::for_group`]). Treat it like the signer:
-    /// keep it only in the device-key-encrypted record of that commit.
+    /// The access signer of the epoch the staged commit moves to (N+1),
+    /// `None` when nothing is staged: its `verifyingKey` is the `epochKey`
+    /// of the commit statement (`DsStatementSigner.commit`).
+    pub fn ds_staged_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<Arc<ds_proof::DsProofSigner>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::staged_group_signer(g.inner(), &identity.inner)
+    }
+
+    /// ADR-0081 — the 32-byte access seed of the current epoch, to record
+    /// with a staged commit so a re-send after a restart can prove the epoch
+    /// the commit leaves. Keep it only in the device-key-encrypted record.
     pub fn ds_access_seed(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         ds_proof::group_access_seed(g.inner(), &identity.inner)
     }
 
-    /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
-    /// is minted over this; the joiner targets it when crafting its
-    /// external-join proposal.
+    /// ADR-0064 section 7 — the 32-byte access seed of the epoch the staged
+    /// commit (or a held entry) moves to, `None` when nothing is staged:
+    /// saved in the channel's vault head with `stagedGroupInfo`, at epoch
+    /// `epoch + 1`. Secret; keep it only in the sealed head. An entering
+    /// device rebuilds a saved epoch's signer with `DsProofSigner.forGroup`.
+    pub fn staged_ds_access_seed(&self, identity: &Identity) -> Result<Option<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::staged_group_access_seed(g.inner(), &identity.inner)
+    }
+
+    /// The underlying MLS `group_id`.
     pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.group_id())
     }
 
-    /// The current MLS epoch. G-50: a PublisherGroup commit's durable record
-    /// names the epoch it moved the group to, and a restart compares it with
-    /// this.
+    /// The current MLS epoch.
     pub fn epoch(&self) -> Result<u64, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.epoch())
     }
 
-    /// Process one row read from this journal's **knock** queue (ADR-0053).
-    /// Anything that is not a stranger's external-join proposal for this group
-    /// is refused BEFORE it is processed - a knock row is an unauthenticated
-    /// write, and applying a commit or message someone posted there instead of
-    /// the journal would fork the admins who read knocks from everyone else.
-    /// A row that passes is processed exactly like `processIncomingVerifyingRoles`.
+    /// The owner's 32-byte account key this device recorded for the group.
+    pub fn owner_account_key(&self) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.owner_account_key().to_vec())
+    }
+
+    /// `true` when `owner_account_seed` derives this group's id: the
+    /// caller's account owns the channel (every owner device), `false` for a
+    /// co-publisher's own seed.
+    pub fn is_owned_by(&self, owner_account_seed: Vec<u8>) -> Result<bool, FfiError> {
+        let seed = owner_seed32(&owner_account_seed)?;
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.is_owned_by(&seed))
+    }
+
+    /// `true` when `identity` is bound to the owner's account: a device that
+    /// may commit in this group.
+    pub fn is_owner_device(&self, identity: &Identity) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.is_owner_device(&identity.inner))
+    }
+
+    /// Process one row read from this journal's **knock** queue (ADR-0053):
+    /// anything that is not a stranger's external-join proposal for this
+    /// group is refused before it is processed.
     pub fn process_knock(
         &self,
         identity: &Identity,
         bytes: Vec<u8>,
     ) -> Result<ProcessedMessage, FfiError> {
-        {
-            let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-            if !lakko_mls::is_external_join_proposal_for(&bytes, &g.group_id()) {
-                return Err(FfiError::Message(
-                    "knock row is not an external-join proposal for this group".to_string(),
-                ));
-            }
-        }
-        self.process_incoming_verifying_roles(identity, bytes)
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(processed_message_of(
+            g.process_knock(&identity.inner, &bytes)?,
+        ))
     }
 
-    /// ADR-0028 OQ3 — process an incoming MLS message on the publisher tier,
-    /// role-gated (ADR-0022). Surfaces a non-member's external-join proposal as
-    /// `ProcessedMessage::ExternalJoinProposal` so the owner can approve a
-    /// co-publisher.
+    /// Process one message read from the PublisherGroup journal. Every
+    /// commit passes the ADR-0090 commit gate before it merges: a commit
+    /// whose committer is not a device of the owner, that adds a leaf
+    /// without a verifying device binding, that puts more than 8 leaves of
+    /// one account in the roster, or that carries another proposal kind is
+    /// refused (typed `FfiError`: `MembershipNotOwner`,
+    /// `MembershipDeviceBindingInvalid`, `MembershipDeviceLimitReached`,
+    /// `MembershipUnsupportedProposal`) and not merged. The name is kept from
+    /// the ADR-0028 surface; there is no role table.
     pub fn process_incoming_verifying_roles(
         &self,
         identity: &Identity,
         bytes: Vec<u8>,
     ) -> Result<ProcessedMessage, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let result = g
-            .inner_mut()
-            .process_incoming_verifying_roles(&identity.inner, &bytes)?;
-        Ok(match result {
-            MlsIncoming::Application {
-                bytes,
-                sender_leaf,
-                sender_account,
-            } => ProcessedMessage::Application {
-                data: bytes,
-                sender_leaf,
-                sender_account,
-            },
-            MlsIncoming::Commit => ProcessedMessage::Commit,
-            MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
-                record: record.into(),
-            },
-            MlsIncoming::ExternalJoinProposal {
-                joiner_signature_key,
-                retained,
-            } => ProcessedMessage::ExternalJoinProposal {
-                joiner_signature_key,
-                retained,
-            },
-        })
+        Ok(processed_message_of(
+            g.process_incoming(&identity.inner, &bytes)?,
+        ))
     }
 
-    /// ADR-0028 OQ3 — the signature key of every pending co-publisher
-    /// external-join proposal (a handle for `approve_external_join` /
-    /// `reject_external_join`).
+    /// The signature key of every retained request to join.
     pub fn pending_external_joins(&self) -> Result<Vec<Vec<u8>>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        Ok(g.inner().pending_external_joins())
+        Ok(g.pending_external_joins())
     }
 
     /// ADR-0087 section 5 — retain a co-publisher's request to join read off
-    /// the channel's knock (`openKnockRow`); approve it with
-    /// [`Self::approve_external_join`].
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError`] when the bytes are not one KeyPackage or it does not
-    /// validate; nothing is changed.
+    /// the channel's knock; approve it with
+    /// [`Self::stage_approve_external_join`].
     pub fn retain_join_request(
         &self,
         identity: &Identity,
@@ -3269,30 +3296,20 @@ impl PublisherGroup {
         Ok(g.retain_join_request(&identity.inner, &key_package)?.into())
     }
 
-    /// ADR-0087 section 7 — encrypt an application message for the
-    /// publishers at the current epoch (the admission-seed envelope a channel
-    /// owner hands its co-publishers). Read it on the other side with
-    /// `processIncomingVerifyingRoles`; publish it to the PublisherGroup
-    /// journal like any group message.
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError`] when MLS refuses to encrypt.
+    /// Encrypt an application message for the publishers at the current
+    /// epoch (hand-over envelopes, device requests, admission marks).
+    /// Allowed while a commit is staged.
     pub fn create_application_message(
         &self,
         identity: &Identity,
         plaintext: Vec<u8>,
     ) -> Result<Vec<u8>, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let msg = g
-            .inner_mut()
-            .create_application_message(&identity.inner, &plaintext)?;
-        Ok(group::encode_message(&msg)?)
+        Ok(g.create_application_message(&identity.inner, &plaintext)?)
     }
 
-    /// ADR-0087 phase B — the publishers at the current epoch, one row per
-    /// leaf with the leaf's account key, the list the channel info's
-    /// Publishers block renders. Same shape as [`Group::members`].
+    /// The publishers at the current epoch, one row per leaf (device) with
+    /// the leaf's account key; group by `accountKey`.
     pub fn members(&self) -> Result<Vec<GroupMember>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.members()
@@ -3305,108 +3322,207 @@ impl PublisherGroup {
             .collect())
     }
 
-    /// Whether `identity` is the channel's owner: the account whose seed this
-    /// PublisherGroup's id derives from (ADR-0078 phase 6).
-    pub fn is_owned_by(&self, identity: &Identity) -> Result<bool, FfiError> {
-        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        Ok(g.is_owned_by(&identity.inner))
-    }
-
-    /// `false` once a commit removed this device's own leaf (the owner
-    /// removed this publisher). Mirror of [`Group::is_active`].
+    /// `false` once a commit removed this device's own leaf.
     pub fn is_active(&self) -> Result<bool, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.is_active())
     }
 
-    /// ADR-0087 section 15 (phase B) — the owner removes a publisher: every
-    /// leaf of `account_key` in ONE commit, merged here. Returns the encoded
-    /// commit. Take the epoch-N access signer (`dsAccessSeed`) BEFORE the
-    /// call, publish the commit through the ADR-0081 commit route, then
-    /// rotate and reseal: the removed person cannot derive the next seed.
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError`] when `identity` is not the owner, `account_key` is the
-    /// owner's own, no leaf belongs to it, or the commit fails.
-    pub fn remove_publisher(
+    /// Stage ONE commit (ADR-0090 section 3) that admits `admit` (wire
+    /// KeyPackages of devices of accounts that already publish here),
+    /// retires the leaves whose signature keys are `retire`, and carries an
+    /// update path when `rotate`. Owner devices only; nothing merges.
+    pub fn stage_commit(
+        &self,
+        identity: &Identity,
+        admit: Vec<Vec<u8>>,
+        retire: Vec<Vec<u8>>,
+        rotate: bool,
+    ) -> Result<FfiPublisherCommit, FfiError> {
+        let admit: Vec<&[u8]> = admit.iter().map(Vec::as_slice).collect();
+        let retire: Vec<&[u8]> = retire.iter().map(Vec::as_slice).collect();
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let staged = g.stage_commit(&identity.inner, &admit, &retire, rotate)?;
+        Ok(FfiPublisherCommit {
+            commit: staged.commit,
+            welcome: staged.welcome,
+        })
+    }
+
+    /// Stage a rotation (ADR-0090 section 4). Returns the commit.
+    pub fn stage_rotate(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.stage_rotate(&identity.inner)?)
+    }
+
+    /// Stage the admission of devices of accounts that already publish here
+    /// (ADR-0090 sections 2.1, 2.2). Returns the commit and the Welcome.
+    pub fn stage_admit_devices(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<Vec<u8>>,
+    ) -> Result<AddMember, FfiError> {
+        let kps: Vec<&[u8]> = key_packages.iter().map(Vec::as_slice).collect();
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let staged = g.stage_admit_devices(&identity.inner, &kps)?;
+        Ok(AddMember {
+            commit: staged.commit,
+            welcome: staged.welcome,
+        })
+    }
+
+    /// Stage the retirement of the leaves whose signature keys are
+    /// `device_keys` (ADR-0090 sections 2.1, 2.4). Returns the commit.
+    pub fn stage_retire_devices(
+        &self,
+        identity: &Identity,
+        device_keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let keys: Vec<&[u8]> = device_keys.iter().map(Vec::as_slice).collect();
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.stage_retire_devices(&identity.inner, &keys)?)
+    }
+
+    /// Stage the removal of every leaf of the publisher `account_key`
+    /// (ADR-0087 section 15). Never the owner's account. Returns the commit.
+    pub fn stage_remove_publisher(
         &self,
         identity: &Identity,
         account_key: Vec<u8>,
     ) -> Result<Vec<u8>, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        Ok(g.remove_publisher(&identity.inner, &account_key)?)
+        Ok(g.stage_remove_publisher(&identity.inner, &account_key)?)
     }
 
-    /// ADR-0087 section 15 (phase B) — a co-publisher steps down: an
-    /// encrypted application message (`lakko/publisher-step-down/v1`) the
-    /// owner's device applies as `removePublisher` of the sender's account.
-    /// Returns the encoded message to publish to the PublisherGroup journal.
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError`] when `identity` is the owner, or MLS refuses to encrypt.
-    pub fn step_down(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
-        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        Ok(g.step_down(&identity.inner)?)
-    }
-
-    /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns
-    /// the Commit + the joiner's Welcome, as it always has.
-    ///
-    /// **This is the direct approve, and this is the only type it survives on**
-    /// (ADR-0045 S7). A PublisherGroup carries no ADR-0022 role table, so it has
-    /// no committer to sweep a proposal, and ADR-0045 leaves such a group on
-    /// direct commits. The return type is the difference and it is deliberate:
-    /// [`Group::approve_external_join`] hands back proposal bytes and no
-    /// Welcome, this hands back a merged Commit and a Welcome to deliver now,
-    /// and neither can be used where the other is expected.
-    pub fn approve_external_join(
+    /// Stage the approval of a retained co-publisher request to join. The
+    /// request stays retained until the commit merges. Returns the commit
+    /// and the joiner's Welcome.
+    pub fn stage_approve_external_join(
         &self,
         identity: &Identity,
         proposal_ref: Vec<u8>,
     ) -> Result<AddMember, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let MemberAddition { commit, welcome } =
-            g.approve_external_join(&identity.inner, &proposal_ref)?;
+        let staged = g.stage_approve_external_join(&identity.inner, &proposal_ref)?;
         Ok(AddMember {
-            commit: group::encode_message(&commit)?,
-            welcome: group::encode_message(&welcome)?,
+            commit: staged.commit,
+            welcome: staged.welcome,
         })
     }
 
-    /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
-    /// no epoch advance).
-    /// `identity` is what the durable copy of the pending set is written
-    /// through (the request set rides the MLS storage snapshot, so a decision
-    /// survives a restart).
+    /// `true` while a commit of this device awaits the Delivery Service.
+    pub fn has_staged_commit(&self) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.has_staged_commit())
+    }
+
+    /// The channel seed of the epoch the staged commit moves to, `None`
+    /// when nothing is staged. Never seal it to a subscriber before
+    /// `mergeStagedCommit` (C-90); a caller may only record it.
+    pub fn staged_channel_seed(&self, identity: &Identity) -> Result<Option<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.staged_channel_seed(&identity.inner)?.map(|s| s.to_vec()))
+    }
+
+    /// ADR-0064 section 7 — the GroupInfo of the current epoch (wire bytes,
+    /// with the ratchet tree and the external public key, signed by this
+    /// device's leaf): what an owner device saves in the channel's vault head
+    /// so another owner device can `publisherGroupEnter`. Refused while an
+    /// entry awaits its verdict.
+    pub fn group_info(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_info(&identity.inner)?)
+    }
+
+    /// ADR-0064 section 7 — the GroupInfo of the epoch the staged commit
+    /// moves to, `None` when nothing is staged: save it BEFORE sending the
+    /// commit. For an entry, the GroupInfo of the epoch the entry moves to.
+    pub fn staged_group_info(&self, identity: &Identity) -> Result<Option<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.staged_group_info(&identity.inner)?)
+    }
+
+    /// The journal took the staged commit (`201`, or the identical
+    /// re-send's `200`): merge it. `false` when nothing was staged.
+    pub fn merge_staged_commit(&self, identity: &Identity) -> Result<bool, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.merge_staged_commit(&identity.inner)?)
+    }
+
+    /// The journal took another commit (`409`): discard the staged one; the
+    /// group stays at N to apply the winner. `false` when nothing was
+    /// staged.
+    pub fn abandon_staged_commit(&self, identity: &Identity) -> Result<bool, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.abandon_staged_commit(&identity.inner)?)
+    }
+
+    /// Delete this device's state for the group, active or not (ADR-0090
+    /// section 2.5: the journal was reset under it, or the account founds
+    /// again). This handle is unusable afterwards.
+    pub fn delete(&self, identity: &Identity) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        g.delete(&identity.inner)?;
+        Ok(())
+    }
+
+    /// A co-publisher steps down: the application message (an owner device
+    /// applies it as `stageRemovePublisher` of the sender's account).
+    pub fn step_down(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.step_down(&identity.inner)?)
+    }
+
+    /// Drop a retained co-publisher request to join (local, no commit).
     pub fn reject_external_join(
         &self,
         identity: &Identity,
         proposal_ref: Vec<u8>,
     ) -> Result<(), FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        g.inner_mut()
-            .reject_external_join(&identity.inner, &proposal_ref)?;
+        g.reject_external_join(&identity.inner, &proposal_ref)?;
         Ok(())
     }
 }
 
-/// Load the persisted PublisherGroup for `channel_id` if any.
-/// Returns `null` when no group has been minted yet for this
-/// (identity, channel_id) pair under `identity`'s provider
-/// storage.
-///
-/// Free function rather than a constructor because UniFFI
-/// 0.28 rejects `Option<Self>` in constructor returns — same
-/// shape rationale as the existing [`load_group`].
+fn processed_message_of(result: MlsIncoming) -> ProcessedMessage {
+    match result {
+        MlsIncoming::Application {
+            bytes,
+            sender_leaf,
+            sender_account,
+        } => ProcessedMessage::Application {
+            data: bytes,
+            sender_leaf,
+            sender_account,
+        },
+        MlsIncoming::Commit => ProcessedMessage::Commit,
+        MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
+            record: record.into(),
+        },
+        MlsIncoming::ExternalJoinProposal {
+            joiner_signature_key,
+            retained,
+        } => ProcessedMessage::ExternalJoinProposal {
+            joiner_signature_key,
+            retained,
+        },
+    }
+}
+
+/// Open the PublisherGroup this OWNER device holds for `channel_id`, or
+/// `null` when it holds none: the device then waits to be admitted
+/// (ADR-0090 section 2.1) and never founds. `identity` is this device's
+/// bound identity, `owner_account_seed` the account's 32-byte seed.
 #[uniffi::export]
 pub fn publisher_group_load(
     identity: &Identity,
+    owner_account_seed: Vec<u8>,
     channel_id: Vec<u8>,
 ) -> Result<Option<Arc<PublisherGroup>>, FfiError> {
     let cid = MlsChannelId::try_from_slice(&channel_id)?;
-    let loaded = MlsPublisherGroup::load(&identity.inner, &cid)?;
+    let seed = owner_seed32(&owner_account_seed)?;
+    let loaded = MlsPublisherGroup::load(&identity.inner, &seed, &cid)?;
     Ok(loaded.map(|inner| {
         Arc::new(PublisherGroup {
             inner: Mutex::new(inner),
@@ -3414,32 +3530,10 @@ pub fn publisher_group_load(
     }))
 }
 
-/// Load-or-create convenience — the path every composer
-/// should take. Tries [`publisher_group_load`] first; on
-/// `null`, mints a fresh group via
-/// [`PublisherGroup::create`]. Idempotent: once a group has
-/// been minted for `(identity, channel_id)`, every
-/// subsequent call returns the same persisted state and
-/// therefore the same exporter output for the current
-/// epoch.
-#[uniffi::export]
-pub fn publisher_group_open_or_create(
-    identity: &Identity,
-    channel_id: Vec<u8>,
-) -> Result<Arc<PublisherGroup>, FfiError> {
-    if let Some(existing) = publisher_group_load(identity, channel_id.clone())? {
-        return Ok(existing);
-    }
-    let created = PublisherGroup::create(identity, channel_id)?;
-    Ok(Arc::new(created))
-}
-
-/// ADR-0028 OQ3 / ADR-0078 section 6 — open a PublisherGroup this identity
-/// JOINED as a co-publisher. A co-publisher cannot compute the owner's id
-/// (it is derived from the owner's seed), so it passes the `group_id` its
-/// `/g/` capability conveyed and the `channel_id` that link's sealed preview
-/// carried, both kept since the join. Returns `null` when nothing is stored
-/// under `group_id`; never creates.
+/// Open a PublisherGroup this device joined, by the id it kept (a
+/// co-publisher's device: the id its `/g/` link conveyed). Returns `null`
+/// when nothing is stored under `group_id`; never creates; refused when the
+/// owner's account key was never recorded beside the group.
 #[uniffi::export]
 pub fn publisher_group_load_joined(
     identity: &Identity,
@@ -3472,26 +3566,106 @@ pub fn device_group_join_welcome_by_name(
     }))
 }
 
-/// ADR-0028 OQ3 / ADR-0081 amendment (2026-10-19) — join a PublisherGroup as
-/// a co-publisher from the owner's Welcome. A PublisherGroup carries no role
-/// table, so `Group.joinFromWelcome` refuses its Welcome (`NoRoleTable`); this
-/// is its entry point. `group_id` is the id the `/g/` capability conveyed and
-/// `channel_id` the one its sealed preview carried: a Welcome for any other
-/// group, or a conversation's Welcome, is refused before anything is written.
-/// The joined state persists in `identity`'s provider
-/// (`publisherGroupLoadJoined` reopens it).
+/// ADR-0090 section 2.3 — join a PublisherGroup from an owner device's
+/// Welcome: an owner device (`group_id` = `publisherGroupIdFor`,
+/// `owner_account_key` = `publisherOwnerAccountKey` of its account seed) or
+/// a co-publisher device (`group_id` from its `/g/` link,
+/// `owner_account_key` the capability's issuer key). A Welcome sent by
+/// anyone but a device of `owner_account_key`, for another group, or a
+/// conversation's, is refused before anything is written.
 #[uniffi::export]
 pub fn publisher_group_join_from_welcome(
     identity: &Identity,
     welcome: Vec<u8>,
     group_id: Vec<u8>,
     channel_id: Vec<u8>,
+    owner_account_key: Vec<u8>,
 ) -> Result<Arc<PublisherGroup>, FfiError> {
     let cid = MlsChannelId::try_from_slice(&channel_id)?;
-    let inner = MlsPublisherGroup::join_from_welcome(&identity.inner, &welcome, &group_id, &cid)?;
+    let owner = account_key32(&owner_account_key)?;
+    let inner =
+        MlsPublisherGroup::join_from_welcome(&identity.inner, &welcome, &group_id, &cid, &owner)?;
     Ok(Arc::new(PublisherGroup {
         inner: Mutex::new(inner),
     }))
+}
+
+/// What [`publisher_group_enter`] returns: the group, HOLDING its entry until
+/// the Delivery Service answers, and the external commit to send.
+#[derive(uniffi::Record)]
+pub struct FfiPublisherGroupEntry {
+    /// The entered group: `hasStagedCommit` is `true`, `stagedChannelSeed`
+    /// and `dsStagedAccessSigner` answer for the epoch the entry moves to,
+    /// `epoch` is the epoch it leaves; `channelSeed`, `groupInfo`,
+    /// `dsAccessSigner` and every send and receive are refused until
+    /// `mergeStagedCommit` (`201` / `200`). `abandonStagedCommit` (`409`)
+    /// deletes everything the entry wrote: the handle then holds nothing.
+    pub group: Arc<PublisherGroup>,
+    /// The external commit, wire-encoded.
+    pub commit: Vec<u8>,
+}
+
+/// ADR-0064 section 7 (amendment of 2026-11-14) — an owner device that holds
+/// no PublisherGroup for `channel_id` enters from a GroupInfo another owner
+/// device saved, by an external commit carrying its ExternalInit alone and
+/// this device's bound leaf. Send `commit` through the Delivery Service
+/// commit route, then `mergeStagedCommit` or `abandonStagedCommit`. The entry
+/// is durable (it rides the storage snapshot; `publisherGroupLoad` opens it
+/// still held). Refused before anything is written: a device not bound to
+/// the owner's account (`MembershipDeviceBindingInvalid`), a GroupInfo of
+/// another group or channel, one signed by a device that is not the owner's
+/// (`MembershipNotOwner`), an owner already at 8 devices
+/// (`MembershipDeviceLimitReached`), a leaf that is not a bound device, a
+/// device that already holds the group or whose leaf is still in it.
+///
+/// G-55: `ds_access_seed` is the 32-byte Delivery Service access seed saved
+/// with the GroupInfo (`VaultReentryEpoch.dsAccessSeed`, the epoch the
+/// GroupInfo describes). The returned `commit` is wrapped under a key derived
+/// from it, so the Delivery Service never reads the entering leaf's account
+/// binding; members open it in `processIncomingVerifyingRoles`. Send it as
+/// the commit row unchanged.
+#[uniffi::export]
+pub fn publisher_group_enter(
+    identity: &Identity,
+    group_info: Vec<u8>,
+    owner_account_seed: Vec<u8>,
+    channel_id: Vec<u8>,
+    ds_access_seed: Vec<u8>,
+) -> Result<FfiPublisherGroupEntry, FfiError> {
+    let cid = MlsChannelId::try_from_slice(&channel_id)?;
+    let seed = owner_seed32(&owner_account_seed)?;
+    let access = <[u8; 32]>::try_from(ds_access_seed.as_slice()).map_err(|_| {
+        FfiError::Message(format!(
+            "ds_access_seed must be 32 bytes, got {}",
+            ds_access_seed.len()
+        ))
+    })?;
+    let entry = MlsPublisherGroup::enter(&identity.inner, &group_info, &seed, &cid, &access)?;
+    Ok(FfiPublisherGroupEntry {
+        group: Arc::new(PublisherGroup {
+            inner: Mutex::new(entry.group),
+        }),
+        commit: entry.commit,
+    })
+}
+
+/// The owner's account key (the Ed25519 public key of
+/// `owner_account_seed`): what a co-publisher's `/g/` capability names as its
+/// issuer and what every owner device's binding names.
+#[uniffi::export]
+pub fn publisher_owner_account_key(owner_account_seed: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    Ok(lakko_mls::publisher_owner_account_key(&owner_seed32(&owner_account_seed)?).to_vec())
+}
+
+/// ADR-0078 section 6 — the PublisherGroup id the account whose 32-byte
+/// seed is `owner_account_seed` derives for `channel_id`.
+#[uniffi::export]
+pub fn publisher_group_id_for_seed(
+    owner_account_seed: Vec<u8>,
+    channel_id: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let cid = MlsChannelId::try_from_slice(&channel_id)?;
+    Ok(lakko_mls::publisher_group_id_for(&owner_seed32(&owner_account_seed)?, &cid).to_vec())
 }
 
 /// ADR-0078 section 6 — the PublisherGroup id the account whose identity is
@@ -4439,10 +4613,10 @@ pub struct HistoryAttachment {
     /// ADR-0047 poster frame.
     #[uniffi(default = None)]
     pub thumb: Option<HistoryThumb>,
-    /// ADR-0090 audio title tag.
+    /// ADR-0092 audio title tag.
     #[uniffi(default = None)]
     pub title: Option<String>,
-    /// ADR-0090 audio artist tag.
+    /// ADR-0092 audio artist tag.
     #[uniffi(default = None)]
     pub artist: Option<String>,
 }
@@ -4529,12 +4703,97 @@ pub struct HistoryPlaceholder {
     pub text: String,
     /// Attachment references.
     pub attachments: Vec<HistoryAttachment>,
-    /// ADR-0090 — the content of a poll, checklist, location, contact card
+    /// ADR-0092 — the content of a poll, checklist, location, contact card
     /// or article message (the latest edit) and, for a poll or checklist,
     /// its saved state. On decode a payload that does not decode is `None`
     /// and a state that does not belong to the content is dropped.
     #[uniffi(default = None)]
     pub content: Option<crate::content::ContentMessage>,
+    /// ADR-0087 section 14 — the channel invitation card the message's
+    /// envelope carried, opaque. Dropped when empty or longer than the
+    /// envelope's bound (2048 bytes).
+    #[uniffi(default = None)]
+    pub channel_invite: Option<Vec<u8>>,
+    /// ADR-0052 — the reply this message is, as stored.
+    #[uniffi(default = None)]
+    pub reply: Option<HistoryReply>,
+    /// ADR-0052 decision 2 — the forward attribution, as stored.
+    #[uniffi(default = None)]
+    pub forward: Option<HistoryForward>,
+}
+
+/// The reply a [`HistoryPlaceholder`] carries (ADR-0052). An author or
+/// excerpt that is empty or over the envelope's bound is dropped alone.
+#[derive(uniffi::Record)]
+pub struct HistoryReply {
+    /// The target's DS `messageId`.
+    pub target: i64,
+    /// The quoted author's name as the replier saw it.
+    #[uniffi(default = None)]
+    pub author: Option<String>,
+    /// The quoted excerpt as the replier saw it.
+    #[uniffi(default = None)]
+    pub excerpt: Option<String>,
+}
+
+/// The forward a [`HistoryPlaceholder`] carries (ADR-0052 decision 2). The
+/// origin is kept only when both `origin_group_id` (1 to 96 bytes) and
+/// `origin_message_id` are present; a forward with neither an author nor an
+/// origin is dropped.
+#[derive(uniffi::Record)]
+pub struct HistoryForward {
+    /// The original author's name, a snapshot.
+    #[uniffi(default = None)]
+    pub author: Option<String>,
+    /// The origin conversation's group id (raw bytes).
+    #[uniffi(default = None)]
+    pub origin_group_id: Option<Vec<u8>>,
+    /// The original's DS `messageId`.
+    #[uniffi(default = None)]
+    pub origin_message_id: Option<i64>,
+}
+
+/// The card, reply and forward of a history placeholder with the chat
+/// envelope's bounds applied (`lakko-attachments`): a field the live
+/// envelope would have dropped is dropped here too, alone, so a stored row
+/// that somehow exceeds a bound costs that field and never the message.
+#[allow(clippy::type_complexity)]
+fn bounded_history_extras(
+    card: Option<Vec<u8>>,
+    reply: Option<(i64, Option<String>, Option<String>)>,
+    forward: Option<(Option<String>, Option<Vec<u8>>, Option<i64>)>,
+) -> (
+    Option<Vec<u8>>,
+    Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
+    Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
+) {
+    use lakko_mls::history_placeholder as hp;
+    fn snapshot(v: Option<String>, max: usize) -> Option<String> {
+        v.filter(|s| !s.is_empty() && s.len() <= max)
+    }
+    let card = card.filter(|c| !c.is_empty() && c.len() <= hp::MAX_CHANNEL_INVITE_BYTES);
+    let reply = reply.map(|(target, author, excerpt)| hp::HistoryReplyPlaceholder {
+        target,
+        author: snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES),
+        excerpt: snapshot(excerpt, hp::MAX_REPLY_EXCERPT_BYTES),
+    });
+    let forward = forward.and_then(|(author, group, message)| {
+        let author = snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES);
+        let origin = match (group, message) {
+            (Some(group_id), Some(message_id))
+                if !group_id.is_empty() && group_id.len() <= hp::MAX_ORIGIN_GROUP_BYTES =>
+            {
+                Some(hp::HistoryForwardOrigin {
+                    group_id,
+                    message_id,
+                })
+            },
+            _ => None,
+        };
+        (author.is_some() || origin.is_some())
+            .then_some(hp::HistoryForwardPlaceholder { author, origin })
+    });
+    (card, reply, forward)
 }
 
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], FfiError> {
@@ -4605,6 +4864,13 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
             })
         })
         .transpose()?;
+    let (channel_invite, reply, forward) = bounded_history_extras(
+        placeholder.channel_invite,
+        placeholder.reply.map(|r| (r.target, r.author, r.excerpt)),
+        placeholder
+            .forward
+            .map(|f| (f.author, f.origin_group_id, f.origin_message_id)),
+    );
     let msg = HistoryMessagePlaceholder {
         message_id: placeholder.message_id,
         direction: placeholder.direction.into(),
@@ -4612,6 +4878,9 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
         text: placeholder.text,
         attachments,
         content,
+        channel_invite,
+        reply,
+        forward,
     };
     Ok(msg.encode()?)
 }
@@ -4632,7 +4901,33 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
     let content = msg.content.as_ref().and_then(|c| {
         crate::content::content_message_from_core(c.kind, &c.payload, &c.state, &mimes)
     });
+    let (channel_invite, reply, forward) = bounded_history_extras(
+        msg.channel_invite,
+        msg.reply.map(|r| (r.target, r.author, r.excerpt)),
+        msg.forward.map(|f| {
+            let (group, message) = f
+                .origin
+                .map_or((None, None), |o| (Some(o.group_id), Some(o.message_id)));
+            (f.author, group, message)
+        }),
+    );
     Ok(HistoryPlaceholder {
+        channel_invite,
+        reply: reply.map(|r| HistoryReply {
+            target: r.target,
+            author: r.author,
+            excerpt: r.excerpt,
+        }),
+        forward: forward.map(|f| {
+            let (origin_group_id, origin_message_id) = f
+                .origin
+                .map_or((None, None), |o| (Some(o.group_id), Some(o.message_id)));
+            HistoryForward {
+                author: f.author,
+                origin_group_id,
+                origin_message_id,
+            }
+        }),
         message_id: msg.message_id,
         direction: msg.direction.into(),
         created_at: msg.created_at,
@@ -4728,6 +5023,9 @@ mod history_placeholder_media_tests {
             text: String::new(),
             attachments: vec![att],
             content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
         })
         .expect("encodes");
         decode_history_placeholder(bytes)
@@ -4750,6 +5048,91 @@ mod history_placeholder_media_tests {
             (thumb.size, thumb.width, thumb.height),
             (5000, Some(240), None)
         );
+    }
+
+    #[test]
+    fn the_history_bounds_equal_the_envelope_bounds() {
+        use lakko_mls::history_placeholder as hp;
+        assert_eq!(
+            hp::MAX_CHANNEL_INVITE_BYTES,
+            lakko_attachments::MAX_CHANNEL_INVITE_BYTES
+        );
+        assert_eq!(
+            hp::MAX_SNAPSHOT_AUTHOR_BYTES,
+            lakko_attachments::MAX_REPLY_AUTHOR_BYTES
+        );
+        assert_eq!(
+            hp::MAX_SNAPSHOT_AUTHOR_BYTES,
+            lakko_attachments::MAX_FORWARDED_FROM_BYTES
+        );
+        assert_eq!(
+            hp::MAX_REPLY_EXCERPT_BYTES,
+            lakko_attachments::MAX_REPLY_EXCERPT_BYTES
+        );
+        assert_eq!(
+            hp::MAX_ORIGIN_GROUP_BYTES,
+            lakko_attachments::MAX_FORWARD_ORIGIN_GROUP_BYTES / 4 * 3
+        );
+    }
+
+    #[test]
+    fn card_reply_and_forward_survive_the_history_bundle() {
+        let bytes = encode_history_placeholder(HistoryPlaceholder {
+            message_id: 9,
+            direction: HistoryMessageDirection::Outgoing,
+            created_at: "2026-11-13T12:00:00Z".into(),
+            text: "https://lakko.me/g/abcdefgh#secret".into(),
+            attachments: vec![],
+            content: None,
+            channel_invite: Some(vec![0x33; 700]),
+            reply: Some(HistoryReply {
+                target: 4,
+                author: Some("Ann".into()),
+                excerpt: Some(String::new()),
+            }),
+            forward: Some(HistoryForward {
+                author: Some("x".repeat(300)),
+                origin_group_id: Some(vec![7; 32]),
+                origin_message_id: Some(11),
+            }),
+        })
+        .expect("encodes");
+        let back = decode_history_placeholder(bytes).expect("decodes");
+        assert_eq!(back.channel_invite, Some(vec![0x33; 700]));
+        let reply = back.reply.expect("reply kept");
+        assert_eq!(
+            (reply.target, reply.author.as_deref(), reply.excerpt),
+            (4, Some("Ann"), None)
+        );
+        let forward = back.forward.expect("forward kept");
+        // An over-long author is dropped alone; the origin stays.
+        assert_eq!(forward.author, None);
+        assert_eq!(forward.origin_group_id, Some(vec![7; 32]));
+        assert_eq!(forward.origin_message_id, Some(11));
+    }
+
+    #[test]
+    fn an_out_of_bounds_card_or_half_an_origin_is_dropped_not_the_message() {
+        let bytes = encode_history_placeholder(HistoryPlaceholder {
+            message_id: 9,
+            direction: HistoryMessageDirection::Incoming,
+            created_at: String::new(),
+            text: "t".into(),
+            attachments: vec![],
+            content: None,
+            channel_invite: Some(vec![1; 2049]),
+            reply: None,
+            forward: Some(HistoryForward {
+                author: None,
+                origin_group_id: Some(vec![7; 32]),
+                origin_message_id: None,
+            }),
+        })
+        .expect("encodes");
+        let back = decode_history_placeholder(bytes).expect("decodes");
+        assert_eq!(back.text, "t");
+        assert_eq!(back.channel_invite, None);
+        assert!(back.forward.is_none());
     }
 
     #[test]
@@ -7903,115 +8286,350 @@ mod tests {
         vec![byte; lakko_mls::CHANNEL_ID_LEN]
     }
 
+    const OWNER_SEED: [u8; 32] = [0x0A; 32];
+    const COPUB_SEED: [u8; 32] = [0x0C; 32];
+
+    /// A bound device identity of the account whose seed is `account`.
+    fn device(tag: u8, account: &[u8; 32]) -> Identity {
+        Identity::from_seed_bound(vec![tag; 64], account.to_vec(), 1).unwrap()
+    }
+
     #[test]
     fn publisher_group_create_then_channel_seed_is_stable() {
-        let alice = Identity::new("alice-publisher".into()).unwrap();
+        let alice = device(0xA1, &OWNER_SEED);
         let cid = channel_id_filled(0xAA);
-
-        let pg = PublisherGroup::create(&alice, cid.clone()).unwrap();
+        let pg = PublisherGroup::create(&alice, OWNER_SEED.to_vec(), cid.clone()).unwrap();
         let seed_1 = pg.channel_seed(&alice).unwrap();
-        let seed_2 = pg.channel_seed(&alice).unwrap();
-        // Same group, same epoch -> same seed.
-        assert_eq!(seed_1, seed_2);
+        assert_eq!(seed_1, pg.channel_seed(&alice).unwrap());
         assert_eq!(seed_1.len(), 32);
-        // Channel id round-trips.
         assert_eq!(pg.channel_id().unwrap(), cid);
+        assert!(pg.is_owned_by(OWNER_SEED.to_vec()).unwrap());
+        assert!(pg.is_owner_device(&alice).unwrap());
+        assert_eq!(
+            pg.owner_account_key().unwrap(),
+            publisher_owner_account_key(OWNER_SEED.to_vec()).unwrap()
+        );
+        assert_eq!(
+            pg.group_id().unwrap(),
+            publisher_group_id_for_seed(OWNER_SEED.to_vec(), cid).unwrap()
+        );
     }
 
     #[test]
-    fn publisher_group_open_or_create_is_idempotent_across_handles() {
-        // The load-bearing FFI test: two consecutive
-        // `open_or_create` calls under the SAME identity for
-        // the SAME channel id must resolve to the SAME
-        // persisted group — i.e. they must produce byte-
-        // identical channel seeds. If they don't, we're back
-        // to the throwaway-group bug G4-2-mls-persistence
-        // closes.
-        let alice = Identity::new("alice-persist".into()).unwrap();
-        let cid = channel_id_filled(0xBB);
-
-        let first = publisher_group_open_or_create(&alice, cid.clone()).unwrap();
-        let seed_first = first.channel_seed(&alice).unwrap();
-
-        let second = publisher_group_open_or_create(&alice, cid.clone()).unwrap();
-        let seed_second = second.channel_seed(&alice).unwrap();
-
-        assert_eq!(seed_first, seed_second);
-    }
-
-    #[test]
-    fn publisher_group_load_returns_null_before_create() {
-        let alice = Identity::new("alice-empty".into()).unwrap();
+    fn publisher_group_load_is_null_before_create_and_found_after() {
+        let alice = device(0xA2, &OWNER_SEED);
         let cid = channel_id_filled(0xCC);
-
-        let loaded = publisher_group_load(&alice, cid).unwrap();
-        assert!(loaded.is_none(), "no group should be persisted yet");
+        assert!(
+            publisher_group_load(&alice, OWNER_SEED.to_vec(), cid.clone())
+                .unwrap()
+                .is_none()
+        );
+        let _created = PublisherGroup::create(&alice, OWNER_SEED.to_vec(), cid.clone()).unwrap();
+        let loaded = publisher_group_load(&alice, OWNER_SEED.to_vec(), cid.clone())
+            .unwrap()
+            .expect("found");
+        assert_eq!(loaded.channel_id().unwrap(), cid);
+        // An unbound identity is refused: a PublisherGroup leaf is a device.
+        let unbound = Identity::new("unbound".into()).unwrap();
+        assert!(
+            PublisherGroup::create(&unbound, OWNER_SEED.to_vec(), channel_id_filled(1)).is_err()
+        );
     }
 
+    /// ADR-0064 section 7: an owner device with nothing but the GroupInfo
+    /// another owner device saved before its rotation enters; the member
+    /// applies the entry and both hold one seed. A co-publisher's device is
+    /// refused.
     #[test]
-    fn publisher_group_load_returns_group_after_create() {
-        let alice = Identity::new("alice-loadback".into()).unwrap();
-        let cid = channel_id_filled(0xDD);
+    fn an_owner_device_enters_from_a_saved_group_info() {
+        let cid = channel_id_filled(0x5A);
+        let a = device(0x5B, &OWNER_SEED);
+        let pg_a = PublisherGroup::create(&a, OWNER_SEED.to_vec(), cid.clone()).unwrap();
+        assert!(pg_a.staged_group_info(&a).unwrap().is_none());
+        assert!(pg_a.staged_ds_access_seed(&a).unwrap().is_none());
+        let rotation = pg_a.stage_rotate(&a).unwrap();
+        let saved = pg_a.staged_group_info(&a).unwrap().expect("saved");
+        let saved_epoch = pg_a.epoch().unwrap() + 1;
+        let saved_seed = pg_a.staged_ds_access_seed(&a).unwrap().expect("seed");
+        assert!(pg_a.merge_staged_commit(&a).unwrap());
+        let _ = rotation;
+        assert!(!pg_a.group_info(&a).unwrap().is_empty());
+        // The saved seed is the landed epoch's: the same seed and signer the
+        // member now derives.
+        assert_eq!(pg_a.ds_access_seed(&a).unwrap(), saved_seed);
+        assert_eq!(
+            ds_proof::DsProofSigner::for_group(saved_epoch, saved_seed.clone())
+                .unwrap()
+                .verifying_key(),
+            pg_a.ds_access_signer(&a).unwrap().verifying_key()
+        );
 
-        let _created = PublisherGroup::create(&alice, cid.clone()).unwrap();
-        let loaded = publisher_group_load(&alice, cid.clone()).unwrap();
-        assert!(loaded.is_some(), "load must find the freshly-created group");
-        assert_eq!(loaded.unwrap().channel_id().unwrap(), cid);
+        let b = device(0x5C, &OWNER_SEED);
+        let entry = publisher_group_enter(
+            &b,
+            saved.clone(),
+            OWNER_SEED.to_vec(),
+            cid.clone(),
+            saved_seed.clone(),
+        )
+        .unwrap();
+        // G-55: the row the Delivery Service stores names no account.
+        let owner_key = publisher_owner_account_key(OWNER_SEED.to_vec()).unwrap();
+        assert!(!entry
+            .commit
+            .windows(owner_key.len())
+            .any(|w| w == owner_key.as_slice()));
+        assert_eq!(epoch_of_message(entry.commit.clone()), Some(saved_epoch));
+        assert!(entry.group.has_staged_commit().unwrap());
+        assert!(entry.group.channel_seed(&b).is_err());
+        // The entering device proves the epoch it leaves with the saved seed
+        // and registers the next one with its staged signer.
+        assert_eq!(entry.group.epoch().unwrap(), saved_epoch);
+        let proof = ds_proof::DsProofSigner::for_group(saved_epoch, saved_seed).unwrap();
+        assert_eq!(proof.epoch(), saved_epoch);
+        let next_signer = entry
+            .group
+            .ds_staged_access_signer(&b)
+            .unwrap()
+            .expect("next");
+        assert_eq!(next_signer.epoch(), saved_epoch + 1);
+        let next_seed = entry
+            .group
+            .staged_ds_access_seed(&b)
+            .unwrap()
+            .expect("seed");
+        assert!(
+            entry.group.ds_access_seed(&b).is_err(),
+            "no epoch-N seed is held"
+        );
+        let next = entry.group.staged_channel_seed(&b).unwrap().expect("seed");
+        pg_a.process_incoming_verifying_roles(&a, entry.commit.clone())
+            .unwrap();
+        assert_eq!(
+            pg_a.ds_access_signer(&a).unwrap().verifying_key(),
+            next_signer.verifying_key()
+        );
+        assert_eq!(pg_a.ds_access_seed(&a).unwrap(), next_seed);
+        assert!(entry.group.merge_staged_commit(&b).unwrap());
+        assert_eq!(entry.group.channel_seed(&b).unwrap(), next);
+        assert_eq!(pg_a.channel_seed(&a).unwrap(), next);
+
+        let stranger = device(0x5D, &[0x77; 32]);
+        assert!(matches!(
+            publisher_group_enter(&stranger, saved, OWNER_SEED.to_vec(), cid, vec![0; 32]),
+            Err(FfiError::MembershipDeviceBindingInvalid(_))
+        ));
+    }
+
+    /// ADR-0090 S3: two owner devices both admit a third device of the
+    /// account; the Delivery Service takes one commit per epoch, so one
+    /// merges, the other abandons and applies the winner, and exactly one
+    /// commit lands: one epoch, one seed, three leaves.
+    #[test]
+    fn two_owner_devices_admit_a_third_and_exactly_one_commit_lands() {
+        let cid = channel_id_filled(0x90);
+        let a = device(0x91, &OWNER_SEED);
+        let pg_a = PublisherGroup::create(&a, OWNER_SEED.to_vec(), cid.clone()).unwrap();
+        let gid = pg_a.group_id().unwrap();
+        let owner_key = publisher_owner_account_key(OWNER_SEED.to_vec()).unwrap();
+
+        let b = device(0x92, &OWNER_SEED);
+        let add_b = pg_a
+            .stage_admit_devices(&a, vec![b.create_key_package().unwrap()])
+            .unwrap();
+        assert!(pg_a.merge_staged_commit(&a).unwrap());
+        let pg_b = publisher_group_join_from_welcome(
+            &b,
+            add_b.welcome,
+            gid.clone(),
+            cid.clone(),
+            owner_key.clone(),
+        )
+        .unwrap();
+
+        let c = device(0x93, &OWNER_SEED);
+        let kp_c = c.create_key_package().unwrap();
+        let epoch = pg_a.epoch().unwrap();
+        let staged_a = pg_a.stage_admit_devices(&a, vec![kp_c.clone()]).unwrap();
+        let staged_b = pg_b.stage_admit_devices(&b, vec![kp_c]).unwrap();
+        assert!(pg_a.ds_staged_access_signer(&a).unwrap().is_some());
+        // The journal took A's commit: A merges, B abandons and applies it.
+        assert!(pg_a.merge_staged_commit(&a).unwrap());
+        assert!(pg_b.abandon_staged_commit(&b).unwrap());
+        assert_eq!(pg_b.epoch().unwrap(), epoch);
+        assert!(matches!(
+            pg_b.process_incoming_verifying_roles(&b, staged_a.commit.clone())
+                .unwrap(),
+            ProcessedMessage::Commit
+        ));
+        let pg_c = publisher_group_join_from_welcome(
+            &c,
+            staged_a.welcome,
+            gid.clone(),
+            cid.clone(),
+            owner_key,
+        )
+        .unwrap();
+        // B's Welcome is never delivered: C joined A's, and holds the group
+        // it names, so B's is refused here too.
+        assert!(publisher_group_join_from_welcome(
+            &c,
+            staged_b.welcome,
+            gid,
+            cid,
+            publisher_owner_account_key(OWNER_SEED.to_vec()).unwrap(),
+        )
+        .is_err());
+        for (pg, id) in [(&pg_a, &a), (&pg_b, &b), (&pg_c, &c)] {
+            assert_eq!(pg.epoch().unwrap(), epoch + 1);
+            assert_eq!(pg.members().unwrap().len(), 3);
+            assert_eq!(pg.channel_seed(id).unwrap(), pg_a.channel_seed(&a).unwrap());
+        }
+    }
+
+    /// ADR-0090 S3: a co-publisher's device request crosses the boundary
+    /// (composed, sent as an application message, dispatched, decoded) and
+    /// the owner device applies it, admitting the co-publisher's second
+    /// device.
+    #[test]
+    fn a_co_publisher_device_request_is_applied_by_the_owner() {
+        let cid = channel_id_filled(0x94);
+        let owner = device(0x95, &OWNER_SEED);
+        let pg_o = PublisherGroup::create(&owner, OWNER_SEED.to_vec(), cid.clone()).unwrap();
+        let gid = pg_o.group_id().unwrap();
+        let owner_key = publisher_owner_account_key(OWNER_SEED.to_vec()).unwrap();
+
+        let c1 = device(0x96, &COPUB_SEED);
+        pg_o.retain_join_request(&owner, c1.create_key_package().unwrap())
+            .unwrap();
+        let approved = pg_o
+            .stage_approve_external_join(&owner, c1.signature_public_key())
+            .unwrap();
+        assert!(pg_o.merge_staged_commit(&owner).unwrap());
+        let pg_c1 = publisher_group_join_from_welcome(
+            &c1,
+            approved.welcome,
+            gid.clone(),
+            cid.clone(),
+            owner_key.clone(),
+        )
+        .unwrap();
+        assert!(!pg_c1.is_owner_device(&c1).unwrap());
+        assert!(
+            pg_c1.stage_rotate(&c1).is_err(),
+            "a co-publisher commits nothing"
+        );
+
+        let c2 = device(0x97, &COPUB_SEED);
+        let kp_c2 = c2.create_key_package().unwrap();
+        let binding = lakko_contacts::mailbox::MailboxBinding::for_account_seed(&COPUB_SEED)
+            .encode()
+            .to_vec();
+        let request = crate::publisher_devices::compose_publisher_device_admit(
+            cid.clone(),
+            kp_c2.clone(),
+            binding,
+            Vec::new(),
+        )
+        .unwrap();
+        let wire = pg_c1.create_application_message(&c1, request).unwrap();
+
+        let ProcessedMessage::Application {
+            data,
+            sender_account,
+            ..
+        } = pg_o.process_incoming_verifying_roles(&owner, wire).unwrap()
+        else {
+            panic!("an application message");
+        };
+        let dispatched = crate::contacts::dispatch_incoming_envelope(data.clone()).unwrap();
+        assert_eq!(
+            dispatched.kind,
+            crate::contacts::FfiIncomingEnvelopeKind::PublisherDeviceRequest
+        );
+        let decoded =
+            crate::publisher_devices::decode_publisher_device_request_envelope(data).unwrap();
+        assert_eq!(decoded.channel_id, cid);
+        let crate::publisher_devices::FfiPublisherDeviceAction::Admit { key_package, .. } =
+            decoded.action
+        else {
+            panic!("an admit");
+        };
+        // The owner's rule: the KeyPackage's binding names the sender's account.
+        let sender = sender_account.expect("resolved at receipt");
+        assert_eq!(
+            key_package_account_key(key_package.clone()).unwrap(),
+            Some(sender)
+        );
+
+        let admitted = pg_o.stage_admit_devices(&owner, vec![key_package]).unwrap();
+        assert!(pg_o.merge_staged_commit(&owner).unwrap());
+        assert!(matches!(
+            pg_c1
+                .process_incoming_verifying_roles(&c1, admitted.commit)
+                .unwrap(),
+            ProcessedMessage::Commit
+        ));
+        let pg_c2 =
+            publisher_group_join_from_welcome(&c2, admitted.welcome, gid, cid, owner_key).unwrap();
+        assert_eq!(
+            pg_c2.channel_seed(&c2).unwrap(),
+            pg_o.channel_seed(&owner).unwrap()
+        );
+        assert_eq!(
+            pg_c2.channel_seed(&c2).unwrap(),
+            pg_c1.channel_seed(&c1).unwrap()
+        );
     }
 
     #[test]
     fn publisher_group_rejects_wrong_length_channel_id() {
-        let alice = Identity::new("alice-badid".into()).unwrap();
-        // 8 bytes — half a channel id. Must refuse rather
-        // than silently zero-pad (would let two channels
-        // collide under the deterministic group id).
+        let alice = device(0xA3, &OWNER_SEED);
         let bad = vec![0u8; 8];
-        let create_res = PublisherGroup::create(&alice, bad.clone());
-        assert!(create_res.is_err(), "create must refuse short channel id");
-        let create_err = create_res.err().unwrap();
+        let create_err = PublisherGroup::create(&alice, OWNER_SEED.to_vec(), bad.clone())
+            .err()
+            .unwrap();
         assert!(matches!(
             create_err,
             FfiError::Codec(_) | FfiError::Group(_)
         ));
-
-        let load_res = publisher_group_load(&alice, bad);
-        assert!(load_res.is_err(), "load must refuse short channel id");
-        let load_err = load_res.err().unwrap();
+        let load_err = publisher_group_load(&alice, OWNER_SEED.to_vec(), bad)
+            .err()
+            .unwrap();
         assert!(matches!(load_err, FfiError::Codec(_) | FfiError::Group(_)));
+        assert!(PublisherGroup::create(&alice, vec![0; 31], channel_id_filled(1)).is_err());
     }
 
     #[test]
-    fn publisher_group_rotate_changes_seed() {
-        // G4-2-mls-persistence step 4 (FFI) — the load-bearing
-        // test: rotating the PublisherGroup MUST produce a
-        // distinct exporter output (different epoch under the
-        // hood). Mirror of the lakko-mls test of the same
-        // shape, but exercised through the UniFFI surface so
-        // the iOS / Android composer paths are covered too.
-        let alice = Identity::new("alice-rotate".into()).unwrap();
-        let cid = channel_id_filled(0xEE);
-
-        let pg = publisher_group_open_or_create(&alice, cid).unwrap();
+    fn publisher_group_staged_rotation_changes_seed_only_on_merge() {
+        let alice = device(0xA4, &OWNER_SEED);
+        let pg =
+            PublisherGroup::create(&alice, OWNER_SEED.to_vec(), channel_id_filled(0xEE)).unwrap();
         let seed_pre = pg.channel_seed(&alice).unwrap();
-
-        let _commit = pg.rotate(&alice).unwrap();
-        let seed_post = pg.channel_seed(&alice).unwrap();
-
-        assert_ne!(seed_pre, seed_post);
-        assert_eq!(seed_post.len(), 32);
+        let _commit = pg.stage_rotate(&alice).unwrap();
+        assert!(pg.has_staged_commit().unwrap());
+        assert_eq!(pg.channel_seed(&alice).unwrap(), seed_pre);
+        let staged = pg.staged_channel_seed(&alice).unwrap().expect("staged");
+        assert!(pg.merge_staged_commit(&alice).unwrap());
+        assert_eq!(pg.channel_seed(&alice).unwrap(), staged);
+        assert_ne!(staged, seed_pre);
+        // A lost race: stage, abandon, nothing changed.
+        let _ = pg.stage_rotate(&alice).unwrap();
+        assert!(pg.abandon_staged_commit(&alice).unwrap());
+        assert_eq!(pg.channel_seed(&alice).unwrap(), staged);
     }
 
     #[test]
     fn publisher_group_distinct_channels_distinct_seeds() {
-        let alice = Identity::new("alice-multichannel".into()).unwrap();
-        let cid_a = channel_id_filled(0x11);
-        let cid_b = channel_id_filled(0x22);
-
-        let pg_a = publisher_group_open_or_create(&alice, cid_a).unwrap();
-        let pg_b = publisher_group_open_or_create(&alice, cid_b).unwrap();
-        let seed_a = pg_a.channel_seed(&alice).unwrap();
-        let seed_b = pg_b.channel_seed(&alice).unwrap();
-        assert_ne!(seed_a, seed_b);
+        let alice = device(0xA5, &OWNER_SEED);
+        let pg_a =
+            PublisherGroup::create(&alice, OWNER_SEED.to_vec(), channel_id_filled(0x11)).unwrap();
+        let pg_b =
+            PublisherGroup::create(&alice, OWNER_SEED.to_vec(), channel_id_filled(0x22)).unwrap();
+        assert_ne!(
+            pg_a.channel_seed(&alice).unwrap(),
+            pg_b.channel_seed(&alice).unwrap()
+        );
     }
 
     fn ed25519_pub_of(id: &Identity) -> Vec<u8> {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import LakkoCore
 import XCTest
 
@@ -36,11 +37,15 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
     /// The generation the published identity reads (ADR-0073 section 4.1).
     var publishedGeneration: UInt64 = 1
 
+    /// G-56 — the account's own conversation link the bundle serves.
+    var conversationLink: Data?
+
     func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
         events.append("identity")
         guard let publishedKey else { return nil }
         return IdentityFetchResponse(
-            signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "", keyGeneration: publishedGeneration)
+            signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "", keyGeneration: publishedGeneration,
+            conversationLink: conversationLink?.base64EncodedString())
     }
 
     func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data? {
@@ -203,6 +208,9 @@ final class RecoveryFlowTests: XCTestCase {
             SessionTokenStore.deleteSessionToken(accountIdB64: b64)
             try? PhraseStore().deletePhrase(accountIdB64: b64)
             ThreeWordsBudgetStore().clearAll(accountIdB64: b64)
+            KeychainOwnPredecessorStore().clear(accountIdB64: b64)
+            KeychainOwnConversationKeyStore().clear(accountIdB64: b64)
+            BackupRestoreRetryStore.clear(accountIdB64: b64)
         }
         accountIdsToClean = []
         for suite in suites { UserDefaults().removePersistentDomain(forName: suite) }
@@ -254,8 +262,8 @@ final class RecoveryFlowTests: XCTestCase {
         return UserDefaults(suiteName: suite)!
     }
 
-    private func newAccount() -> (bytes: Data, b64: String) {
-        let bytes = randomBytes(16)
+    private func newAccount(_ fixed: Data? = nil) -> (bytes: Data, b64: String) {
+        let bytes = fixed ?? randomBytes(16)
         let b64 = base64Encode(bytes)
         accountIdsToClean.append(b64)
         return (bytes, b64)
@@ -267,6 +275,8 @@ final class RecoveryFlowTests: XCTestCase {
         marker: PersistedSession? = nil,
         persistence: ScriptedPersistence = ScriptedPersistence(),
         markers: RecoveryMarkers? = nil,
+        backup: BackupRestoreSource? = nil,
+        earlierKeysGate: Bool = false,
         routes: @escaping (_ path: String, _ json: [String: Any]) -> (Int, String)? = { _, _ in nil }
     ) -> Harness {
         let host = NameRouteStub.scope { _, path, json in routes(path, json) ?? (503, "") }
@@ -279,6 +289,11 @@ final class RecoveryFlowTests: XCTestCase {
         let tokens = SessionTokenProvider()
         let wiped = WipeLog()
         let clock = Clock()
+        // G-56: the gate reads this device's binding; these tests model
+        // devices that never bootstrapped a chat (no binding), so only the
+        // G-56 tests read the real inputs.
+        let noGate: @MainActor (String, Data) -> EarlierKeysGate.Inputs? = { _, _ in nil }
+        let gateInputs: (@MainActor (String, Data) -> EarlierKeysGate.Inputs?)? = earlierKeysGate ? nil : noGate
         let repository = AuthRepository(
             sessionStore: store,
             authClientFactory: { NameRouteStub.client(host) },
@@ -297,7 +312,9 @@ final class RecoveryFlowTests: XCTestCase {
             keyResetHooks: reset.hooks,
             wipeAfterKeyReset: { wiped.note($0) },
             recallRecords: InMemoryRecallRecordStore(),
-            recallOperations: .unreachable
+            recallOperations: .unreachable,
+            backupRestoreSource: backup ?? LiveBackupRestoreSource(),
+            earlierKeysInputs: gateInputs
         )
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,
@@ -833,6 +850,238 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.reset.deviceGroupCalls.map(\.accountIdB64), [account.b64])
     }
 
+    // MARK: - Waiting for the directory (UX 15.4, amended 2026-11-12)
+
+    func testTheDirectorysCoolDownStartsAWaitOfTheTimeItNamedAndOnlyThat() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":2400}"#)
+
+        let before = SessionRestore.nowMs()
+        _ = try await mint(h)
+        let after = SessionRestore.nowMs()
+
+        XCTAssertTrue(h.repository.freshPublishPending)
+        let wait = try XCTUnwrap(h.repository.keyResetPublishWait, "the reset's own publish learned the wait")
+        XCTAssertEqual(wait.accountIdB64, account.b64)
+        XCTAssertGreaterThanOrEqual(wait.untilMs, before + 2_400_000)
+        XCTAssertLessThanOrEqual(wait.untilMs, after + 2_400_000)
+
+        // The same refusal with no readable time: back to "could not finish".
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity", body: #"{"error":"identity-changed-too-recently"}"#)
+        do {
+            try await h.repository.retryFreshPublish()
+            XCTFail("the directory still refuses")
+        } catch {}
+        XCTAssertNil(h.repository.keyResetPublishWait)
+
+        // A network failure: "could not finish" too.
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":60}"#)
+        do { try await h.repository.retryFreshPublish() } catch {}
+        XCTAssertNotNil(h.repository.keyResetPublishWait)
+        h.directory.publishError = URLError(.notConnectedToInternet)
+        do { try await h.repository.retryFreshPublish() } catch {}
+        XCTAssertNil(h.repository.keyResetPublishWait)
+
+        // The retry once the directory accepts: nothing is owed or awaited.
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":1}"#)
+        do { try await h.repository.retryFreshPublish() } catch {}
+        XCTAssertNotNil(h.repository.keyResetPublishWait)
+        h.directory.publishError = nil
+        try await h.repository.retryFreshPublish()
+        XCTAssertNil(h.repository.keyResetPublishWait)
+        XCTAssertFalse(h.repository.freshPublishPending)
+        XCTAssertEqual(h.reset.resetCalls.count, 1, "never resets again")
+    }
+
+    // MARK: - This device's reset was reset again elsewhere (base scenario 4b)
+
+    /// The auth service, scripted beside the TOTP route: whether a refresh
+    /// answers `key-generation-superseded`.
+    private final class AuthGeneration {
+        var superseded = false
+        /// A refresh that is not superseded answers a new pair (else `503`).
+        var refreshAnswers = false
+        private(set) var refreshes = 0
+
+        func routes(_ account: Data, totp: @escaping (String, [String: Any]) -> (Int, String)?)
+            -> (String, [String: Any]) -> (Int, String)? {
+            { [unowned self] path, json in
+                switch path {
+                case "/auth/session/refresh":
+                    self.refreshes += 1
+                    if self.superseded { return (401, #"{"error":"key-generation-superseded"}"#) }
+                    guard self.refreshAnswers else { return (503, "") }
+                    return (200, """
+                    {"session_token":"tok-gen2-refreshed","session_expires_at_ms":4000000000000,"refresh_token":"r1.gen2-refreshed","refresh_expires_at_ms":4000000000000,"key_generation":2}
+                    """)
+                case "/backup":
+                    return (200, "{}")
+                default:
+                    return totp(path, json)
+                }
+            }
+        }
+    }
+
+    /// The baseline backup's storage and head mint, on the harness's
+    /// scripted host, for the duration of one test.
+    private func backupOnHost(_ host: String) -> () -> Void {
+        let previous = AuthRepository.makeBackupClient
+        AuthRepository.makeBackupClient = {
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [NameRouteStub.self]
+            let session = URLSession(configuration: config)
+            return BackupClient(
+                storage: StorageClient(baseURL: "http://\(host):9", session: session),
+                authBaseURL: "http://\(host):9", authSession: session)
+        }
+        return { AuthRepository.makeBackupClient = previous }
+    }
+
+    private func paths(_ host: String) -> [String] {
+        NameRouteStub.requests(host).map(\.path)
+    }
+
+    func testAPhraseParkedAtLaunchAsksAuthAndASupersededResetEndsOnTheRecallScreen() async throws {
+        // This device reset the keys and closed the app on its phrase screen,
+        // with the publish done. The keys were then reset again on another
+        // device, whose own publish is refused for an hour: the directory
+        // still holds THIS device's key at THIS device's generation, auth
+        // is one generation above it.
+        let account = newAccount()
+        let mnemonic = RecoveryMnemonic.generate()
+        let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
+        try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = mnemonic.toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(
+                access: "tok-gen2", refresh: "r1.gen2", refreshExpiresAtMs: Int64.max / 2, generation: 2)),
+            accountIdB64: account.b64)
+        let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
+        markers.markPhraseOwed(accountIdB64: account.b64)
+        let auth = AuthGeneration()
+        auth.superseded = true
+
+        let h = harness(
+            marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
+            persistence: persistence, markers: markers,
+            routes: auth.routes(account.bytes, totp: { _, _ in nil }))
+        h.directory.publishedKey = newKey
+        h.directory.publishedGeneration = 2
+
+        let signedOut = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(signedOut, "the superseded reset ends on Was it you?, not on its words")
+        XCTAssertEqual(auth.refreshes, 1, "the parked launch asked auth")
+        let wiped = await waitUntil { h.wiped.accounts == [account.b64] }
+        XCTAssertTrue(wiped, "the staged wipe ran")
+        XCTAssertNil(h.tokens.current)
+        XCTAssertTrue(h.directory.events.filter { $0.hasPrefix("publish") }.isEmpty, "nothing was published")
+    }
+
+    func testDoneOnAPhraseWhoseKeysWereResetAgainSignsOutBeforeAnyUpload() async throws {
+        let account = newAccount()
+        let auth = AuthGeneration()
+        let h = harness(routes: auth.routes(account.bytes, totp: totpRoute(account.bytes)))
+        let restore = backupOnHost(h.host)
+        defer { restore() }
+        try await parkWithoutKeys(h)
+        _ = try await mint(h)
+        XCTAssertFalse(h.repository.freshPublishPending, "this device's own publish landed")
+        let publishesBefore = h.directory.events.filter { $0.hasPrefix("publish") }
+        XCTAssertEqual(publishesBefore, ["publish+attest"])
+        // The scripted pair's refresh credential is valid on this clock.
+        h.tokens.nowMs = { 1_000_000 }
+
+        // Another device resets the keys while this phrase screen is open;
+        // its publish is refused by the directory's cool-down, so the
+        // directory still names this device's key at this generation.
+        auth.superseded = true
+        h.directory.publishedGeneration = 2
+
+        try h.repository.confirmFreshPhraseSaved()
+        let signedOut = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(signedOut, "Done asked auth and the superseded keys ended on Was it you?")
+        let wiped = await waitUntil { h.wiped.accounts == [account.b64] }
+        XCTAssertTrue(wiped, "the staged wipe ran")
+        XCTAssertEqual(
+            h.directory.events.filter { $0.hasPrefix("publish") }, publishesBefore,
+            "the superseded keys were not uploaded again")
+        // The baseline backup waited for auth's answer and sent nothing:
+        // no head mint, no storage write (storage would have accepted the
+        // stale device's token).
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(paths(h.host).contains("/backup"), "\(paths(h.host))")
+        XCTAssertFalse(paths(h.host).contains("/auth/backup/head"), "\(paths(h.host))")
+    }
+
+    func testTheBaselineBackupAfterDoneGoesUpOnlyAfterAuthRefreshedThePair() async throws {
+        let account = newAccount()
+        let auth = AuthGeneration()
+        auth.refreshAnswers = true
+        let h = harness(routes: auth.routes(account.bytes, totp: totpRoute(account.bytes)))
+        let restore = backupOnHost(h.host)
+        defer { restore() }
+        try await parkWithoutKeys(h)
+        _ = try await mint(h)
+        h.tokens.nowMs = { 1_000_000 }
+
+        try h.repository.confirmFreshPhraseSaved()
+        let uploaded = await waitUntil { self.paths(h.host).contains("/backup") }
+        XCTAssertTrue(uploaded, "the baseline went up: \(paths(h.host))")
+        let seen = paths(h.host)
+        let refresh = try XCTUnwrap(seen.firstIndex(of: "/auth/session/refresh"))
+        let mint = try XCTUnwrap(seen.firstIndex(of: "/auth/backup/head"))
+        let put = try XCTUnwrap(seen.firstIndex(of: "/backup"))
+        XCTAssertLessThan(refresh, mint, "auth answered for the pair before the head mint")
+        XCTAssertLessThan(mint, put)
+        // With the refreshed pair.
+        let putRequest = try XCTUnwrap(NameRouteStub.requests(h.host).last { $0.path == "/backup" })
+        XCTAssertEqual(putRequest.authorization, "Bearer tok-gen2-refreshed")
+        XCTAssertNil(h.repository.recall)
+    }
+
+    func testAHeadMintThatSaysSupersededStopsTheUploadInsteadOfALegacyEnvelope() async throws {
+        let host = NameRouteStub.scope { _, path, _ in
+            switch path {
+            case "/auth/backup/head": return (401, #"{"error":"key-generation-superseded"}"#)
+            case "/backup": return (200, "{}")
+            default: return (503, "")
+            }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NameRouteStub.self]
+        let session = URLSession(configuration: config)
+        let client = BackupClient(
+            storage: StorageClient(baseURL: "http://\(host):9", session: session),
+            authBaseURL: "http://\(host):9", authSession: session,
+            ownPredecessors: InMemoryOwnPredecessorStore(),
+            ownEnvelopes: { _ in OwnBackupEnvelopes(ownProfile: nil, visibility: nil) })
+        client.setSessionToken("tok-stale")
+        let account = newAccount()
+        let mnemonic = RecoveryMnemonic.generate()
+        do {
+            try await client.uploadNow(
+                accountId: account.bytes, accountIdB64: account.b64,
+                ed25519Seed: try Identity.fromSeed(seed: mnemonic.toSeed()).ed25519Seed(),
+                phraseBytes: Data(mnemonic.phrase().utf8), contacts: [])
+            XCTFail("a superseded mint must stop the upload")
+        } catch {
+            XCTAssertEqual(error as? BackupHeadMintError, .signedOut, "\(error)")
+        }
+        XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/auth/backup/head"], "no legacy write")
+    }
+
     // MARK: - The password-fresh reset grant (ADR-0073, amended 2026-10-04)
 
     func testAResetWithoutAGrantOrAPasswordAsksForThePasswordBeforeAnyCall() async throws {
@@ -1244,6 +1493,68 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(outcome, .noKeys)
         XCTAssertEqual(h.repository.restoreNotice, .passkeyNoKeys)
         XCTAssertTrue(isNeedsKeys(h.repository))
+    }
+
+    // MARK: - The account id's two spellings
+    //
+    // The auth service speaks URL-safe base64 without padding for the account
+    // id on the passkey routes (`/webauthn/auth/start` decodes it so, the
+    // finish sends it so); every store on this device uses the standard
+    // padded form. An id whose two spellings differ must survive both ways.
+
+    /// 16 bytes whose standard spelling holds `+`, `/` and `==` and whose
+    /// URL-safe one holds `-` and `_` instead.
+    private static let twoSpellingsId = Data(Array(repeating: [UInt8(0xFB), 0xFF, 0xBF], count: 5).flatMap { $0 } + [0x00])
+
+    func testTheFixtureIdHasTwoDifferentSpellings() {
+        let standard = base64Encode(Self.twoSpellingsId)
+        let urlSafe = base64UrlEncodeNoPad(Self.twoSpellingsId)
+        XCTAssertEqual(Self.twoSpellingsId.count, 16)
+        XCTAssertTrue(standard.contains("+") && standard.contains("/") && standard.hasSuffix("=="), standard)
+        XCTAssertTrue(urlSafe.contains("-") && urlSafe.contains("_") && !urlSafe.contains("="), urlSafe)
+    }
+
+    func testADiscoverablePasskeySignInLandsTheStandardSpellingOfAUrlSafeId() async throws {
+        let account = newAccount(Self.twoSpellingsId)
+        let h = harness()
+        // What the finish response carries: URL-safe, no padding.
+        h.passkey.result = assertion(account.bytes)
+        h.directory.lookup = .success(account.bytes)
+
+        try await h.repository.loginWithPasskey(usernameHint: "alice")
+
+        guard case .needsRecoveryPhrase(let parked) = h.repository.state else {
+            return XCTFail("expected the restore prompt")
+        }
+        XCTAssertEqual(parked.accountIdB64, account.b64)
+        XCTAssertEqual(parked.username, "alice")
+        XCTAssertEqual(h.store.load()?.accountIdB64, account.b64, "the marker uses the standard spelling")
+    }
+
+    func testThePasskeyRowNamesTheAccountUrlSafeAndAcceptsItsOwnAccount() async throws {
+        let account = newAccount(Self.twoSpellingsId)
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.passkey.result = assertion(account.bytes)
+
+        let outcome = try await h.repository.restoreKeysWithPasskey()
+
+        XCTAssertEqual(h.passkey.askedFor, [base64UrlEncodeNoPad(account.bytes)])
+        XCTAssertNotEqual(h.passkey.askedFor.first ?? nil, account.b64)
+        XCTAssertEqual(outcome, .noKeys, "its own account: not refused as another account's passkey")
+    }
+
+    func testAPasskeyProofNamesTheAccountUrlSafeAndAcceptsItsOwnAccount() async throws {
+        let (h, account) = try await sessionWithKeys(Self.twoSpellingsId)
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(account.bytes),
+            session: .fixture(access: "tok-passkey", refresh: "r1.passkey"),
+            freshGrant: FreshAuthGrant(grant: "grant-passkey", expiresAtMs: 1_600_000))
+
+        try await h.repository.proveWithPasskey()
+
+        XCTAssertEqual(h.passkey.askedFor, [base64UrlEncodeNoPad(account.bytes)])
+        XCTAssertEqual(h.repository.liveFreshGrant(), "grant-passkey")
     }
 
     func testThePasskeyRowNeedsAParkedSignIn() async {
@@ -1920,8 +2231,8 @@ final class RecoveryFlowTests: XCTestCase {
     // MARK: - The fresh-auth proof (ADR-0073, amended 2026-10-06; UX 17)
 
     /// A device that holds the keys, signed in with the authenticator code.
-    private func sessionWithKeys() async throws -> (Harness, (bytes: Data, b64: String)) {
-        let account = newAccount()
+    private func sessionWithKeys(_ fixed: Data? = nil) async throws -> (Harness, (bytes: Data, b64: String)) {
+        let account = newAccount(fixed)
         let h = harness(routes: totpRoute(account.bytes))
         let mine = RecoveryMnemonic.generate()
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: account.b64, seed: mine.toSeed())
@@ -2110,5 +2421,441 @@ final class DevicePhraseTests: XCTestCase {
         // Something that is not a phrase is never written over a good one.
         DevicePhrase.store("not a recovery phrase", accountIdB64: accountIdB64, context: "test", since: nil)
         XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase())
+    }
+}
+
+// MARK: - G-56: a device waits for the account's earlier keys
+
+/// The backup source, scripted: the queued outcomes in order, then none.
+private final class ScriptedEarlierKeysBackup: BackupRestoreSource {
+    var outcomes: [RestoreOutcome] = []
+    private(set) var calls = 0
+    func restore(sessionToken: String, phraseBytes: Data, gate: RestoreGateContext) async -> RestoreOutcome {
+        calls += 1
+        return outcomes.isEmpty ? .noBackup : outcomes.removeFirst()
+    }
+}
+
+extension RecoveryFlowTests {
+
+    /// The current phrase and an earlier one; the link the rotation uploaded.
+    private struct Rotated {
+        let current: RecoveryMnemonic
+        let oldSeed: Data
+        let link: Data
+        var oldKey: Data { try! Identity.fromSeed(seed: oldSeed).signaturePublicKey() }
+    }
+
+    private func rotated() throws -> Rotated {
+        let current = RecoveryMnemonic.generate()
+        let oldSeed = RecoveryMnemonic.generate().toSeed()
+        let link = try XCTUnwrap(OwnAccountKeys.conversationLink(
+            currentSeed: current.toSeed(), predecessorSeeds: [oldSeed], issuedAtUnixSecs: 1_700_000_000))
+        return Rotated(current: current, oldSeed: oldSeed, link: link)
+    }
+
+    private func isParkedForEarlierKeys(_ repository: AuthRepository) -> Bool {
+        if case .needsEarlierKeys = repository.state { return true }
+        return false
+    }
+
+    private func backupCarrying(_ account: Data, oldSeed: Data) throws -> ParsedBackupPayload {
+        try parseBackupPayload(wire: try BackupClient.composePayload(
+            accountId: account,
+            createdAtMs: 1_700_000_000_000,
+            ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [],
+            knownGroupIdsHex: [],
+            syncedState: nil,
+            ownPredecessors: [BackupOwnPredecessor(seed: oldSeed, adoptedAtMs: 1_700_000_000_000)]))
+    }
+
+    func testAPhraseRestoreWhoseChatsUseAnEarlierKeyParksAndBindsNothing() async throws {
+        let account = newAccount()
+        let backup = ScriptedEarlierKeysBackup()
+        let h = harness(backup: backup, earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        var states: [AuthState] = []
+        let sink = h.repository.$state.sink { states.append($0) }
+        defer { sink.cancel() }
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: r.current.phrase())
+
+        XCTAssertTrue(isParkedForEarlierKeys(h.repository), "\(h.repository.state)")
+        // The shell's `.task` runs on `.session` only: it never ran.
+        XCTAssertFalse(states.contains { if case .session = $0 { return true } else { return false } })
+        XCTAssertNil(h.repository.identitySecrets)
+        XCTAssertNil(DeviceIdentityStore.getDeviceBinding(accountIdB64: account.b64), "no binding minted")
+        XCTAssertEqual(KeychainOwnConversationKeyStore().load(accountIdB64: account.b64)?.conversationKey, r.oldKey)
+        // The keys this device holds stayed (the phrase and its seed).
+        XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64), r.current.toSeed())
+        // The session pair is persisted: a relaunch returns here.
+        XCTAssertNotNil(h.persistence.sessionToken(accountIdB64: account.b64))
+    }
+
+    func testTheParkedDeviceLandsOnceTheBackupBringsTheEarlierKey() async throws {
+        let account = newAccount()
+        let backup = ScriptedEarlierKeysBackup()
+        let h = harness(backup: backup, earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        // The route's own restore finds no backup; the next look finds one
+        // a sibling uploaded, carrying the earlier key.
+        backup.outcomes = [.noBackup, .restored(try backupCarrying(account.bytes, oldSeed: r.oldSeed))]
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: r.current.phrase())
+
+        let landed = await waitUntil { self.isSession(h.repository) }
+        XCTAssertTrue(landed, "\(h.repository.state)")
+        XCTAssertEqual(KeychainOwnPredecessorStore().load(accountIdB64: account.b64), [r.oldSeed])
+        // The chat layer now mints under the conversation key.
+        let inputs = try XCTUnwrap(EarlierKeysGate.readInputs(
+            accountIdB64: account.b64, accountSeed: r.current.toSeed(), holdsConversations: false))
+        XCTAssertEqual(EarlierKeysGate.verdict(inputs, link: .key(key: r.oldKey)), .mint(key: r.oldKey))
+    }
+
+    func testThePairedRowStoresTheEarlierKeysBeforeTheSessionLands() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        var heldAtLanding: [Data]?
+        let sink = h.repository.$state.sink { state in
+            if case .session = state, heldAtLanding == nil {
+                heldAtLanding = KeychainOwnPredecessorStore().load(accountIdB64: account.b64)
+            }
+        }
+        defer { sink.cancel() }
+
+        try await h.repository.completeFromPairing(
+            phraseEntropy: r.current.toEntropy(),
+            session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000),
+            predecessors: [FfiRecoveryPredecessor(seed: r.oldSeed, adoptedAtMs: 1_700_000_000_000)])
+
+        XCTAssertTrue(isSession(h.repository), "\(h.repository.state)")
+        XCTAssertEqual(heldAtLanding, [r.oldSeed], "the earlier key was held when the session landed")
+    }
+
+    func testAPairedRowWithoutTheEarlierKeyParks() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+
+        try await h.repository.completeFromPairing(
+            phraseEntropy: r.current.toEntropy(),
+            session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000))
+
+        XCTAssertTrue(isParkedForEarlierKeys(h.repository), "\(h.repository.state)")
+        XCTAssertNil(DeviceIdentityStore.getDeviceBinding(accountIdB64: account.b64))
+    }
+
+    func testAnAccountThatNeverRotatedLandsAsBefore() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let mine = RecoveryMnemonic.generate()
+        h.directory.publishedKey = try identityKey(of: mine)
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: mine.phrase())
+
+        XCTAssertTrue(isSession(h.repository))
+        XCTAssertEqual(KeychainOwnConversationKeyStore().load(accountIdB64: account.b64)?.conversationKey, nil)
+    }
+
+    func testTwoConcurrentLandingsWhileParkedRunOnce() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), earlierKeysGate: true, routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let r = try rotated()
+        h.directory.publishedKey = try identityKey(of: r.current)
+        h.directory.conversationLink = r.link
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: r.current.phrase())
+        XCTAssertTrue(isParkedForEarlierKeys(h.repository))
+
+        var landings = 0
+        let sink = h.repository.$state.sink { if case .session = $0 { landings += 1 } }
+        defer { sink.cancel() }
+        // The earlier key arrives; the device's own look and a pairing the
+        // person started now both could land.
+        try KeychainOwnPredecessorStore().replace([r.oldSeed], accountIdB64: account.b64)
+        let repository = h.repository
+        let entropy = r.current.toEntropy()
+        let oldSeed = r.oldSeed
+        async let look: Void = repository.retryEarlierKeys()
+        async let pairing: Void = {
+            try? await repository.completeFromPairing(
+                phraseEntropy: entropy,
+                session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000),
+                predecessors: [FfiRecoveryPredecessor(seed: oldSeed, adoptedAtMs: 1_700_000_000_000)])
+        }()
+        _ = await (look, pairing)
+        _ = await waitUntil { self.isSession(h.repository) }
+
+        XCTAssertTrue(isSession(h.repository), "\(h.repository.state)")
+        XCTAssertEqual(landings, 1, "one landing, not two")
+        XCTAssertFalse(h.repository.parkedLanding.busy, "the guard is free again")
+    }
+
+    func testTheGuardSkipsALookAndQueuesACompletion() async {
+        let guardian = ParkedLandingGuard()
+        XCTAssertTrue(guardian.tryEnter())
+        XCTAssertFalse(guardian.tryEnter(), "a look skips while a landing runs")
+        var order: [String] = []
+        let waiting = Task { @MainActor in
+            await guardian.enter()
+            order.append("completion")
+            guardian.leave()
+        }
+        await Task.yield()
+        order.append("first left")
+        guardian.leave()
+        await waiting.value
+        XCTAssertEqual(order, ["first left", "completion"])
+        XCTAssertFalse(guardian.busy)
+    }
+
+    func testTheRelaunchStepReadsOnlyWhatIsRecorded() throws {
+        let account = newAccount()
+        let h = harness()
+        let current = Data(repeating: 0xCC, count: 32), old = Data(repeating: 0xA0, count: 32)
+        var inputs = EarlierKeysGate.Inputs(
+            boundKey: nil, currentKey: current, predecessorKeys: [], holdsConversations: false)
+        h.repository.earlierKeysInputs = { _, _ in inputs }
+        let seed = Data(count: 64)
+        // A binding would be minted and nothing is recorded: read.
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .read)
+        // Recorded: the chats use a key this device lacks.
+        KeychainOwnConversationKeyStore().save(
+            OwnConversationKeyRecord(conversationKey: old, readAtMs: 1), accountIdB64: account.b64)
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .park)
+        // Held now: the binding is minted under it, no request.
+        inputs.predecessorKeys = [old]
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .land)
+        // A kept binding lands whatever is recorded.
+        inputs = EarlierKeysGate.Inputs(
+            boundKey: old, currentKey: current, predecessorKeys: [old], holdsConversations: true)
+        XCTAssertEqual(h.repository.relaunchEarlierKeysStep(accountIdB64: account.b64, seed: seed), .land)
+    }
+}
+
+// MARK: - The username of a sign-in that named none
+
+/// Auth's answers to `POST /auth/login-handle/check`, per handle, mutable
+/// between steps.
+private final class HandleAnswers {
+    var byHandle: [String: (Int, String)] = [:]
+    var fallback: (Int, String) = (200, #"{"state":"other"}"#)
+
+    func set(_ username: String, _ answer: (Int, String)) throws {
+        byHandle[base64UrlEncodeNoPad(try loginHandle(username: username))] = answer
+    }
+
+    func answer(_ json: [String: Any]) -> (Int, String) {
+        (json["handle"] as? String).flatMap { byHandle[$0] } ?? fallback
+    }
+}
+
+extension RecoveryFlowTests {
+
+    private static let same = (200, #"{"state":"same"}"#)
+    private static let other = (200, #"{"state":"other"}"#)
+    private static let none = (200, #"{"state":"none"}"#)
+
+    private func checks(_ h: Harness) -> [RecordedAuthRequest] {
+        NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle/check" }
+    }
+
+    private func checkedHandle(_ request: RecordedAuthRequest) -> String? { request.json["handle"] as? String }
+
+    private func wire(_ username: String) throws -> String { base64UrlEncodeNoPad(try loginHandle(username: username)) }
+
+    /// A backup whose own profile envelope names `username`.
+    private func backupNaming(_ account: Data, profileUsername: String) throws -> ParsedBackupPayload {
+        let envelope = try composeProfileEnvelope(profile: FfiProfile(
+            displayName: "Alice", username: profileUsername, updatedAtMs: 1_700_000_000_000,
+            accountId: account, usernameCertificate: nil, grants: []))
+        return try parseBackupPayload(wire: try BackupClient.composePayload(
+            accountId: account,
+            createdAtMs: 1_700_000_000_000,
+            ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [],
+            knownGroupIdsHex: [],
+            syncedState: nil,
+            own: OwnBackupEnvelopes(ownProfile: envelope)))
+    }
+
+    /// A passkey sign-in that named no username, then the phrase: the
+    /// session lands with an empty username.
+    private func landWithoutAName(
+        _ h: Harness, _ account: (bytes: Data, b64: String), register: String? = nil
+    ) async throws {
+        h.repository.storedOwnUsernameRegister = { _ in register }
+        try await parkWithoutKeysOrName(h, account.bytes)
+        let mine = RecoveryMnemonic.generate()
+        h.directory.publishedKey = try identityKey(of: mine)
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: mine.phrase())
+        XCTAssertTrue(isSession(h.repository), "\(h.repository.state)")
+    }
+
+    func testANameTheBackupGivesIsCheckedAndAdoptedWithoutAPrompt() async throws {
+        let account = newAccount()
+        let answers = HandleAnswers()
+        try answers.set("alice", Self.same)
+        let backup = ScriptedEarlierKeysBackup()
+        backup.outcomes = [.restored(try backupNaming(account.bytes, profileUsername: "alice"))]
+        let h = harness(backup: backup, routes: { path, json in
+            path == "/auth/login-handle/check" ? answers.answer(json) : nil
+        })
+        var learned: [String] = []
+        h.repository.onUsernameLearned = { learned.append($0) }
+
+        try await landWithoutAName(h, account)
+
+        let named = SessionAccount(accountIdB64: account.b64, username: "alice")
+        let adopted = await waitUntil { h.repository.state == .session(named) }
+        XCTAssertTrue(adopted, "\(h.repository.state)")
+        XCTAssertEqual(h.store.load(), PersistedSession(accountIdB64: account.b64, username: "alice"))
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64, "no prompt")
+        XCTAssertEqual(learned, [account.b64], "the rejoin is woken")
+        XCTAssertEqual(checks(h).map(checkedHandle), [try wire("alice")])
+        XCTAssertEqual(checks(h).first?.authorization, "Bearer tok-passkey")
+        // The rejoin's handle source now names the account's handle.
+        XCTAssertEqual(DeviceSession.current(h.repository)?.loginHandle, try loginHandle(username: "alice"))
+        // Learned once: no second check for the session.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(checks(h).count, 1)
+    }
+
+    func testABackupNameOfAnotherAccountIsSkippedAndTheRegisterIsTried() async throws {
+        let account = newAccount()
+        let answers = HandleAnswers()
+        try answers.set("bob", Self.other)
+        try answers.set("alice", Self.same)
+        let backup = ScriptedEarlierKeysBackup()
+        backup.outcomes = [.restored(try backupNaming(account.bytes, profileUsername: "bob"))]
+        let h = harness(backup: backup, routes: { path, json in
+            path == "/auth/login-handle/check" ? answers.answer(json) : nil
+        })
+
+        try await landWithoutAName(h, account, register: "alice")
+
+        let adopted = await waitUntil { h.store.load()?.username == "alice" }
+        XCTAssertTrue(adopted)
+        XCTAssertEqual(checks(h).map(checkedHandle), [try wire("bob"), try wire("alice")])
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64)
+    }
+
+    func testWithNoNameFromTheBackupThePersonIsAskedAndNothingIsSent() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), routes: { path, _ in
+            path == "/auth/login-handle/check" ? Self.same : nil
+        })
+
+        try await landWithoutAName(h, account)
+
+        let asked = await waitUntil { h.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(asked)
+        XCTAssertTrue(checks(h).isEmpty, "nothing to check before the person types")
+        XCTAssertEqual(h.store.load()?.username, "")
+    }
+
+    func testThePromptsAnswersSameOtherNone429AndNetwork() async throws {
+        let account = newAccount()
+        let answers = HandleAnswers()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), routes: { path, json in
+            path == "/auth/login-handle/check" ? answers.answer(json) : nil
+        })
+        var learned: [String] = []
+        h.repository.onUsernameLearned = { learned.append($0) }
+        try await landWithoutAName(h, account)
+        let asked = await waitUntil { h.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(asked)
+
+        // The username rule refuses before any request.
+        let rule = await h.repository.submitPromptedUsername("no")
+        XCTAssertEqual(rule, .rule(.tooShort))
+        let empty = await h.repository.submitPromptedUsername("   ")
+        XCTAssertEqual(empty, .empty)
+        XCTAssertTrue(checks(h).isEmpty)
+
+        try answers.set("bob", Self.other)
+        let other = await h.repository.submitPromptedUsername("bob")
+        XCTAssertEqual(other, .notThisAccount)
+        try answers.set("carol", (429, #"{"error":"too-many-attempts"}"#))
+        let limited = await h.repository.submitPromptedUsername("carol")
+        XCTAssertEqual(limited, .tooMany)
+        try answers.set("dave", (503, ""))
+        let failed = await h.repository.submitPromptedUsername("dave")
+        XCTAssertEqual(failed, .network)
+        XCTAssertEqual(h.repository.usernamePromptAccountIdB64, account.b64, "the prompt stays up")
+        XCTAssertEqual(h.store.load()?.username, "")
+        XCTAssertTrue(learned.isEmpty)
+
+        try answers.set("alice", Self.same)
+        let same = await h.repository.submitPromptedUsername(" @Alice ")
+        XCTAssertEqual(same, .adopted("alice"))
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64, "closed")
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: account.b64, username: "alice")))
+        XCTAssertEqual(h.store.load()?.username, "alice")
+        XCTAssertEqual(learned, [account.b64])
+        XCTAssertEqual(checks(h).map(checkedHandle),
+                       [try wire("bob"), try wire("carol"), try wire("dave"), try wire("alice")])
+    }
+
+    func testAnAccountWithNoUsernameClosesThePromptAndChangesNothing() async throws {
+        let account = newAccount()
+        let h = harness(backup: ScriptedEarlierKeysBackup(), routes: { path, _ in
+            path == "/auth/login-handle/check" ? Self.none : nil
+        })
+        var learned: [String] = []
+        h.repository.onUsernameLearned = { learned.append($0) }
+        try await landWithoutAName(h, account)
+        _ = await waitUntil { h.repository.usernamePromptAccountIdB64 == account.b64 }
+
+        let outcome = await h.repository.submitPromptedUsername("alice")
+
+        XCTAssertEqual(outcome, .accountHasNone)
+        XCTAssertNil(h.repository.usernamePromptAccountIdB64)
+        XCTAssertEqual(h.store.load()?.username, "")
+        XCTAssertTrue(learned.isEmpty)
+    }
+
+    /// "I don't remember" closes the prompt for this run of the app; the
+    /// next start (a new repository over the same stores) asks again while
+    /// the username is still empty.
+    func testIDontRememberAsksAgainAtTheNextStart() async throws {
+        let account = newAccount()
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = RecoveryMnemonic.generate().toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(access: "tok-nameless")), accountIdB64: account.b64)
+        let marker = PersistedSession(accountIdB64: account.b64, username: "")
+        let routes: (String, [String: Any]) -> (Int, String)? = { path, _ in
+            path == "/auth/login-handle/check" ? Self.other : nil
+        }
+
+        let first = harness(marker: marker, persistence: persistence, routes: routes)
+        XCTAssertTrue(isSession(first.repository))
+        let asked = await waitUntil { first.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(asked, "a relaunch with no username asks")
+        first.repository.dismissUsernamePrompt()
+        XCTAssertNil(first.repository.usernamePromptAccountIdB64)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(first.repository.usernamePromptAccountIdB64, "not again in this run")
+
+        let next = harness(marker: marker, persistence: persistence, routes: routes)
+        let askedAgain = await waitUntil { next.repository.usernamePromptAccountIdB64 == account.b64 }
+        XCTAssertTrue(askedAgain, "the next start asks again")
     }
 }

@@ -289,7 +289,7 @@ export function planBackgroundEvents(
         break;
       case "contentOp":
       case "openItems":
-        // ADR-0090 — filed at receipt by the chat client (`attach/`), never
+        // ADR-0092 — filed at receipt by the chat client (`attach/`), never
         // handed on; a stray one is dropped here.
         break;
       default: {

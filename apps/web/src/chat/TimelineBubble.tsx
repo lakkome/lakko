@@ -25,8 +25,11 @@ import { createEffect, createResource, createSignal, For, Index, onCleanup, Show
 import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
 
+import { base64Encode } from "../auth/account-id";
 import { callInviteOf } from "../calls/call-invite-link";
 import { ChannelInviteCard, groupLinkOf } from "./ChannelInviteCard";
+import { linkOpening, linkWithoutSecret, openStoredCard } from "./channel-invite-preview";
+import type { OpenedChannelInvite } from "../channels/channel-invites";
 
 import type { MemberIdentity } from "./author-identity";
 import {
@@ -37,6 +40,7 @@ import {
   type ReplyRef,
 } from "./attachments";
 import { useChats } from "./ChatContext";
+import { bubbleCopyText, bubbleOffersEdit, bubbleOffersForward } from "./bubble-copy";
 import { copyMessageText } from "./copy-message";
 import { heldBy, type MessageOpState } from "./message-ops";
 import {
@@ -97,14 +101,14 @@ import { Icon } from "../ui/icons";
 import { joinList, t } from "../l10n";
 import { displayLocale } from "../l10n/display-locale";
 import { publicOrigin } from "../platform";
-import type { MessageRef, TextSlot } from "../translation/controller";
+import type { MessageRef, TextSlot, TextView } from "../translation/controller";
 import { useTranslation } from "../translation/context";
 import { TranslationLine } from "../translation/TranslationLine";
 import type { TranscriptHost } from "../translation/Transcript";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
-  /** ADR-0090 — what a poll, checklist, location, contact card or article
+  /** ADR-0092 — what a poll, checklist, location, contact card or article
    *  bubble needs from the conversation. Absent: content renders read-only
    *  as the unsupported sentence. */
   contentHost?: ContentHost | undefined;
@@ -352,7 +356,7 @@ export function TimelineBubble(
       return null;
     }
     if (ev.kind === "serviceEnvelope" || ev.kind === "contentOp" || ev.kind === "openItems") {
-      // An unrecognised `lakko/…` service envelope, or an ADR-0090 op or
+      // An unrecognised `lakko/…` service envelope, or an ADR-0092 op or
       // hand-over: consumed at receipt by the chat client and never a bubble.
       // Defensive.
       return null;
@@ -396,6 +400,7 @@ export function TimelineBubble(
         contentState={ev.contentState}
         authorKeyB64={ev.senderKey}
         createdAt={ev.createdAt}
+        channelInviteB64={ev.channelInvite === undefined ? undefined : base64Encode(ev.channelInvite)}
         {...props}
       />
     );
@@ -436,6 +441,7 @@ export function TimelineBubble(
       contentState={live().contentState}
       authorKeyB64={live().authorKey}
       createdAt={live().createdAt}
+      channelInviteB64={live().channelInviteB64}
       {...props}
     />
   );
@@ -510,12 +516,15 @@ function ChatBubbleBody(
      *  read: the bubble says so in the catalog's words, in the language
      *  current when drawn. */
     unsupported?: boolean | undefined;
-    /** ADR-0090 — a poll, checklist, location, contact card or article. */
+    /** ADR-0092 — a poll, checklist, location, contact card or article. */
     content?: MessageContent | undefined;
     contentState?: ContentState | undefined;
     /** The author's key (base64), for a content bubble's attribution. */
     authorKeyB64?: string | undefined;
     createdAt?: string | undefined;
+    /** ADR-0087 section 14 — the channel invitation card the message
+     *  carried (base64), drawn as the card, opened on this device. */
+    channelInviteB64?: string | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -564,6 +573,34 @@ function ChatBubbleBody(
     return groupLinkOf(displayText(), origin);
   };
   const [isChannelCard, setIsChannelCard] = createSignal(false);
+  /** ADR-0087 section 14 — the invitation the message's own card opens to,
+   *  on this device and offline; `null` without a card. */
+  const storedInvite = (): OpenedChannelInvite | null => {
+    if (props.channelInviteB64 === undefined || isDeleted()) return null;
+    let origin: string;
+    try {
+      origin = publicOrigin();
+    } catch {
+      return null;
+    }
+    return openStoredCard(props.channelInviteB64, origin);
+  };
+  /**
+   * The words drawn in place of a `/g/` link that is not drawn as a card:
+   * the link without its secret while it is opened or the ledger does not
+   * answer, the catalog's "invalid link" sentence when it is gone. `null`
+   * draws the text as it is: a link that opened as a group's is live and is
+   * tapped. The secret after `#` is never drawn otherwise.
+   */
+  const linkText = (): string | null => {
+    if (storedInvite() !== null) return null;
+    const link = groupLink();
+    if (link === null) return null;
+    const o = linkOpening(link.url);
+    if (o === undefined || o.kind === "offline") return linkWithoutSecret(link.url);
+    if (o.kind === "dead") return t("invite.link.invalid");
+    return null;
+  };
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
 
@@ -590,6 +627,14 @@ function ChatBubbleBody(
     return translation === undefined || ref === null || isEditing()
       ? ({ phase: "none" } as const)
       : translation.textView("text", ref);
+  };
+  /** UX 3.2 — the quiet line: the translation's line, or before any, the
+   *  message's language with `Translate` up front. */
+  const lineView = (): TextView => {
+    const v = textView();
+    const ref = messageRef();
+    if (translation === undefined || ref === null || isEditing() || isDeleted()) return v;
+    return translation.textLine(ref, displayText(), props.tone === "outgoing");
   };
   /** The text the bubble shows: the translation while it is shown. */
   const shownText = (): string => {
@@ -619,11 +664,13 @@ function ChatBubbleBody(
   };
   /** Copy is "the text I see" (UX 3.2): the translation while it is shown. */
   const copyableText = (): string | null => {
-    // ADR-0090 — a content message has no text to copy (a location's
+    // ADR-0092 — a content message has no text to copy (a location's
     // coordinates are its own row).
     if (props.content !== undefined) return null;
     const ref = messageRef();
-    if (displayText().length > 0) return shownText();
+    if (displayText().length > 0) {
+      return bubbleCopyText(shownText(), storedInvite() !== null || isChannelCard(), linkText());
+    }
     const tr = openTranscript();
     if (tr === null || translation === undefined || ref === null) return null;
     const v = translation.textView("transcript-translation", ref);
@@ -716,7 +763,7 @@ function ChatBubbleBody(
     });
   }
 
-  // ADR-0090 / UX attachments 11.3 — the article reader opens this bubble's
+  // ADR-0092 / UX attachments 11.3 — the article reader opens this bubble's
   // menu directly through the registry.
   createEffect(() => {
     const id = props.messageId;
@@ -792,7 +839,7 @@ function ChatBubbleBody(
 
   // ADR-0047 — media attachments render as their own bubbles; anything the
   // hub does not accept as media stays a file chip.
-  // ADR-0090 — an article's images are its own; an audio file has its own
+  // ADR-0092 — an article's images are its own; an audio file has its own
   // bubble (title, artist, cover).
   const plainRefs = (): AttachmentRefBytes[] =>
     props.content !== undefined ? [] : props.attachments.filter((a) => a.kind !== "audio");
@@ -864,7 +911,7 @@ function ChatBubbleBody(
       {/* ADR-0065 section 2 — the saved mark, seen only by this account. */}
       <Show when={props.messageId !== undefined && props.isSavedOf?.(props.messageId) === true}>
         <span class="lk-bubble-saved" role="img" aria-label={t("chat.message.saved_mark")} title={t("chat.message.saved_mark")}>
-          <Icon name="bookmark" size={12} />
+          <Icon name="bookmark-fill" size={14} />
         </span>
       </Show>
       {/* A failed row offers Retry where the message is. The media
@@ -903,7 +950,7 @@ function ChatBubbleBody(
               }
               aria-label={read() ? t("chat.message.read") : t("chat.message.sent")}
             >
-              <Icon name={read() ? "dcheck" : "check"} size={14} />
+              <Icon name={read() ? "checkmark-double" : "checkmark"} size={14} />
             </span>
           );
         })()}
@@ -963,9 +1010,7 @@ function ChatBubbleBody(
               toggleRow();
             }}
           >
-            <Show when={rowSelected()}>
-              <Icon name="check" size={14} strokeWidth={2.4} />
-            </Show>
+            <Icon name={rowSelected() ? "checkmark-circle-fill" : "circle"} size={26} />
           </button>
         </Show>
       </Show>
@@ -1110,7 +1155,7 @@ function ChatBubbleBody(
                   {(invite) => (
                     <div class="lk-bubble-call-invite">
                       <span class="lk-bubble-call-invite-icon" aria-hidden="true">
-                        <Icon name="phone" size={20} />
+                        <Icon name="phone-fill" size={20} />
                       </span>
                       <span class="lk-bubble-call-invite-title">
                         {t("chat.call_invite.title")}
@@ -1121,12 +1166,21 @@ function ChatBubbleBody(
                     </div>
                   )}
                 </Show>
-                <Show when={callInvite() === null ? groupLink() : null}>
+                <Show when={callInvite() === null ? storedInvite() : null}>
+                  {(o) => <ChannelInviteCard opened={o()} />}
+                </Show>
+                <Show when={callInvite() === null && storedInvite() === null ? groupLink() : null}>
                   {(link) => <ChannelInviteCard link={link()} onResolved={setIsChannelCard} />}
                 </Show>
-                <Show when={displayText().length > 0 && callInvite() === null && !isChannelCard()}>
+                <Show
+                  when={
+                    displayText().length > 0 && callInvite() === null && !isChannelCard() && storedInvite() === null
+                  }
+                >
                   <div class="lk-bubble-text" dir="auto">
-                    <MessageText text={shownText()} />
+                    <Show when={linkText()} fallback={<MessageText text={shownText()} />}>
+                      {(words) => <span>{words()}</span>}
+                    </Show>
                     <Show when={isEdited()}>
                       <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
                     </Show>
@@ -1140,7 +1194,7 @@ function ChatBubbleBody(
                         slot="text"
                         messageRef={ref()}
                         text={displayText()}
-                        view={textView()}
+                        view={lineView()}
                       />
                     )}
                   </Show>
@@ -1466,6 +1520,7 @@ function ChatBubbleBody(
               canForward={
                 props.messageId !== undefined &&
                 props.ack === "sent" &&
+                bubbleOffersForward(storedInvite() !== null || isChannelCard()) &&
                 // UX `attachments.md` section 11a: never a poll or checklist,
                 // a contact card only while its person lets it be shared.
                 canForwardContent(props.content, (k) => profiles.cardShareableOf(k))
@@ -1510,7 +1565,9 @@ function ChatBubbleBody(
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);
               }}
               onClose={() => setMenuAnchor(null)}
-              canEdit={props.content === undefined}
+              // A content message edits through its own menu rows (ADR-0092),
+              // an invitation card never (ADR-0087 section 14).
+              canEdit={props.content === undefined && bubbleOffersEdit(storedInvite() !== null || isChannelCard())}
               extraActions={
                 props.content !== undefined && props.contentHost !== undefined
                   ? contentMenuActions({

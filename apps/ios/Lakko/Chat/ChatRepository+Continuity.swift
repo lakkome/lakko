@@ -761,7 +761,7 @@ extension ChatRepository {
         existingLocalId: Int64? = nil
     ) -> Bool {
         guard let record = groups[groupIdHex], let queue = heldQueue else { return false }
-        // ADR-0090 — a held location, card or article keeps its content: the
+        // ADR-0092 — a held location, card or article keeps its content: the
         // envelope with no forward line (the forward is held beside it).
         var heldContent: Data?
         if let content {
@@ -961,7 +961,7 @@ extension ChatRepository {
                 do {
                     let envelope: Data
                     if let content = decoded.content {
-                        // ADR-0090 — the held content goes out as content,
+                        // ADR-0092 — the held content goes out as content,
                         // with its forward line.
                         envelope = try composeContentEnvelope(
                             content: content, attachments: decoded.attachments,

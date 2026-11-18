@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.6 — one anonymous ballot cast, the same code on the
+ * ADR-0092 section 3.6 — one anonymous ballot cast, the same code on the
  * worker and (where no worker can be started) on the page.
  */
 import { loadWasm } from "../wasm";

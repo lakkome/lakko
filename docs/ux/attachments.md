@@ -3,7 +3,7 @@
 
 # UX spec — the attachment menu and the kinds it sends
 
-**Status:** design, 2026-11-15. The input to [ADR-0090](../adr/0090-attachment-kinds.md)
+**Status:** design, 2026-11-15. The input to [ADR-0092](../adr/0092-attachment-kinds.md)
 and to the four client builds (web, desktop, iOS, Android). Nothing in this document is
 built.
 **Owner surface:** the paperclip in every composer (one-to-one, group, channel), the

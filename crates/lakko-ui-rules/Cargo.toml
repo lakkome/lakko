@@ -20,7 +20,7 @@ workspace = true
 # predicate the blinder enforces rather than a third spelling of it.
 lakko-contacts.workspace = true
 # The message-link rule (`message_links`), defined once in lakko-attachments
-# so the article codec (ADR-0090) uses the same rule; re-exported here.
+# so the article codec (ADR-0092) uses the same rule; re-exported here.
 lakko-attachments.workspace = true
 # The one-emoji rule (`emoji`, UX reactions-and-emoji D10): extended
 # grapheme clusters, and the Extended_Pictographic property that
@@ -28,6 +28,14 @@ lakko-attachments.workspace = true
 # workspace declaration.
 unicode-segmentation.workspace = true
 icu_properties.workspace = true
+# On-device text language detection (`language_detect`, ADR-0082 note of
+# 2026-11-15). Pure Rust, compiled-in trigram profiles, no I/O. The `dev`
+# feature exposes the ranked score list (`whatlang::dev::raw_detect`), which
+# the close-candidate set reads. Upstream calls that API internal and advises
+# against relying on it; the version is pinned exactly (`=0.18.0`) in the
+# workspace, so it cannot change under us without a deliberate bump, and the
+# tests of `language_detect` pin what it returns for the measured cases.
+whatlang = { workspace = true, features = ["dev"] }
 
 [dev-dependencies]
 # Only to pin that the folder bitfield constants equal the wire ones.

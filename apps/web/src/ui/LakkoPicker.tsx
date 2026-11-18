@@ -217,7 +217,7 @@ export function LakkoPicker<V extends string = string>(props: LakkoPickerProps<V
           {currentLabel()}
         </span>
         <span class="lk-picker-chevron" aria-hidden="true">
-          <Icon name="chevron" size={16} />
+          <Icon name="chevron-up-down" size={20} />
         </span>
       </button>
       <Show when={open()}>
@@ -253,7 +253,7 @@ export function LakkoPicker<V extends string = string>(props: LakkoPickerProps<V
                 <span class="lk-ellipsis">{option.label}</span>
                 <span class="lk-picker-check" aria-hidden="true">
                   <Show when={option.value === props.value}>
-                    <Icon name="check" size={18} />
+                    <Icon name="checkmark" size={20} />
                   </Show>
                 </span>
               </div>

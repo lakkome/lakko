@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0090 — sending a poll, checklist, location, contact card or article
+// ADR-0092 — sending a poll, checklist, location, contact card or article
 // into a group conversation, and every op on one (votes, closes, ticks,
 // added items, edits). Anonymous ballots go through ``BallotQueue``.
 
@@ -53,7 +53,7 @@ extension ChatRepository {
         // The pending row carries what can be shown before the seal: the
         // signed form is composed inside the lock (the ring must be the
         // roster of the epoch the seal uses).
-        // ADR-0090 section 11a (forwarding, amended 2026-11-18) — a forwarded
+        // ADR-0092 section 11a (forwarding, amended 2026-11-18) — a forwarded
         // location, card or article carries the forward line.
         let parts = ContentModel.forwardParts(forward)
         let preview = try draft.compose(groupId: groupId, authorSeed: author.ed25519Seed(), ringKeys: nil)
@@ -108,7 +108,7 @@ extension ChatRepository {
 
     /// Vote in (or retract from, with empty `choices`) the poll `pollMessageId`.
     /// A non-anonymous vote is an MLS op; an anonymous one is queued as a
-    /// ballot (ADR-0090 section 3.6) and shows as cast at once.
+    /// ballot (ADR-0092 section 3.6) and shows as cast at once.
     public func votePoll(groupIdHex: String, pollMessageId: Int64, choices: [UInt8]) async throws {
         guard let record = groups[groupIdHex],
               let message = record.messages.first(where: { $0.messageId == pollMessageId }),
@@ -276,7 +276,7 @@ enum ContentFFI {
 
 // MARK: - What an editor hands over
 
-/// ADR-0090 — a content message as an editor produced it, before signing.
+/// ADR-0092 — a content message as an editor produced it, before signing.
 public enum ContentDraft {
     case poll(question: String, options: [String], multiple: Bool, quiz: PollQuiz?, closeAtMs: Int64?, anonymous: Bool)
     case checklist(ChecklistBody)
@@ -286,7 +286,7 @@ public enum ContentDraft {
 
     /// A channel post's content: no author signature (the post signature is
     /// the author's) and never the anonymous fields (every channel poll is
-    /// anonymous through the credential, ADR-0090 section 4.1).
+    /// anonymous through the credential, ADR-0092 section 4.1).
     func unsigned() -> MessageContent? {
         switch self {
         case .poll(let question, let options, let multiple, let quiz, let closeAtMs, _):
@@ -334,7 +334,7 @@ public enum ContentDraft {
 }
 
 extension HeldSend {
-    /// ADR-0090 — the content a held one-to-one keeps for its successor: a
+    /// ADR-0092 — the content a held one-to-one keeps for its successor: a
     /// location, contact card or article, which carry no signature over the
     /// group. A poll or checklist is signed over the group it was composed
     /// in, so it is never held for another.

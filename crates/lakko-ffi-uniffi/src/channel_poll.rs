@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 4.3 channel polls on the UniFFI surface: the option
+//! ADR-0092 section 4.3 channel polls on the UniFFI surface: the option
 //! labels a vote names, the vote message a credential presentation is bound
 //! to, and the frozen tally a close carries. Every rule is
 //! `lakko_channels::poll`'s.

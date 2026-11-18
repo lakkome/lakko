@@ -99,11 +99,11 @@ struct FeedImportScreen: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
                 if let rule {
-                    Label(rule.name, systemImage: FeedIcons.symbol(rule.icon))
+                    Label(rule.name, icon: FeedIcons.icon(rule.icon), size: 24, relativeTo: .title3)
                         .font(.title3.weight(.semibold))
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(FeedDraft.summary(rule), id: \.self) { line in
-                            Label(line, systemImage: "circle.fill")
+                            Label(line, icon: .bullet)
                                 .labelStyle(SummaryLabelStyle())
                         }
                     }
@@ -187,7 +187,6 @@ private struct SummaryLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             configuration.icon
-                .font(.system(size: 5))
                 .foregroundStyle(Color.lakkoTextMuted)
             configuration.title
                 .font(.subheadline)

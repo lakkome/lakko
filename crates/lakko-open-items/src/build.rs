@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! The committer's side: one held open item to a `lakko_contacts::OpenItem`
-//! (ADR-0090 section 3.9).
+//! (ADR-0092 section 3.9).
 //!
 //! Which items are open is the caller's reading (a poll that is not closed
 //! by a close op or its time, a checklist with no close); this module turns

@@ -233,3 +233,71 @@ describe("history is not news (docs/ux/second-device.md section 2)", () => {
     expect((await loadMessageLog(JOINER, key))?.held).toEqual(held);
   });
 });
+
+describe("the invitation card, the reply and the forward reach the new device", () => {
+  // Seen live 2026-11-13: an invitation the old device drew as a card reached
+  // the new device as its bare `/g/` link (the placeholder carried text only).
+  const card = new Uint8Array(400).fill(0x5a);
+  const originGroup = new Uint8Array(32).fill(0x42);
+
+  it("a web sender carries them and a web joiner stores them", async () => {
+    const key = await deviceKey();
+    const invitation: PersistedMessage = {
+      ...row(10, "outgoing", "https://lakko.me/g/abcdefgh#secret"),
+      channelInviteB64: btoa(String.fromCharCode(...card)),
+    };
+    const reply: PersistedMessage = {
+      ...row(11, "incoming", "yes"),
+      reply: { target: "10", author: "Ann", excerpt: "come along" },
+    };
+    const forward: PersistedMessage = {
+      ...row(12, "incoming", "look"),
+      forward: {
+        author: "Bob",
+        origin: { groupIdB64: btoa(String.fromCharCode(...originGroup)), messageId: "77" },
+      },
+    };
+    await saveMessageLog(SENDER, key, {
+      version: 1,
+      groups: { [GROUP_HEX]: { cursor: "12", messages: [invitation, reply, forward] } },
+    });
+    const sealed = await buildHistoryBundleFromLog({ accountIdB64: SENDER, deviceKey: key, secret: SECRET });
+    if (sealed === null) throw new Error("no bundle");
+    const joinerKey = await deviceKey();
+    expect(
+      await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: joinerKey, secret: SECRET, sealedBytes: sealed }),
+    ).toBe(3);
+    const rows = (await loadMessageLog(JOINER, joinerKey))?.groups[GROUP_HEX]?.messages ?? [];
+    expect(rows.find((m) => m.messageId === "10")?.channelInviteB64).toBe(invitation.channelInviteB64);
+    expect(rows.find((m) => m.messageId === "11")?.reply).toEqual(reply.reply);
+    expect(rows.find((m) => m.messageId === "12")?.forward).toEqual(forward.forward);
+    // A plain row gains none of them.
+    expect(rows.find((m) => m.messageId === "11")?.channelInviteB64).toBeUndefined();
+    expect(rows.find((m) => m.messageId === "10")?.reply).toBeUndefined();
+  });
+
+  it("a native sender's placeholder (raw bytes on the wire) decodes the same", () => {
+    const placeholder = wasm.encodeHistoryPlaceholder(
+      12n,
+      1,
+      "t",
+      "look",
+      [],
+      card,
+      3n,
+      undefined,
+      "quoted",
+      undefined,
+      originGroup,
+      77n,
+    );
+    const opened = wasm.decodeHistoryPlaceholder(placeholder);
+    expect(Array.from(opened.channelInvite ?? [])).toEqual(Array.from(card));
+    expect(opened.replyTarget).toBe(3n);
+    expect(opened.replyAuthor).toBeUndefined();
+    expect(opened.replyExcerpt).toBe("quoted");
+    expect(opened.forwardedFrom).toBeUndefined();
+    expect(Array.from(opened.forwardOriginGroup ?? [])).toEqual(Array.from(originGroup));
+    expect(opened.forwardOriginMessage).toBe(77n);
+  });
+});

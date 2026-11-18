@@ -45,6 +45,17 @@ extension Notification.Name {
 ///   whose app has not answered yet (ADR-0079 section 5), with display-only
 ///   copies of what was written to them (``CarriedHeldMessage``).
 ///
+/// Format `v` 4 (2026-11-13, flag day: `v` 3 is refused) — one more required
+/// array, ``CarriedChannelSeeds``: per channel the account is subscribed to
+/// (a live channel subscription register on the sending device), the newest
+/// epoch seeds that device holds, at most ``maxSeedsPerChannel``, so the new
+/// device reads the posts the old one can. The channels themselves, their
+/// subscriber key, read key and role travel in the synced channel
+/// subscription register (ADR-0050 section 2.9 as amended 2026-11-13), not
+/// here; the seeds are kept until a register for the channel arrives, and
+/// dropped if it is (or becomes) left. A seed held for an epoch is never
+/// overwritten.
+///
 /// iOS mirror of `apps/web/src/devices/state-bundle.ts`. The JSON shape, the
 /// row magic and the exporter label are identical so a web scanner and an iOS
 /// joiner (and the reverse) interoperate: one more row on the pairing
@@ -235,8 +246,43 @@ public enum StateBundle {
         }
     }
 
+    /// ADR-0050 section 2.9 (bundle v4) — one channel's newest epoch seeds.
+    public struct CarriedChannelSeeds: Codable, Equatable, Sendable {
+        /// Standard base64 of the 16-byte channel id.
+        public let channelIdB64: String
+        /// 1 to ``maxSeedsPerChannel`` seeds, strictly ascending by epoch.
+        public let seeds: [CarriedSeed]
+
+        public init(channelIdB64: String, seeds: [CarriedSeed]) {
+            self.channelIdB64 = channelIdB64
+            self.seeds = seeds
+        }
+    }
+
+    /// One epoch seed. Key material: the bundle is sealed under the
+    /// DeviceGroup exporter, and this value is never logged.
+    public struct CarriedSeed: Codable, Equatable, Sendable {
+        public let epoch: UInt32
+        /// Standard base64 of the 32-byte seed.
+        public let seedB64: String
+
+        public init(epoch: UInt32, seedB64: String) {
+            self.epoch = epoch
+            self.seedB64 = seedB64
+        }
+    }
+
     /// The bundle's format version. A bundle with any other `v` is refused.
-    public static let version = 3
+    public static let version = 4
+    /// At most this many channels carry seeds, and this many seeds each.
+    public static let maxChannelSeedEntries = 1000
+    public static let maxSeedsPerChannel = 32
+    /// The per-channel seed counts a build steps down through while the
+    /// encoded bundle is over the size cap; seeds never push out another
+    /// array.
+    static let seedLadder = [32, 16, 8, 4, 0]
+    static let channelIdLength = 16
+    static let channelSeedLength = 32
     /// At most this many group names, profiles and pending contacts, and this
     /// many held messages per pending contact (chosen, not measured). A bundle
     /// carrying more is refused whole; a build keeps the first ones in a
@@ -254,7 +300,7 @@ public enum StateBundle {
     public static let seedLength = 64
     static let signatureKeyLength = 32
 
-    public struct V3: Codable, Equatable, Sendable {
+    public struct V4: Codable, Equatable, Sendable {
         public let v: Int
         public let contacts: [CarriedContact]
         public let pins: [CarriedPin]
@@ -269,13 +315,17 @@ public enum StateBundle {
         public let profiles: [CarriedProfile]
         /// The pending contacts, with what was written to them.
         public let pendingContacts: [CarriedPendingContact]
+        /// Bundle v4 — the newest epoch seeds of the subscribed channels,
+        /// ascending by channel id bytes.
+        public let channelSeeds: [CarriedChannelSeeds]
 
         public init(
             contacts: [CarriedContact], pins: [CarriedPin], knownGroupIdsB64: [String],
             ownPredecessors: [OwnPredecessor] = [],
             groupNames: [CarriedGroupName] = [],
             profiles: [CarriedProfile] = [],
-            pendingContacts: [CarriedPendingContact] = []
+            pendingContacts: [CarriedPendingContact] = [],
+            channelSeeds: [CarriedChannelSeeds] = []
         ) {
             self.v = StateBundle.version
             self.contacts = contacts
@@ -285,12 +335,13 @@ public enum StateBundle {
             self.groupNames = groupNames
             self.profiles = profiles
             self.pendingContacts = pendingContacts
+            self.channelSeeds = channelSeeds
         }
     }
 
     // MARK: - Codec
 
-    public static func encode(_ bundle: V3) -> Data {
+    public static func encode(_ bundle: V4) -> Data {
         (try? JSONEncoder().encode(bundle)) ?? Data()
     }
 
@@ -302,14 +353,15 @@ public enum StateBundle {
     /// names, ``maxProfiles`` profiles, ``maxPendingContacts`` pending
     /// contacts or ``maxHeldMessages`` held messages of one; a malformed or
     /// repeated entry of any of the three.
-    public static func decode(_ bytes: Data) -> V3? {
+    public static func decode(_ bytes: Data) -> V4? {
         guard !bytes.isEmpty, bytes.count <= maxBundleBytes,
-              let bundle = try? JSONDecoder().decode(V3.self, from: bytes),
+              let bundle = try? JSONDecoder().decode(V4.self, from: bytes),
               bundle.v == version,
               bundle.ownPredecessors.count <= maxPredecessors,
               bundle.groupNames.count <= maxGroupNames,
               bundle.profiles.count <= maxProfiles,
-              bundle.pendingContacts.count <= maxPendingContacts
+              bundle.pendingContacts.count <= maxPendingContacts,
+              validChannelSeeds(bundle.channelSeeds)
         else { return nil }
         var groupIds = Set<String>()
         for entry in bundle.groupNames {
@@ -580,8 +632,9 @@ public enum StateBundle {
         ownKeysB64: Set<String> = [],
         pendingDefaults: UserDefaults = .standard,
         heldMessages: ((PendingContact) -> [CarriedHeldMessage])? = nil,
+        channelSeeds: [CarriedChannelSeeds] = [],
         nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
-    ) -> V3 {
+    ) -> V4 {
         let pinStore = pinStore ?? PeerPinStore(ownerAccountIdB64: accountIdB64)
         let proven = (provenStore ?? ProvenPredecessorStore(ownerAccountIdB64: accountIdB64)).load()
         let contacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
@@ -612,12 +665,111 @@ public enum StateBundle {
         let pending = carriedPendingContacts(
             PendingContactStore.load(accountIdB64: accountIdB64, defaults: pendingDefaults),
             held: heldMessages ?? { heldMessagesFromStores($0, accountIdB64: accountIdB64) })
-        return fittingCap(V3(
+        let fitted = fittingCap(V4(
             contacts: contacts.map(carried), pins: pins, knownGroupIdsB64: groupIds,
             ownPredecessors: own,
             groupNames: names,
             profiles: carriedProfiles(profiles, ownKeysB64: ownKeysB64),
             pendingContacts: pending))
+        return withChannelSeeds(fitted, channelSeeds)
+    }
+
+    /// Bundle v4 — `bundle` (already fitted) with `seeds` added at
+    /// ``maxSeedsPerChannel`` per channel, the per-channel count stepping
+    /// down for every channel at once (``seedLadder``) while the encoding is
+    /// over `cap`. Seeds never push out another array; at 0 none ride.
+    static func withChannelSeeds(_ bundle: V4, _ seeds: [CarriedChannelSeeds], cap: Int = maxBundleBytes) -> V4 {
+        let entries = Array(seeds.prefix(maxChannelSeedEntries))
+        for perChannel in seedLadder {
+            let kept: [CarriedChannelSeeds] = perChannel == 0 ? [] : entries.compactMap { entry in
+                let newest = Array(entry.seeds.suffix(perChannel))
+                return newest.isEmpty ? nil : CarriedChannelSeeds(channelIdB64: entry.channelIdB64, seeds: newest)
+            }
+            let candidate = V4(
+                contacts: bundle.contacts, pins: bundle.pins, knownGroupIdsB64: bundle.knownGroupIdsB64,
+                ownPredecessors: bundle.ownPredecessors, groupNames: bundle.groupNames,
+                profiles: bundle.profiles, pendingContacts: bundle.pendingContacts, channelSeeds: kept)
+            if perChannel == 0 || encode(candidate).count <= cap {
+                if perChannel < maxSeedsPerChannel, !entries.isEmpty {
+                    NSLog("state bundle: channel seeds trimmed to %d per channel to fit the size cap", perChannel)
+                }
+                return candidate
+            }
+        }
+        return bundle
+    }
+
+    /// The bundle entries for `held` (lower-case hex channel id -> epoch ->
+    /// seed): one per channel holding a 16-byte id and at least one 32-byte
+    /// seed, ascending by channel id bytes, each its newest `perChannel`
+    /// seeds ascending by epoch; at most ``maxChannelSeedEntries``.
+    static func carriedChannelSeeds(_ held: [String: [UInt32: Data]], perChannel: Int) -> [CarriedChannelSeeds] {
+        var out: [(id: Data, entry: CarriedChannelSeeds)] = []
+        for (hex, byEpoch) in held {
+            guard let id = hexDecode(hex.lowercased()), id.count == channelIdLength else { continue }
+            let seeds = byEpoch.filter { $0.value.count == channelSeedLength }
+                .sorted { $0.key < $1.key }
+                .suffix(perChannel)
+                .map { CarriedSeed(epoch: $0.key, seedB64: $0.value.base64EncodedString()) }
+            guard !seeds.isEmpty else { continue }
+            out.append((id, CarriedChannelSeeds(channelIdB64: id.base64EncodedString(), seeds: Array(seeds))))
+        }
+        return out
+            .sorted { $0.id.lexicographicallyPrecedes($1.id) }
+            .prefix(maxChannelSeedEntries)
+            .map(\.entry)
+    }
+
+    /// The decoder's rule for the `channelSeeds` array (the whole bundle is
+    /// refused on any violation): at most ``maxChannelSeedEntries`` entries,
+    /// no channel id twice, each id 16 bytes; 1 to ``maxSeedsPerChannel``
+    /// seeds per entry, epochs strictly ascending, each seed 32 bytes.
+    static func validChannelSeeds(_ entries: [CarriedChannelSeeds]) -> Bool {
+        guard entries.count <= maxChannelSeedEntries else { return false }
+        var ids = Set<Data>()
+        for entry in entries {
+            guard let id = Data(base64Encoded: entry.channelIdB64), id.count == channelIdLength,
+                  ids.insert(id).inserted,
+                  (1...maxSeedsPerChannel).contains(entry.seeds.count) else { return false }
+            var previous: UInt32?
+            for seed in entry.seeds {
+                if let previous, seed.epoch <= previous { return false }
+                previous = seed.epoch
+                guard var bytes = Data(base64Encoded: seed.seedB64) else { return false }
+                let length = bytes.count
+                bytes.resetBytes(in: 0..<bytes.count)
+                guard length == channelSeedLength else { return false }
+            }
+        }
+        return true
+    }
+
+    /// The carried seeds as lower-case hex channel id -> epoch -> seed (a
+    /// decoded bundle has passed ``validChannelSeeds(_:)``).
+    static func decodedChannelSeeds(_ entries: [CarriedChannelSeeds]) -> [String: [UInt32: Data]] {
+        var out: [String: [UInt32: Data]] = [:]
+        for entry in entries {
+            guard let id = Data(base64Encoded: entry.channelIdB64), id.count == channelIdLength else { continue }
+            for seed in entry.seeds {
+                guard let bytes = Data(base64Encoded: seed.seedB64), bytes.count == channelSeedLength else { continue }
+                out[hexEncode(id), default: [:]][seed.epoch] = bytes
+            }
+        }
+        return out
+    }
+
+    /// `held` with every carried seed added unless one is held for that
+    /// channel and epoch (never overwritten).
+    static func mergedChannelSeeds(
+        held: [String: [UInt32: Data]], carried: [String: [UInt32: Data]]
+    ) -> [String: [UInt32: Data]] {
+        var out = held
+        for (id, seeds) in carried {
+            for (epoch, seed) in seeds where out[id]?[epoch] == nil {
+                out[id, default: [:]][epoch] = seed
+            }
+        }
+        return out
     }
 
     /// `bundle` trimmed until its encoding fits `cap` (the receiver refuses
@@ -626,7 +778,7 @@ public enum StateBundle {
     /// contact's last message first). Contacts, pins, known group ids, own
     /// predecessors and the pending contacts themselves are never trimmed. A
     /// bundle that still does not fit is returned as it is.
-    static func fittingCap(_ bundle: V3, cap: Int = maxBundleBytes) -> V3 {
+    static func fittingCap(_ bundle: V4, cap: Int = maxBundleBytes) -> V4 {
         var total = encode(bundle).count
         guard total > cap else { return bundle }
         var profiles = bundle.profiles
@@ -654,10 +806,10 @@ public enum StateBundle {
                 username: contact.username, addedAtMs: contact.addedAtMs, linkIdB64: contact.linkIdB64,
                 heldMessages: Array(contact.heldMessages.dropLast()))
         }
-        let trimmed = V3(
+        let trimmed = V4(
             contacts: bundle.contacts, pins: bundle.pins, knownGroupIdsB64: bundle.knownGroupIdsB64,
             ownPredecessors: bundle.ownPredecessors, groupNames: names, profiles: profiles,
-            pendingContacts: pending)
+            pendingContacts: pending, channelSeeds: bundle.channelSeeds)
         let exact = encode(trimmed).count
         if exact > cap, exact < encode(bundle).count, !(profiles.isEmpty && names.isEmpty
             && pending.allSatisfy { $0.heldMessages.isEmpty }) {
@@ -782,7 +934,7 @@ public enum StateBundle {
     @MainActor
     @discardableResult
     static func applyNames(
-        _ bundle: V3,
+        _ bundle: V4,
         accountIdB64: String,
         groupNameStore: GroupNameStore = GroupNameStore(),
         directory: ProfileDirectory = .shared,
@@ -873,7 +1025,7 @@ public enum StateBundle {
     /// after this returns, unless `applyNamesOnMain` is `false` (tests).
     @discardableResult
     static func apply(
-        _ bundle: V3,
+        _ bundle: V4,
         accountIdB64: String,
         pinStore: PeerPinStore? = nil,
         ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
@@ -950,6 +1102,14 @@ public enum StateBundle {
         NotificationCenter.default.post(
             name: .lakkoStateBundleApplied, object: fresh,
             userInfo: [appliedAccountKey: accountIdB64, pendingAddedKey: !pendingAdded.isEmpty])
+        // Bundle v4 — the channel seeds, kept for the channels whose
+        // subscription register arrives (``ChannelSubscriptionSync``).
+        if applyNamesOnMain, !bundle.channelSeeds.isEmpty {
+            let seeds = bundle.channelSeeds
+            Task { @MainActor in
+                ChannelSubscriptionSync.shared.storeCarriedSeeds(accountIdB64: accountIdB64, carried: seeds)
+            }
+        }
         if applyNamesOnMain, !bundle.groupNames.isEmpty || !bundle.profiles.isEmpty {
             Task { @MainActor in
                 let applied = applyNames(bundle, accountIdB64: accountIdB64)
@@ -1051,7 +1211,7 @@ public enum StateBundle {
     /// Scanner side: seal `bundle` under the per-pairing exporter key of
     /// `group` and publish it as a tagged row.
     public static func publish(
-        bundle: V3,
+        bundle: V4,
         group: DeviceGroup,
         identity: Identity,
         rendezvousPseudonym: Data,
@@ -1078,7 +1238,7 @@ public enum StateBundle {
         afterCursor: Int64,
         timeoutSeconds: TimeInterval = pollTimeoutSeconds,
         ds: DsClient = DsClient()
-    ) async -> V3? {
+    ) async -> V4? {
         let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
         var cursor = afterCursor
         var sealed: Data?

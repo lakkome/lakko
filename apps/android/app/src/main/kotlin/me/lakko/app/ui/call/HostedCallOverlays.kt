@@ -17,9 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CallEnd
-import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -68,6 +65,9 @@ import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.contacts.ContactRowModel
 import me.lakko.app.ui.contacts.contactRouteKey
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The in-call screens of the calls the app-level host drives through a
@@ -520,10 +520,11 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Filled.Link,
+                LkIcon(
+                    icon = R.drawable.ic_lk_link,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
+                    size = LkIconSize.Row,
                 )
                 Spacer(Modifier.width(12.dp))
                 Column {
@@ -583,10 +584,11 @@ public fun BoxScope.EndedForEveryoneNoticeBar(notice: EndedForEveryoneNotice) {
         shadowElevation = 4.dp,
     ) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Filled.CallEnd,
+            LkIcon(
+                icon = R.drawable.ic_lk_phone_down_fill,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Row,
             )
             Spacer(Modifier.width(12.dp))
             Text(text = text, style = MaterialTheme.typography.bodyMedium)

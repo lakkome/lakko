@@ -11,13 +11,13 @@ import LakkoCore
 /// the default JSONEncoder produces the right body bytes.
 public struct RotateBatchEntry: Encodable {
     /// Hex-encoded subscriber public key.
-    public let subscriber_pubkey_hex: String
+    public let subscriber_id: String
     /// Base64-encoded sealed HPKE envelope carrying the
     /// new content seed.
     public let envelope_b64: String
 
     public init(subscriberPubkeyHex: String, envelopeB64: String) {
-        self.subscriber_pubkey_hex = subscriberPubkeyHex
+        self.subscriber_id = subscriberPubkeyHex
         self.envelope_b64 = envelopeB64
     }
 }

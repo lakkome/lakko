@@ -35,13 +35,13 @@ export function MethodList<Id extends string>(props: {
               onClick={() => props.onPick(m.id)}
             >
               <span class="lk-card-row-icon">
-                <Icon name={m.icon} size={18} />
+                <Icon name={m.icon} size={20} />
               </span>
               <span class="lk-method-row-body">
                 <span class="lk-method-row-title">{m.title}</span>
                 <span class="lk-method-row-sub">{m.sub}</span>
               </span>
-              <Icon name="chevron" size={18} />
+              <Icon name="chevron-forward" size={14} />
             </button>
           </li>
         )}
@@ -67,10 +67,10 @@ export function MethodHead(props: {
         disabled={props.disabled?.() === true}
         onClick={props.onBack}
       >
-        <Icon name="back" size={20} />
+        <Icon name="chevron-back" size={24} />
       </button>
       <span class="lk-card-row-icon">
-        <Icon name={props.method().icon} size={18} />
+        <Icon name={props.method().icon} size={20} />
       </span>
       <h2>{props.method().title}</h2>
     </div>

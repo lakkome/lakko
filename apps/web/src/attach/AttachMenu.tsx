@@ -72,7 +72,7 @@ export function AttachMenu(props: {
           disabled={props.disabled === true}
           onClick={() => (open() ? close() : openMenu())}
         >
-          <Icon name="clip" size={20} />
+          <Icon name="paperclip" size={20} />
         </button>
         <Show when={open()}>
           <MenuBackdrop onClose={() => close()} closeOnContextMenu />

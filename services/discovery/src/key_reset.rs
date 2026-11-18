@@ -60,7 +60,10 @@ pub(crate) const CODE_ATTESTATION_INVALID: &str = "key-reset-attestation-invalid
 pub(crate) const CODE_KEY_RESET_DISABLED: &str = "key-reset-disabled";
 
 /// `429` body of an attested key change inside the ADR-0017 cool-down
-/// window (kept as defence in depth on attested changes, ADR-0073 4.1).
+/// window (kept as defence in depth on attested changes, ADR-0073 4.1). The
+/// answer also carries `retry_after_secs` and a `Retry-After` header: the
+/// whole seconds until the window ends, so the resetting device can say when
+/// the change will go through and retry by itself.
 pub(crate) const CODE_COOLING_DOWN: &str = "identity-changed-too-recently";
 
 /// `400` body of an identity upload whose supersession proof does not
@@ -93,6 +96,10 @@ pub(crate) enum RouteError {
     Text(StatusCode, String),
     /// `status` with the JSON body `{"error": code}`.
     Code(StatusCode, &'static str),
+    /// `status` with the JSON body `{"error": code, "retry_after_secs": n}`
+    /// and a `Retry-After: n` header: a refusal that a retry after `n`
+    /// seconds can pass (the cool-down), so a client can say when and wait.
+    RetryAfter(StatusCode, &'static str, u64),
 }
 
 impl From<(StatusCode, String)> for RouteError {
@@ -106,6 +113,12 @@ impl IntoResponse for RouteError {
         match self {
             Self::Text(status, message) => (status, message).into_response(),
             Self::Code(status, code) => (status, Json(json!({ "error": code }))).into_response(),
+            Self::RetryAfter(status, code, secs) => (
+                status,
+                [(axum::http::header::RETRY_AFTER, secs.to_string())],
+                Json(json!({ "error": code, "retry_after_secs": secs })),
+            )
+                .into_response(),
         }
     }
 }
@@ -337,6 +350,21 @@ mod tests {
         // Not base64 at all.
         let err = verify_upload_attestation(Some("!!"), Some(&vk), &ACCOUNT, &KEY).unwrap_err();
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_retry_after_refusal_carries_the_header_and_the_seconds() {
+        let response =
+            RouteError::RetryAfter(StatusCode::TOO_MANY_REQUESTS, CODE_COOLING_DOWN, 1234)
+                .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1234")
+        );
     }
 }
 
@@ -883,6 +911,12 @@ mod route_tests {
             .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
         assert_eq!(error_code(&text), CODE_COOLING_DOWN);
+        // The answer says when a retry can pass: within the window, never 0.
+        let retry_after = serde_json::from_str::<serde_json::Value>(&text).unwrap()
+            ["retry_after_secs"]
+            .as_u64()
+            .unwrap();
+        assert!((1..=3600).contains(&retry_after), "{text}");
         assert_eq!(c.fetch(&acct).await["key_generation"], 2);
         // A same-key retry and a proven rotation are never gated.
         let (status, text) = c.publish(&acct, 2, k2, serde_json::json!({})).await;

@@ -19,10 +19,10 @@
 
 `hash_to_point` is try-and-increment, not RFC 9380: outputs are not uniform over the subgroup. The proof needs only that no discrete-logarithm relation between these points and `G` is known. curve25519-dalek 4.1.3 has no RFC 9380 Edwards map (its `nonspec_map_to_curve` is deprecated as not a secure hash), and Ristretto cannot be used because Ed25519 keys are Edwards points with no public conversion.
 
-## The witness question (ADR-0090 open question 1)
+## The witness question (ADR-0092 open question 1)
 
 The voter proves with the Ed25519 signing scalar of the key its leaf is bound to, the maintainer's recommendation. The same scalar then signs Ed25519 messages and proves ring membership; the transcripts are domain-separated and a proof is not an EdDSA signature, but no proof of joint security is cited. Listed for G-39.
 
 ## References
 
-ADR-0090 section 3.6 ("The witness", "Key checks"). Tests: `point::tests::*`.
+ADR-0092 section 3.6 ("The witness", "Key checks"). Tests: `point::tests::*`.

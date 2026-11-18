@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target — `Article::decode` (ADR-0090 section 8). An article rides
+//! Fuzz target — `Article::decode` (ADR-0092 section 8). An article rides
 //! base64 in a chat envelope any group member or channel publisher writes, so
 //! every byte reaches this decoder before anything is rendered. The harness
 //! asserts `fuzz_api::article_decode_round_trip`: decoding never panics, and

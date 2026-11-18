@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.6 "Own choice" — the person's own choice in a poll, as
+ * ADR-0092 section 3.6 "Own choice" — the person's own choice in a poll, as
  * the account's other devices learn it: a `lakko-sync` register in the
  * DeviceGroup, keyed on (conversation ref, poll message id), last writer
  * wins. Never read from a ballot (nobody, the voter included, can).

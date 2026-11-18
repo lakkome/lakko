@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Anonymous credential issuance for channel polls ([ADR-0090] section 4.2).
+//! Anonymous credential issuance for channel polls ([ADR-0092] section 4.2).
 //!
 //! One account, one vote per channel poll: auth issues each account a
 //! keyed-verification anonymous credential (`lakko-anon-cred`) per 30-day
@@ -36,7 +36,7 @@
 //! route here answers `503 anon-credential-disabled`. Malformed: startup
 //! fails.
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 use std::sync::Arc;
 

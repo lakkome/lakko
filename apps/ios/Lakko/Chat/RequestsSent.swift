@@ -26,8 +26,11 @@ public enum RequestsSentStore {
         public var id: String { groupIdHex }
     }
 
-    /// Section 6.2 — "No answer yet" and `Ask again` after this long.
-    public static let askAgainAfterMs: Int64 = 7 * 86_400_000
+    /// Section 6.2 — "No answer yet" and `Ask again` after this long: a
+    /// device asks once per group per day (asking again restarts the day).
+    /// The invite page (`JoinGroupLandingViewModel`), this list and the
+    /// channel publisher invitation card (UX 15.2.2) all read this one value.
+    public static let askAgainAfterMs: Int64 = 86_400_000
 
     static func key(_ accountIdB64: String) -> String { "lakko.requests-sent.v1.\(accountIdB64)" }
 
@@ -79,9 +82,22 @@ public enum RequestsSentStore {
         return open
     }
 
-    /// Section 6.2 — over 7 days with no answer: `Ask again` is offered.
+    /// Section 6.2 — a day or more with no answer: `Ask again` is offered.
     public static func mayAskAgain(_ entry: Entry, nowMs: Int64) -> Bool {
-        nowMs - entry.sentAtMs >= askAgainAfterMs
+        mayAskAgain(sentAtMs: entry.sentAtMs, nowMs: nowMs)
+    }
+
+    /// The one rule behind every `Ask again` of a join or publisher request:
+    /// a day or more since the request (or the last `Ask again`) was sent.
+    public static func mayAskAgain(sentAtMs: Int64, nowMs: Int64) -> Bool {
+        nowMs - sentAtMs >= askAgainAfterMs
+    }
+
+    /// The request this device sent to `groupIdHex`, whether or not the group
+    /// has appeared since (the invite page opened again for the same group).
+    public static func entry(accountIdB64: String, groupIdHex: String) -> Entry? {
+        let hex = groupIdHex.lowercased()
+        return load(accountIdB64).first { $0.groupIdHex == hex }
     }
 
     static func capability(_ entry: Entry) -> (wire: Data, blobId: Data)? {

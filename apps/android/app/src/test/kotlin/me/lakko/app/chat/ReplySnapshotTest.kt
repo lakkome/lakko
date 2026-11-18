@@ -92,4 +92,17 @@ class ReplySnapshotTest {
         assertEquals("" to "Message", replyQuoteLines(ReplyRef(target = 1L, author = " ", excerpt = "")))
         assertEquals("Anna" to "hello", replyQuoteLines(ReplyRef(target = 1L, author = "Anna", excerpt = "hello")))
     }
+
+    // Base scenario 26 (2026-11-13): a message carrying a channel invitation
+    // card has the `/g/` link with its secret as its text; the quote names
+    // the invitation instead.
+    @Test
+    fun `a channel invitation is quoted as its card, never as the link`() {
+        val link = "https://test.lakko.me/g/AAAAAAAA#fakesecretxyz1"
+        val card = message(link).copy(channelInvite = byteArrayOf(1, 2, 3))
+        val ref = replySnapshotFor(card, "Anna") { if (it != null) "Invitation to Walk 26 private" else null }
+        assertEquals("Invitation to Walk 26 private", ref.excerpt)
+        // A card that does not open leaves the text, as the bubble does.
+        assertEquals(link, replySnapshotFor(card, "Anna") { null }.excerpt)
+    }
 }

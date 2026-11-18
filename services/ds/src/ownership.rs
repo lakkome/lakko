@@ -1958,7 +1958,16 @@ mod tests {
             register(&app, &gid, &root, MAX_ACCESS_EPOCH, &key(3), &[]).await,
             StatusCode::NO_CONTENT
         );
-        crate::access::prune_group_access(&pool, 1).await;
+        // The prune statement runs over every group's rows, this one's at
+        // the cap included, and must not fail. A day's retention keeps it
+        // from deleting the rows of tests running beside this one in the
+        // shared test database (with 1 s it pruned their older epochs).
+        assert!(
+            crate::access::prune_group_access_rows(&pool, 86_400)
+                .await
+                .is_ok(),
+            "the prune failed on a group at the cap"
+        );
     }
 
     /// ADR-0053 security pass, finding 4, carried over: concurrent first

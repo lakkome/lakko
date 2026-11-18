@@ -94,7 +94,7 @@ pub(crate) struct MemoryFeedback {
     comment_reactions: HashMap<(ChannelId, u64, u64), BTreeSet<(WriterKey, Label)>>,
     last_comment_id: u64,
     nonces: HashMap<[u8; WRITE_NONCE_LEN], u64>,
-    /// Channel poll votes (ADR-0090 section 4.3).
+    /// Channel poll votes (ADR-0092 section 4.3).
     pub(crate) votes: crate::votes::MemoryVotes,
 }
 

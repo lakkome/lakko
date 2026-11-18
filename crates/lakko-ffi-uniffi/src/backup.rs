@@ -133,7 +133,9 @@ pub struct ParsedBackupPayload {
     /// (ADR-0050 section 2.5a), never from this list.
     pub known_group_ids: Vec<Vec<u8>>,
     /// The ADR-0058 folded synced state, as `SyncedState.toBytes()` wrote
-    /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held.
+    /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held, or
+    /// the backup's state was of a version this build cannot read (dropped
+    /// by the parser; everything else in the payload is still restored).
     pub synced_state: Vec<u8>,
     /// The account's own predecessors, oldest first (ADR-0074 section 3.7).
     /// A restored device stores them where a kept device does, and mints its
@@ -842,6 +844,44 @@ mod tests {
         assert_eq!(parsed.known_group_ids, ids);
         assert_eq!(parsed.synced_state, state);
         assert_eq!(parsed.accepted_contacts.len(), 1);
+    }
+
+    #[test]
+    fn a_synced_state_of_another_version_parses_as_absent() {
+        let ids = vec![vec![0x11u8; 32]];
+        let state = sample_synced_state_bytes();
+        let mut wire = build_backup_payload(
+            vec![0xA1u8; 16],
+            7,
+            vec![0x42u8; 32],
+            Vec::new(),
+            ids.clone(),
+            Some(state.clone()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build");
+        // version, account id, created at, seed, contact count, group count,
+        // one group (length + id), the state's length: then its version byte.
+        let at = 1 + 16 + 8 + 32 + 4 + 4 + 4 + 32 + 4;
+        assert_eq!(wire[at], state[0]);
+        // An older and a newer state version.
+        for version in [state[0] - 1, state[0] + 1] {
+            wire[at] = version;
+            let parsed = parse_backup_payload(wire.clone()).expect("parse");
+            assert!(parsed.synced_state.is_empty(), "version {version}");
+            assert_eq!(parsed.known_group_ids, ids);
+            assert_eq!(parsed.ed25519_seed, vec![0x42u8; 32]);
+        }
+        // Malformed states of the current version stay refused: covered in
+        // `lakko-backup` (`a_malformed_synced_state_of_the_current_version_*`).
+        wire[at] = state[0];
+        assert_eq!(
+            parse_backup_payload(wire).expect("parse").synced_state,
+            state
+        );
     }
 
     #[test]

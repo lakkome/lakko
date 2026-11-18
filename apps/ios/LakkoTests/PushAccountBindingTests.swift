@@ -279,7 +279,8 @@ final class PushAccountBindingTests: XCTestCase {
             accountDirectory: NoDirectory(),
             restoreDirectory: OfflineRestoreDirectory(),
             pushBinding: binding,
-            removeDeliveredNotifications: removeDeliveredNotifications
+            removeDeliveredNotifications: removeDeliveredNotifications,
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 }

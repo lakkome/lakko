@@ -23,15 +23,15 @@ public sealed interface ChannelRowContent {
         val text: String,
         val attachments: List<AttachmentRef>,
         val channelInvite: ByteArray? = null,
-        /** ADR-0090 — a poll, checklist, location, contact card or article post. */
+        /** ADR-0092 — a poll, checklist, location, contact card or article post. */
         val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     ) : ChannelRowContent
 
-    /** ADR-0090 section 4 — the publisher closed the poll at [target],
+    /** ADR-0092 section 4 — the publisher closed the poll at [target],
      *  freezing [tally] into it (absent on an older close). */
     public data class Close(val target: Long, val tally: uniffi.lakko_ffi_uniffi.ChannelPollTally?) : ChannelRowContent
 
-    /** ADR-0090 / UX 8 — a publisher's tick or added item on the checklist at [target]. */
+    /** ADR-0092 / UX 8 — a publisher's tick or added item on the checklist at [target]. */
     public data class ChecklistOp(
         val target: Long,
         val add: Boolean,
@@ -75,12 +75,12 @@ public data class ChannelPostItem(
      *  no key for, after the first one it can read. */
     val unavailable: Boolean = false,
     val channelInvite: ByteArray? = null,
-    /** ADR-0090 — the post's content, when it is one. */
+    /** ADR-0092 — the post's content, when it is one. */
     val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
-    /** ADR-0090 section 4 — closed by a publisher, with the frozen tally. */
+    /** ADR-0092 section 4 — closed by a publisher, with the frozen tally. */
     val closed: Boolean = false,
     val frozenTally: uniffi.lakko_ffi_uniffi.ChannelPollTally? = null,
-    /** ADR-0090 — ops a checklist post collected (publishers' ticks and adds, a close). */
+    /** ADR-0092 — ops a checklist post collected (publishers' ticks and adds, a close). */
     val ops: List<me.lakko.app.chat.ContentOpRecord> = emptyList(),
 )
 
@@ -180,13 +180,41 @@ public fun foldChannelTimeline(rows: List<ChannelRow>): ChannelTimeline {
     return ChannelTimeline(posts = posts.values.toList(), earlierUnavailable = earlier)
 }
 
-/** Section 12 — the one line under a channel's name. [band] is the rough
- *  size of a public channel (`"10k+"`), `null` when not known. */
-public fun channelHeaderLineKey(public: Boolean, band: String?): Pair<String, Map<String, String>> = when {
+/** The cursor a channel screen marks read once its list shows the newest
+ *  post: the newest post of the timeline (readable or not, as web), `null`
+ *  when it holds none. */
+public fun channelReadThroughOnScreen(timeline: ChannelTimeline): Long? =
+    timeline.posts.maxOfOrNull { it.cursor }
+
+/** The channel list (newest at the bottom, reversed) stands at its newest
+ *  end: the first item on screen is the newest post or one of the uploads
+ *  in flight drawn under it. */
+public fun channelListAtNewestEnd(firstVisibleItemIndex: Int, pendingUploads: Int): Boolean =
+    firstVisibleItemIndex <= pendingUploads
+
+/** Section 12 — the one line under a channel's name. [public] is `null`
+ *  when this device does not know the channel's visibility: then there is
+ *  no line (as web `channelHeaderLine` and iOS `ChannelHeaderLine`), never
+ *  "Private channel". [band] is the rough size of a public channel
+ *  (`"10k+"`), `null` when not known. */
+public fun channelHeaderLineKey(public: Boolean?, band: String?): Pair<String, Map<String, String>>? = when {
+    public == null -> null
     !public -> "channels.header.private" to emptyMap()
     band == null -> "channels.header.public" to emptyMap()
     else -> "channels.header.public_count" to mapOf("band" to band)
 }
+
+/**
+ * Section 12 — whether a channel is public as this device knows it, `null`
+ * when nothing says. The signed `@name` in the newest metadata record says so
+ * first ([handlePublic]), then the record's own flag ([recordPublic]; `null`
+ * when no record has been read), then a held read key: only a public
+ * channel's record, search card or link carries one, so a subscriber who
+ * came from a search card knows the channel is public before its first read
+ * (as iOS `ChannelExtras.isPublic`).
+ */
+public fun channelIsPublic(handlePublic: Boolean?, recordPublic: Boolean?, holdsReadKey: Boolean): Boolean? =
+    handlePublic ?: recordPublic ?: if (holdsReadKey) true else null
 
 /** ADR-0059 section 4 — the size band a count falls in, as shown. */
 public fun subscriberBand(count: Long): String = when {
@@ -195,5 +223,7 @@ public fun subscriberBand(count: Long): String = when {
     count >= 1_000 -> "1k+"
     count >= 100 -> "100+"
     count >= 10 -> "10+"
-    else -> count.toString()
+    // The directory's first band (services/channels BANDS), as iOS and web show
+    // it: an exact count read "1 subscribers" (base scenario 29, 2026-11-11).
+    else -> "<10"
 }

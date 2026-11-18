@@ -132,3 +132,39 @@ export function clearRotationStatesForAccount(accountIdB64: string): void {
     // storage unavailable: nothing to clear
   }
 }
+
+/**
+ * ADR-0090 section 4 — the policy's state as every owner device sees it:
+ * the stored epoch start, and the larger of the stored post count and the
+ * posts this device listed since that start. Pure.
+ */
+export function rebuiltRotationState(
+  stored: ChannelRotationState,
+  listedPostsSinceStart: number,
+): ChannelRotationState {
+  return {
+    lastRotationMs: stored.lastRotationMs,
+    postsSinceRotation: Math.max(stored.postsSinceRotation, Math.max(0, Math.floor(listedPostsSinceStart))),
+  };
+}
+
+/** The epoch start a commit row's DS `created_at` names, or `null` when it
+ *  does not parse. Pure. */
+export function epochStartMsOf(createdAt: string): number | null {
+  const ms = Date.parse(createdAt);
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+/**
+ * ADR-0090 section 4 — a commit that changed the seed was applied here (any
+ * owner device's rotation, admission, retirement, publisher change): the
+ * rotation clock restarts at the DS row time of that commit, and the post
+ * count with it. An older row moves nothing.
+ */
+export function noteEpochStart(channelIdHex: string, createdAt: string, owner?: string): void {
+  const ms = epochStartMsOf(createdAt);
+  if (ms === null) return;
+  const stored = loadRotationState(channelIdHex, owner);
+  if (stored !== null && stored.lastRotationMs >= BigInt(ms)) return;
+  saveRotationState(channelIdHex, { lastRotationMs: BigInt(ms), postsSinceRotation: 0 }, owner);
+}

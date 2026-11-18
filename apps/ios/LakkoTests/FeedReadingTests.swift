@@ -181,19 +181,19 @@ final class FeedReadingTests: XCTestCase {
             FeedIcons.all.map(\.label),
             ["Feed", "Star", "Heart", "Lightning", "Book", "Code", "Music", "Camera", "Globe",
              "Speech bubble", "Bell", "Flag"])
-        XCTAssertEqual(FeedIcons.symbol(0), "newspaper")
-        XCTAssertEqual(FeedIcons.symbol(3), "bolt")
-        XCTAssertEqual(FeedIcons.symbol(11), "flag")
-        XCTAssertEqual(FeedIcons.symbol(12), FeedIcons.symbol(0))
-        XCTAssertEqual(FeedIcons.symbol(255), FeedIcons.symbol(0))
-        XCTAssertEqual(Set(FeedIcons.all.map(\.symbol)).count, 12)
+        XCTAssertEqual(FeedIcons.icon(0), .feed)
+        XCTAssertEqual(FeedIcons.icon(3), .bolt)
+        XCTAssertEqual(FeedIcons.icon(11), .flag)
+        XCTAssertEqual(FeedIcons.icon(12), FeedIcons.icon(0))
+        XCTAssertEqual(FeedIcons.icon(255), FeedIcons.icon(0))
+        XCTAssertEqual(Set(FeedIcons.all.map(\.icon)).count, 12)
     }
 
     func testPresetIcons() {
-        XCTAssertEqual(FeedIcons.presetSymbol(.latest), FeedIcons.symbol(0))
-        XCTAssertEqual(FeedIcons.presetSymbol(.popular), FeedIcons.symbol(3))
-        XCTAssertEqual(FeedIcons.presetSymbol(.forMe), "person")
-        XCTAssertEqual(FeedIcons.discoverSymbol, FeedIcons.symbol(8))
+        XCTAssertEqual(FeedIcons.presetIcon(.latest), FeedIcons.icon(0))
+        XCTAssertEqual(FeedIcons.presetIcon(.popular), FeedIcons.icon(3))
+        XCTAssertEqual(FeedIcons.presetIcon(.forMe), .person)
+        XCTAssertEqual(FeedIcons.discoverIcon, FeedIcons.icon(8))
     }
 
     // MARK: - Item menu

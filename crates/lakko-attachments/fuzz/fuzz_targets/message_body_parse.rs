@@ -23,7 +23,7 @@
 //! add / remove and an optional target-author key) is checked by
 //! `fuzz_api::reaction_within_bounds`.
 //!
-//! ADR-0090: the poll, checklist, location, contact-card and article content
+//! ADR-0092: the poll, checklist, location, contact-card and article content
 //! fields and the vote / close / tick / add-item ops are decoded strictly;
 //! `fuzz_api::content_within_bounds` asserts that every one that survives
 //! parse re-composes and parses back to the same body.
@@ -57,6 +57,6 @@ fuzz_target!(|data: &[u8]| {
     // a bounded emoji and an explicit add / remove op, and its target author
     // survives compose_reaction -> parse_body whole or not at all.
     assert!(reaction_within_bounds(data));
-    // ADR-0090: a new content kind or op that survives parse is canonical.
+    // ADR-0092: a new content kind or op that survives parse is canonical.
     assert!(content_within_bounds(data));
 });

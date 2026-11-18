@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target — the frozen tally of a channel poll (ADR-0090 section 4.3).
+//! Fuzz target — the frozen tally of a channel poll (ADR-0092 section 4.3).
 //!
 //! A publisher writes the tally into the post it edits at close; every
 //! subscriber decodes it: the domain, the version, the voter count, the

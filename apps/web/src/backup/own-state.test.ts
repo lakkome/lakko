@@ -23,6 +23,7 @@ import {
   decodeRestoredOwnProfile,
   ownProfileForBackup,
   registerBackupUsernameSource,
+  restoredOwnUsername,
   storeRestoredVisibility,
   visibilityForBackup,
   visibilityStampOf,
@@ -31,6 +32,7 @@ import {
 const core = wasm as unknown as Wasm;
 const ACCOUNT = "QkJCQkJCQkJCQkJCQkJCQg==";
 const ACCOUNT_BYTES = base64Decode(ACCOUNT);
+const OTHER_ACCOUNT_FOR_USERNAME = "Q0NDQ0NDQ0NDQ0NDQ0NDQw==";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -96,7 +98,29 @@ describe("what a backup carries", () => {
     );
     const parsed = wasm.parseBackupPayload(payload);
     expect(decodeRestoredOwnProfile(core, parsed.ownProfile, ACCOUNT)?.displayName).toBe("Anna");
+    // No username source stood when it was composed: the backup names none.
+    expect(decodeRestoredOwnProfile(core, parsed.ownProfile, ACCOUNT)?.username).toBeNull();
     expect(visibilityStampOf(core, parsed.visibility)).toBe(5n);
+  });
+});
+
+describe("the username a backup names (docs/ux/identity-recovery.md 8b)", () => {
+  it("is kept for the landing to check, apart from the name and photo", async () => {
+    const stop = registerBackupUsernameSource(() => "anna");
+    saveOwnProfile(ACCOUNT, "Anna", 1_000);
+    const bytes = ownProfileForBackup(core, ACCOUNT, ACCOUNT_BYTES) as Uint8Array;
+    stop();
+    expect(decodeRestoredOwnProfile(core, bytes, ACCOUNT)?.username).toBe("anna");
+    expect(restoredOwnUsername(ACCOUNT)).toBeNull();
+    await adoptRestoredOwnProfile(ACCOUNT, bytes);
+    expect(restoredOwnUsername(ACCOUNT)).toBe("anna");
+  });
+
+  it("a profile with no username leaves nothing to check", async () => {
+    const carried = wasm.composeProfileEnvelope("Anna", undefined, 500n, base64Decode(OTHER_ACCOUNT_FOR_USERNAME));
+    expect(decodeRestoredOwnProfile(core, carried, OTHER_ACCOUNT_FOR_USERNAME)?.username).toBeNull();
+    await adoptRestoredOwnProfile(OTHER_ACCOUNT_FOR_USERNAME, carried);
+    expect(restoredOwnUsername(OTHER_ACCOUNT_FOR_USERNAME)).toBeNull();
   });
 });
 

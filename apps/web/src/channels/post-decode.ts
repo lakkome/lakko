@@ -45,9 +45,9 @@ export type PostDecode =
       readonly plaintext?: Uint8Array;
     }
   | { readonly kind: "dropped" }
-  /** ADR-0090 — a poll, checklist, location, contact card or article post. */
+  /** ADR-0092 — a poll, checklist, location, contact card or article post. */
   | { readonly kind: "content"; readonly body: Extract<ParsedBodyResult, { kind: "content" }> }
-  /** ADR-0090 — an op on an earlier content post (a publisher's close with
+  /** ADR-0092 — an op on an earlier content post (a publisher's close with
    *  its frozen tally, an article edit); never a card. */
   | { readonly kind: "content-op"; readonly body: Extract<ParsedBodyResult, { kind: "content-op" }> };
 

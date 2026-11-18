@@ -95,7 +95,7 @@ export function encodeProfileRow(
       // ADR-0084 — the photo references (blob keys inside: this payload is
       // only ever written encrypted). Absent for no photo.
       ...(prof.avatar === undefined || prof.avatar === null ? {} : { av: prof.avatar }),
-      // ADR-0090 section 7 — present only when the card may not be shared.
+      // ADR-0092 section 7 — present only when the card may not be shared.
       ...(prof.cardShareable === false ? { ns: true } : {}),
     };
   }

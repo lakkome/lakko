@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 4 / UX 7.7 — voting in a channel poll: one vote per
+ * ADR-0092 section 4 / UX 7.7 — voting in a channel poll: one vote per
  * account through an anonymous credential (`lakko-anon-cred`) and a per-poll
  * tag at the channel service.
  *
@@ -32,7 +32,7 @@ const AUTH_BASE = "/api/auth";
 const CHANNELS_BASE: string =
   (import.meta as { env?: Record<string, string | undefined> }).env?.LAKKO_CHANNELS_URL ?? "/api/channels";
 
-/** The service's freshness window for `at_ms` (ADR-0090 section 4.3). */
+/** The service's freshness window for `at_ms` (ADR-0092 section 4.3). */
 export const VOTE_WINDOW_MS = 120_000;
 
 // ----- pure: the vote message and the retry rule -----------------------

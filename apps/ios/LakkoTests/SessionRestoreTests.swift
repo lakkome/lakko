@@ -295,7 +295,8 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
             nowMs: { 1_000_000 },
             accountDirectory: directory,
             loginHandleBinds: ledger,
-            restoreDirectory: OfflineRestoreDirectory()
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 

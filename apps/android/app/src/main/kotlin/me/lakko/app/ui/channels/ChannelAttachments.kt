@@ -34,10 +34,10 @@ import uniffi.lakko_ffi_uniffi.MessageContent
 internal enum class ChannelContentScreen { POLL, CHECKLIST, LOCATION, CONTACT, ARTICLE }
 
 /**
- * ADR-0090 / attachments UX 2.4 and 7.7 — a publisher's attachment menu and
+ * ADR-0092 / attachments UX 2.4 and 7.7 — a publisher's attachment menu and
  * its editors in a channel. A poll here is always anonymous (the switch is
  * not shown) and carries no anonymous fields or author signature: the post
- * signature authenticates the publisher (ADR-0090 section 4.1); a checklist
+ * signature authenticates the publisher (ADR-0092 section 4.1); a checklist
  * is likewise unsigned. A subscriber has no paperclip.
  */
 @Composable

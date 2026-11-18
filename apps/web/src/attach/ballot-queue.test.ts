@@ -41,7 +41,7 @@ const q = (over: Partial<QueuedBallot> = {}): QueuedBallot => ({
 
 afterEach(() => resetBallotQueueForTest());
 
-describe("the anonymous ballot delay (ADR-0090 section 3.6)", () => {
+describe("the anonymous ballot delay (ADR-0092 section 3.6)", () => {
   it("is uniform over 0..=10 s, both ends reachable", () => {
     expect(ballotDelayMs(0)).toBe(0);
     expect(ballotDelayMs(0.999_999_999_9)).toBe(BALLOT_DELAY_MAX_MS);

@@ -168,9 +168,11 @@ struct FloatingCallWindow: View {
                     topTrailingRadius: tuck == .leading ? 12 : 0,
                     style: .continuous)
                     .fill(Color(red: 0.06, green: 0.07, blue: 0.13).opacity(0.92))
-                Image(systemName: tuck == .leading ? "chevron.right" : "chevron.left")
-                    .font(.system(size: 15, weight: .semibold))
+                // Points away from the screen edge, not along the reading
+                // direction: the asset's right-to-left mirroring is turned off.
+                LkIconView(tuck == .leading ? .chevronForward : .chevronBack, size: 20, relativeTo: nil)
                     .foregroundStyle(.white)
+                    .environment(\.layoutDirection, .leftToRight)
             }
             .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
             .contentShape(Rectangle())
@@ -330,7 +332,7 @@ struct CollapsedCallWindow: View {
             InitialsAvatar(
                 name: label, identity: label,
                 size: CallScreenPresentation.tileInitialsDiameter(tileSize: size),
-                placeholderSymbol: "person.fill",
+                placeholderIcon: .personFill,
                 photo: peerKey.map(AvatarPhoto.person))
         }
     }
@@ -340,7 +342,7 @@ struct CollapsedCallWindow: View {
         InitialsAvatar(
             name: shown.name, identity: person.id,
             size: CallScreenPresentation.tileInitialsDiameter(tileSize: size),
-            placeholderSymbol: "person.fill",
+            placeholderIcon: .personFill,
             photo: person.isLocal
                 ? .own
                 : (state.personKeys[person.id] ?? peerKey).map(AvatarPhoto.person))
@@ -386,8 +388,7 @@ struct CollapsedCallWindow: View {
             // A lock and never the word: a claim about encryption belongs
             // where the safety number can be read, which is one tap away.
             if state.e2ee.active {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 9, weight: .semibold))
+                LkIconView(.lockFill, size: 14, relativeTo: nil)
             }
         }
         .foregroundStyle(.white)
@@ -463,7 +464,7 @@ struct CollapsedCallWindow: View {
     /// that starts here moves the window and never toggles the microphone.
     private var muteButton: some View {
         CallControlFaceView(
-            systemImage: micOn ? "mic.fill" : "mic.slash.fill",
+            icon: micOn ? .micFill : .micSlashFill,
             face: CallScreenPresentation.face(.microphone, on: micOn),
             diameter: 32)
             .frame(width: CallWindowGeometry.muteTarget, height: CallWindowGeometry.muteTarget)

@@ -34,5 +34,5 @@ Every point and scalar of every wire form passes through these decoders. They ar
 
 ## References
 
-- ADR-0090 4.2 (`G_cred`), RFC 9496.
+- ADR-0092 4.2 (`G_cred`), RFC 9496.
 - Tests: `generators_are_distinct_and_not_identity`, `hash_to_group_separates_label_from_input`, `decoders_refuse_bad_input`.

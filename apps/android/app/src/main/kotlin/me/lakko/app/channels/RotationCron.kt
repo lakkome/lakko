@@ -28,7 +28,7 @@ import uniffi.lakko_ffi_uniffi.channelShouldRotate
  */
 @Serializable
 public data class RotateBatchEntry(
-    val subscriber_pubkey_hex: String,
+    val subscriber_id: String,
     val envelope_b64: String,
 )
 
@@ -85,7 +85,8 @@ public data class RotateBatchEntry(
  */
 public class RotationCron(
     private val publisherGroup: PublisherGroup,
-    private val identity: Identity,
+    /** ADR-0090 — the account identity and this device's leaf. */
+    private val ids: ChannelIdentity,
     private val channelIdHex: String,
     private val channelsClient: ChannelsClient,
     private val saveState: suspend (ChannelRotationState) -> Unit,
@@ -93,9 +94,6 @@ public class RotationCron(
     private val accountIdB64: String,
     /** G-50 — where the rotation is recorded before any of its steps runs. */
     private val store: PublisherCommitStore,
-    /** G-50 — snapshot the channel provider now, throwing when it was not
-     *  written ([ChannelPublisherIdentity.withIdentityPersistingFirst]). */
-    private val persistNow: () -> Unit,
     private val onRotated: ((UInt) -> Unit)? = null,
 ) {
 
@@ -111,6 +109,9 @@ public class RotationCron(
         /** New server-side epoch id after the rotation,
          *  when `rotated:true`. */
         val newEpoch: UInt? = null,
+        /** ADR-0090 — another owner device committed at this epoch first;
+         *  this device abandoned its rotation. */
+        val lost: Boolean = false,
     )
 
     /** Errors `runOnce` can throw before any network
@@ -142,34 +143,23 @@ public class RotationCron(
             return OnceResult(rotated = false, newState = state)
         }
 
-        // 1. The server epoch the envelopes will bind to,
-        //    read BEFORE the local rotation: after the eager
-        //    merge nothing may fail before the commit's record
-        //    is durable (G-50), and this is a network read.
-        val currentEpoch = channelsClient.fetchEpoch(channelIdHex)
-        if (currentEpoch == UInt.MAX_VALUE) {
-            throw CronException.UnexpectedServerEpoch(currentEpoch)
-        }
-        val newServerEpoch = currentEpoch + 1u
+        // 1. The server epoch the envelopes will bind to, read
+        //    before the stage (a network read).
+        val newServerEpoch = CoPublisher.nextServerEpoch(channelsClient, channelIdHex).toUInt()
 
-        // 2. Advance the local MLS epoch (the self-update
-        //    commit eager-merges N -> N+1 in the channel
-        //    provider) and record the rotation, then the N+1
-        //    provider snapshot, durably, before any of its
-        //    steps runs. A refused record runs nothing and
-        //    rolls the provider back.
-        // ADR-0081 — the proof of the epoch the rotation leaves, taken
-        // before the eager merge and recorded with the rotation.
-        val entry = CoPublisher.recordCommit(identity, accountIdB64, store, persistNow) {
+        // 2. ADR-0090 section 3 — STAGE the rotation (the group stays at
+        //    epoch N holding it) and record it with the staged snapshot and
+        //    the epoch-N access seed, before anything leaves the device.
+        val entry = CoPublisher.recordCommit(ids, publisherGroup, accountIdB64, store) { device ->
             val proofEpoch = publisherGroup.epoch().toLong()
-            val proofSeed = publisherGroup.dsAccessSeed(identity)
-            val commit = publisherGroup.rotate(identity)
+            val proofSeed = publisherGroup.dsAccessSeed(device)
+            val commit = publisherGroup.stageRotate(device)
             PublisherCommitEntry(
                 id = PublisherCommitEntry.newId(),
                 kind = PublisherCommitEntry.Kind.ROTATION,
                 channelIdHex = channelIdHex.lowercase(),
                 groupIdHex = me.lakko.app.ds.DsClient.pseudonymHex(publisherGroup.groupId()),
-                targetEpoch = publisherGroup.epoch().toLong(),
+                targetEpoch = proofEpoch + 1,
                 serverTargetEpoch = newServerEpoch.toLong(),
                 commitB64 = java.util.Base64.getEncoder().encodeToString(commit),
                 proofEpoch = proofEpoch,
@@ -177,20 +167,21 @@ public class RotationCron(
             ).also { proofSeed.fill(0) }
         }
 
-        // 3. The steps: the N+1 epoch key and the rotation
-        //    commit on the DS in one request (ADR-0057,
-        //    ADR-0081; best effort for a rotation), reseal the
-        //    N+1 seed to every subscriber and commit the
-        //    rotation on the channels service with the ADR-0030
-        //    chunked fanout (C-42: the commit is the one atomic
-        //    point).
-        me.lakko.app.ds.DsClient().use { ds ->
+        // 3. The DS decides (ADR-0090 section 4: any owner device may
+        //    rotate, one commit per epoch lands): taken, the stage merges
+        //    and the new seed is resealed to every subscriber (ADR-0030
+        //    chunked fanout, C-42); `409`, the stage is abandoned and this
+        //    device does nothing more (the journal read applies the winner).
+        val outcome = me.lakko.app.ds.DsClient().use { ds ->
             runPublisherCommit(
                 entry,
                 CoPublisher.commitPorts(
-                    ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store,
+                    ds, channelsClient, ids, publisherGroup, channelIdHex, accountIdB64, store,
                 ),
             )
+        }
+        if (outcome == PublisherCommitOutcome.LOST) {
+            return OnceResult(rotated = false, newState = state, lost = true)
         }
 
         // 4. Stamp the new state + persist.

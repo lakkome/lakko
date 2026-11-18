@@ -5,7 +5,7 @@ import LakkoCore
 import XCTest
 @testable import Lakko
 
-/// ADR-0090 / `docs/ux/attachments.md` — the iOS wiring of the attachment
+/// ADR-0092 / `docs/ux/attachments.md` — the iOS wiring of the attachment
 /// menu and the content kinds: the menu rows come from the core rule, the
 /// ballot queue waits 0..=10 s and survives a restart, a stored content
 /// message reads back through the core, the folds read what the receive path
@@ -36,11 +36,12 @@ final class AttachmentKindsTests: XCTestCase {
         let all: [AttachmentMenuItem] = [
             .photoOrVideo, .camera, .file, .audio, .poll, .checklist, .location, .contact, .article,
         ]
+        // One Lakko icon per row (design system section 8), none shared.
+        XCTAssertEqual(Set(all.map(AttachmentMenuCopy.icon)).count, all.count)
         for item in all {
             let key = AttachmentMenuCopy.labelKey(item)
             XCTAssertTrue(key.hasPrefix("attach.menu."))
             XCTAssertNotEqual(Localization.text(key), key, "no catalog text for \(key)")
-            XCTAssertFalse(AttachmentMenuCopy.icon(item).isEmpty)
         }
         for reason: AttachmentMenuDisabled in [.noCamera, .cameraInCall, .noLocation] {
             let key = AttachmentMenuCopy.reasonKey(reason)
@@ -197,7 +198,7 @@ final class AttachmentKindsTests: XCTestCase {
         XCTAssertEqual(view.doneCount, 1)
         XCTAssertTrue(view.mayTick(other))
 
-        // ADR-0090 section 3.9 — the committer hands the open checklist over.
+        // ADR-0092 section 3.9 — the committer hands the open checklist over.
         let plan = ChatRepository.handoverPlan(messages: [message], nowMs: 1)
         XCTAssertEqual(plan.items.count, 1)
         XCTAssertEqual(plan.items.first?.pollRef(), 20)

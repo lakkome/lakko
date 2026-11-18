@@ -120,6 +120,15 @@ describe("deleteDecision — enabled only when every selected message is own", (
   });
 });
 
+// Maintainer, 2026-11-13: a message carrying a channel invitation card is
+// never forwarded; a selection holding one does not offer Forward.
+describe("forwardEnabled — a selection holding an invitation card", () => {
+  it("is disabled", () => {
+    expect(forwardEnabled(enterSelection(7), true)).toBe(false);
+    expect(forwardEnabled(enterSelection(7), false)).toBe(true);
+  });
+});
+
 describe("forwardEnabled — when the selection is not empty", () => {
   it("empty is disabled, one is enabled", () => {
     expect(forwardEnabled(leaveSelection())).toBe(false);

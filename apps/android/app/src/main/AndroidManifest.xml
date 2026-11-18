@@ -70,7 +70,7 @@
       add-device path needs it).
     -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- ADR-0090 / docs/ux/attachments.md section 9 — Location sends where
+    <!-- ADR-0092 / docs/ux/attachments.md section 9 — Location sends where
       the person is, once, after they press Send; asked on the location
       screen, never at the menu. No background location. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />

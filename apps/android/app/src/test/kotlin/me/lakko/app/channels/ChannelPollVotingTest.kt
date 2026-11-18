@@ -9,7 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0090 section 4.3 — the channel-poll vote write and its retries. */
+/** ADR-0092 section 4.3 — the channel-poll vote write and its retries. */
 class ChannelPollVotingTest {
 
     @Test

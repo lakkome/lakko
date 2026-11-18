@@ -4,7 +4,7 @@
 /**
  * `docs/ux/attachments.md` section 10.1 — pick one of the person's contacts
  * to share. A contact with no username cannot be shared (the receiver adds
- * through a username lookup, ADR-0090 section 7) and is shown disabled; so
+ * through a username lookup, ADR-0092 section 7) and is shown disabled; so
  * is a contact whose "who can find me" is `Nobody` (their newest profile
  * says their card may not be shared, maintainer 2026-11-18).
  */

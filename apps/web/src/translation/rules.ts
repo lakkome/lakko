@@ -15,6 +15,7 @@ import { createSignal } from "solid-js";
 
 import { loadWasm, type Wasm } from "../wasm";
 import type { Detection, EngineState } from "./engines";
+import type { ConversationLanguagesRecord } from "./result-store";
 
 export type TranslationRules = Pick<
   Wasm,
@@ -29,6 +30,10 @@ export type TranslationRules = Pick<
   | "readsLanguage"
   | "translationDetectionConfidentPermille"
   | "translationBarWindow"
+  | "conversationDetection"
+  | "ConversationLanguages"
+  | "resolveTranslationSource"
+  | "orderPickerLanguages"
 >;
 
 const [rules, setRules] = createSignal<TranslationRules | null>(null);
@@ -89,6 +94,160 @@ export function offerFor(
   if (answer === r.TranslateOffer.Translate) return "translate";
   if (answer === r.TranslateOffer.TranslateAskLanguage) return "ask";
   return "none";
+}
+
+/** The shared rule's object for a stored record (the caller frees it). */
+function languagesOf(r: TranslationRules, record: ConversationLanguagesRecord) {
+  return new r.ConversationLanguages(
+    record.picks.map((p) => p.tag),
+    Float64Array.from(record.picks, (p) => p.atMs),
+    Float64Array.from(record.detections, (d) => d.messageId),
+    record.detections.map((d) => d.tag),
+  );
+}
+
+/** A stored record from the shared rule's object. */
+function recordOf(l: InstanceType<TranslationRules["ConversationLanguages"]>): ConversationLanguagesRecord {
+  const pickTags = l.pickTags;
+  const pickAt = l.pickAtMs;
+  const ids = l.detectionIds;
+  const tags = l.detectionTags;
+  return {
+    picks: pickTags.map((tag: string, i: number) => ({ tag, atMs: pickAt[i] ?? 0 })),
+    detections: Array.from(ids, (messageId, i) => ({ messageId, tag: tags[i] ?? "" })),
+  };
+}
+
+/** The record with a pick (`Not X?` or the picker) of `tag` at `atMs`. */
+export function withLanguagePick(
+  r: TranslationRules,
+  record: ConversationLanguagesRecord,
+  tag: string,
+  atMs: number,
+): ConversationLanguagesRecord {
+  const l = languagesOf(r, record);
+  const next = l.withPick(tag, atMs);
+  try {
+    return recordOf(next);
+  } finally {
+    next.free();
+    l.free();
+  }
+}
+
+/** The record with message `messageId` confidently detected as `tag`. */
+export function withLanguageDetection(
+  r: TranslationRules,
+  record: ConversationLanguagesRecord,
+  messageId: number,
+  tag: string,
+): ConversationLanguagesRecord {
+  const l = languagesOf(r, record);
+  const next = l.withDetection(messageId, tag);
+  try {
+    return recordOf(next);
+  } finally {
+    next.free();
+    l.free();
+  }
+}
+
+/** The conversation's usual language (latest pick, else most detected). */
+export function usualLanguage(r: TranslationRules, record: ConversationLanguagesRecord): string | null {
+  const l = languagesOf(r, record);
+  try {
+    return l.usual() ?? null;
+  } finally {
+    l.free();
+  }
+}
+
+/**
+ * ADR-0082 note of 2026-11-15 — the language an unsure message is taken to be
+ * in: a picked close candidate, else the most detected one, else the
+ * detection; a confident detection stands.
+ */
+export function conversationDetectionFor(
+  r: TranslationRules,
+  detected: Detection | null,
+  record: ConversationLanguagesRecord,
+): Detection | null {
+  if (detected === null) return null;
+  const l = languagesOf(r, record);
+  const chosen = r.conversationDetection(detected.tag, detected.permille, [...(detected.alternatives ?? [])], l);
+  l.free();
+  if (chosen === undefined) return detected;
+  try {
+    const tag = chosen.tag;
+    const permille = chosen.confidencePermille;
+    return detected.alternatives === undefined ? { tag, permille } : { tag, permille, alternatives: detected.alternatives };
+  } finally {
+    chosen.free();
+  }
+}
+
+/** What the line under a message names and what `Translate` starts from. */
+export interface SourceResolution {
+  /** The language the line names; `null` for no line. */
+  readonly lineTag: string | null;
+  readonly linePermille: number;
+  /** Whether the line carries `Translate`; `false` is a name alone. */
+  readonly lineCanTranslate: boolean;
+  /** The language `Translate` starts from; `null` opens the picker. */
+  readonly translateSource: string | null;
+  /** The guess the picker marks. */
+  readonly guess: string | null;
+}
+
+/**
+ * ADR-0082 note of 2026-11-15 — the line and `Translate` from one shared rule
+ * (`resolveTranslationSource`), so they never name different languages.
+ * `translatable` lists the languages the engine answered it can translate
+ * from into `target`.
+ */
+export function resolveSourceFor(
+  r: TranslationRules,
+  detected: Detection | null,
+  record: ConversationLanguagesRecord,
+  target: string,
+  translatable: readonly string[],
+): SourceResolution {
+  const l = languagesOf(r, record);
+  const res = r.resolveTranslationSource(
+    detected?.tag,
+    detected?.permille ?? 0,
+    [...(detected?.alternatives ?? [])],
+    l,
+    target,
+    [...translatable],
+  );
+  l.free();
+  try {
+    return {
+      lineTag: res.lineTag ?? null,
+      linePermille: res.lineConfidencePermille,
+      lineCanTranslate: res.lineCanTranslate,
+      translateSource: res.translateSource ?? null,
+      guess: res.guess ?? null,
+    };
+  } finally {
+    res.free();
+  }
+}
+
+/** The detection's close candidates: the detected language, then the others. */
+export function candidateTags(detected: Detection | null): string[] {
+  return detected === null ? [] : [detected.tag, ...(detected.alternatives ?? [])];
+}
+
+/** `Not X?` — the picker's languages with the message's close candidates first. */
+export function orderPickerLanguagesFor(
+  r: TranslationRules,
+  languages: readonly string[],
+  candidates: readonly string[],
+): string[] {
+  if (candidates.length === 0) return [...languages];
+  return r.orderPickerLanguages([...languages], [...candidates]);
 }
 
 /** UX 3.6 — the language the conversation bar names, before the engine is asked. */

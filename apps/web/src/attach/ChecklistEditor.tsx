@@ -4,7 +4,7 @@
 /**
  * `docs/ux/attachments.md` section 8.1 — the checklist editor, for a new
  * checklist and for the creator's `Edit checklist`. An edited item keeps its
- * id, so its ticks stay with it (ADR-0090 section 5); a new item has none and
+ * id, so its ticks stay with it (ADR-0092 section 5); a new item has none and
  * the conversation assigns one when it signs.
  */
 import { createMemo, createSignal, Index, Show, type JSX } from "solid-js";
@@ -153,7 +153,7 @@ export function ChecklistEditor(props: {
                   startDragReorder(e, rowsEl, i, lastMovable(), (from, to) => setRows(movedTo(rows(), from, to)))
                 }
               >
-                <Icon name="grip" size={16} />
+                <Icon name="drag-handle" size={16} />
               </span>
               <input
                 type="text"
@@ -172,7 +172,7 @@ export function ChecklistEditor(props: {
                 disabled={i === 0 || i > lastMovable()}
                 onClick={() => setRows(moved(rows(), i, i - 1))}
               >
-                <Icon name="chevron" class="lk-attach-up" size={16} />
+                <Icon name="chevron-up" size={16} />
               </button>
               <button
                 type="button"
@@ -182,7 +182,7 @@ export function ChecklistEditor(props: {
                 disabled={i >= lastMovable()}
                 onClick={() => setRows(moved(rows(), i, i + 1))}
               >
-                <Icon name="chevron" class="lk-attach-down" size={16} />
+                <Icon name="chevron-down" size={16} />
               </button>
               <button
                 type="button"
@@ -192,7 +192,7 @@ export function ChecklistEditor(props: {
                 disabled={i > lastMovable() || rows().length <= 1}
                 onClick={() => setRows(withTrailing(rows().filter((_, j) => j !== i)))}
               >
-                <Icon name="close" size={16} />
+                <Icon name="minus-circle" size={16} />
               </button>
             </div>
           )}

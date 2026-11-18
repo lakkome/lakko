@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The typed half of the open-items hand-over (ADR-0090 section 3.9).
+//! The typed half of the open-items hand-over (ADR-0092 section 3.9).
 //!
 //! The wire codec, the row planner and the part assembler live in
 //! `lakko_contacts::open_items` and `lakko_contacts::poll_ballots`, where the

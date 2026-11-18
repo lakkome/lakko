@@ -89,22 +89,28 @@ import { base64Encode } from "../auth/account-id";
 import type { DiscoveryClient } from "../discovery/client";
 import { newRevocationKey } from "../contacts/own-links";
 import { withGroupMlsLock } from "../mls/group-lock";
-import { appointCoPublisher, fetchEpoch, rememberPublisherRole } from "./api";
+import { failedApplyKind, failedRowLine } from "../chat/registered-commit-hold";
+import { appointCoPublisher, rememberPublisherRole } from "./api";
 import { channelsActions, channelsState } from "../state/channels-state";
-import { publisherCommitPorts } from "./rotation-cron";
+import { commitInFlight, publisherCommitPorts, runStagedPublisherCommit } from "./rotation-cron";
 import {
-  newEntryId,
   remainingSteps,
   replayVerdict,
   runPublisherCommit,
+  withStepDone,
   type PublisherCommitEntry,
+  type PublisherCommitPorts,
 } from "./publisher-commit-outbox";
+import { admitExtras, learnEpochOffset } from "./publisher-devices";
 import {
   bytesToHex,
   freshPublisherKeys,
-  openOrFoundPublisherGroup,
+  openHeldPublisherGroup,
+  PublisherGroupNotHeldError,
   type ChannelPublisherKeys,
 } from "./composer";
+import { publisherDevice } from "./publisher-device";
+import { joinBelowDeletedGroup, welcomeAlreadyJoined, welcomeHashHex, withJoinedWelcome } from "./welcome-replay";
 import { LegacyChannelError, isLegacyV1PublisherGroupId } from "./legacy-v1";
 import {
   InviteLinkDamagedError,
@@ -131,7 +137,8 @@ type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
 /** Path prefix every group/co-publisher invite URL starts with. */
 const GROUP_INVITE_URL_PREFIX = "/g/";
 
-/** Open (or create) the persistent PublisherGroup handle for a channel. The
+/** Open the persistent PublisherGroup handle this device holds for a channel
+ *  (never founds one: see `openHeldPublisherGroup`). The
  *  caller owns the returned handle and MUST `.free()` it when done. */
 export async function openPublisherGroup(
   identity: Identity,
@@ -148,13 +155,17 @@ export async function openPublisherGroup(
   const joinedIdHex = channelsActions.coPublisherGroupIdOf(channelIdHex);
   if (joinedIdHex !== undefined) {
     const joinedId = hexToBytes(joinedIdHex);
-    const joined = joinedId === null ? undefined : wasm.PublisherGroup.loadJoined(identity, joinedId, channelId);
-    if (joined === undefined) throw new Error("co-publisher: the joined PublisherGroup is not on this device");
+    const joined =
+      joinedId === null ? undefined : wasm.PublisherGroup.loadJoined(publisherDevice(), joinedId, channelId);
+    if (joined === undefined) throw new PublisherGroupNotHeldError();
     return joined;
   }
-  // A channel minted under the retired v1 derivation refuses inside with the
-  // readable copy. A group founded here claims its journal (ADR-0057).
-  return await openOrFoundPublisherGroup(wasm, identity, channelId);
+  // 2026-11-13, the trap rule: this is every path but New channel, so the
+  // group is loaded, never founded. A device of the owner that holds no group
+  // state is a reader of the channel (PublisherGroupNotHeldError); founding
+  // here would claim-reset the live journal. A channel minted under the
+  // retired v1 derivation refuses inside with the readable copy.
+  return await openHeldPublisherGroup(wasm, identity, channelId);
 }
 
 /**
@@ -165,7 +176,7 @@ export async function openPublisherGroup(
  * withdraws it; call that BEFORE freeing the handle.
  */
 export function registerPublisherGroupAccess(
-  identity: Identity,
+  device: Identity,
   publisherGroup: PublisherGroup,
 ): () => void {
   const own = publisherGroup.groupId();
@@ -175,19 +186,25 @@ export function registerPublisherGroupAccess(
     return true;
   };
   const unregisterSource = dsAccess.registerGroupSource((groupId) =>
-    matches(groupId) ? publisherGroup.dsAccessSigner(identity) : null,
+    matches(groupId) ? publisherGroup.dsAccessSigner(device) : null,
   );
-  // ADR-0057 — the channel owner holds the PublisherGroup journal's root
-  // (the handle this panel holds is the owner's). A co-publisher on web holds
-  // no registrar seed: a PublisherGroup carries no application messages to
-  // deliver one in, so its own commits are not registered (stated residual).
+  // ADR-0057 — every device of the channel owner holds the PublisherGroup
+  // journal's root (ADR-0090: an owner DEVICE commits; a co-publisher's
+  // device never does, and holds no root).
+  const ownerDevice = ((): boolean => {
+    try {
+      return publisherGroup.isOwnerDevice(device);
+    } catch {
+      return false;
+    }
+  })();
   const unregisterOwner = dsAccess.registerOwnerSource((groupId) =>
-    matches(groupId) ? true : null,
+    matches(groupId) ? ownerDevice : null,
   );
   // ADR-0057 obligation 2 - the owner claims the journal on open (once per
   // session): an unclaimed journal never answers the 401 the lazy claim
   // waits for.
-  void new DsClient().ensureOwnerClaim(own);
+  if (ownerDevice) void new DsClient().ensureOwnerClaim(own);
   return () => {
     unregisterSource();
     unregisterOwner();
@@ -207,6 +224,31 @@ export interface MintedCoPublisherLink {
   readonly sealed: Uint8Array;
   /** The 12-byte link secret (the URL fragment). SECRET. */
   readonly linkSecret: Uint8Array;
+  /** The invitation card the one-to-one message carries beside the URL
+   *  (ADR-0087 section 14, UX 15.2): the ledger id, the secret and the sealed
+   *  blob, so every client draws "... invites you to be a publisher of
+   *  {channel}." with `Accept` from the message alone. SECRET (it holds the
+   *  link secret); it travels only inside the end-to-end encrypted message. */
+  readonly card: Uint8Array;
+}
+
+/**
+ * The channel name a co-publisher link carries in its preview: the name the
+ * channel's own record gives, else the name this device keeps for it, else
+ * its @name. `undefined` when it has none of them (the link then carries no
+ * name and the receiving client says "Channel"); never the generic word.
+ */
+export function coPublisherLinkChannelName(
+  sharedName: string | undefined,
+  localName: string | undefined,
+  localHandle: string | undefined,
+): string | undefined {
+  for (const candidate of [sharedName, localName]) {
+    const name = (candidate ?? "").trim();
+    if (name.length > 0) return name;
+  }
+  const handle = (localHandle ?? "").trim().replace(/^@/, "");
+  return handle.length > 0 ? handle : undefined;
 }
 
 /**
@@ -225,7 +267,13 @@ export async function mintOneUseCoPublisherLink(
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
   const channelId = publisherGroup.channelId();
-  const name = channelsState.metaByChannel().get(bytesToHex(channelId))?.name;
+  const channelIdHex = bytesToHex(channelId);
+  const handle = channelsState.channels().find((c) => c.id === channelIdHex);
+  const name = coPublisherLinkChannelName(
+    channelsState.metaByChannel().get(channelIdHex)?.name,
+    handle?.localName,
+    handle?.localHandle,
+  );
   const inviterName = await ownInviterName(wasm);
   const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
   const knockSeed = wasm.groupKnockSeed(root, INITIAL_KNOCK_VERSION);
@@ -235,7 +283,7 @@ export async function mintOneUseCoPublisherLink(
     groupId,
     0n,
     channelId,
-    name === undefined || name.length === 0 ? undefined : name,
+    name,
     wasm.groupKnockPublicKey(knockSeed),
     INITIAL_KNOCK_VERSION,
     undefined,
@@ -267,7 +315,8 @@ export async function mintOneUseCoPublisherLink(
     secret: linkSecret,
     widths: inviteLinkWidths(wasm),
   });
-  return { url, ledgerId, revocationSeed: revocation.seed, capabilityWire, sealed, linkSecret };
+  const card = wasm.composeChannelInviteCard(ledgerId, linkSecret, sealed);
+  return { url, ledgerId, revocationSeed: revocation.seed, capabilityWire, sealed, linkSecret, card };
 }
 
 /** Capability wires read off sealed knock rows, keyed like the bindings
@@ -280,6 +329,16 @@ const joinerCapabilities = new Map<string, string>();
  *  joiner's identity bundle by it and seals the admission seed to the bundle's
  *  X25519 key only when the bundle's signature key IS the joiner's key. */
 const joinerAccountIds = new Map<string, Uint8Array>();
+
+/** ADR-0090: the account key a pending joiner's KeyPackage is bound to,
+ *  keyed like the bindings (`groupIdB64:deviceKeyHex`). */
+const joinerAccounts = new Map<string, Uint8Array>();
+
+/** The account key a pending joiner's device leaf is bound to (ADR-0050
+ *  binding of its KeyPackage), or `undefined` before its request was read. */
+export function accountKeyOfJoiner(groupId: Uint8Array, joinerKey: Uint8Array): Uint8Array | undefined {
+  return joinerAccounts.get(bindingKey(base64Encode(groupId), joinerKey));
+}
 
 /** The account id a pending joiner's request named, or `undefined`. */
 export function accountIdOfJoiner(groupId: Uint8Array, joinerKey: Uint8Array): Uint8Array | undefined {
@@ -444,6 +503,8 @@ export async function pollCoPublisherJournal(
    *  account key its MLS sender resolved to at receipt (C-68). Runs inside
    *  the group's MLS lock: it must not take it again. */
   onApplication?: (plaintext: Uint8Array, senderAccount: Uint8Array | undefined) => void | Promise<void>,
+  /** ADR-0090 section 4: a commit row was applied (its DS `created_at`). */
+  onCommit?: (createdAt: string) => void,
 ): Promise<number> {
   const groupId = publisherGroup.groupId();
   const groupIdB64 = base64Encode(groupId);
@@ -480,25 +541,58 @@ export async function pollCoPublisherJournal(
   // The APPLY — inside it.
   return withGroupMlsLock(groupIdB64, async () => {
     const wasm = await loadWasm();
+    const device = publisherDevice();
     const lastRow = raw.messages.at(-1);
     if (lastRow !== undefined) {
       journalCursors.set(groupIdB64, Math.max(journalCursors.get(groupIdB64) ?? 0, lastRow.id));
     }
     for (const m of raw.messages) {
+      let localEpoch: bigint | undefined;
       try {
-        const processed = publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
+        localEpoch = publisherGroup.epoch();
+      } catch {
+        localEpoch = undefined;
+      }
+      try {
+        const processed = publisherGroup.processIncomingVerifyingRoles(device, m.payload);
         try {
           const data = processed.applicationData;
           if (processed.kind === "Application" && data !== undefined && onApplication !== undefined) {
             await onApplication(data, processed.senderAccount);
+          } else if (processed.kind === "Commit") {
+            // ADR-0090 section 4: the epoch began with this row; every owner
+            // device restarts its rotation clock from the DS row time.
+            onCommit?.(m.createdAt);
           }
         } finally {
           processed.free();
         }
-      } catch {
-        // A commit we have already merged (epoch mismatch) or a non-MLS entry
-        // — skip, the FIFO journal lets the next poll catch up on any
-        // genuinely-new commit.
+      } catch (err) {
+        // A commit we have already merged (epoch mismatch), a commit the
+        // ADR-0090 gate refused (not merged), or a non-MLS entry — skip, the
+        // FIFO journal lets the next poll catch up on any genuinely-new commit.
+        // ADR-0091 phase 1: logged without identifiers, never silently.
+        let sealed: bigint | undefined;
+        let after: bigint | undefined;
+        try {
+          sealed = wasm.epochOfMessage(m.payload);
+          after = wasm.epochAfterMessage(m.payload);
+        } catch {
+          sealed = undefined;
+          after = undefined;
+        }
+        // eslint-disable-next-line no-console
+        console.warn(
+          failedRowLine({
+            kind: failedApplyKind(err),
+            sealed,
+            after,
+            local: localEpoch,
+            latest: undefined,
+            verdict: "skip",
+            attempt: undefined,
+          }),
+        );
       }
     }
     if (knocks !== null) {
@@ -507,7 +601,7 @@ export async function pollCoPublisherJournal(
         // ADR-0087 section 5 — a sealed KeyPackage row (the co-publisher
         // request since phase B): opened with this owner's knock seed,
         // retained, and approved later from the retained package.
-        if (await applySealedCoPublisherRow(wasm, identity, publisherGroup, k.payload)) continue;
+        if (await applySealedCoPublisherRow(wasm, identity, device, publisherGroup, k.payload)) continue;
         // ADR-0059 — a co-publisher binding rides beside the proposal. It is
         // not an MLS message, so it is read here and never processed.
         const bound = recordBinding(wasm, groupIdB64, channelIdHex, k.payload);
@@ -530,7 +624,7 @@ export async function pollCoPublisherJournal(
           // processing it (a member's commit posted here would otherwise be
           // applied by this owner alone). A refused row, an attribution or a
           // stale-epoch proposal throws and is skipped.
-          publisherGroup.processKnock(identity, k.payload);
+          publisherGroup.processKnock(device, k.payload);
         } catch {
           // Not a proposal: it may be the joiner's attribution, which carries
           // the `reply` grant the approve writes the Welcome under (ADR-0060
@@ -539,6 +633,9 @@ export async function pollCoPublisherJournal(
         }
       }
     }
+    // ADR-0090: applied commits and retained requests live in the device
+    // provider: written (best effort) after the apply.
+    if (raw.messages.length > 0 || (knocks?.messages.length ?? 0) > 0) channelsActions.notePublisherGroupChanged();
     // ADR-0057 obligation 6 — no heal on apply: whoever committed registered
     // its epoch before publishing.
     return pendingCoPublishers(publisherGroup).length;
@@ -554,6 +651,7 @@ export async function pollCoPublisherJournal(
 async function applySealedCoPublisherRow(
   wasm: Wasm,
   identity: Identity,
+  device: Identity,
   publisherGroup: PublisherGroup,
   payload: Uint8Array,
 ): Promise<boolean> {
@@ -589,7 +687,7 @@ async function applySealedCoPublisherRow(
     }
     let joined;
     try {
-      joined = publisherGroup.retainJoinRequest(identity, request.keyPackage);
+      joined = publisherGroup.retainJoinRequest(device, request.keyPackage);
     } catch {
       return true;
     }
@@ -598,6 +696,10 @@ async function applySealedCoPublisherRow(
     joined.free();
     if (outcome !== "retained" && outcome !== "already-pending") return true;
     joinerCapabilities.set(bindingKey(base64Encode(groupId), joinerKey), base64Encode(cap));
+    // ADR-0090: the leaf is a DEVICE; the account it is bound to is what
+    // the approve records, appoints and seals to.
+    const accountKey = wasm.keyPackageAccountKey(request.keyPackage);
+    if (accountKey !== undefined) joinerAccounts.set(bindingKey(base64Encode(groupId), joinerKey), accountKey);
     const profile = request.profile;
     if (profile !== undefined) {
       try {
@@ -612,8 +714,10 @@ async function applySealedCoPublisherRow(
     const session = reachSession();
     const reply = request.replyGrant;
     try {
-      // A co-publisher's leaf key IS its account key.
-      if (session !== null && joinReplyBindingVerifies(reply, joinerKey)) {
+      // ADR-0090: the reply grant's binding is the joiner ACCOUNT's; kept
+      // under the device leaf key the approve looks it up by.
+      const account = joinerAccounts.get(bindingKey(base64Encode(groupId), joinerKey)) ?? joinerKey;
+      if (session !== null && joinReplyBindingVerifies(reply, account)) {
         await rememberJoinReply(groupId, joinerKey, session.encodeGrant(reply));
       }
     } finally {
@@ -642,10 +746,12 @@ export async function requestToCoPublishSealed(
     readonly groupId: Uint8Array;
     readonly channelIdHex: string;
     readonly joinerKey: Uint8Array;
+    readonly ownerKey: Uint8Array;
   }) => Promise<void>,
   discovery: Pick<DiscoveryClient, "fetchGroupInvite">,
-): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
+): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array; ownerKey: Uint8Array }> {
   const wasm = await loadWasm();
+  const device = publisherDevice();
   const widths = inviteLinkWidths(wasm);
   const split = splitGroupInviteLink(link, widths);
   if (split === null) throw new Error("not a /g/ co-publisher link");
@@ -663,9 +769,11 @@ export async function requestToCoPublishSealed(
   let knockKey: Uint8Array | undefined;
   let knockVersion: number | undefined;
   let channelIdBytes: Uint8Array | undefined;
+  let issuerKey: Uint8Array;
   try {
     groupId = cap.groupId;
     wire = cap.wire;
+    issuerKey = cap.issuerSignaturePubkey;
     knockKey = cap.knockPublicKey;
     knockVersion = cap.knockVersion;
     let preview: ReturnType<typeof cap.openPreview> | undefined;
@@ -705,13 +813,15 @@ export async function requestToCoPublishSealed(
     } catch {
       profile = new Uint8Array();
     }
-    row = wasm.sealKnockRow(knockKey, knockVersion, identity.createKeyPackage(), replyGrant, profile, wire);
+    // ADR-0090: the leaf is this DEVICE (bound to the account), so the
+    // KeyPackage is the device identity's, minted into its provider.
+    row = wasm.sealKnockRow(knockKey, knockVersion, device.createKeyPackage(), replyGrant, profile, wire);
   } finally {
     replyGrant.free();
   }
-  await persistBeforeKnock({ groupId, channelIdHex, joinerKey: identity.signaturePublicKey });
+  await persistBeforeKnock({ groupId, channelIdHex, joinerKey: device.signaturePublicKey, ownerKey: issuerKey });
   await ds.knock(groupId, [row, binding]);
-  return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
+  return { groupId, channelIdHex, joinerKey: device.signaturePublicKey, ownerKey: issuerKey };
 }
 
 /** The pending co-publisher external-join requests — each a 32-byte joiner leaf
@@ -745,47 +855,34 @@ export async function approveCoPublisher(
   proposalRef: Uint8Array,
   channelIdHex: string,
   apiBase?: string,
-): Promise<number> {
+): Promise<number | null> {
   const groupId = publisherGroup.groupId();
-  let landedAt = 0;
-  // G-38 residual 3 — SERIALIZED per group against the 5 s interval poll above.
-  // `approveExternalJoin` eagerly merges the Add into the shared provider, so
-  // it must not run while a poll is mid-apply on the same group; and the reseal
-  // is inside the region because it reads the POST-approve `channelSeed`, which
-  // another applied commit would move under it.
+  let landedAt: number | null = null;
+  // G-38 residual 3 — SERIALIZED per group against the poll above. ADR-0090
+  // section 3: the approve is STAGED; the journal decides, the stage is
+  // merged on its acceptance, and the reseal reads the MERGED seed.
   await withGroupMlsLock(base64Encode(groupId), async () => {
-    // G-50: the server epoch the reseal binds to is read BEFORE the eager
-    // merge: after it nothing may fail before the record is durable.
-    const serverEpoch = (await fetchEpoch(channelIdHex, apiBase)).epoch;
-    // ADR-0081 - the key of the epoch the approve leaves proves its commit
-    // request; its seed is taken before the eager merge and recorded with
-    // the approve, so a replay after a reload can still prove it.
-    const proofEpoch = publisherGroup.epoch();
-    const proofSeed = publisherGroup.dsAccessSeed(identity);
-    const added = publisherGroup.approveExternalJoin(identity, proposalRef);
-    const entry: PublisherCommitEntry = {
-      id: newEntryId(),
-      kind: "approve",
-      channelIdHex,
-      groupIdHex: bytesToHex(groupId),
-      targetEpoch: publisherGroup.epoch().toString(),
-      serverTargetEpoch: serverEpoch + 1,
-      commitB64: base64Encode(added.commit),
-      welcomeB64: base64Encode(added.welcome),
-      joinerKeyB64: base64Encode(proposalRef),
-      replyGrantB64: await keptJoinReply(groupId, proposalRef),
-      proofEpoch: proofEpoch.toString(),
-      proofSeedB64: base64Encode(proofSeed),
-      journalLost: false,
-      done: [],
-    };
-    proofSeed.fill(0);
-    added.free();
-    // The N+1 provider snapshot and this record in one durable write; a
-    // refused write publishes nothing.
-    await channelsActions.recordPublisherCommit(entry);
-    await runPublisherCommit(entry, approvePorts(ds, identity, publisherGroup, channelIdHex, apiBase));
-    landedAt = entry.serverTargetEpoch;
+    const device = publisherDevice();
+    const account = accountKeyOfJoiner(groupId, proposalRef);
+    const run = await runStagedPublisherCommit(
+      { publisherGroup, identity, device, channelIdHex, ...(apiBase === undefined ? {} : { apiBase }), ds },
+      {
+        kind: "approve",
+        stage: () => {
+          const added = publisherGroup.stageApproveExternalJoin(device, proposalRef);
+          try {
+            return { commit: added.commit, welcome: added.welcome };
+          } finally {
+            added.free();
+          }
+        },
+        joinerKeyB64: base64Encode(proposalRef),
+        joinerAccountKeyB64: account === undefined ? null : base64Encode(account),
+        replyGrantB64: await keptJoinReply(groupId, proposalRef),
+      },
+      approveExtras(ds, identity, groupId, channelIdHex, apiBase),
+    );
+    if (run.outcome === "landed") landedAt = run.serverTargetEpoch;
     // The grant stays until it expires (7 days): a replayed approve may need
     // to write the Welcome again.
   });
@@ -799,47 +896,41 @@ async function keptJoinReply(groupId: Uint8Array, joinerKey: Uint8Array): Promis
 }
 
 /**
- * The ports of a recorded approve: the rotation ports (the N+1 key, the
- * reseal) plus the journal publish, the Welcome and the appointment.
+ * The approve-only steps of a recorded approve (the rotation ports supply
+ * the journal, the merge and the reseal):
  *
- * - ADR-0081: the commit goes to the journal together with the N+1 key's
- *   registration, proven under the epoch-N key whose seed the entry records,
- *   live and on a replay after a reload alike.
  * - ADR-0053 contract point 8 — the Welcome goes to the joiner's own account
  *   mailbox, never to the journal. ADR-0060 section 6: the mailbox is closed,
- *   so the write is signed under the `reply` grant the joiner's attribution
- *   carried (kept in the record, since the in-memory copy does not survive a
- *   reload). ADR-0078: the row is sealed as a Welcome to the mailbox key that
- *   grant's binding names, verified against the joiner's account key (a
- *   co-publisher's leaf IS its account key). Rule 6: a refused write
- *   re-checks the address once.
+ *   so the write is signed under the `reply` grant the joiner's request
+ *   carried (kept in the record). ADR-0078 / ADR-0090: the row is sealed to
+ *   the mailbox key that grant's binding names, verified against the joiner's
+ *   ACCOUNT key (its leaf names a device). Rule 6: a refused write re-checks
+ *   the address once.
  * - ADR-0059 — the appointment of the newcomer's co-publisher key, after the
  *   load-bearing reseal; never fails the approve.
  */
-function approvePorts(
+function approveExtras(
   ds: DsClient,
   identity: Identity,
-  publisherGroup: PublisherGroup,
+  groupId: Uint8Array,
   channelIdHex: string,
   apiBase?: string,
-) {
-  const groupId = publisherGroup.groupId();
-  return publisherCommitPorts(
-    { publisherGroup, identity, channelIdHex, ...(apiBase === undefined ? {} : { apiBase }), ds },
-    {
-      async deliverWelcome(welcome, joinerKey, replyGrantB64) {
-        const wasm = await loadWasm();
-        await writeToPerson(
-          joinerKey,
-          { explicit: replyGrantB64 ?? (await keptJoinReply(groupId, joinerKey)) },
-          (target, auth) => ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome-rendezvous", welcome), auth),
-        );
-      },
-      async appoint(joinerKey) {
-        await appointBound(identity, base64Encode(groupId), joinerKey, channelIdHex, apiBase);
-      },
+): Partial<Pick<PublisherCommitPorts, "deliverWelcome" | "appoint">> {
+  return {
+    async deliverWelcome(welcome, joinerKey, replyGrantB64) {
+      const wasm = await loadWasm();
+      const account = accountKeyOfJoiner(groupId, joinerKey) ?? joinerKey;
+      await writeToPerson(
+        account,
+        { explicit: replyGrantB64 ?? (await keptJoinReply(groupId, joinerKey)) },
+        (target, auth) => ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome-rendezvous", welcome), auth),
+      );
     },
-  );
+    async appoint(joinerKey) {
+      const account = accountKeyOfJoiner(groupId, joinerKey) ?? joinerKey;
+      await appointBound(identity, base64Encode(groupId), account, channelIdHex, apiBase);
+    },
+  };
 }
 
 /**
@@ -854,9 +945,11 @@ function approvePorts(
 export async function replayPublisherCommits(identity: Identity, apiBase?: string): Promise<LandedPublisherCommit[]> {
   const pending = channelsActions.pendingPublisherCommits();
   const landed: LandedPublisherCommit[] = [];
-  if (pending.length === 0) return landed;
   const ds = new DsClient();
   for (const entry of pending) {
+    // ADR-0090: an owed commit is re-sent by every pass; one a live run is
+    // driving is left to it.
+    if (commitInFlight(entry.id)) continue;
     if (remainingSteps(entry).length === 0) {
       // Every step landed before the reload; what follows a commit (the new
       // seed, the record) may not have.
@@ -867,24 +960,38 @@ export async function replayPublisherCommits(identity: Identity, apiBase?: strin
     let group: PublisherGroup | null = null;
     try {
       group = await openPublisherGroupIfPresent(identity, entry.channelIdHex);
+      const device = publisherDevice();
       await withGroupMlsLock(base64Encode(hexToBytes(entry.groupIdHex) ?? new Uint8Array(0)), async () => {
         const restored = group === null ? null : group.epoch();
-        if (replayVerdict(entry, restored) === "discard" || group === null) {
+        const verdict = replayVerdict(entry, restored, group?.hasStagedCommit() ?? false);
+        if (verdict === "discard" || group === null) {
+          // eslint-disable-next-line no-console
+          console.info(`ADR-0090: a recorded ${entry.kind} commit was never staged on disk; dropped`);
           await channelsActions.finishPublisherCommit(entry.id);
           return;
         }
-        const ports =
+        // A merged stage: the DS took it before the reload.
+        const resumed = verdict === "merged" ? withStepDone(entry, "journal") : entry;
+        const ctx = {
+          publisherGroup: group,
+          identity,
+          device,
+          channelIdHex: entry.channelIdHex,
+          ...(apiBase === undefined ? {} : { apiBase }),
+          ds,
+        };
+        const ports = publisherCommitPorts(
+          ctx,
           entry.kind === "approve"
-            ? approvePorts(ds, identity, group, entry.channelIdHex, apiBase)
-            : publisherCommitPorts({
-                publisherGroup: group,
-                identity,
-                channelIdHex: entry.channelIdHex,
-                ...(apiBase === undefined ? {} : { apiBase }),
-                ds,
-              });
-        await runPublisherCommit(entry, ports);
-        landed.push({ channelIdHex: entry.channelIdHex, kind: entry.kind, serverTargetEpoch: entry.serverTargetEpoch });
+            ? approveExtras(ds, identity, group.groupId(), entry.channelIdHex, apiBase)
+            : entry.kind === "admit"
+              ? admitExtras(ds, entry.channelIdHex)
+              : {},
+        );
+        const outcome = await runPublisherCommit(resumed, ports);
+        if (outcome === "landed") {
+          landed.push({ channelIdHex: entry.channelIdHex, kind: entry.kind, serverTargetEpoch: entry.serverTargetEpoch });
+        }
       });
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -893,7 +1000,38 @@ export async function replayPublisherCommits(identity: Identity, apiBase?: strin
       group?.free();
     }
   }
+  await abandonUnrecordedStages(identity);
   return landed;
+}
+
+/**
+ * ADR-0090 section 3 — a PublisherGroup this device holds with a staged
+ * commit no recorded entry names: the entry is written before any commit
+ * leaves the device, so nothing of it was sent. Abandoned, so the group's
+ * membership operations are not frozen. Never throws.
+ */
+async function abandonUnrecordedStages(identity: Identity): Promise<void> {
+  const recorded = new Set(channelsActions.pendingPublisherCommits().map((e) => e.channelIdHex));
+  for (const idHex of channelsState.keysByChannel().keys()) {
+    if (recorded.has(idHex)) continue;
+    let group: PublisherGroup | null = null;
+    try {
+      group = await openPublisherGroupIfPresent(identity, idHex);
+      if (group === null || !group.hasStagedCommit()) continue;
+      const g = group;
+      await withGroupMlsLock(base64Encode(g.groupId()), async () => {
+        if (!g.hasStagedCommit()) return;
+        g.abandonStagedCommit(publisherDevice());
+        // eslint-disable-next-line no-console
+        console.info("ADR-0090: an unrecorded staged PublisherGroup commit was abandoned");
+        await channelsActions.persistPublisherGroupDurable().catch(() => undefined);
+      });
+    } catch {
+      /* the group cannot be read here: nothing to abandon */
+    } finally {
+      group?.free();
+    }
+  }
 }
 
 /** A recorded PublisherGroup commit whose steps a replay ran to the end (its
@@ -910,12 +1048,13 @@ async function openPublisherGroupIfPresent(identity: Identity, channelIdHex: str
   const wasm = await loadWasm();
   const channelId = hexToBytes(channelIdHex);
   if (channelId === null) return null;
+  const device = publisherDevice();
   const joinedIdHex = channelsActions.coPublisherGroupIdOf(channelIdHex);
   if (joinedIdHex !== undefined) {
     const joinedId = hexToBytes(joinedIdHex);
-    return joinedId === null ? null : (wasm.PublisherGroup.loadJoined(identity, joinedId, channelId) ?? null);
+    return joinedId === null ? null : (wasm.PublisherGroup.loadJoined(device, joinedId, channelId) ?? null);
   }
-  return wasm.PublisherGroup.load(identity, channelId) ?? null;
+  return wasm.PublisherGroup.load(device, identity.ed25519Seed, channelId) ?? null;
 }
 
 /** Reject a pending co-publisher — drops the retained request, no commit, no
@@ -927,7 +1066,8 @@ export function rejectCoPublisher(
   publisherGroup: PublisherGroup,
   proposalRef: Uint8Array,
 ): void {
-  publisherGroup.rejectExternalJoin(identity, proposalRef);
+  void identity;
+  publisherGroup.rejectExternalJoin(publisherDevice(), proposalRef);
   // Refused: the kept reply grant has nothing left to carry.
   void forgetJoinReply(publisherGroup.groupId(), proposalRef);
 }
@@ -1029,13 +1169,14 @@ export async function requestToCoPublish(
   await knockToJoin({
     knock: (payloads) =>
       ds.knock(groupId, payloads.length === 0 ? payloads : [...payloads, binding]),
-    buildProposal: (epoch) => identity.createExternalJoinProposal(groupId, epoch),
+    // ADR-0090: the leaf is this DEVICE.
+    buildProposal: (epoch) => publisherDevice().createExternalJoinProposal(groupId, epoch),
     // Self-signed join attribution (OQ2): advisory for the approval, and the
     // only carrier of our reply grant.
     buildAttribution: () => attribution,
     persistBeforeKnock,
   });
-  return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
+  return { groupId, channelIdHex, joinerKey: publisherDevice().signaturePublicKey };
 }
 
 /** What the co-publisher Welcome wait has read of each mailbox in this
@@ -1069,6 +1210,7 @@ export async function pollForCoPublishWelcome(
   groupId: Uint8Array,
   joinerKey: Uint8Array,
   channelIdHex: string,
+  ownerKey: Uint8Array,
   existingSigningSeed?: Uint8Array,
   currentIdentity?: Identity | null,
 ): Promise<ChannelPublisherKeys | null> {
@@ -1135,7 +1277,7 @@ export async function pollForCoPublishWelcome(
   let refused = 0;
   for (const c of candidates.reverse()) {
     if (welcomeScan.hasFailed(c.key)) continue;
-    const keys = await joinCoPublishWelcome(identity, c.welcome, groupId, channelIdHex, existingSigningSeed);
+    const keys = await joinCoPublishWelcome(identity, c.welcome, groupId, channelIdHex, ownerKey, existingSigningSeed);
     if (keys !== null) {
       if (refused > 0) logRefused(refused);
       return keys;
@@ -1170,25 +1312,59 @@ export async function joinCoPublishWelcome(
   welcome: Uint8Array,
   groupId: Uint8Array,
   channelIdHex: string,
+  ownerKey: Uint8Array,
   existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
   const channelId = hexToBytes(channelIdHex);
   if (channelId === null) throw new Error(`channel id hex is not valid: ${channelIdHex}`);
+  // lakko-security F2 / F3 (`welcome-replay.ts`): a Welcome this device
+  // already joined is not joined again, and a join below the last group this
+  // device deleted is undone (unless the channel is under reset suspicion).
+  const hashHex = await welcomeHashHex(welcome);
+  const access = channelsActions.accessOf(channelIdHex);
+  if (welcomeAlreadyJoined(access, hashHex)) return null;
+  const device = publisherDevice();
   let group: PublisherGroup;
   try {
-    group = wasm.PublisherGroup.joinFromWelcome(identity, welcome, groupId, channelId);
+    // ADR-0090: joined with this DEVICE; refused unless the Welcome's sender
+    // is a device of `ownerKey` (the `/g/` capability's issuer).
+    group = wasm.PublisherGroup.joinFromWelcome(device, welcome, groupId, channelId, ownerKey);
   } catch {
     return null;
   }
-  group.free();
+  try {
+    if (
+      joinBelowDeletedGroup({
+        joinedEpoch: group.epoch(),
+        deletedGroupEpoch: access.deletedGroupEpoch,
+        resetSuspected: access.resetSuspected === true,
+      })
+    ) {
+      group.deleteLocally(device);
+      // eslint-disable-next-line no-console
+      console.warn("co-publish: a Welcome at an epoch not above the last deleted group's was not taken");
+      return null;
+    }
+  } finally {
+    group.free();
+  }
+  await channelsActions.updateAccessDurable(channelIdHex, (r) => withJoinedWelcome(r, hashHex));
   // The Welcome landed: the single-use reply key of this request goes.
   void reachSession()?.closeRepliesTo(journalHex(groupId));
   // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the
   // (now-joined) group, derives the shared content-key seed, and reuses the
   // persisted per-device signing seed (or mints one) so this device can
   // publish.
-  const keys = await freshPublisherKeys(identity, channelIdHex, existingSigningSeed, groupId);
+  const fresh = await freshPublisherKeys(identity, channelIdHex, existingSigningSeed, groupId);
+  // ADR-0090: the channel epoch this group epoch serves, from the service.
+  const offset = await learnEpochOffset(channelIdHex, fresh.seedEpoch ?? 0);
+  const keys = { ...fresh, seedEpoch: (fresh.seedEpoch ?? 0) + offset };
+  // ADR-0090: the owner key this device verified, for the account's register.
+  const ownerKeyB64 = base64Encode(ownerKey);
+  await channelsActions.updateAccessDurable(channelIdHex, (r) =>
+    r.ownerAccountKeyB64 === ownerKeyB64 ? r : { ...r, ownerAccountKeyB64: ownerKeyB64 },
+  );
   // ADR-0059 section 9: this account publishes here as a co-publisher, so
   // its writes are signed with the co-publisher key from the first one.
   await rememberPublisherRole(channelIdHex, identity, "copublisher");

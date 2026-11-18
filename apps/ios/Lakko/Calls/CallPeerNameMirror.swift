@@ -92,6 +92,13 @@ public enum ReactionNotificationMirror {
     }
 }
 
+/// ADR-0087 section 14 — the marker the stored channel-invitation lines
+/// carry where the channel's name goes (the extension's
+/// `nseChannelNameMark`).
+public enum ChannelInviteNotificationMirror {
+    public static let channelMark = "\u{E002}"
+}
+
 /// Section 12 — people's names for the extension's reaction notification,
 /// written by the app (it resolved them) into the App Group suite, read by
 /// the extension (C-59: it resolves nothing). Per account; account key ->

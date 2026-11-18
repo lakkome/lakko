@@ -116,7 +116,7 @@ export function ChatFoldersSection(): JSX.Element {
                 }}
               >
                 <span class="lk-folder-handle" title={t("folders.settings.drag_hint")} aria-hidden="true">
-                  <Icon name="grip" size={16} />
+                  <Icon name="drag-handle" size={20} />
                 </span>
                 <button
                   type="button"
@@ -138,7 +138,7 @@ export function ChatFoldersSection(): JSX.Element {
                     setRowMenu({ index: i(), x: r.left, y: r.bottom });
                   }}
                 >
-                  <Icon name="more" size={18} />
+                  <Icon name="ellipsis" size={20} />
                 </button>
               </div>
             )}
@@ -149,7 +149,7 @@ export function ChatFoldersSection(): JSX.Element {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="plus" size={18} />
+            <Icon name="folder-plus" size={20} />
           </span>
           <div class="lk-card-row-body">
             <button
@@ -174,7 +174,7 @@ export function ChatFoldersSection(): JSX.Element {
             {(s) => (
               <div class="lk-card-row">
                 <span class="lk-card-row-icon">
-                  <Icon name="folder" size={18} />
+                  <Icon name="folder" size={20} />
                 </span>
                 <div class="lk-card-row-body">
                   <span class="lk-card-row-title">{s.name()}</span>

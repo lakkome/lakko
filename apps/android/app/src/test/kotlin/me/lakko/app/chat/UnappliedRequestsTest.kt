@@ -97,8 +97,6 @@ class UnappliedRequestsTest {
         val lines = UnappliedKind.values().map { unappliedLine(UnappliedRequest(contact, it)) } + listOf(
             UNAPPLIED_EXPLANATION,
             JOIN_WAIT_PRIMARY,
-            JOIN_WAIT_SECONDARY,
-            JOIN_REQUEST_AGAIN,
         )
         for (s in lines) {
             assertTrue("states a reason: ${s.en}", !banned.containsMatchIn(s.en.lowercase()))
@@ -111,17 +109,15 @@ class UnappliedRequestsTest {
     }
 
     /**
-     * The joiner cannot be TOLD anything, so what it gets is the one repair
-     * available to it.
+     * The joiner cannot be TOLD anything: the wait line says the request went
+     * out and when an admin sees it, and nothing more (UX 6.2, 2026-11-12).
      */
     @Test
-    fun `the joiner is offered the one repair`() {
+    fun `the joiner is told only that the request went out`() {
         assertEquals(
-            "Request sent. An admin approves it, then the change is applied to the group.",
+            "Request sent. An admin will see it when they next open Lakko.",
             JOIN_WAIT_PRIMARY.en,
         )
-        assertTrue(JOIN_WAIT_SECONDARY.en.contains("send the request again"))
-        assertEquals("Request again", JOIN_REQUEST_AGAIN.en)
     }
 
     // -----------------------------------------------------------------------

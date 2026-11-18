@@ -5,7 +5,7 @@
  * `docs/ux/attachments.md` section 11.3 — the article reader. Built from the
  * decoded tree only: every node becomes a SolidJS element, text goes in as
  * text. No HTML string is produced, no `innerHTML`, no Markdown parser
- * (ADR-0090 section 8).
+ * (ADR-0092 section 8).
  */
 import { createResource, For, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 
@@ -49,7 +49,7 @@ export function ArticleReader(props: {
           title={t("article.more")}
           onClick={() => props.onMenu()}
         >
-          <Icon name="more" />
+          <Icon name="ellipsis-circle" />
         </button>
         <button
           ref={close}
@@ -59,7 +59,7 @@ export function ArticleReader(props: {
           title={t("common.close")}
           onClick={() => props.onClose()}
         >
-          <Icon name="close" />
+          <Icon name="xmark" />
         </button>
       </header>
       <div class="lk-article-scroll">

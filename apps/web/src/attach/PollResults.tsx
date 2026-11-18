@@ -42,7 +42,7 @@ export function PollResults(props: {
           title={t("common.close")}
           onClick={() => props.onClose()}
         >
-          <Icon name="close" />
+          <Icon name="xmark" />
         </button>
       </header>
       <div class="lk-article-scroll">

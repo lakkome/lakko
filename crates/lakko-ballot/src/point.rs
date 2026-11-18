@@ -109,7 +109,7 @@ pub(crate) fn commitment_generators(count: usize) -> Result<(EdwardsPoint, Vec<E
 }
 
 /// The voter's secret: the Ed25519 signing scalar of the key its leaf in the
-/// group is bound to (ADR-0090 section 3.6, "The witness"), and the matching
+/// group is bound to (ADR-0092 section 3.6, "The witness"), and the matching
 /// public key. Zeroized on drop.
 pub struct VoterKey {
     scalar: Scalar,

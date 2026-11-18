@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.9 — who admitted this device into each group: the
+ * ADR-0092 section 3.9 — who admitted this device into each group: the
  * account key the sender of its Welcome resolves to (`peekWelcomeFounder`),
  * recorded when the Welcome is joined. A hand-over is taken from an owner or
  * admin, or from this account; `openItemsSenderTrusted` reads this as the

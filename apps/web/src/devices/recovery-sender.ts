@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The confirming device's half of the recovery payload v2
+ * The confirming device's half of the recovery payload v3
  * (`recovery-payload.ts`): what it hands `runScanFlow` so the new device
- * receives a session grant and the recovery phrase.
+ * receives a session grant, the recovery phrase and (read by `runScanFlow`
+ * itself, `ownPredecessorsForRow`) the account's earlier keys.
  *
  * The phrase comes from this device's own store (`backup/device-phrase.ts`)
  * and crosses as its 16-byte entropy. A device that does not hold the

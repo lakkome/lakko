@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 — turning an editor's draft into signed content, and the ops a
+ * ADR-0092 — turning an editor's draft into signed content, and the ops a
  * person sends on a poll or checklist. The author signs with the key its
  * leaf in this group is bound to (the conversation key, ADR-0074 section
  * 3.5), which is what every receiver resolves the sender to.

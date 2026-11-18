@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -148,6 +149,79 @@ public class AuthRepository(
             },
         )
 
+    /**
+     * A session that landed with no username (a passkey sign-in on a new
+     * device, `UsernamePrompt.kt`): the backup's name is adopted when auth
+     * confirms it, else the prompt asks for it.
+     */
+    private val usernamePromptController: UsernamePromptController =
+        UsernamePromptController(
+            ports = object : UsernamePromptPorts {
+                override fun session(): UsernamePromptSession? {
+                    val session = mutableState.value as? AuthState.Session ?: return null
+                    val accountIdB64 = session.account.accountIdB64
+                    if (!secretsAreFor(accountIdB64)) return null
+                    // A guest account has no username and no other device.
+                    if (guestSessionOf(session, mutableGuest.value) != null) return null
+                    if (guestAccountState(guestMarkers, accountIdB64) != null) return null
+                    return UsernamePromptSession(accountIdB64, session.account.username)
+                }
+
+                override fun backupCandidates(accountIdB64: String): List<String> {
+                    val accountId = mutableIdentitySecrets.value?.accountId ?: return emptyList()
+                    val fromProfile = me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.username
+                    val live = ownUsernamePort?.state()?.takeIf { it.ready }?.username
+                    val stored = me.lakko.app.devices.sync.DeviceGroupSyncRepository
+                        .storedOwnUsername(applicationContext, accountIdB64)
+                    return listOfNotNull(fromProfile, live, stored)
+                }
+
+                override fun handleFor(username: String): NamedHandle =
+                    namedHandleOrRefuse(loginHandleSource, username)
+
+                override suspend fun check(handle: ByteArray): LoginHandleState {
+                    val token = sessionTokenProvider.current() ?: throw AuthClientArgError("not signed in")
+                    return authClientFactory().use { it.checkLoginHandle(token, handle) }
+                }
+
+                override fun adopt(accountIdB64: String, username: String) {
+                    adoptUsername(accountIdB64, username, renamedElsewhere = true)
+                }
+            },
+            log = { message -> Log.i("lakko-auth", message) },
+        )
+
+    /** The username prompt (`UsernamePrompt.kt`), or `null` when closed. */
+    public val usernamePrompt: StateFlow<UsernamePromptState?> get() = usernamePromptController.state
+
+    /** The prompt's "Continue". */
+    public suspend fun submitUsernamePrompt(typed: String) {
+        usernamePromptController.submit(typed)
+    }
+
+    /** The prompt's "I don't remember". */
+    public suspend fun forgotUsernamePrompt() {
+        usernamePromptController.forgot()
+    }
+
+    /** The prompt's note was read. */
+    public fun closeUsernamePromptNote() {
+        usernamePromptController.closeNote()
+    }
+
+    /** Look at the session's username again (a session landed, a restore or
+     *  the own-username register gave this device something). */
+    private fun scheduleUsernamePrompt() {
+        pushScope.launch {
+            try {
+                usernamePromptController.evaluate()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "username prompt not evaluated: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
     private val mutableState: MutableStateFlow<AuthState> =
         MutableStateFlow(AuthState.Loading)
 
@@ -256,6 +330,7 @@ public class AuthRepository(
                 when (value) {
                     is AuthState.Session -> value.account.accountIdB64
                     is AuthState.NeedsRecoveryPhrase -> value.account.accountIdB64
+                    is AuthState.NeedsEarlierKeys -> value.account.accountIdB64
                     is AuthState.SaveFreshPhrase -> value.account.accountIdB64
                     AuthState.Loading, is AuthState.Anon -> null
                 },
@@ -642,6 +717,23 @@ public class AuthRepository(
                 if (target != null) loginHandleRebinder.onSessionAvailable(target)
             }
         }
+        // A session that lands with no username learns it from the backup
+        // or asks for it (`UsernamePrompt.kt`); a username that arrives, a
+        // sign-out or another account closes the prompt.
+        pushScope.launch {
+            combine(state, identitySecrets, guestAccount) { current, secrets, guest ->
+                val session = current as? AuthState.Session
+                Triple(session?.account?.accountIdB64, session?.account?.username, secrets != null && guest == null)
+            }.distinctUntilChanged().collect { (accountIdB64, username, eligible) ->
+                if (accountIdB64 == null || !eligible) {
+                    usernamePromptController.close()
+                } else if (username.isNullOrBlank()) {
+                    scheduleUsernamePrompt()
+                } else {
+                    usernamePromptController.close()
+                }
+            }
+        }
         // ADR-0054 S3 - the anonymous-token pool draws its batches WITH this
         // session (the tokens it hands out carry nothing about the account).
         // Keyed on the account, so a switch never reuses another account's
@@ -676,7 +768,7 @@ public class AuthRepository(
                 )
             }
         }
-        // ADR-0090 section 4 - the channel-poll credential: one per account
+        // ADR-0092 section 4 - the channel-poll credential: one per account
         // and period, from the LINEAGE seed, asked of auth with the session.
         me.lakko.app.channels.ChannelPollCredentials.active = me.lakko.app.channels.ChannelPollCredentials(
             context = applicationContext,
@@ -771,6 +863,10 @@ public class AuthRepository(
                         claimedUsername = it.claimedUsername,
                     )
                 }
+                // G-56: a device parked for the account's earlier keys comes
+                // back to that screen, never to the app. A stored binding the
+                // core keeps lands with no request.
+                if (parkIfEarlierKeysMissing(decision.account, decision.secrets)) return
                 installSessionPair(accountIdB64, decision.secrets.session)
                 // Secrets first, then state: an observer that reacts to the
                 // Session flip must already find the secrets it needs.
@@ -985,6 +1081,326 @@ public class AuthRepository(
         installSessionPair(accountIdB64, secrets.session)
         publishIdentitySecrets(secrets)
         if (retryBackupRestore) retryPendingBackupRestoreInBackground(secrets)
+    }
+
+    // -----------------------------------------------------------------
+    // G-56 (ADR-0074, "Joining after a rotation: the device waits for the
+    // earlier keys"; UX section 8a): the gate before a session lands.
+    // -----------------------------------------------------------------
+
+    private val ownConversationKeyStore: OwnConversationKeyStore by lazy {
+        OwnConversationKeyStore.onDevice(applicationContext)
+    }
+
+    /** A landing parked in [AuthState.NeedsEarlierKeys]: what it lands with
+     *  once the earlier keys are here. The seed and export key are owned. */
+    private class ParkedEarlierKeys(
+        val account: SessionAccount,
+        val secrets: IdentitySecrets,
+    )
+
+    private val parkedEarlierKeys: AtomicReference<ParkedEarlierKeys?> = AtomicReference(null)
+
+    /** One landing at a time while parked: the look and a completion. */
+    private val parkedLanding: ParkedLandingGuard = ParkedLandingGuard()
+
+    /** Whether [accountIdB64] is the landed session now. */
+    private fun landedAs(accountIdB64: String?): Boolean {
+        val state = mutableState.value
+        return state is AuthState.Session && state.account.accountIdB64 == accountIdB64
+    }
+
+    /** A completion of the parked context still has something to land: the
+     *  account it was started for has not landed meanwhile (the device's own
+     *  look clears the parked context when it lands). */
+    private fun completionStillPending(): Boolean {
+        val state = mutableState.value
+        val pending = pendingRecovery.get()
+        if (state !is AuthState.Session) return true
+        return pending != null && pending.accountIdB64 != state.account.accountIdB64
+    }
+
+    /** The gate's reads and calls for [accountIdB64] whose current seed is
+     *  [seed] (read through [SessionSecretWipe], never kept). */
+    private fun earlierKeysGatePorts(
+        accountIdB64: String,
+        accountId: ByteArray,
+        seed: ByteArray,
+        sessionToken: String?,
+    ): EarlierKeysGatePorts = object : EarlierKeysGatePorts {
+        override fun boundKey(): ByteArray? = try {
+            val deviceSeed = DeviceIdentityStore.getDeviceIdentitySeed(applicationContext, accountIdB64)
+            if (deviceSeed == null) {
+                null
+            } else {
+                try {
+                    DeviceIdentityStore.getDeviceBinding(applicationContext, accountIdB64)?.let { binding ->
+                        Identity.fromSeedWithBinding(deviceSeed, binding).use { it.accountPublicKey() }
+                    }
+                } finally {
+                    deviceSeed.fill(0)
+                }
+            }
+        } catch (_: Throwable) {
+            null
+        }
+
+        override fun currentKey(): ByteArray =
+            SessionSecretWipe.use(seed) { Identity.fromSeed(it).use { identity -> identity.signaturePublicKey() } }
+
+        override fun predecessorKeys(): List<ByteArray> {
+            val rows = try {
+                ownPredecessorStore.load(accountIdB64)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            return try {
+                rows.map { it.signaturePubkey.copyOf() }
+            } finally {
+                rows.forEach { it.zero() }
+            }
+        }
+
+        override fun holdsConversations(): Boolean = try {
+            me.lakko.app.chat.KnownGroupsStore(applicationContext).load(accountIdB64).isNotEmpty()
+        } catch (_: Throwable) {
+            false
+        }
+
+        override fun verdict(
+            boundKey: ByteArray?,
+            currentKey: ByteArray,
+            predecessorKeys: List<ByteArray>,
+            link: uniffi.lakko_ffi_uniffi.FfiOwnLink,
+            holdsConversations: Boolean,
+        ): uniffi.lakko_ffi_uniffi.FfiBindingVerdict =
+            uniffi.lakko_ffi_uniffi.ownBindingVerdict(boundKey, currentKey, predecessorKeys, link, holdsConversations)
+
+        override fun recordedLink(): uniffi.lakko_ffi_uniffi.FfiOwnLink = try {
+            linkOfRecord(ownConversationKeyStore.load(accountIdB64))
+        } catch (_: Throwable) {
+            uniffi.lakko_ffi_uniffi.FfiOwnLink.Absent
+        }
+
+        override suspend fun readLink(): uniffi.lakko_ffi_uniffi.FfiOwnLink = try {
+            discoveryClientFactory().use { discovery ->
+                discovery.setSessionToken(sessionToken)
+                val bundle = discovery.identityFetch(accountId)
+                if (bundle == null) {
+                    uniffi.lakko_ffi_uniffi.FfiOwnLink.Absent
+                } else {
+                    ownLinkOf(bundle.conversation_link, currentKey(), { link, current -> uniffi.lakko_ffi_uniffi.ownConversationKey(link, current) })
+                }
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "G-56: own identity bundle not read (${cause.javaClass.simpleName})")
+            uniffi.lakko_ffi_uniffi.FfiOwnLink.Unknown
+        }
+
+        override fun recordLink(link: uniffi.lakko_ffi_uniffi.FfiOwnLink) {
+            val record = recordOfLink(link, System.currentTimeMillis()) ?: return
+            if (!ownConversationKeyStore.save(accountIdB64, record)) {
+                Log.w("lakko-auth", "G-56: own conversation key record not stored")
+            }
+        }
+    }
+
+    /**
+     * The G-56 gate, run before a non-exempt landing installs its secrets
+     * (contract section 2.2). `true` when the device was parked in
+     * [AuthState.NeedsEarlierKeys] instead: the caller stops, and [secrets]
+     * (its seed and export key) now belong to the parked landing. [prefetched]
+     * is the link answer the route already read with its seed check.
+     */
+    private suspend fun parkIfEarlierKeysMissing(
+        account: SessionAccount,
+        secrets: IdentitySecrets,
+        prefetched: uniffi.lakko_ffi_uniffi.FfiOwnLink? = null,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+    ): Boolean {
+        val accountIdB64 = account.accountIdB64
+        // The record below is this account's write: its stores are open from
+        // here (the route has passed its checks).
+        openStoresFor(accountIdB64)
+        val decision = runEarlierKeysGate(
+            earlierKeysGatePorts(accountIdB64, secrets.accountId, secrets.accountIdentitySeed, secrets.sessionToken),
+            prefetched,
+        )
+        if (decision is EarlierKeysDecision.Land) return false
+        Log.w("lakko-auth", "G-56: the account's earlier keys are not on this device; parked")
+        parkForEarlierKeys(account, secrets, wipes)
+        return true
+    }
+
+    /** Park [secrets] for [account]: the pair and the session record are
+     *  persisted (a relaunch returns here), the app shell does not start. */
+    private fun parkForEarlierKeys(
+        account: SessionAccount,
+        secrets: IdentitySecrets,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark?,
+    ) {
+        val accountIdB64 = account.accountIdB64
+        persistSessionPairBestEffort(accountIdB64, secrets.session, wipes)
+        try {
+            val record = PersistedSession(accountIdB64 = accountIdB64, username = account.username)
+            if (wipes == null) {
+                sessionStore.save(record)
+            } else {
+                SignInKeyWrites.ifNotWiped(wipes, accountIdB64) { sessionStore.save(record) }
+            }
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "session record (parked) not saved", cause)
+        }
+        // "Another device" and "I have none of these" on the parked screen
+        // run the restore prompt's flows, which read this.
+        pendingRecovery.getAndSet(
+            PendingRecovery(
+                accountIdBytes = secrets.accountId.copyOf(),
+                accountIdB64 = accountIdB64,
+                exportKey = secrets.exportKey.copyOf(),
+                session = secrets.session,
+                username = account.username,
+            ),
+        )?.exportKey?.fill(0)
+        parkedEarlierKeys.getAndSet(ParkedEarlierKeys(account, secrets))?.let { old ->
+            if (old.secrets.accountIdentitySeed !== secrets.accountIdentitySeed) {
+                SessionSecretWipe.wipe(old.secrets.exportKey, old.secrets.accountIdentitySeed)
+            }
+        }
+        installParkedSessionPair(accountIdB64, secrets.session)
+        landedState = AuthState.NeedsEarlierKeys(account)
+    }
+
+    /** [installSessionPair] for a parked landing: refreshed pairs are
+     *  persisted and kept with the parked context. */
+    private fun installParkedSessionPair(accountIdB64: String, pair: SessionPair) {
+        logoutOwedStore.clear(accountIdB64)
+        sessionTokenProvider.install(
+            pair = pair,
+            persist = { refreshed ->
+                persistSessionPairBestEffort(accountIdB64, refreshed)
+                parkedEarlierKeys.get()?.let { parked ->
+                    if (parked.account.accountIdB64 == accountIdB64) {
+                        parkedEarlierKeys.compareAndSet(
+                            parked,
+                            ParkedEarlierKeys(parked.account, parked.secrets.copy(session = refreshed)),
+                        )
+                    }
+                }
+                pendingRecovery.get()?.let { pending ->
+                    if (pending.accountIdB64 == accountIdB64) {
+                        pendingRecovery.compareAndSet(pending, pending.copy(session = refreshed))
+                    }
+                }
+            },
+            onRefusal = { refusal ->
+                when (refusal) {
+                    SessionRefusal.KeysReset -> onKeysSuperseded(accountIdB64)
+                    SessionRefusal.DeviceRevoked -> onDeviceRevoked(accountIdB64)
+                    SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
+                }
+            },
+        )
+    }
+
+    /** Keep what a landing-time read of the own bundle says of the link. */
+    private fun recordOwnLinkBestEffort(accountIdB64: String, linkB64: String?, currentKey: ByteArray) {
+        try {
+            val link = ownLinkOf(linkB64, currentKey, { link, current -> uniffi.lakko_ffi_uniffi.ownConversationKey(link, current) })
+            recordOfLink(link, System.currentTimeMillis())?.let { ownConversationKeyStore.save(accountIdB64, it) }
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "G-56: own conversation link not recorded (${cause.javaClass.simpleName})")
+        }
+    }
+
+    /** Drop the parked G-56 landing, wiping its secrets. */
+    private fun clearParkedEarlierKeys() {
+        parkedEarlierKeys.getAndSet(null)?.let { SessionSecretWipe.wipe(it.secrets.exportKey, it.secrets.accountIdentitySeed) }
+    }
+
+    /**
+     * One look for the earlier keys while parked (contract section 4.2): the
+     * backup opened with the phrase this device holds, then a fresh read of
+     * the own link. Lands the parked session when the gate now allows it. The
+     * parked screen calls it at entry (every start lands there) and every
+     * [EARLIER_KEYS_RETRY_MS] while it is in the foreground. Never throws
+     * (cancellation aside); a failed look is not shown.
+     */
+    public suspend fun lookForEarlierKeysNow() {
+        parkedLanding.runIfParked(
+            { parkedEarlierKeys.get() != null && mutableState.value is AuthState.NeedsEarlierKeys },
+        ) { lookForEarlierKeysLocked() }
+    }
+
+    private suspend fun lookForEarlierKeysLocked() {
+        val parked = parkedEarlierKeys.get() ?: return
+        val accountIdB64 = parked.account.accountIdB64
+        val bound = accountBinding.capture()
+        val token = try {
+            sessionTokenProvider.current()
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            null
+        } ?: parked.secrets.sessionToken
+        val mayLand = lookForEarlierKeys(
+            fetchBackupPredecessors = {
+                val phrase = me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
+                if (phrase != null) {
+                    try {
+                        val stored = me.lakko.app.backup.fetchOwnPredecessorsOnly(
+                            backupRestorePorts(token, parked.secrets.accountId.copyOf(), accountIdB64, phrase),
+                        )
+                        Log.i("lakko-auth", "G-56: backup looked at for the earlier keys (stored: $stored)")
+                    } finally {
+                        phrase.fill(0)
+                    }
+                }
+            },
+            ports = earlierKeysGatePorts(accountIdB64, parked.secrets.accountId, parked.secrets.accountIdentitySeed, token),
+        )
+        if (!mayLand || !bound.isCurrent) return
+        val latest = parkedEarlierKeys.get() ?: return
+        if (latest.account.accountIdB64 != accountIdB64 || !parkedEarlierKeys.compareAndSet(latest, null)) return
+        landParkedEarlierKeys(latest)
+    }
+
+    /** The landing a parked device was waiting for. */
+    private fun landParkedEarlierKeys(parked: ParkedEarlierKeys) {
+        val accountIdB64 = parked.account.accountIdB64
+        Log.i("lakko-auth", "G-56: the account's earlier keys are here; landing")
+        installIdentitySecrets(accountIdB64, parked.secrets)
+        pendingRecovery.getAndSet(null)?.exportKey?.fill(0)
+        mutableRestoreNotice.value = null
+        landedState = AuthState.Session(parked.account)
+        if (mutableGuest.value == null) subscribePushBestEffort("earlier-keys")
+        refreshThenCheckPublishedIdentityInBackground(
+            accountIdB64 = accountIdB64,
+            accountIdBytes = parked.secrets.accountId,
+            accountIdentitySeed = parked.secrets.accountIdentitySeed,
+        )
+    }
+
+    /**
+     * Defence in depth (contract section 2.2): the chat layer refused to mint
+     * ([EarlierKeysMissing]) for a session that landed: nothing was bound or
+     * published. The session root maps it to the parked state: the live
+     * secrets move to the parked landing and the app shell goes away.
+     */
+    public fun parkAfterChatRefusal(accountIdB64: String) {
+        val state = mutableState.value as? AuthState.Session ?: return
+        if (state.account.accountIdB64 != accountIdB64) return
+        val live = mutableIdentitySecrets.value ?: return
+        if (base64Encode(live.accountId) != accountIdB64) return
+        Log.w("lakko-auth", "G-56: the chat layer refused to mint; parked")
+        val kept = live.copy(
+            exportKey = live.exportKey.copyOf(),
+            accountIdentitySeed = SessionSecretWipe.use(live.accountIdentitySeed) { it.copyOf() },
+        )
+        clearIdentitySecrets()
+        parkForEarlierKeys(state.account, kept, wipes = null)
     }
 
     /** Persist [pair] where the session token always was; a failed write
@@ -2230,23 +2646,23 @@ public class AuthRepository(
 
                 // Stash the export key + the phrase seed + session
                 // token for ContactsClient / DiscoveryClient.
+                val landing = IdentitySecrets(
+                    accountId = accountIdBytes,
+                    exportKey = result.exportKey.copyOf(),
+                    accountIdentitySeed = accountIdentitySeed,
+                    session = result.session,
+                )
+                val account = SessionAccount(accountIdB64 = accountIdB64, username = resolvedUsername)
+                markSignedInNow(accountIdB64)
+                // G-56: a device without the account's earlier keys parks.
+                clearParkedEarlierKeys()
+                if (parkIfEarlierKeysMissing(account, landing, wipes = start.wipes)) return@use
                 installIdentitySecrets(
                     accountIdB64,
-                    IdentitySecrets(
-                        accountId = accountIdBytes,
-                        exportKey = result.exportKey.copyOf(),
-                        accountIdentitySeed = accountIdentitySeed,
-                        session = result.session,
-                    ),
+                    landing,
                     wipes = start.wipes,
                 )
-                markSignedInNow(accountIdB64)
-                landedState = AuthState.Session(
-                    account = SessionAccount(
-                        accountIdB64 = accountIdB64,
-                        username = resolvedUsername,
-                    ),
-                )
+                landedState = AuthState.Session(account = account)
                 // ADR-0073 section 4.2 - read the directory before any write:
                 // stale keys land the signed-out screen; our key is
                 // re-published. Before this, a password login never
@@ -2516,14 +2932,30 @@ public class AuthRepository(
                     // recover, so the canonical AccountIdentity rebuilt
                     // from it is byte-for-byte the same as before —
                     // which is the whole point: contacts never re-verify.
+                    val landing = IdentitySecrets(
+                        accountId = accountIdBytes,
+                        exportKey = result.exportKey.copyOf(),
+                        accountIdentitySeed = accountIdentitySeed,
+                        session = result.session,
+                    )
+                    // G-56: the backup above may have brought the earlier
+                    // keys; without them (and a link naming one) the device
+                    // parks, publishing nothing.
+                    clearParkedEarlierKeys()
+                    if (parkIfEarlierKeysMissing(
+                            SessionAccount(accountIdB64 = accountIdB64, username = resolvedUsername),
+                            landing,
+                            wipes = wipes,
+                        )
+                    ) {
+                        markSignedInNow(accountIdB64)
+                        seedHandedOff = true
+                        mutableNewPasswordOwed.value = false
+                        return@use
+                    }
                     installIdentitySecrets(
                         accountIdB64,
-                        IdentitySecrets(
-                            accountId = accountIdBytes,
-                            exportKey = result.exportKey.copyOf(),
-                            accountIdentitySeed = accountIdentitySeed,
-                            session = result.session,
-                        ),
+                        landing,
                         // This route ran the restore itself, just above.
                         retryBackupRestore = false,
                         wipes = wipes,
@@ -3341,6 +3773,9 @@ public class AuthRepository(
             is OwnUsernameSync.Seed -> writeOwnUsername(accountIdB64, action.username)
             is OwnUsernameSync.Adopt -> adoptUsername(accountIdB64, action.username, renamedElsewhere = true)
         }
+        // A register that just became readable may name an account that
+        // landed with no username (`UsernamePrompt.kt`).
+        if (session.account.username.isBlank()) scheduleUsernamePrompt()
     }
 
     /** The marker and the live session take [username]; the handle is known
@@ -3351,6 +3786,8 @@ public class AuthRepository(
         sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = username))
         sessionTokenProvider.peek()?.let { loginHandleRebinder.markBound(it.accessToken, username) }
         landedState = AuthState.Session(session.account.copy(username = username))
+        // A rejoin waiting for a login handle knocks now, not at its next pass.
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.wakeForLoginHandle()
         try {
             onUsernameChanged?.invoke(username, renamedElsewhere)
         } catch (cause: Throwable) {
@@ -4283,17 +4720,21 @@ public class AuthRepository(
                 Log.w("lakko-auth", "export-key cache read failed (access recover)", cause)
                 null
             }
-            installIdentitySecrets(
-                accountIdB64,
-                IdentitySecrets(
-                    accountId = accountIdBytes,
-                    exportKey = cachedExportKey ?: ByteArray(0),
-                    accountIdentitySeed = accountIdentitySeed,
-                    session = session,
-                ),
-                wipes = wipes,
+            val landing = IdentitySecrets(
+                accountId = accountIdBytes,
+                exportKey = cachedExportKey ?: ByteArray(0),
+                accountIdentitySeed = accountIdentitySeed,
+                session = session,
             )
             markSignedInNow(accountIdB64)
+            // G-56: a device without the account's earlier keys parks.
+            clearParkedEarlierKeys()
+            if (parkIfEarlierKeysMissing(SessionAccount(accountIdB64, username), landing, wipes = wipes)) return
+            installIdentitySecrets(
+                accountIdB64,
+                landing,
+                wipes = wipes,
+            )
             pendingRecovery.set(null)
             mutableRestoreNotice.value = null
             landedState = AuthState.Session(
@@ -4333,8 +4774,9 @@ public class AuthRepository(
         installPendingSessionPair(accountIdB64, session)
         markSignedInNow(accountIdB64)
         if (restoreKeys != null && restoreKeys()) {
-            // The passkey carried the keys and the session has landed.
-            subscribePushBestEffort(pushContext)
+            // The passkey carried the keys and the session has landed (or,
+            // G-56, parked for the earlier keys: no push registration then).
+            if (mutableState.value !is AuthState.NeedsEarlierKeys) subscribePushBestEffort(pushContext)
             return
         }
         landedState = AuthState.NeedsRecoveryPhrase(
@@ -4457,128 +4899,147 @@ public class AuthRepository(
          *  after it refuses the key and phrase rows written below. */
         wipes: me.lakko.app.account.AccountStoreGate.WipeMark = me.lakko.app.account.AccountStoreGate.wipeMark(),
     ) {
-        val pending = pendingRecovery.get()
-            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
-        // A sign-out while the checks below are out wins: it wiped `pending`
-        // in place, and nothing of this account is written or landed after it.
-        val bound = accountBinding.capture()
+        // G-56: one landing at a time for a parked account.
+        parkedLanding.runIfParked(::completionStillPending) {
+            val pending = pendingRecovery.get()
+                ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+            // A sign-out while the checks below are out wins: it wiped `pending`
+            // in place, and nothing of this account is written or landed after it.
+            val bound = accountBinding.capture()
 
-        // Parse the phrase -> derive the BIP39 seed -> derive the
-        // canonical AccountIdentity pubkey from it. `fromPhrase` throws
-        // a typed FfiException on a bad checksum / unknown word
-        // (preserves BIP39's no-probing property).
-        // The canonical form (12 lower-case words, single spaces) is what the
-        // device stores once the check below has passed.
-        val (canonicalPhrase, accountIdentitySeed) =
-            RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { it.phrase() to it.toSeed() }
-        var seedHandedOff = false
-        try {
-            verifySeedAgainstPublishedIdentity(
-                accountIdBytes = pending.accountIdBytes,
-                sessionToken = pending.sessionToken,
-                accountIdentitySeed = accountIdentitySeed,
-            )
-            bound.ensureCurrent()
-
-            // ADR-0018 factor (c): a TOTP-recovered fresh device parked
-            // with NO device root key (no password => no export key to
-            // derive one from). Bootstrap it from the VERIFIED identity
-            // seed — and ONLY here, strictly AFTER the fail-closed
-            // verification above: a refusal must leave this device
-            // untouched. No-op when a key already exists (password /
-            // passkey paths).
-            bootstrapDeviceKeyFromSeedBestEffort(
-                accountIdB64 = pending.accountIdB64,
-                accountIdentitySeed = accountIdentitySeed,
-                context = "provideRecoveryPhrase",
-                wipes = wipes,
-            )
-
-            // Cache the phrase seed under EncryptedSharedPreferences so
-            // future warm logins skip the prompt. Best-effort.
+            // Parse the phrase -> derive the BIP39 seed -> derive the
+            // canonical AccountIdentity pubkey from it. `fromPhrase` throws
+            // a typed FfiException on a bad checksum / unknown word
+            // (preserves BIP39's no-probing property).
+            // The canonical form (12 lower-case words, single spaces) is what the
+            // device stores once the check below has passed.
+            val (canonicalPhrase, accountIdentitySeed) =
+                RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { it.phrase() to it.toSeed() }
+            var seedHandedOff = false
             try {
-                SignInKeyWrites.ifNotWiped(wipes, pending.accountIdB64) {
-                    AccountIdentitySeedStore.putAccountIdentitySeed(
-                        applicationContext,
-                        pending.accountIdB64,
-                        accountIdentitySeed,
+                val link = verifySeedAgainstPublishedIdentity(
+                    accountIdBytes = pending.accountIdBytes,
+                    sessionToken = pending.sessionToken,
+                    accountIdentitySeed = accountIdentitySeed,
+                )
+                bound.ensureCurrent()
+
+                // ADR-0018 factor (c): a TOTP-recovered fresh device parked
+                // with NO device root key (no password => no export key to
+                // derive one from). Bootstrap it from the VERIFIED identity
+                // seed — and ONLY here, strictly AFTER the fail-closed
+                // verification above: a refusal must leave this device
+                // untouched. No-op when a key already exists (password /
+                // passkey paths).
+                bootstrapDeviceKeyFromSeedBestEffort(
+                    accountIdB64 = pending.accountIdB64,
+                    accountIdentitySeed = accountIdentitySeed,
+                    context = "provideRecoveryPhrase",
+                    wipes = wipes,
+                )
+
+                // Cache the phrase seed under EncryptedSharedPreferences so
+                // future warm logins skip the prompt. Best-effort.
+                try {
+                    SignInKeyWrites.ifNotWiped(wipes, pending.accountIdB64) {
+                        AccountIdentitySeedStore.putAccountIdentitySeed(
+                            applicationContext,
+                            pending.accountIdB64,
+                            accountIdentitySeed,
+                        )
+                    }
+                } catch (cause: Throwable) {
+                    Log.w(
+                        "lakko-auth",
+                        "account-identity-seed persist (provideRecoveryPhrase) failed",
+                        cause,
                     )
                 }
-            } catch (cause: Throwable) {
-                Log.w(
-                    "lakko-auth",
-                    "account-identity-seed persist (provideRecoveryPhrase) failed",
-                    cause,
+                // The device holds the keys now, so it holds the phrase (this is
+                // also where a passkey that carried the keys ends).
+                DevicePhrase.store(
+                    applicationContext,
+                    pending.accountIdB64,
+                    canonicalPhrase,
+                    DevicePhrase.LandingPath.ProvidePhrase,
+                    wipes,
                 )
-            }
-            // The device holds the keys now, so it holds the phrase (this is
-            // also where a passkey that carried the keys ends).
-            DevicePhrase.store(
-                applicationContext,
-                pending.accountIdB64,
-                canonicalPhrase,
-                DevicePhrase.LandingPath.ProvidePhrase,
-                wipes,
-            )
 
-            // The phrase is in hand, so this route restores the account
-            // backup exactly as the restore screen does (one shared function):
-            // contacts, the synced state and the conversations' ids - never
-            // MLS state. Strictly AFTER the fail-closed verification above (a
-            // refused phrase must leave this device untouched) and BEFORE the
-            // flip below, whose session bootstrap reads what this writes.
-            // Never fails the sign-in: no backup is an ordinary outcome, and a
-            // failed fetch stays pending and is tried again at each landing
-            // until it gets a definitive answer. Also where a passkey that
-            // carried the keys ends, so that route restores the backup too.
-            val restoreOutcome = restoreBackupOnPhraseRoute(
-                route = "provideRecoveryPhrase",
-                sessionToken = sessionTokenProvider.current() ?: pending.sessionToken,
-                accountId = pending.accountIdBytes.copyOf(),
-                accountIdB64 = pending.accountIdB64,
-                phrase = canonicalPhrase,
-            )
-            bound.ensureCurrent()
-            if (phraseHeldByPerson) owedStore.clearPhraseOwed(pending.accountIdB64)
+                // The phrase is in hand, so this route restores the account
+                // backup exactly as the restore screen does (one shared function):
+                // contacts, the synced state and the conversations' ids - never
+                // MLS state. Strictly AFTER the fail-closed verification above (a
+                // refused phrase must leave this device untouched) and BEFORE the
+                // flip below, whose session bootstrap reads what this writes.
+                // Never fails the sign-in: no backup is an ordinary outcome, and a
+                // failed fetch stays pending and is tried again at each landing
+                // until it gets a definitive answer. Also where a passkey that
+                // carried the keys ends, so that route restores the backup too.
+                val restoreOutcome = restoreBackupOnPhraseRoute(
+                    route = "provideRecoveryPhrase",
+                    sessionToken = sessionTokenProvider.current() ?: pending.sessionToken,
+                    accountId = pending.accountIdBytes.copyOf(),
+                    accountIdB64 = pending.accountIdB64,
+                    phrase = canonicalPhrase,
+                )
+                bound.ensureCurrent()
+                if (phraseHeldByPerson) owedStore.clearPhraseOwed(pending.accountIdB64)
 
-            // Finish the session: hand the verified phrase seed into the
-            // live IdentitySecrets and flip to a full Session.
-            installIdentitySecrets(
-                pending.accountIdB64,
-                IdentitySecrets(
+                // Finish the session: hand the verified phrase seed into the
+                // live IdentitySecrets and flip to a full Session.
+                val landing = IdentitySecrets(
                     accountId = pending.accountIdBytes,
                     exportKey = pending.exportKey.copyOf(),
                     accountIdentitySeed = accountIdentitySeed,
                     session = pendingRecovery.get()?.session ?: pending.session,
-                ),
-                // This route ran the restore itself, just above.
-                retryBackupRestore = false,
-                wipes = wipes,
-            )
-            seedHandedOff = true
-            pendingRecovery.set(null)
-            // The keys are on this device now; nothing is left to explain.
-            mutableRestoreNotice.value = null
-            landedState = AuthState.Session(
-                account = SessionAccount(
-                    accountIdB64 = pending.accountIdB64,
-                    username = pending.username,
-                ),
-            )
-            // The keys are on this device (typed, or carried by a passkey):
-            // its backup is due, uploaded by the automatic backup of the
-            // session that just landed. NOT after a failed fetch: the server
-            // may hold a backup this device has not seen yet.
-            if (restoreOutcome != me.lakko.app.backup.BackupRestoreOutcome.FETCH_FAILED) {
-                markBackupDueBestEffort(pending.accountIdB64, "provideRecoveryPhrase")
+                )
+                // G-56: the backup above brings the earlier keys when it holds
+                // them; when it could not be read and the link names a key this
+                // device lacks, the device parks and tries again by itself.
+                clearParkedEarlierKeys()
+                if (parkIfEarlierKeysMissing(
+                        SessionAccount(accountIdB64 = pending.accountIdB64, username = pending.username),
+                        landing,
+                        prefetched = link,
+                        wipes = wipes,
+                    )
+                ) {
+                    seedHandedOff = true
+                    mutableRestoreNotice.value = null
+                    return@runIfParked
+                }
+                installIdentitySecrets(
+                    pending.accountIdB64,
+                    landing,
+                    // This route ran the restore itself, just above.
+                    retryBackupRestore = false,
+                    wipes = wipes,
+                )
+                seedHandedOff = true
+                pendingRecovery.set(null)
+                // The keys are on this device now; nothing is left to explain.
+                mutableRestoreNotice.value = null
+                landedState = AuthState.Session(
+                    account = SessionAccount(
+                        accountIdB64 = pending.accountIdB64,
+                        username = pending.username,
+                    ),
+                )
+                // The keys are on this device (typed, or carried by a passkey):
+                // its backup is due, uploaded by the automatic backup of the
+                // session that just landed. NOT after a failed fetch: the server
+                // may hold a backup this device has not seen yet.
+                if (restoreOutcome != me.lakko.app.backup.BackupRestoreOutcome.FETCH_FAILED) {
+                    markBackupDueBestEffort(pending.accountIdB64, "provideRecoveryPhrase")
+                }
+            } finally {
+                // On every refusal (mismatch, 404, network, FFI throw) the
+                // seed never reached the live IdentitySecrets — zeroize it.
+                if (!seedHandedOff) {
+                    accountIdentitySeed.fill(0)
+                }
             }
-        } finally {
-            // On every refusal (mismatch, 404, network, FFI throw) the
-            // seed never reached the live IdentitySecrets — zeroize it.
-            if (!seedHandedOff) {
-                accountIdentitySeed.fill(0)
-            }
-        }
+        } ?: Log.i("lakko-auth", "G-56: the account landed meanwhile; this restore stands down")
     }
 
     /**
@@ -4859,6 +5320,12 @@ public class AuthRepository(
         } catch (cause: Throwable) {
             Log.w("lakko-auth", "own predecessors not cleared after a reset", cause)
         }
+        // G-56: the link read before names the old key (and no longer
+        // verifies); a parked landing of the old keys is over.
+        ownConversationKeyStore.clear(accountIdB64)
+        // The DeviceGroup this device joined is the old seed's.
+        me.lakko.app.devices.JoinedDeviceGroupIdStore.onDevice(applicationContext).clear(accountIdB64)
+        clearParkedEarlierKeys()
         try {
             DeviceIdentityStore.deleteDeviceBinding(applicationContext, accountIdB64)
         } catch (cause: Throwable) {
@@ -5064,7 +5531,7 @@ public class AuthRepository(
         val parked = pendingRecovery.get()
         val assertion = runPasskeyCeremony(
             activityContext,
-            accountIdB64Url = base64UrlEncodeNoPad(target.accountIdBytes),
+            accountIdB64Url = me.lakko.app.webauthn.passkeyStartAccountId(target.accountIdBytes),
             wipes = me.lakko.app.account.AccountStoreGate.wipeMark(),
         )
         try {
@@ -5480,6 +5947,12 @@ public class AuthRepository(
 
                     override suspend fun fetchPublished(): PublishedIdentityKeys? =
                         discovery.identityFetch(accountId)?.let {
+                            // G-56 (contract 2.1): a kept device keeps what it
+                            // reads of its own conversation link; a key it
+                            // lacks parks it at the next landing.
+                            if (base64Decode(it.signature_pubkey).contentEquals(signaturePubkey)) {
+                                recordOwnLinkBestEffort(accountIdB64, it.conversation_link, signaturePubkey)
+                            }
                             PublishedIdentityKeys(
                                 signaturePubkey = base64Decode(it.signature_pubkey),
                                 x25519Pubkey = base64Decode(it.x25519_pubkey),
@@ -5630,7 +6103,7 @@ public class AuthRepository(
         accountIdBytes: ByteArray,
         sessionToken: String?,
         accountIdentitySeed: ByteArray,
-    ) {
+    ): uniffi.lakko_ffi_uniffi.FfiOwnLink {
         val derivedPubkey =
             Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
         val discovery = discoveryClientFactory()
@@ -5665,6 +6138,9 @@ public class AuthRepository(
             if (!published.contentEquals(derivedPubkey)) {
                 throw PhraseMismatch()
             }
+            // G-56 (contract section 1.2): the account's own conversation
+            // link, read from the same fetch, verified against THIS seed's key.
+            return ownLinkOf(bundle.conversation_link, derivedPubkey, { link, current -> uniffi.lakko_ffi_uniffi.ownConversationKey(link, current) })
         } finally {
             discovery.close()
         }
@@ -5699,11 +6175,32 @@ public class AuthRepository(
          *  are refused when the account was wiped after it
          *  ([SignInKeyWrites]). Taken here when the caller has none. */
         flowWipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+        /** G-56 (recovery payload v3): the account's own earlier keys the
+         *  row carried, oldest first. Consumed (zeroed) here. */
+        predecessors: List<me.lakko.app.devices.StateBundle.OwnPredecessorSeed> = emptyList(),
+    ) {
+        // G-56: one landing at a time for a parked account; a completion
+        // that finds the account already landed stands down.
+        parkedLanding.runIfParked(::completionStillPending) {
+            completeFromPairingLocked(phraseEntropy, session, flowWipes, predecessors)
+        } ?: run {
+            Log.i("lakko-auth", "G-56: the account landed meanwhile; this pairing stands down")
+            phraseEntropy.fill(0)
+            predecessors.forEach { it.seed.fill(0) }
+        }
+    }
+
+    private suspend fun completeFromPairingLocked(
+        phraseEntropy: ByteArray,
+        session: SessionPair?,
+        flowWipes: me.lakko.app.account.AccountStoreGate.WipeMark?,
+        predecessors: List<me.lakko.app.devices.StateBundle.OwnPredecessorSeed>,
     ) {
         val wipes = flowWipes ?: me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get()
         if (pending == null) {
             phraseEntropy.fill(0)
+            predecessors.forEach { it.seed.fill(0) }
             throw AuthClientArgError("no pending identity recovery — sign in first")
         }
         // ADR-0074 - the grant redeem named no device (it learned its account
@@ -5716,7 +6213,7 @@ public class AuthRepository(
         val phraseSeed = keys.seed
         var seedHandedOff = false
         try {
-            verifySeedAgainstPublishedIdentity(
+            val link = verifySeedAgainstPublishedIdentity(
                 accountIdBytes = pending.accountIdBytes,
                 sessionToken = session?.accessToken ?: pending.sessionToken,
                 accountIdentitySeed = phraseSeed,
@@ -5734,6 +6231,9 @@ public class AuthRepository(
                 context = "completeFromPairing",
                 wipes = wipes,
             )
+            // G-56: the account's earlier keys FIRST, before the seed and
+            // the landing (contract section 3.3 step 4).
+            storeCarriedPredecessors(pending.accountIdB64, predecessors, wipes)
             try {
                 SignInKeyWrites.ifNotWiped(wipes, pending.accountIdB64) {
                     AccountIdentitySeedStore.putAccountIdentitySeed(
@@ -5757,14 +6257,23 @@ public class AuthRepository(
                 DevicePhrase.LandingPath.DevicePairing,
                 wipes,
             )
+            val landing = IdentitySecrets(
+                accountId = pending.accountIdBytes,
+                exportKey = pending.exportKey.copyOf(),
+                accountIdentitySeed = phraseSeed,
+                session = session ?: pendingRecovery.get()?.session ?: pending.session,
+            )
+            // A parked "earlier keys missing" landing of this account ends
+            // here: this route lands (or parks again) on its own.
+            clearParkedEarlierKeys()
+            val account = SessionAccount(accountIdB64 = pending.accountIdB64, username = pending.username)
+            if (parkIfEarlierKeysMissing(account, landing, prefetched = link, wipes = wipes)) {
+                seedHandedOff = true
+                return
+            }
             installIdentitySecrets(
                 pending.accountIdB64,
-                IdentitySecrets(
-                    accountId = pending.accountIdBytes,
-                    exportKey = pending.exportKey.copyOf(),
-                    accountIdentitySeed = phraseSeed,
-                    session = session ?: pendingRecovery.get()?.session ?: pending.session,
-                ),
+                landing,
                 wipes = wipes,
             )
             seedHandedOff = true
@@ -5777,9 +6286,28 @@ public class AuthRepository(
                 ),
             )
         } finally {
+            predecessors.forEach { it.seed.fill(0) }
             if (!seedHandedOff) {
                 phraseSeed.fill(0)
             }
+        }
+    }
+
+    /** G-56: store the account's own earlier keys a recovery row carried,
+     *  before the account seed and the landing. Never throws; a failure
+     *  leaves the gate to park the device. */
+    private fun storeCarriedPredecessors(
+        accountIdB64: String,
+        predecessors: List<me.lakko.app.devices.StateBundle.OwnPredecessorSeed>,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+    ) {
+        if (predecessors.isEmpty()) return
+        if (SignInKeyWrites.isWiped(wipes, accountIdB64)) return
+        val receipt = me.lakko.app.devices.StateBundle.storeOwnPredecessorSeeds(applicationContext, accountIdB64, predecessors)
+        if (receipt == null) {
+            Log.w("lakko-auth", "G-56: the earlier keys the other device sent were not stored")
+        } else {
+            Log.i("lakko-auth", "G-56: ${predecessors.size} earlier key(s) received, ${receipt.held} held")
         }
     }
 
@@ -5838,6 +6366,36 @@ public class AuthRepository(
          *  taken here when the caller has none. The route's key writes are
          *  refused when the account was wiped after it ([SignInKeyWrites]). */
         flowWipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+        /** G-56 (recovery payload v3): the account's own earlier keys the
+         *  row carried, oldest first. Consumed (zeroed) here. */
+        predecessors: List<me.lakko.app.devices.StateBundle.OwnPredecessorSeed> = emptyList(),
+    ) {
+        try {
+            // G-56: one landing at a time for a parked account.
+            parkedLanding.runIfParked({ !landedAs(accountIdB64) }) {
+                completeFromDeviceRestoreWith(
+                    accountIdBytes, accountIdB64, username, phraseEntropy, session, persistJoin, forgotPassword,
+                    flowWipes, predecessors,
+                )
+            } ?: run {
+                Log.i("lakko-auth", "G-56: the account landed meanwhile; this restore stands down")
+                phraseEntropy.fill(0)
+            }
+        } finally {
+            predecessors.forEach { it.seed.fill(0) }
+        }
+    }
+
+    private suspend fun completeFromDeviceRestoreWith(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        username: String,
+        phraseEntropy: ByteArray,
+        session: SessionPair,
+        persistJoin: suspend () -> Unit,
+        forgotPassword: Boolean,
+        flowWipes: me.lakko.app.account.AccountStoreGate.WipeMark?,
+        predecessors: List<me.lakko.app.devices.StateBundle.OwnPredecessorSeed>,
     ) {
         val wipes = flowWipes ?: me.lakko.app.account.AccountStoreGate.wipeMark()
         val start = signInStart()
@@ -5850,20 +6408,27 @@ public class AuthRepository(
         val keys = keysFromTransferredEntropy(phraseEntropy)
         val phraseSeed = keys.seed
         var seedHandedOff = false
+        // G-56: the link answer read with the seed check (contract 1.2).
+        var link: uniffi.lakko_ffi_uniffi.FfiOwnLink? = null
         try {
             runCheckedDeviceRestore(
                 username = username,
                 accountIdBytes = accountIdBytes,
                 phraseSeed = phraseSeed,
                 verifySeed = {
-                    verifySeedAgainstPublishedIdentity(
+                    link = verifySeedAgainstPublishedIdentity(
                         accountIdBytes = accountIdBytes,
                         sessionToken = session.accessToken,
                         accountIdentitySeed = phraseSeed,
                     )
                 },
                 lookup = { name -> lookupWithSession(name, accountIdBytes, session.accessToken) },
-                persistJoin = persistJoin,
+                // G-56: the account's earlier keys FIRST, before the join
+                // state, the seed and the landing (contract 3.3 step 4).
+                persistJoin = predecessorsFirst(
+                    storePredecessors = { storeCarriedPredecessors(accountIdB64, predecessors, wipes) },
+                    persistJoin = persistJoin,
+                ),
                 land = {
                     // The binding this restore started under is gone (a
                     // sign-out, another landing): do not sign this one in.
@@ -5877,6 +6442,7 @@ public class AuthRepository(
                         phrase = keys.phrase,
                         session = session,
                         wipes = wipes,
+                        link = link,
                     )
                     seedHandedOff = true
                 },
@@ -5910,7 +6476,7 @@ public class AuthRepository(
 
     /** The writes and the session of a device restore that passed every
      *  gate of [completeFromDeviceRestore]. */
-    private fun landDeviceRestore(
+    private suspend fun landDeviceRestore(
         accountIdBytes: ByteArray,
         accountIdB64: String,
         username: String,
@@ -5918,6 +6484,7 @@ public class AuthRepository(
         phrase: String,
         session: SessionPair,
         wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+        link: uniffi.lakko_ffi_uniffi.FfiOwnLink?,
     ) {
         // Every key write below is refused when the account was wiped after
         // the route began ([SignInKeyWrites]); the session record is the one
@@ -5966,25 +6533,25 @@ public class AuthRepository(
                 ),
             )
         }
-        installIdentitySecrets(
-            accountIdB64,
-            IdentitySecrets(
-                accountId = accountIdBytes.copyOf(),
-                exportKey = ByteArray(0),
-                accountIdentitySeed = phraseSeed,
-                session = session,
-            ),
-            wipes = wipes,
+        val landing = IdentitySecrets(
+            accountId = accountIdBytes.copyOf(),
+            exportKey = ByteArray(0),
+            accountIdentitySeed = phraseSeed,
+            session = session,
         )
         markSignedInNow(accountIdB64)
+        val account = SessionAccount(accountIdB64 = accountIdB64, username = username)
+        clearParkedEarlierKeys()
+        // G-56: park instead of landing while the earlier keys are missing.
+        if (parkIfEarlierKeysMissing(account, landing, prefetched = link, wipes = wipes)) return
+        installIdentitySecrets(
+            accountIdB64,
+            landing,
+            wipes = wipes,
+        )
         pendingRecovery.set(null)
         mutableRestoreNotice.value = null
-        landedState = AuthState.Session(
-            account = SessionAccount(
-                accountIdB64 = accountIdB64,
-                username = username,
-            ),
-        )
+        landedState = AuthState.Session(account = account)
     }
 
     // -----------------------------------------------------------------
@@ -6091,7 +6658,7 @@ public class AuthRepository(
         )
         val assertion = runPasskeyCeremony(
             activityContext,
-            accountIdB64Url = base64UrlEncodeNoPad(pending.accountIdBytes),
+            accountIdB64Url = me.lakko.app.webauthn.passkeyStartAccountId(pending.accountIdBytes),
             wipes = wipes,
         )
         try {
@@ -6132,9 +6699,9 @@ public class AuthRepository(
     }
 
     /**
-     * "Turn on" for one passkey: store the account's keys for it, sealed
-     * under the passkey's own secret. Opt-in, per passkey; nothing is stored
-     * unless the person chose this. The rule is
+     * Store the account's keys for one passkey, sealed under the passkey's
+     * own secret (UX 10.2): right after the passkey is created, and from its
+     * row's "Restore keys with this passkey". There is no choice. The rule is
      * [me.lakko.app.webauthn.turnOnPasskeyKeys]; this supplies the device's
      * phrase and seed, the limited ceremony, and the seal + upload. The
      * passkey's secret never leaves this device.
@@ -6182,16 +6749,6 @@ public class AuthRepository(
         )
     }
 
-    /** "Stop restoring keys": delete what is stored for one passkey. It then
-     *  only signs in; keys already restored on other devices stay there. */
-    public suspend fun stopPasskeyKeys(credentialIdB64: String): Boolean {
-        val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError(
-            "no session",
-            me.lakko.app.l10n.UiText("common.error.session_not_ready"),
-        )
-        return authClientFactory().use { it.passkeyVaultDelete(secrets.sessionToken, credentialIdB64) }
-    }
-
     /** Run the passkey ceremony (discoverable when [accountIdB64Url] is
      *  `null`, else limited to that account's passkeys), asking for the PRF
      *  evaluation that protects the keys. Failures are rethrown with the
@@ -6234,11 +6791,7 @@ public class AuthRepository(
     }
 
     private fun accountIdOfAssertion(assertion: PasskeyLoginResult): ByteArray {
-        val bytes = try {
-            base64UrlDecodeNoPad(assertion.accountIdB64)
-        } catch (_: IllegalArgumentException) {
-            null
-        }
+        val bytes = me.lakko.app.webauthn.passkeyFinishAccountId(assertion.accountIdB64)
         if (bytes == null || bytes.size != ACCOUNT_ID_LENGTH) {
             throw AuthClientArgError(
                 "malformed account id in the passkey sign-in",
@@ -7325,7 +7878,14 @@ public class AuthRepository(
                                     signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
                                     return
                                 }
-                                journalRead = readDeviceGroupJournalOnce()
+                                if (journalReadStep(readDeviceGroupJournalOnce(secrets.accountId, accountIdB64)) ==
+                                    JournalReadStep.Decide
+                                ) {
+                                    journalRead = true
+                                } else {
+                                    kotlinx.coroutines.delay(waitMs)
+                                    waitMs = (waitMs * 2).coerceAtMost(SUPERSESSION_RETRY_MAX_MS)
+                                }
                             }
                             KeptResolution.Later -> {
                                 if (candidates != null) return
@@ -7334,7 +7894,18 @@ public class AuthRepository(
                             }
                         }
                     }
-                    KeptDeviceVerdict.ReadJournalOnce -> journalRead = readDeviceGroupJournalOnce()
+                    KeptDeviceVerdict.ReadJournalOnce -> {
+                        // No answer from the journal is never a wipe: wait and
+                        // read again.
+                        if (journalReadStep(readDeviceGroupJournalOnce(secrets.accountId, accountIdB64)) ==
+                            JournalReadStep.Decide
+                        ) {
+                            journalRead = true
+                        } else {
+                            kotlinx.coroutines.delay(waitMs)
+                            waitMs = (waitMs * 2).coerceAtMost(SUPERSESSION_RETRY_MAX_MS)
+                        }
+                    }
                     KeptDeviceVerdict.TreatAsReset -> {
                         signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
                         return
@@ -7379,19 +7950,42 @@ public class AuthRepository(
         }
     }
 
-    /** ADR section 3.3 "Order on a superseded device": read the DeviceGroup
-     *  journal to its head, once (the DS does not use session tokens). An
-     *  unreadable journal counts as read: the device then decides without
-     *  it, as the ADR says. */
-    private suspend fun readDeviceGroupJournalOnce(): Boolean {
-        try {
-            me.lakko.app.devices.sync.DeviceGroupSyncRepository.awaitHeadOnce(JOURNAL_HEAD_WAIT_MS)
-        } catch (cancel: kotlinx.coroutines.CancellationException) {
-            throw cancel
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "the device list's journal could not be read: ${cause.javaClass.simpleName}")
+    /**
+     * ADR section 3.3 "Order on a superseded device": read the DeviceGroup
+     * journal to its head, once (the DS does not use session tokens). A sync
+     * runtime that is polling does the read; when none is (the refusal came
+     * at launch before the session shell started it, or it could not open),
+     * this device opens its OWN persisted DeviceGroup into a throwaway handle
+     * and reads from the persisted cursor to the head, handing each
+     * key-rotation envelope to [onKeyRotationEnvelope] and persisting nothing
+     * ([readJournalStandalone]). [JournalCatchUp.Offline] is not a read: the
+     * caller waits and reads again, never wipes on it.
+     */
+    private suspend fun readDeviceGroupJournalOnce(accountIdBytes: ByteArray, accountIdB64: String): JournalCatchUp {
+        if (me.lakko.app.devices.sync.DeviceGroupSyncRepository.hasLiveRuntime()) {
+            val read = try {
+                me.lakko.app.devices.sync.DeviceGroupSyncRepository.awaitHeadOnce(JOURNAL_HEAD_WAIT_MS)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the device list's journal could not be read: ${cause.javaClass.simpleName}")
+                false
+            }
+            if (read) return JournalCatchUp.Read
         }
-        return true
+        val accountId = accountIdBytes.copyOf()
+        val outcome = withContext(Dispatchers.IO) {
+            readJournalStandalone(
+                open = {
+                    me.lakko.app.devices.sync.DeviceGroupStandaloneJournal.open(applicationContext, accountId, accountIdB64)
+                },
+                intake = { envelope -> onKeyRotationEnvelope(envelope) },
+                classify = { me.lakko.app.devices.sync.DeviceGroupStandaloneJournal.classify(it) },
+                deadlineMs = JOURNAL_HEAD_WAIT_MS,
+            )
+        }
+        Log.i("lakko-auth", "the device list's journal, read on its own: $outcome")
+        return outcome
     }
 
     /**
@@ -8030,6 +8624,8 @@ public class AuthRepository(
         } else {
             restoredProfileOwed.set(accountIdB64)
         }
+        // The restored profile may name the account (`UsernamePrompt.kt`).
+        scheduleUsernamePrompt()
     }
 
     /** Whether a restore that ran before this session landed changed the own
@@ -8128,6 +8724,8 @@ public class AuthRepository(
                 accountIdB64 = accountIdB64,
                 bytes = bytes,
             )
+            // The own-username register may name the account (`UsernamePrompt.kt`).
+            scheduleUsernamePrompt()
         }
 
         override fun rememberRestoredGroups(groupIdsHex: List<String>) {
@@ -8390,6 +8988,7 @@ public class AuthRepository(
         when (val state = mutableState.value) {
             is AuthState.Session -> state.account.accountIdB64
             is AuthState.NeedsRecoveryPhrase -> state.account.accountIdB64
+            is AuthState.NeedsEarlierKeys -> state.account.accountIdB64
             is AuthState.SaveFreshPhrase -> state.account.accountIdB64
             AuthState.Loading, is AuthState.Anon -> null
         }
@@ -8464,6 +9063,7 @@ public class AuthRepository(
      *  user leaves no secret material behind. */
     private fun clearPendingRecovery() {
         clearParkedRecovery()
+        clearParkedEarlierKeys()
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
         // The fresh-auth proof belongs to the sign-in that is ending.
         freshAuth.clear()
@@ -8508,6 +9108,14 @@ public sealed interface AuthState {
      *  [AuthRepository.provideRecoveryPhrase] and its siblings complete the
      *  session. */
     public data class NeedsRecoveryPhrase(val account: SessionAccount) : AuthState
+
+    /** G-56 (ADR-0074, "Joining after a rotation"; UX section 8a). Signed in,
+     *  holding the account's current keys, but not the EARLIER keys its chats
+     *  use: nothing is bound, published or joined, the app shell does not
+     *  start. The device looks for them by itself
+     *  ([AuthRepository.lookForEarlierKeysNow]); "Another device" brings them;
+     *  "I have none of these" is the ADR-0073 reset. */
+    public data class NeedsEarlierKeys(val account: SessionAccount) : AuthState
 
     /** ADR-0073 "Reset account keys" (the ADR-0017 lost-everything
      *  fallback). The user recovered ACCESS via an ADR-0018 factor but has
@@ -8929,6 +9537,8 @@ internal fun freshIdentityAfterPublish(
     stillBound -> FreshIdentityAfterPublish.SHOW_AND_KEEP
     now is AuthState.Anon -> FreshIdentityAfterPublish.SHOW_ONLY
     now is AuthState.NeedsRecoveryPhrase && now.account.accountIdB64 == accountIdB64 ->
+        FreshIdentityAfterPublish.SHOW_AND_KEEP
+    now is AuthState.NeedsEarlierKeys && now.account.accountIdB64 == accountIdB64 ->
         FreshIdentityAfterPublish.SHOW_AND_KEEP
     else -> FreshIdentityAfterPublish.KEEP_OWED
 }

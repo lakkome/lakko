@@ -51,7 +51,7 @@ export function composeOwnProfileForDevices(
   accountIdBytes: Uint8Array | null,
   /** The backup carries it too; a device of the account keeps the session's. */
   username: string | null = null,
-  /** ADR-0090 section 7 — the own "my card may be shared" flag. */
+  /** ADR-0092 section 7 — the own "my card may be shared" flag. */
   cardShareable: boolean = true,
 ): Uint8Array | null {
   if (own.updatedAtMs <= 0) return null;

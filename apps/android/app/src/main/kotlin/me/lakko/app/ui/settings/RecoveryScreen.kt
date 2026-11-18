@@ -12,16 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.ShortText
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Password
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -42,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -64,6 +53,9 @@ import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.devices.QrTextImageComposable
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Settings > Security > Recovery: the ways back into the account, on one
@@ -134,7 +126,7 @@ public fun RecoveryScreen(
                 title = { Text(t("settings.recovery.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -183,9 +175,9 @@ public fun RecoveryScreen(
                         passkeys?.let { Text(passkeyCountsLine(it)) }
                     }
                 },
-                leadingContent = { Icon(Icons.Filled.Fingerprint, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                leadingContent = { LkIcon(R.drawable.ic_lk_passkey, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row) },
                 trailingContent = {
-                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    LkIcon(R.drawable.ic_lk_chevron_forward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Mark)
                 },
                 colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
                 modifier = Modifier.clickable(onClick = onOpenPasskeys),
@@ -193,9 +185,9 @@ public fun RecoveryScreen(
             ListItem(
                 headlineContent = { Text(t("settings.recovery.devices.title")) },
                 supportingContent = { Text(t("settings.security.devices.sub")) },
-                leadingContent = { Icon(Icons.Filled.Devices, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                leadingContent = { LkIcon(R.drawable.ic_lk_devices, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row) },
                 trailingContent = {
-                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    LkIcon(R.drawable.ic_lk_chevron_forward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Mark)
                 },
                 colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
                 modifier = Modifier.clickable(onClick = onOpenDevices),
@@ -213,13 +205,13 @@ public fun RecoveryScreen(
                         },
                     )
                 },
-                leadingContent = { Icon(Icons.AutoMirrored.Filled.ShortText, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                leadingContent = { LkIcon(R.drawable.ic_lk_words, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row) },
                 colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
             )
             ExpandableRow(
                 title = t("settings.recovery.totp.title"),
                 supporting = t("recovery.method.totp.sub"),
-                icon = Icons.Filled.Password,
+                icon = R.drawable.ic_lk_lock_rotation,
                 expanded = authenticatorOpen,
                 onToggle = { authenticatorOpen = !authenticatorOpen },
             ) {
@@ -331,7 +323,7 @@ private fun RecoveryPhraseRow(
                 )
             }
         },
-        leadingContent = { Icon(Icons.Filled.Key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        leadingContent = { LkIcon(R.drawable.ic_lk_key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row) },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
     )
     if (phraseOnDevice != true) return
@@ -382,6 +374,38 @@ private fun RecoveryPhraseRow(
                 ) { Text(if (r.busy) t("common.checking") else t("settings.recovery.phrase.show")) }
             }
             is PhraseReveal.PublishPending -> {
+                // The directory's cool-down (UX 15.4): the minutes left, no
+                // "Try again", and a retry by itself when the time is up.
+                val owedReason by authRepository.freshPublishOwed.collectAsStateWithLifecycle()
+                // An account with no saved phrase is told nothing about words.
+                val wordless = remember { !authRepository.showsNewWordsHere() }
+                val autoRetryAtMs = owedReason?.let {
+                    me.lakko.app.auth.publishOwedScreenModel(it, wordless, nowMs = System.currentTimeMillis()).autoRetryAtMs
+                }
+                val autoRetryLeft = me.lakko.app.ui.auth.rememberRemainingMs(autoRetryAtMs)
+                val waiting = owedReason?.let { reason ->
+                    val nowMs = autoRetryAtMs?.let { it - autoRetryLeft } ?: System.currentTimeMillis()
+                    me.lakko.app.auth.publishOwedScreenModel(reason, wordless, nowMs = nowMs)
+                }
+                LaunchedEffect(owedReason, autoRetryAtMs) {
+                    val at = autoRetryAtMs ?: return@LaunchedEffect
+                    kotlinx.coroutines.delay((at - System.currentTimeMillis()).coerceAtLeast(0L))
+                    try {
+                        authRepository.retryOwedPublish()
+                    } catch (cause: Throwable) {
+                        if (cause is kotlinx.coroutines.CancellationException) throw cause
+                        android.util.Log.w("lakko-auth", "automatic publish retry did not finish: ${cause.javaClass.simpleName}")
+                    }
+                }
+                val waitingKey = waiting?.waitingKey
+                val waitingMinutes = waiting?.waitingMinutes
+                if (waitingKey != null && waitingMinutes != null) {
+                    Text(
+                        t(waitingKey, emptyMap(), mapOf("minutes" to waitingMinutes.toULong())),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    return@Column
+                }
                 Text(t("recovery_phrase.fresh.publish_owed"), style = MaterialTheme.typography.bodyMedium)
                 val waitLeft = me.lakko.app.ui.auth.rememberRemainingMs(r.waitUntilMs)
                 val problem = if (waitLeft > 0L) {
@@ -456,7 +480,7 @@ public fun PasswordScreen(
                 title = { Text(t("settings.password.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -506,7 +530,7 @@ private fun SectionLabel(text: String) {
 private fun ExpandableRow(
     title: String,
     supporting: String,
-    icon: ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     expanded: Boolean,
     onToggle: () -> Unit,
     content: @Composable () -> Unit,
@@ -514,12 +538,13 @@ private fun ExpandableRow(
     ListItem(
         headlineContent = { Text(title) },
         supportingContent = { Text(supporting) },
-        leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        leadingContent = { LkIcon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row) },
         trailingContent = {
-            Icon(
-                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+            LkIcon(
+                icon = if (expanded) R.drawable.ic_lk_chevron_up else R.drawable.ic_lk_chevron_down,
                 contentDescription = if (expanded) t("common.collapse") else t("common.expand"),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Row,
             )
         },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),

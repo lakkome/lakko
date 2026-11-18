@@ -490,7 +490,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null
-                // ADR-0090 — content, ballot, hand-over and credential errors
+                // ADR-0092 — content, ballot, hand-over and credential errors
                 // are never membership refusals.
                 is FfiException.AnonCred -> null
                 is FfiException.Ballot -> null
@@ -553,6 +553,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0078 section 3 - a push wake or subscription that could
                 // not be sealed; not a membership refusal.
                 is FfiException.PushWake,
+                // G-56 - a recovery payload v3 or row the core refused; not a
+                // membership refusal.
+                is FfiException.RecoveryPayload,
+                // docs/ux/donations.md section 3 - a donation statement that
+                // does not verify; not a membership refusal.
+                is FfiException.Donation,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

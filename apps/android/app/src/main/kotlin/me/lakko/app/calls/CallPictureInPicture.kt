@@ -182,11 +182,12 @@ public object CallPictureInPicture {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         // Drawn on and off as the call screen draws it: a muted microphone is
-        // the slashed one.
+        // the slashed one. The Lakko set is drawn in black to be tinted; the
+        // system window's actions sit on a dark scrim, so the glyph is white.
         val icon = Icon.createWithResource(
             context,
-            if (spec.micOn) R.drawable.ic_call_pip_mic else R.drawable.ic_call_pip_mic_off,
-        )
+            if (spec.micOn) R.drawable.ic_lk_mic_fill else R.drawable.ic_lk_mic_slash_fill,
+        ).setTint(android.graphics.Color.WHITE)
         return RemoteAction(icon, label, label, pending).apply { isEnabled = spec.micEnabled }
     }
 

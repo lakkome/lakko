@@ -325,7 +325,7 @@ final class HeldSendQueueTests: XCTestCase {
         XCTAssertEqual(toShow.map(\.localId), ["l2"])
     }
 
-    // MARK: - ADR-0090 — a held content message keeps its content
+    // MARK: - ADR-0092 — a held content message keeps its content
 
     func testAHeldContentMessageKeepsItsContentAcrossARelaunchAndIsAMessageWithNoText() throws {
         let card = SharedContactCard(name: "Anna", username: "anna", accountKey: Data(repeating: 3, count: 32))

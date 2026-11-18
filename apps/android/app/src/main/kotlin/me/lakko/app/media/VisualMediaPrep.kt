@@ -173,7 +173,7 @@ public fun decodeOrientedBitmap(file: File, maxSide: Int): Bitmap? = try {
 }
 
 /**
- * ADR-0090 / UX attachments section 3 — a photo picked through Photo or Video
+ * ADR-0092 / UX attachments section 3 — a photo picked through Photo or Video
  * is decoded and re-encoded as JPEG with its longest side at most
  * [maxLongestSide], its orientation applied and every piece of metadata (EXIF
  * location, camera, time) dropped. `null` when the image cannot be decoded

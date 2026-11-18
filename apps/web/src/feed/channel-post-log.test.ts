@@ -23,6 +23,9 @@ const ID = "ab".repeat(16);
 describe("decodeChannelPostLog", () => {
   it("refuses an unknown version and drops malformed entries alone", () => {
     expect(decodeChannelPostLog({ version: 99, channels: {} })).toBeNull();
+    // Version 2 kept no attachment references, so the feed could not draw a
+    // channel's media (base scenario 32): dropped and fetched again.
+    expect(decodeChannelPostLog({ version: 2, channels: {} })).toBeNull();
     const log = decodeChannelPostLog({
       version: CHANNEL_POST_LOG_VERSION,
       channels: {
@@ -132,5 +135,71 @@ describe("syncChannelSlot", () => {
     const slot = await syncChannelSlot(ID, undefined, d, NOW);
     expect(d.afters).toEqual([0, CHANNEL_POST_PAGE]);
     expect(slot.cursor).toBe(CHANNEL_POST_PAGE + 1);
+  });
+});
+
+describe("attachment kinds in the log", () => {
+  it("keeps a caption-less photo, file or GIF post with its attachments' kinds", async () => {
+    const d = deps([{ posts: [post(1, "t:hello"), post(2, "gif")], nextAfter: 2 }], (p) =>
+      p === "gif"
+        ? { kind: "text", text: "", media: [{ mime: "image/gif", kind: "gif" }] }
+        : { kind: "text", text: p.slice(2) },
+    );
+    const slot = await syncChannelSlot(ID, undefined, d, NOW);
+    expect(slot.posts.at(-1)).toEqual({
+      cursor: 2,
+      serverTsMs: NOW,
+      text: "",
+      media: [{ mime: "image/gif", kind: "gif" }],
+    });
+    expect(slot.posts[0]).not.toHaveProperty("media");
+  });
+
+  it("round-trips the kinds through the stored form and drops malformed ones", () => {
+    const log = decodeChannelPostLog({
+      version: CHANNEL_POST_LOG_VERSION,
+      channels: {
+        [ID]: {
+          cursor: 2,
+          posts: [
+            { cursor: 1, serverTsMs: NOW, text: "", media: [{ mime: "image/jpeg", kind: 7 }, "bad"] },
+            { cursor: 2, serverTsMs: NOW, text: "", media: "not a list" },
+          ],
+        },
+      },
+    });
+    expect(log?.channels[ID]?.posts).toEqual([
+      { cursor: 1, serverTsMs: NOW, text: "", media: [{ mime: "image/jpeg", kind: null }] },
+      { cursor: 2, serverTsMs: NOW, text: "" },
+    ]);
+  });
+
+  it("keeps each attachment's reference and drops one that cannot be fetched", () => {
+    const ref = { blobIdB64: "AAAA", keyB64: "BBBB", nonceB64: "CCCC", mime: "image/jpeg", sizeStr: "99", name: null };
+    const stored = JSON.parse(
+      JSON.stringify({
+        version: CHANNEL_POST_LOG_VERSION,
+        channels: {
+          [ID]: {
+            cursor: 1,
+            posts: [
+              {
+                cursor: 1,
+                serverTsMs: NOW,
+                text: "",
+                media: [
+                  { mime: "image/jpeg", kind: null, ref },
+                  { mime: "image/png", kind: null, ref: { ...ref, keyB64: 5 } },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    ) as unknown;
+    expect(decodeChannelPostLog(stored)?.channels[ID]?.posts[0]?.media).toEqual([
+      { mime: "image/jpeg", kind: null, ref },
+      { mime: "image/png", kind: null },
+    ]);
   });
 });

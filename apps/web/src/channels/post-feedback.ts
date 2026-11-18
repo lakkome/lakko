@@ -89,7 +89,7 @@ const [rawCounts, setRawCounts] = createSignal<ReadonlyMap<string, ReadonlyMap<n
  *  rows this device read). */
 const [commentCounts, setCommentCounts] = createSignal<ReadonlyMap<string, number>>(new Map());
 /** `${channel}:${cursor}` -> a channel poll's voters and votes per opaque
- *  option label as last fetched (ADR-0090 section 4). */
+ *  option label as last fetched (ADR-0092 section 4). */
 const [voteCounts, setVoteCounts] = createSignal<
   ReadonlyMap<string, { readonly voters: number; readonly labels: ReadonlyMap<string, number> }>
 >(new Map());

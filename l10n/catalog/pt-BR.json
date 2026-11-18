@@ -125,6 +125,10 @@
       "text": "Este navegador não é compatível com chaves de acesso.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Este dispositivo não é compatível com chaves de acesso.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Esta chave de acesso pertence a uma conta diferente da que está neste dispositivo. Entre primeiro com sua senha.",
       "status": "machine"
@@ -243,6 +247,42 @@
     },
     "auth.username.label": {
       "text": "Nome de usuário",
+      "status": "machine"
+    },
+    "auth.username_prompt.continue": {
+      "text": "Continuar",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Não foi possível verificar o nome de usuário. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Esse não é o nome de usuário desta conta.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Tentativas demais. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Nome de usuário",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Não lembro",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Você pode vê-lo em Configurações no seu outro dispositivo. Até lá, este dispositivo não sincroniza com eles.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Este dispositivo ainda não sabe o nome de usuário da sua conta. Digite-o para sincronizar com seus outros dispositivos.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Qual é o seu nome de usuário?",
       "status": "machine"
     },
     "backup.rollback_refused.body": {
@@ -711,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "Este navegador não consegue criptografar a mídia da chamada, então a chamada não começou.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Este dispositivo não consegue criptografar a mídia da chamada, então a chamada não começou.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -1910,7 +1954,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Não foi possível criar este canal. Nada foi criado. Tente de novo.",
+      "text": "Não foi possível criar este canal. Tente de novo.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -2071,6 +2115,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "As reações em um canal são anônimas. Ninguém pode ver quem reagiu, nem mesmo o dono do canal.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "Você poderá publicar aqui quando o Lakko abrir no seu outro dispositivo.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "Você poderá publicar aqui quando o Lakko abrir no seu outro dispositivo e no do proprietário.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -3381,12 +3433,20 @@
       "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo. Permita o acesso à câmera nas configurações do site no navegador.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo. Permita nas configurações de privacidade do sistema.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "O Lakko precisa de acesso ao microfone para gravar mensagens de voz. Permita o acesso ao microfone nas configurações do site no navegador.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "O Lakko precisa de acesso ao microfone para gravar mensagens de voz. Permita nas configurações de privacidade do sistema.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3499,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "Não é possível gravar mensagens de voz neste navegador",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "Não é possível gravar mensagens de voz neste dispositivo",
       "status": "machine"
     },
     "chat.record.video": {
@@ -4011,10 +4075,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "Seus outros dispositivos estão adicionando este às suas conversas.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -5109,10 +5169,6 @@
       "text": "Os links de convite e de chamada que você criou antes deixam de funcionar. Crie novos.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Suas chaves de acesso continuam permitindo entrar. \"Restaurar chaves com esta chave de acesso\" fica desativado até você ativar de novo.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "Você recebe uma nova frase de recuperação. A antiga deixa de funcionar.",
       "status": "machine"
@@ -5183,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "O Lakko não consegue usar a câmera. Permita o acesso à câmera nas configurações do site no seu navegador e tente de novo.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "O Lakko não pode usar a câmera. Permita o acesso à câmera nas configurações de privacidade do sistema e tente novamente.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5563,6 +5623,66 @@
     },
     "display_name.error.unknown": {
       "text": "Este nome não pode ser usado",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "Doar",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Copiado",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Copiar",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Copiar endereço",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Rede: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Envie para este endereço apenas {coin} na rede {network}. Qualquer outra coisa será perdida.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Não foi possível carregar as formas de doar. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "As doações pagam os servidores e mantêm o trabalho.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "No momento não há forma de doar disponível no seu país.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Não foi possível mostrar o número. Tente de novo.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Mostrar",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "Número de telefone oculto",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "Cripto",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Banco e cartão",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Apoie o Lakko",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6333,10 +6453,6 @@
       "text": "Pedir para entrar",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Pedir de novo",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Seu pedido não foi enviado. Verifique sua conexão e tente novamente.",
       "status": "machine"
@@ -6358,11 +6474,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Pedido enviado. Um administrador aprova e depois a alteração é aplicada ao grupo.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Se nada acontecer, você pode enviar o pedido de novo.",
+      "text": "Pedido enviado. Um administrador verá quando abrir o Lakko novamente.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6838,7 +6950,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Convite não aceito",
+      "text": "Não foi possível abrir o convite. Verifique sua conexão e tente novamente.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7302,7 +7414,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Não foi possível criar este grupo. Nada foi criado. Tente de novo.",
+      "text": "Não foi possível criar este grupo. Tente de novo.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7769,10 +7881,6 @@
       "text": "Outro dispositivo",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Faz você entrar. Também traz suas conversas de volta se você ativou isso para esta chave de acesso.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Chave de acesso",
       "status": "machine"
@@ -7847,6 +7955,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "Este dispositivo ou navegador não é compatível com chaves de acesso. Escolha outra forma.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Este dispositivo não é compatível com chaves de acesso. Escolha outra forma.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8189,6 +8301,14 @@
       "text": "Um dispositivo que ainda esteja conectado mostra um código de seis dígitos; digite-o aqui. Não precisa de câmera; se preferir, há um QR code.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Abra o Lakko em um dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "Você entrou como {username}, mas este dispositivo ainda não tem as chaves que suas conversas usam. Traga-as de outro dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "Há um problema com a conta salva neste dispositivo. Saia e entre novamente, ou use sua frase de recuperação.",
       "status": "machine"
@@ -8247,10 +8367,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "Não tenho nenhum destes",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Se você ativou a restauração das chaves da conta para uma chave de acesso.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8469,6 +8585,10 @@
       "text": "Atalhos de teclado",
       "status": "machine"
     },
+    "settings.about.support": {
+      "text": "Apoie o Lakko",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Traduções atualizadas em {date}",
       "status": "machine"
@@ -8531,6 +8651,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Remove os dados da sua conta deste dispositivo. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8717,6 +8841,10 @@
       "text": "Este navegador não está configurado para sua conta. Entre novamente.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Este dispositivo não está configurado para sua conta. Entre novamente.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "Não foi possível remover o dispositivo. Tente novamente.",
       "status": "machine"
@@ -8837,6 +8965,10 @@
       "text": "Reprodução neste dispositivo.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "As publicações dos canais podem chegar atrasadas enquanto o Lakko estiver fechado.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "As notificações estão desativadas, então o Lakko só pode tocar enquanto está aberto. Ative-as para que chamadas e mensagens cheguem até você quando ele não estiver.",
       "status": "machine"
@@ -8901,56 +9033,20 @@
       "text": "Este navegador ou dispositivo não consegue criar chaves de acesso agora.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "Ativar a restauração das chaves da conta",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Se você deixar desativado, a chave de acesso só faz você entrar. Você restaura as chaves da conta com sua frase de recuperação ou com outro dispositivo.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Se você ativar isto, esta chave de acesso sozinha pode levar as chaves da sua conta a um novo dispositivo. As chaves de acesso costumam ser sincronizadas pela Apple, pelo Google ou pelo seu gerenciador de senhas. Quem conseguir entrar na sua conta da Apple, do Google ou do seu gerenciador de senhas poderá então ler suas mensagens futuras e agir como você.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "Cancelado. Esta chave de acesso continua só fazendo você entrar.",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Este dispositivo não consegue criar chaves de acesso agora.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "Esta chave de acesso agora restaura as chaves da sua conta.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Outra chave de acesso respondeu. Tente novamente e escolha a chave de acesso para a qual você está ativando isto.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Essa frase de recuperação não pertence a esta conta. Nada foi alterado.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Você pode mudar isso depois para cada chave de acesso.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "Esta chave de acesso pode fazer você entrar, mas neste dispositivo e provedor de chaves de acesso ela não pode carregar as chaves da sua conta. Guarde sua frase de recuperação.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Digite sua frase de recuperação para ativar isto.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Só entrar",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Permitir que esta chave de acesso restaure as chaves da sua conta?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Ativar",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +9059,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "Só entra",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "Entre com Touch ID, Face ID ou uma chave de segurança em vez da senha. Uma chave de acesso também pode restaurar as chaves da sua conta em um novo dispositivo se você ativar isso. Sua frase de recuperação também sempre funciona.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "Entre com sua digital, rosto ou bloqueio de tela, ou com uma chave de segurança, em vez da senha. Uma chave de acesso também pode restaurar as chaves da sua conta em um novo dispositivo se você ativar isso. Sua frase de recuperação também sempre funciona.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9013,22 +9101,6 @@
       "text": "Suas chaves de acesso foram apagadas quando as chaves da conta foram redefinidas. Adicione uma chave de acesso para entrar de novo com Face ID, Touch ID ou sua impressão digital.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Parar de restaurar as chaves da conta",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Esta chave de acesso só vai fazer você entrar. As chaves da conta já restauradas em outros dispositivos continuam lá.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Esta chave de acesso agora só faz você entrar.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Parar de restaurar as chaves da conta com esta chave de acesso?",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "Chaves de acesso",
       "status": "machine"
@@ -9039,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Este navegador não consegue gerenciar chaves de acesso. Use uma versão recente do Safari, Chrome, Firefox ou Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Este dispositivo não consegue gerenciar chaves de acesso.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9345,6 +9421,10 @@
       "text": "Gerenciado pelo navegador",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Gerenciado pelo sistema",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Remover",
       "status": "machine"
@@ -9533,6 +9613,10 @@
       "text": "A tradução acontece neste dispositivo. O Lakko precisa do pacote de {language} para fazê-la ({size}). Mensagens nunca são enviadas a lugar nenhum para serem traduzidas.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "A tradução acontece neste dispositivo. O macOS baixa o pacote de {language} em Ajustes: Idioma e Região, depois Idiomas de Tradução. Mensagens nunca são enviadas a lugar nenhum para serem traduzidas.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "Cancelar",
       "status": "machine"
@@ -9561,6 +9645,10 @@
       "text": "Agora não",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Abrir Ajustes",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "O pacote vem do Google.",
       "status": "machine"
@@ -9571,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "O pacote vem da empresa que faz o seu navegador.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "O pacote vem da empresa que faz o seu sistema.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9819,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "Quem pode me encontrar",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "Não foi possível compartilhar sua tela. Permita a gravação de tela para o Lakko nas configurações de privacidade do sistema.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Não foi possível compartilhar sua tela. Permita a gravação de tela para o Lakko nos Ajustes do Sistema.",
       "status": "machine"
     }
   },

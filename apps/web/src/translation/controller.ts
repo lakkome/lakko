@@ -25,9 +25,10 @@
 
 import { createSignal } from "solid-js";
 
-import type { Detection, EngineState, Engines } from "./engines";
+import type { Detection, EngineState, Engines, SystemPacks } from "./engines";
 import {
   CANDIDATE_LANGUAGES,
+  connectionTypeKnown,
   messageKey,
   onCellular,
   SAME_LANGUAGE_LINE_MS,
@@ -40,7 +41,21 @@ import {
   type StoredTranscript,
   type StoredTranslation,
 } from "./result-store";
-import { barLanguageFor, isCurrent, offerFor, transcriptOfferedFor, type Offer, type TranslationRules } from "./rules";
+import {
+  barLanguageFor,
+  candidateTags,
+  conversationDetectionFor,
+  resolveSourceFor,
+  usualLanguage,
+  withLanguageDetection,
+  withLanguagePick,
+  type SourceResolution,
+  isCurrent,
+  offerFor,
+  transcriptOfferedFor,
+  type Offer,
+  type TranslationRules,
+} from "./rules";
 import type { PackUse, TranslationSettings } from "./settings";
 
 /** The message a result describes. */
@@ -61,13 +76,19 @@ export type TextView =
   | { readonly phase: "translating"; readonly source: string | null }
   | { readonly phase: "translated"; readonly source: string; readonly text: string }
   | { readonly phase: "original"; readonly source: string }
+  /** Shown before any translation (UX 3.2): the detected language of a
+   *  message not in a reading language, with `Translate` when the device can
+   *  translate from it. `Translate` here does what the menu row does. */
+  | { readonly phase: "detected"; readonly source: string; readonly canTranslate: boolean }
   | { readonly phase: "failed"; readonly source: string | null }
   | { readonly phase: "same"; readonly language: string }
   | { readonly phase: "unsupported"; readonly language: string }
   /** `percent` is `null` until the browser reports progress, if ever. */
   | { readonly phase: "downloading"; readonly language: string; readonly percent: number | null }
   | { readonly phase: "waiting-wifi"; readonly language: string }
-  | { readonly phase: "pack-failed"; readonly language: string };
+  | { readonly phase: "pack-failed"; readonly language: string }
+  /** A pack is needed and anti-censorship is on (ADR-0082 section 4). */
+  | { readonly phase: "packs-blocked"; readonly language: string };
 
 /** The transcript block of a voice or video message (UX 4.3). */
 export type TranscriptView =
@@ -86,7 +107,9 @@ export type TranscriptView =
   | { readonly phase: "no-speech"; readonly language: string }
   | { readonly phase: "failed" }
   | { readonly phase: "unsupported"; readonly language: string }
-  | { readonly phase: "unavailable-file" };
+  | { readonly phase: "unavailable-file" }
+  /** A pack is needed and anti-censorship is on (ADR-0082 section 4). */
+  | { readonly phase: "packs-blocked" };
 
 /** The UX 3.5 dialog. */
 export interface PackRequest {
@@ -94,6 +117,9 @@ export interface PackRequest {
   readonly language: string;
   /** On a cellular link without permission: the button reads `Download on Wi-Fi`. */
   readonly wifiOnly: boolean;
+  /** The system downloads this pack in its own settings (macOS translation):
+   *  the button opens them and nothing is downloaded by Lakko. */
+  readonly systemSettings: boolean;
   /** `Download` - called from the person's press, which the browser needs. */
   readonly download: () => void;
   readonly dismiss: () => void;
@@ -103,6 +129,8 @@ export interface PackRequest {
 export interface PickerRequest {
   readonly use: PackUse;
   readonly current: string | null;
+  /** The message's close candidates, listed first (`Not X?`, UX 3.4). */
+  readonly candidates: readonly string[];
   readonly choose: (language: string) => void;
   readonly dismiss: () => void;
 }
@@ -158,6 +186,27 @@ export class TranslationController {
   }
   get transcriptionPresent(): boolean {
     return this.deps.engines.transcription.present && !this.deps.settings().transcriptionBlocked;
+  }
+
+  /**
+   * Whether `Download packs on mobile data` governs anything here (UX
+   * section 6): some engine downloads a pack itself, and this device can tell
+   * a mobile connection from another. In the desktop app on macOS a
+   * translation pack comes from System Settings and the webview reports no
+   * connection type, so the row is not shown.
+   */
+  mobileDataMatters(): boolean {
+    if (!connectionTypeKnown()) return false;
+    const translation = this.translationPresent && this.deps.engines.translation.fetchesPacks !== false;
+    return translation || this.transcriptionPresent;
+  }
+
+  /** The packs the operating system holds for these engines, where it can
+   *  list them (`Engines.systemPacks`); `null` where it cannot. */
+  async systemPacks(target: string = this.target()): Promise<SystemPacks | null> {
+    const list = this.deps.engines.systemPacks;
+    if (list === undefined) return null;
+    return list.call(this.deps.engines, target).catch(() => null);
   }
 
   /** The language translations are made into. */
@@ -258,6 +307,7 @@ export class TranslationController {
     ).then((d) => {
       this.detections.set(key, d);
       this.detectionsInFlight.delete(key);
+      this.rememberConfident(ref, d);
       this.bump();
       return d;
     });
@@ -267,13 +317,40 @@ export class TranslationController {
 
   private readonly detectionsInFlight = new Map<string, Promise<Detection | null>>();
 
+  /**
+   * The language a message is taken to be in (ADR-0082 note of 2026-11-15):
+   * its detection, unless that is unsure and the conversation's languages
+   * name one of its close candidates: a picked one, else the most detected
+   * one (shared rule `conversationDetection`, independent of the order
+   * messages were detected in). Used for the line up front, the `Translate`
+   * row and the source a translation starts from.
+   */
+  effectiveDetection(ref: MessageRef, text: string): Detection | null {
+    const d = this.detected(ref, text);
+    const r = this.deps.rules();
+    if (d === null || r === null) return d;
+    return conversationDetectionFor(r, d, this.prefs(ref.conversation).languages);
+  }
+
+  /** A confident detection is recorded for its message, once per message id. */
+  private rememberConfident(ref: MessageRef, d: Detection | null): void {
+    const r = this.deps.rules();
+    if (d === null || r === null || d.permille < r.translationDetectionConfidentPermille()) return;
+    const known = this.prefsNow(ref.conversation).languages.detections.find((x) => x.messageId === ref.messageId);
+    if (known !== undefined && r.sameLanguage(known.tag, d.tag)) return;
+    void this.updatePrefs(ref.conversation, (p) => ({
+      ...p,
+      languages: withLanguageDetection(r, p.languages, ref.messageId, d.tag),
+    }));
+  }
+
   // ----- the menu row --------------------------------------------------------
 
   /** UX 3.1 — the `Translate` row (shared rule). */
   offer(ref: MessageRef, text: string, isOwn: boolean): Offer {
     const r = this.deps.rules();
     if (r === null || !this.translationPresent) return "none";
-    const detected = isOwn || text.length === 0 ? null : this.detected(ref, text);
+    const detected = isOwn || text.length === 0 ? null : this.effectiveDetection(ref, text);
     const engineForDetected =
       detected === null ? "unavailable" : (this.translationState(detected.tag) ?? "unavailable");
     return offerFor(r, {
@@ -285,6 +362,81 @@ export class TranslationController {
       anyEngine: this.anyEngine(),
       reading: this.reading(),
     });
+  }
+
+  /**
+   * UX 3.2 — the language line shown before any translation. It names the
+   * language `Translate` would start from (shared rule
+   * `resolveTranslationSource`, the same call {@link sourceFor} makes), so
+   * "hola, qué tal?" read as an unsure Catalan on a device that translates
+   * Spanish shows `Spanish · Translate`. The menu row's rule then decides
+   * whether that language is one to name (not own, has text, setting on, not
+   * a reading language); asked with the engine fact set to "can translate" so
+   * that an engine that cannot translate hides the button, not the line.
+   */
+  languageLine(ref: MessageRef, text: string, isOwn: boolean): TextView {
+    const r = this.deps.rules();
+    if (r === null || isOwn || text.trim().length === 0) return { phase: "none" };
+    const res = this.resolution(ref, text);
+    if (res === null || res.lineTag === null) return { phase: "none" };
+    const named = offerFor(r, {
+      enabled: this.deps.settings().showTranslate,
+      hasText: true,
+      isOwn,
+      detected: { tag: res.lineTag, permille: res.linePermille },
+      engineForDetected: "ready",
+      anyEngine: true,
+      reading: this.reading(),
+    });
+    if (named === "none") return { phase: "none" };
+    return { phase: "detected", source: res.lineTag, canTranslate: res.lineCanTranslate };
+  }
+
+  /**
+   * The line's language and `Translate`'s source for a message, from its
+   * detection, the conversation's languages and the engine's
+   * answers for every candidate (reactive). `null` until the detection and
+   * those answers are in: the line would otherwise change a moment later.
+   */
+  private resolution(ref: MessageRef, text: string): SourceResolution | null {
+    const r = this.deps.rules();
+    if (r === null) return null;
+    const raw = this.detected(ref, text);
+    if (raw === null) return null;
+    const languages = this.prefs(ref.conversation).languages;
+    const usual = usualLanguage(r, languages);
+    const target = this.target();
+    const translatable: string[] = [];
+    if (this.translationPresent) {
+      // Every answer is asked at once, so the line waits one round, not one
+      // per candidate.
+      let pending = false;
+      for (const tag of this.askedTags(r, raw, usual, target)) {
+        const state = this.translationState(tag, target);
+        if (state === null) pending = true;
+        else if (state !== "unavailable") translatable.push(tag);
+      }
+      if (pending) return null;
+    }
+    return resolveSourceFor(r, raw, languages, target, translatable);
+  }
+
+  /** The tags whose engine answer the shared rule needs: every candidate and
+   *  the conversation's usual language, less the language translated into. */
+  private askedTags(r: TranslationRules, raw: Detection | null, usual: string | null, target: string): string[] {
+    const out: string[] = [];
+    for (const tag of [...candidateTags(raw), ...(usual === null ? [] : [usual])]) {
+      if (r.sameLanguage(tag, target) || out.some((t) => r.sameLanguage(t, tag))) continue;
+      out.push(tag);
+    }
+    return out;
+  }
+
+  /** The quiet line under a message's text: the translation's own line when
+   *  there is one (manual or automatic), else the language line up front. */
+  textLine(ref: MessageRef, text: string, isOwn: boolean): TextView {
+    const v = this.textView("text", ref);
+    return v.phase === "none" ? this.languageLine(ref, text, isOwn) : v;
   }
 
   // ----- translating a message ----------------------------------------------
@@ -345,31 +497,56 @@ export class TranslationController {
 
   /**
    * Translate one message. `source` is a language the person chose in the
-   * picker; without it the detected language is used, and when there is none
-   * the picker opens first (UX 3.1, `TranslateAskLanguage`).
+   * picker; without it the detected language is used, even a guess below the
+   * confidence line (the quiet line then offers `Not Spanish?`), then the
+   * language chosen for the conversation, and the picker opens first only
+   * when there is neither (UX 3.1 / 3.4).
    */
   translate(slot: TextSlot, ref: MessageRef, text: string, source?: string): void {
     const key = messageKey(slot, ref.conversation, ref.messageId);
     this.explicitOriginal.delete(key);
     void (async () => {
-      const from = source ?? (await this.sourceFor(ref, text));
-      if (from === null) {
-        this.openSourcePicker(slot, ref, text);
+      const from = source !== undefined ? { tag: source, guess: null } : await this.sourceFor(ref, text);
+      if (from.tag === null) {
+        this.openSourcePicker(slot, ref, text, from.guess);
         return;
       }
-      await this.run(slot, ref, text, from, key);
+      await this.run(slot, ref, text, from.tag, key);
     })();
   }
 
-  /** The source a translation starts from: a confident detection, else the
-   *  conversation's last choice, else nothing (the picker decides). */
-  private async sourceFor(ref: MessageRef, text: string): Promise<string | null> {
-    const d = await this.detect(ref, text);
+  /**
+   * The source a translation starts from: the shared rule
+   * `resolveTranslationSource`, the same one the line up front reads
+   * ({@link resolution}), over the engine's answers asked now. In order: a
+   * confident detection; the conversation's language (picked, else most
+   * detected) when the detection is unsure and it is one of the close
+   * candidates; the guess when usable; the first other close candidate the device can translate from;
+   * the conversation's usual language; otherwise the picker, with the guess
+   * marked.
+   */
+  private async sourceFor(
+    ref: MessageRef,
+    text: string,
+  ): Promise<{ readonly tag: string | null; readonly guess: string | null }> {
+    const raw = await this.detect(ref, text);
     const r = this.deps.rules();
-    // A guess is not a source: below the shared confidence line the picker decides.
-    if (d !== null && r !== null && d.permille >= r.translationDetectionConfidentPermille()) return d.tag;
-    const prefs = this.prefsNow(ref.conversation);
-    return prefs.translationSource;
+    if (r === null) return { tag: raw?.tag ?? null, guess: null };
+    const languages = this.prefsNow(ref.conversation).languages;
+    const target = this.target();
+    const translatable: string[] = [];
+    for (const tag of this.askedTags(r, raw, usualLanguage(r, languages), target)) {
+      if ((await this.engineState(tag, target)) !== "unavailable") translatable.push(tag);
+    }
+    const res = resolveSourceFor(r, raw, languages, target, translatable);
+    return { tag: res.translateSource, guess: res.guess };
+  }
+
+  /** The engine's answer for a pair, asked now and cached. */
+  private async engineState(source: string, target: string): Promise<EngineState> {
+    const state = await this.deps.engines.translation.state(source, target);
+    this.engineStates.set(`t:${source}>${target}`, state);
+    return state;
   }
 
   private async run(slot: TextSlot, ref: MessageRef, text: string, source: string, key: string): Promise<void> {
@@ -403,6 +580,14 @@ export class TranslationController {
     }
     if (state === "needs-pack") {
       this.setView(key, { phase: "none" });
+      if (await this.packsBlocked()) {
+        this.setView(key, { phase: "packs-blocked", language: source });
+        return;
+      }
+      if (this.packFetch(source, target) === "system-settings") {
+        this.askForSystemPack(source, () => this.forgetState(`t:${source}>${target}`));
+        return;
+      }
       this.askForPack(
         "translation",
         source,
@@ -473,16 +658,26 @@ export class TranslationController {
     this.setView(key, { phase: "none" });
   }
 
-  /** `Not Spanish?`, or a message whose language nothing could tell. */
-  openSourcePicker(slot: TextSlot, ref: MessageRef, text: string): void {
+  /** `Not Spanish?`, or a message whose language nothing could tell.
+   *  `guess` marks a detector's unusable guess in the list. */
+  openSourcePicker(slot: TextSlot, ref: MessageRef, text: string, guess: string | null = null): void {
     const view = this.views.get(messageKey(slot, ref.conversation, ref.messageId));
-    const current = view !== undefined && "source" in view ? view.source : null;
+    const current = view !== undefined && "source" in view ? view.source : guess;
+    const known = this.detections.get(`${ref.conversation}|${ref.messageId}|${ref.lastOpId}`);
+    const candidates = candidateTags(known === undefined || known === "pending" ? null : known);
     this.pickerSignal[1]({
       use: "translation",
       current,
+      candidates,
       choose: (language) => {
         this.pickerSignal[1](null);
-        void this.updatePrefs(ref.conversation, (p) => ({ ...p, translationSource: language }));
+        const r = this.deps.rules();
+        if (r !== null) {
+          void this.updatePrefs(ref.conversation, (p) => ({
+            ...p,
+            languages: withLanguagePick(r, p.languages, language, Date.now()),
+          }));
+        }
         this.translate(slot, ref, text, language);
       },
       dismiss: () => this.pickerSignal[1](null),
@@ -503,6 +698,7 @@ export class TranslationController {
       use,
       language,
       wifiOnly,
+      systemSettings: false,
       download: () => {
         this.packSignal[1](null);
         if (wifiOnly) {
@@ -516,6 +712,43 @@ export class TranslationController {
         this.packSignal[1](null);
         onDismiss();
       },
+    });
+  }
+
+  /** Whether a pack may not be downloaded now (anti-censorship on). */
+  private async packsBlocked(): Promise<boolean> {
+    const check = this.deps.engines.packsBlocked;
+    if (check === undefined) return false;
+    return check.call(this.deps.engines).catch(() => true);
+  }
+
+  /** Who fetches the pack of a pair (`engines.ts`, `PackFetch`). */
+  private packFetch(source: string, target: string): "engine" | "system-settings" {
+    return this.deps.engines.translation.packFetch?.(source, target) ?? "engine";
+  }
+
+  /**
+   * UX 3.5 where the system downloads translation packs in its own settings
+   * (macOS): the dialog's button opens them. Lakko downloads nothing and
+   * waits for nothing: the line goes back to `Spanish · Translate`, and the
+   * next `Translate` asks the system again (the rule of ADR-0082 note of
+   * 2026-11-15 for a pack the device fetches later).
+   */
+  private askForSystemPack(language: string, onOpened: () => void): void {
+    this.packSignal[1]({
+      use: "translation",
+      language,
+      wifiOnly: false,
+      systemSettings: true,
+      download: () => {
+        this.packSignal[1](null);
+        onOpened();
+        this.bump();
+        void this.deps.engines.translation.openPackSettings?.().catch((err: unknown) => {
+          console.warn("[translation] opening the system settings failed", err instanceof Error ? err.name : "unknown");
+        });
+      },
+      dismiss: () => this.packSignal[1](null),
     });
   }
 
@@ -625,6 +858,16 @@ export class TranslationController {
     this.setAutoTranslate(conversation, true);
     if (this.translationState(language) !== "needs-pack") return;
     const target = this.target();
+    if (this.packFetch(language, target) === "system-settings") {
+      void this.packsBlocked().then((blocked) => {
+        if (blocked) return;
+        this.askForSystemPack(language, () => {
+          this.forgetState(`t:${language}>${target}`);
+          for (const k of [...this.autoTried]) if (k.startsWith(`text|${conversation}|`)) this.autoTried.delete(k);
+        });
+      });
+      return;
+    }
     this.askForPack(
       "translation",
       language,
@@ -752,6 +995,7 @@ export class TranslationController {
     this.pickerSignal[1]({
       use: "transcription",
       current,
+      candidates: [],
       choose: (language) => {
         this.pickerSignal[1](null);
         void this.updatePrefs(ref.conversation, (p) => ({ ...p, transcriptionLanguage: language }));
@@ -771,6 +1015,10 @@ export class TranslationController {
       return;
     }
     if (state === "needs-pack") {
+      if (await this.packsBlocked()) {
+        this.setTranscript(key, { phase: "packs-blocked" });
+        return;
+      }
       this.askForPack(
         "transcription",
         language,

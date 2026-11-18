@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target — `decode_poll_ballots` (ADR-0090 section 3.9).
+//! Fuzz target — `decode_poll_ballots` (ADR-0092 section 3.9).
 //!
 //! An old-ballots envelope is an MLS application message any member (or the
 //! zero-trust DS) can craft, and it reaches this bounded decoder before any

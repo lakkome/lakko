@@ -51,6 +51,8 @@ import {
 import { useGroupNames } from "./GroupNameContext";
 import { groupTitle } from "./group-title";
 import { previewLine } from "./list-preview";
+import { channelInviteRowPreview } from "./channel-invite-preview";
+import { publicOrigin } from "../platform";
 import { readIsActive } from "./membership-ended";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
 import { ownPersonKeyB64, personKeysOf } from "./person-key";
@@ -135,9 +137,17 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
       const g = c.head;
       const hex = syncGroupIdHex(g.group.groupId);
       const kind = conversationKindOf(g.group);
-      const summary = summarizeGroupSlot(logSlots()[hex], null);
+      const summary = summarizeGroupSlot(logSlots()[hex], null, ownPersonKeyB64(chats.identity()));
+      // ADR-0087 section 14 — a channel invitation reads as the invitation,
+      // never as its `/g/` link with the secret.
+      let invitation: string | null = null;
+      try {
+        invitation = channelInviteRowPreview(summary.preview, publicOrigin(), summary.previewChannelInviteB64);
+      } catch {
+        invitation = null;
+      }
       const line = previewLine({
-        preview: summary.preview,
+        preview: invitation ?? summary.preview,
         isOwn: summary.previewIsOwn,
         senderName:
           summary.lastAuthorKeyB64 === null
@@ -198,7 +208,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
     >
       <Show when={rows().length > 0}>
         <label class="lk-search lk-forward-search">
-          <Icon name="search" size={16} />
+          <Icon name="search" size={20} />
           <input
             type="search"
             placeholder={t("chats.search.placeholder")}
@@ -240,7 +250,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                           <span class="lk-ellipsis">{row.title}</span>
                         </span>
                         <Show when={row.pinned}>
-                          <Icon name="pin" size={14} title={t("chats.row.pinned")} />
+                          <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
                         </Show>
                       </div>
                       <div class="lk-row-line">

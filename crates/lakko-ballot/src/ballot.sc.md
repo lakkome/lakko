@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-ADR-0090 section 3.6: an anonymous ballot is not an MLS message (that would name the sender's leaf). It is a row on the group's journal, posted with the epoch access key every member holds, sealed under a key from the poll's secret, carrying a proof that its voter is in the poll's ring and a tag that makes one account one vote. Since 2026-11-15 (maintainer, after proving over the whole ring was rejected for its cost) the proof covers an anonymity set of at most 256 keys, so cost does not grow with the group.
+ADR-0092 section 3.6: an anonymous ballot is not an MLS message (that would name the sender's leaf). It is a row on the group's journal, posted with the epoch access key every member holds, sealed under a key from the poll's secret, carrying a proof that its voter is in the poll's ring and a tag that makes one account one vote. Since 2026-11-15 (maintainer, after proving over the whole ring was rejected for its cost) the proof covers an anonymity set of at most 256 keys, so cost does not grow with the group.
 
 ## Wire layout
 
@@ -55,7 +55,7 @@ The tag is `x^-1 U`, `U = hash_to_point("lakko/poll/tag-base/v1", len(group_id) 
 - One account has one tag per poll whatever version or set it proves over; two polls give tags with no visible relation.
 - Cost of casting and verifying is bounded by the 256-key set, not the group.
 
-## What a ballot reveals (also ADR-0090 section 3.8)
+## What a ballot reveals (also ADR-0092 section 3.8)
 
 - In a version over 256 keys, the voter is hidden among the 256 members of its set, not among the whole group.
 - Every member's own set contains its own key; members who do not vote appear only in others' sets. Counting how often a member's key appears across the poll's ballots therefore says a little about whether that member voted (a voter appears at least once, its own ballot), never which ballot is theirs.
@@ -83,5 +83,5 @@ Every row on a group journal can be written by any member or the Delivery Servic
 
 ## References
 
-- ADR-0090 sections 3.3 to 3.8, 10.
+- ADR-0092 sections 3.3 to 3.8, 10.
 - Tests in `tests/properties.rs`: `completeness_for_every_position_of_small_rings`, `in_a_large_ring_the_set_is_256_keys_drawn_deterministically`, `a_first_vote_draws_from_the_newest_version_and_a_revote_reuses_the_recorded_one`, `one_key_with_two_different_sets_has_one_tag_and_counts_once`, `a_ballot_verifies_only_for_its_version_set_poll_group_and_choices`, `ill_fitting_sets_and_sets_over_bad_keys_are_refused`, `the_draw_skips_keys_that_are_not_points`, `a_non_member_cannot_produce_a_verifying_ballot`, `hostile_bytes_never_panic`.

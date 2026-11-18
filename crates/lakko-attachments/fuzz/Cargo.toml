@@ -29,7 +29,7 @@ test = false
 doc = false
 bench = false
 
-# ADR-0090 section 8: the article block format. An article rides in a chat
+# ADR-0092 section 8: the article block format. An article rides in a chat
 # envelope any member or publisher writes; the decoder must never panic and
 # must accept only canonical bytes.
 [[bin]]
@@ -39,7 +39,7 @@ test = false
 doc = false
 bench = false
 
-# ADR-0090: the content payload and state snapshot carried by history bundles
+# ADR-0092: the content payload and state snapshot carried by history bundles
 # and vault records.
 [[bin]]
 name = "content_bundle_decode"

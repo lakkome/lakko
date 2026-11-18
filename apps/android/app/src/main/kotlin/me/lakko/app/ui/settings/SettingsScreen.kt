@@ -19,25 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Gavel
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Place
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Password
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.NotificationsOff
-import androidx.compose.material.icons.filled.Palette
-import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PersonRemove
-import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -59,7 +40,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
@@ -75,6 +55,9 @@ import me.lakko.app.ui.theme.ThemePreference
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The Settings tab — docs/ux/client-redesign.md section 5.5.
@@ -118,6 +101,8 @@ public fun SettingsScreen(
     /** reactions-and-emoji D3 / D4 — Appearance > Quick reaction: save the
      *  account's quick reaction (synced to its other devices). */
     onSetQuickReaction: (String) -> Unit = {},
+    /** docs/ux/donations.md section 4 — About > Support Lakko. */
+    onOpenSupport: () -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -184,22 +169,30 @@ public fun SettingsScreen(
             if (!notificationsEnabled) {
                 SettingsRow(
                     title = t(NOTIFICATIONS_OFF_TITLE_KEY),
-                    icon = Icons.Filled.NotificationsOff,
+                    icon = R.drawable.ic_lk_bell_slash,
                     onClick = { openAppNotificationSettings(context) },
                     supporting = t(NOTIFICATIONS_OFF_NOTICE_KEY),
                 )
             }
             // reactions-and-emoji section 12 — the one Reactions switch.
             ReactionNotificationsRow()
+            // docs/ux/channel-notifications.md section 3 — the one place the
+            // cost of reading channels without a push is said.
+            Text(
+                t("settings.notifications.channel_posts_late"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
 
             SectionLabel(t("settings.section.account"))
-            SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
+            SettingsRow(t("settings.section.profile"), R.drawable.ic_lk_person_square, onOpenProfile)
             accountProtection()
 
             // docs/ux/who-can-find-me.md section 2 — Privacy, after Profile: it
             // is about people, not keys, which is why it is not under Security.
             SectionLabel(t("settings.section.privacy"))
-            SettingsRow(t("who_can_find_me.title"), Icons.Filled.Visibility, onOpenWhoCanFindMe)
+            SettingsRow(t("who_can_find_me.title"), R.drawable.ic_lk_person_2_gear, onOpenWhoCanFindMe)
             ShowCityRow()
 
             SectionLabel(t("settings.section.security"))
@@ -207,37 +200,37 @@ public fun SettingsScreen(
             if (username != null) {
                 SettingsRow(
                     t("settings.password.title"),
-                    Icons.Filled.Password,
+                    R.drawable.ic_lk_lock,
                     onOpenPassword,
                     supporting = t("settings.password.change"),
                 )
             }
-            SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
+            SettingsRow(t("settings.passkeys.title"), R.drawable.ic_lk_passkey, onOpenPasskeys)
             // docs/ux/identity-recovery.md 17.5 - the attention badge while a
             // new device of the account is pending.
             val deviceNotice by me.lakko.app.devices.NewDeviceNotices.view.collectAsStateWithLifecycle()
             SettingsRow(
                 t("settings.devices.title"),
-                Icons.Filled.Devices,
+                R.drawable.ic_lk_devices,
                 onOpenDevices,
                 supporting = t("settings.security.devices.sub"),
                 attention = if (deviceNotice.attention) t("settings.devices.attention_a11y") else null,
             )
             SettingsRow(
                 t("settings.recovery.title"),
-                Icons.Filled.Restore,
+                R.drawable.ic_lk_lifepreserver,
                 onOpenRecovery,
                 supporting = t("settings.security.recovery.sub"),
             )
             SettingsRow(
                 t("discover.shared.title"),
-                Icons.Filled.Share,
+                R.drawable.ic_lk_radiowaves,
                 onOpenChannelsIShare,
                 supporting = t("discover.shared.settings_sub"),
             )
 
             SectionLabel(t("settings.section.folders"))
-            SettingsRow(t("settings.section.folders"), Icons.Filled.Folder, onOpenChatFolders)
+            SettingsRow(t("settings.section.folders"), R.drawable.ic_lk_folder, onOpenChatFolders)
 
             SectionLabel(t("settings.section.appearance"))
             Row(
@@ -246,10 +239,11 @@ public fun SettingsScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
-                Icon(
-                    Icons.Filled.Palette,
+                LkIcon(
+                    R.drawable.ic_lk_appearance,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = LkIconSize.Row,
                 )
                 Spacer(Modifier.width(16.dp))
                 Text(t("settings.appearance.theme"), modifier = Modifier.weight(1f))
@@ -285,10 +279,11 @@ public fun SettingsScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 4.dp),
             ) {
-                Icon(
-                    Icons.Filled.PlayCircle,
+                LkIcon(
+                    R.drawable.ic_lk_play_circle,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = LkIconSize.Row,
                 )
                 Spacer(Modifier.width(16.dp))
                 // ADR-0047 / UX spec §3 — autoplay downloads media, so it is
@@ -297,19 +292,21 @@ public fun SettingsScreen(
             }
 
             SectionLabel(t("settings.section.network"))
-            SettingsRow(t("settings.anti_censorship.title"), Icons.Filled.Shield, onOpenAntiCensorship)
+            SettingsRow(t("settings.anti_censorship.title"), R.drawable.ic_lk_network_shield, onOpenAntiCensorship)
 
             SectionLabel(t("settings.section.about"))
             InfoRow(
                 title = t("settings.about.version"),
                 value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
-                icon = Icons.Filled.Info,
+                icon = R.drawable.ic_lk_info_circle,
             )
             TranslationsUpdatedRow()
+            // docs/ux/donations.md section 4 - the app's own donations screen.
+            SettingsRow(t("settings.about.support"), R.drawable.ic_lk_heart, onOpenSupport)
             InfoRow(
                 title = t("settings.about.licence"),
                 value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
-                icon = Icons.Filled.Gavel,
+                icon = R.drawable.ic_lk_doc_text,
             )
             // ADR-0080 - the city database's attribution (CC BY 4.0).
             Text(
@@ -324,19 +321,19 @@ public fun SettingsScreen(
             SectionLabel(t("settings.section.danger_zone"), danger = true)
             SettingsRow(
                 title = t("settings.account.log_out"),
-                icon = Icons.AutoMirrored.Filled.Logout,
+                icon = R.drawable.ic_lk_logout,
                 onClick = { confirmingLogout = true },
                 danger = true,
             )
             SettingsRow(
                 title = t("settings.account.forget_device.label"),
-                icon = Icons.Filled.DeleteForever,
+                icon = R.drawable.ic_lk_trash,
                 onClick = { confirmingForget = true },
                 danger = true,
             )
             SettingsRow(
                 title = t("settings.account.delete.confirm"),
-                icon = Icons.Filled.PersonRemove,
+                icon = R.drawable.ic_lk_person_circle_xmark,
                 onClick = onDeleteAccount,
                 danger = true,
             )
@@ -406,7 +403,7 @@ private fun TranslationsUpdatedRow() {
     ListItem(
         headlineContent = { Text(t("settings.about.translations_updated", mapOf("date" to date))) },
         leadingContent = {
-            Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            LkIcon(R.drawable.ic_lk_info_circle, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
         },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
     )
@@ -420,7 +417,7 @@ private fun ShowCityRow() {
         headlineContent = { Text(t("settings.privacy.show_city")) },
         supportingContent = { Text(t("settings.privacy.show_city.sub")) },
         leadingContent = {
-            Icon(Icons.Filled.Place, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            LkIcon(R.drawable.ic_lk_location, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
         },
         trailingContent = {
             androidx.compose.material3.Switch(
@@ -433,11 +430,11 @@ private fun ShowCityRow() {
 }
 
 @Composable
-private fun InfoRow(title: String, value: String, icon: ImageVector) {
+private fun InfoRow(title: String, value: String, @androidx.annotation.DrawableRes icon: Int) {
     ListItem(
         headlineContent = { Text(title) },
         supportingContent = { Text(value) },
-        leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        leadingContent = { LkIcon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row) },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
     )
 }
@@ -445,7 +442,7 @@ private fun InfoRow(title: String, value: String, icon: ImageVector) {
 @Composable
 private fun SettingsRow(
     title: String,
-    icon: ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     onClick: () -> Unit,
     danger: Boolean = false,
     supporting: String? = null,
@@ -465,7 +462,7 @@ private fun SettingsRow(
             Text(title, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
         },
         supportingContent = supporting?.let { { Text(it) } },
-        leadingContent = { Icon(icon, contentDescription = null, tint = tint) },
+        leadingContent = { LkIcon(icon, contentDescription = null, tint = tint, size = LkIconSize.Row) },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
         modifier = Modifier.clickable(onClick = onClick),
     )

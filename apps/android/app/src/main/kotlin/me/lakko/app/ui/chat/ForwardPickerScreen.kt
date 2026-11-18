@@ -13,9 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +61,9 @@ import me.lakko.app.profile.ProfileDirectory
 import java.time.ZoneId
 import java.util.Locale
 import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * ADR-0052 decision 2 / `docs/ux/message-actions.md` section 5.1 — the
@@ -207,7 +207,7 @@ internal fun ConversationPicker(
                 title = { Text(title) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !busy) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -267,10 +267,11 @@ internal fun ConversationPicker(
                                         .padding(end = 16.dp)
                                         .semantics(mergeDescendants = true) { contentDescription = doneLabel },
                                 ) {
-                                    Icon(
-                                        Icons.Filled.Check,
+                                    LkIcon(
+                                        R.drawable.ic_lk_checkmark,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.primary,
+                                        size = LkIconSize.Row,
                                     )
                                     Text(
                                         text = doneLabel,

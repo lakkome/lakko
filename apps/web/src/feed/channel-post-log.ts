@@ -19,8 +19,18 @@
 
 import type { PersistedAttachment } from "../chat/message-log-store";
 
-/** Payload schema version this client writes. */
-export const CHANNEL_POST_LOG_VERSION = 1;
+/** Payload schema version this client writes. Version 2 records each
+ *  post's attachment kinds; a version-1 log (attachment posts stored as
+ *  empty text) is dropped and fetched again, so a caption-less photo already
+ *  held is named on the row too. Version 3 also keeps each attachment's
+ *  reference, so the feed draws a channel's photo, GIF, voice or video
+ *  message in place as it draws a group's (`docs/ux/feed.md` section 3, base
+ *  scenario 32); a version-2 log is dropped and fetched again the same way
+ *  (read markers live apart, in `feed-marks.ts`, and survive). Version 4
+ *  also keeps a content post's content (ADR-0092: a poll, checklist,
+ *  location, contact card or article), dropped and fetched again the same
+ *  way. */
+export const CHANNEL_POST_LOG_VERSION = 4;
 /** Most posts kept per channel (chosen, ADR-0063 open question 1). */
 export const CHANNEL_POST_CAP = 500;
 /** The server's post retention; older posts are dropped from the log. */
@@ -31,20 +41,65 @@ export const CHANNEL_POST_PAGE = 100;
  *  loop; the rest arrives on the next sync. */
 export const CHANNEL_POST_MAX_PAGES = 5;
 
+/** What the log keeps of one attachment: what names its kind on a list
+ *  row ("Photo", "GIF", "File"), and the reference the feed downloads and
+ *  opens it by. The log is sealed under the device key
+ *  (`channel-post-log-store.ts`), as the group message log holding the same
+ *  references is. */
+export interface PersistedChannelPostMedia {
+  readonly mime: string | null;
+  readonly kind: string | null;
+  /** Absent when it was not kept (a test row) or did not decode. */
+  readonly ref?: PersistedAttachment;
+}
+
 /** One decrypted post. */
 export interface PersistedChannelPost {
   /** The server's per-channel cursor, the post's id in the feed. */
   readonly cursor: number;
   /** Server receive time, unix ms. */
   readonly serverTsMs: number;
+  /** The post's text; empty for a photo, file or GIF posted without one. */
   readonly text: string;
-  /** The post's files (an article's images for a content post), in the
-   *  message log's stored form; absent on rows written before the field. A
-   *  forward from the feed re-encrypts them. */
-  readonly attachments?: readonly PersistedAttachment[];
-  /** ADR-0090 — a content post's `MessageContent`, verbatim; absent on an
-   *  ordinary post. */
+  /** The post's attachments, in order; absent when it has none. A channel's
+   *  row in Chats names the kind of the first when the text is empty, as a
+   *  group's row does. */
+  readonly media?: readonly PersistedChannelPostMedia[];
+  /** ADR-0092 — a content post's `MessageContent`, verbatim; absent on an
+   *  ordinary post. Its images (an article's) are in `media`. */
   readonly content?: unknown;
+}
+
+/** Most attachments recorded per post: the row names the first and counts
+ *  the rest, and a post carries few (chosen). */
+export const CHANNEL_POST_MEDIA_CAP = 16;
+
+/** A stored attachment reference: the four fields it cannot be fetched
+ *  without are strings, else it is left out (the media entry survives with
+ *  its kind). The optional metadata is re-checked on use by
+ *  `attachmentRefFromPersisted`. */
+function decodeRef(raw: unknown): PersistedAttachment | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  if (
+    typeof r.blobIdB64 !== "string" ||
+    typeof r.keyB64 !== "string" ||
+    typeof r.nonceB64 !== "string" ||
+    typeof r.sizeStr !== "string" ||
+    !/^[0-9]+$/.test(r.sizeStr)
+  ) {
+    return undefined;
+  }
+  return raw as PersistedAttachment;
+}
+
+function decodeMedia(raw: unknown): PersistedChannelPostMedia | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const mime = typeof r.mime === "string" ? r.mime : null;
+  const kind = typeof r.kind === "string" ? r.kind : null;
+  const ref = decodeRef(r.ref);
+  return { mime, kind, ...(ref === undefined ? {} : { ref }) };
 }
 
 /** One channel's slice of the log. */
@@ -76,13 +131,17 @@ function decodePost(raw: unknown): PersistedChannelPost | null {
   if (!isCursor(r.cursor) || r.cursor === 0) return null;
   if (typeof r.serverTsMs !== "number" || !Number.isFinite(r.serverTsMs)) return null;
   if (typeof r.text !== "string") return null;
+  const media = Array.isArray(r.media)
+    ? r.media
+        .slice(0, CHANNEL_POST_MEDIA_CAP)
+        .map(decodeMedia)
+        .filter((m): m is PersistedChannelPostMedia => m !== null)
+    : [];
   return {
     cursor: r.cursor,
     serverTsMs: r.serverTsMs,
     text: r.text,
-    ...(Array.isArray(r.attachments) && r.attachments.length > 0
-      ? { attachments: r.attachments as readonly PersistedAttachment[] }
-      : {}),
+    ...(media.length > 0 ? { media } : {}),
     ...(r.content === undefined || r.content === null ? {} : { content: r.content }),
   };
 }
@@ -145,11 +204,11 @@ export function retainChannels(log: ChannelPostLog, keep: ReadonlySet<string>): 
 
 /** What one post decoded to, as far as the log cares. */
 export type PostOutcome =
-  /** A post: kept, with its files and, for a content post, its content. */
+  /** A post (text, attachments or both): kept. */
   | {
       readonly kind: "text";
       readonly text: string;
-      readonly attachments?: readonly PersistedAttachment[];
+      readonly media?: readonly PersistedChannelPostMedia[];
       readonly content?: unknown;
     }
   /** Read and not a feed item (a metadata record, a malformed record, a
@@ -176,7 +235,7 @@ export interface ChannelSyncDeps {
 
 /**
  * Bring one channel's slot up to date: fetch after its cursor, decode each
- * post, keep the text ones. Stops at the first post that must wait for a
+ * post, keep the posts (text, attachments or both). Stops at the first post that must wait for a
  * seed, at an empty page, or after `CHANNEL_POST_MAX_PAGES` pages. A fetch
  * failure throws; the slot the caller holds is unchanged.
  */
@@ -200,13 +259,12 @@ export async function syncChannelSlot(
         break;
       }
       if (outcome.kind === "text") {
+        const media = (outcome.media ?? []).slice(0, CHANNEL_POST_MEDIA_CAP);
         fresh.push({
           cursor: p.cursor,
           serverTsMs: p.serverTsMs,
           text: outcome.text,
-          ...(outcome.attachments === undefined || outcome.attachments.length === 0
-            ? {}
-            : { attachments: outcome.attachments }),
+          ...(media.length > 0 ? { media } : {}),
           ...(outcome.content === undefined ? {} : { content: outcome.content }),
         });
       }

@@ -5,7 +5,7 @@
  * `docs/ux/attachments.md` section 6 — an audio file's own tags, read on the
  * sender's device before upload: title, artist, duration, embedded cover.
  * Best effort: a file without readable tags is titled by its file name, and
- * nothing here throws. No server sees any of it (ADR-0090 section 2).
+ * nothing here throws. No server sees any of it (ADR-0092 section 2).
  *
  * Read: ID3v2.3 / v2.4 (`TIT2`, `TPE1`, `APIC`) and the MP4 `ilst` items
  * (`©nam`, `©ART`, `covr`). ID3v2.2 and Vorbis comments are not read.
@@ -14,7 +14,7 @@ import { reencodePhoto } from "./photo-encode";
 
 /** Cover thumbnail size (UX 6, chosen). */
 export const AUDIO_COVER_PX = 320;
-/** Tag bound in bytes (ADR-0090 section 2); longer text is cut on a char. */
+/** Tag bound in bytes (ADR-0092 section 2); longer text is cut on a char. */
 export const AUDIO_TAG_MAX_BYTES = 255;
 const DURATION_TIMEOUT_MS = 5000;
 

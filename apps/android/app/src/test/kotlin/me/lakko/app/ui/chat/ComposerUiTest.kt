@@ -313,7 +313,7 @@ class ComposerUiTest {
 
     @Test
     fun theAttachButtonOpensTheAttachmentMenu() {
-        // ADR-0090 / docs/ux/attachments.md section 2 — the paperclip opens the
+        // ADR-0092 / docs/ux/attachments.md section 2 — the paperclip opens the
         // one attachment menu (a LakkoMenu sheet the chat screen owns), never a
         // stock dropdown in the composer: one tap, handed up once.
         compose.setContent { ComposerUnderTest(draft = "") }

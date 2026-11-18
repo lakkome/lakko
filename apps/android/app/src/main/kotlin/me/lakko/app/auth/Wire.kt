@@ -641,11 +641,6 @@ data class PasskeyVaultGetResponse(
     val sealed_entropy_b64: String? = null,
 )
 
-@Serializable
-data class PasskeyVaultDeleteResponse(
-    val deleted: Boolean,
-)
-
 /** `GET /vault/passkeys` (bearer): the credential ids that have keys stored. */
 @Serializable
 data class PasskeyVaultListResponse(

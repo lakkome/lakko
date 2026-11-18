@@ -399,7 +399,7 @@ pub enum PostContent<'a> {
     Message {
         /// The decrypted plaintext, as given.
         plaintext: &'a [u8],
-        /// What it parsed to (boxed: since ADR-0090 the largest variant).
+        /// What it parsed to (boxed: since ADR-0092 the largest variant).
         body: Box<MessageBody>,
     },
     /// A well-formed, in-bounds metadata record (boxed: with its photo it is

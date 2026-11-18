@@ -5,7 +5,7 @@ import LakkoCore
 import PhotosUI
 import SwiftUI
 
-// ADR-0090 section 8 / UX section 11 — the article editor and reader. The
+// ADR-0092 section 8 / UX section 11 — the article editor and reader. The
 // editor works in blocks (a paragraph, heading, subheading, quote, list item,
 // image or divider), each with its own marks; consecutive list items become
 // one list. No HTML, no Markdown: the core's closed block format only.
@@ -335,32 +335,32 @@ struct ArticleEditorScreen: View {
     private var formatBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                barButton("textformat.size", "article.format.heading") {
+                barButton(nil, "article.format.heading") {
                     mutateFocused { b in
                         b.kind = b.kind == .heading ? .subheading : (b.kind == .subheading ? .paragraph : .heading)
                     }
                 }
-                barButton("bold", "article.format.bold") { rich.toggle(.traitBold) }
-                barButton("italic", "article.format.italic") { rich.toggle(.traitItalic) }
-                barButton("list.bullet", "article.format.bullets") {
+                barButton(Text(verbatim: "B").bold(), "article.format.bold") { rich.toggle(.traitBold) }
+                barButton(Text(verbatim: "I").italic(), "article.format.italic") { rich.toggle(.traitItalic) }
+                barButton(nil, "article.format.bullets") {
                     mutateFocused { $0.kind = $0.kind == .bullet ? .paragraph : .bullet }
                 }
-                barButton("list.number", "article.format.numbers") {
+                barButton(nil, "article.format.numbers") {
                     mutateFocused { $0.kind = $0.kind == .number ? .paragraph : .number }
                 }
-                barButton("text.quote", "article.format.quote") {
+                barButton(nil, "article.format.quote") {
                     mutateFocused { $0.kind = $0.kind == .quote ? .paragraph : .quote }
                 }
-                barButton("link", "article.format.link") {
+                barButton(nil, "article.format.link") {
                     guard let i = focusedIndex else { return }
                     linkText = rich.selectedLink() ?? "https://"
                     linkFor = draft.blocks[i].id
                 }
-                barButton("photo", "article.format.image") {
+                barButton(nil, "article.format.image") {
                     guard draft.images.count < Int(limits.maxArticleImages) else { return }
                     pickerOpen = true
                 }
-                barButton("minus", "article.format.divider") {
+                barButton(nil, "article.format.divider") {
                     insertAfter(focused ?? draft.blocks.last?.id ?? UUID(), ArticleDraftBlock(kind: .divider))
                 }
                 if uploading { ProgressView().controlSize(.small).padding(.horizontal, 8) }
@@ -371,9 +371,14 @@ struct ArticleEditorScreen: View {
         .background(Color.lakkoSurface)
     }
 
-    private func barButton(_ icon: String, _ key: String, _ action: @escaping () -> Void) -> some View {
+    /// A format-bar button labelled with words, as on web and Android: the
+    /// Lakko icon set draws no text-format marks, and SF Symbols are not used.
+    private func barButton(_ glyph: Text?, _ key: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).frame(width: 40, height: 40)
+            (glyph ?? Text(l10n.t(key)))
+                .font(.subheadline)
+                .padding(.horizontal, 8)
+                .frame(minWidth: 40, minHeight: 40)
         }
         .buttonStyle(.plain)
         .foregroundStyle(Color.lakkoText)
@@ -437,7 +442,7 @@ struct ArticleReaderScreen: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { menuOpen = true } label: { Image(systemName: "ellipsis") }
+                    Button { menuOpen = true } label: { LkIconView(.ellipsisCircle, size: 24) }
                         .accessibilityLabel(l10n.t("article.more"))
                 }
             }

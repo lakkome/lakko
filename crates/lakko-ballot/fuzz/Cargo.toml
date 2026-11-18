@@ -18,7 +18,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 lakko-ballot = { path = ".." }
 
-# ADR-0090 section 10: a ballot row any member (or the Delivery Service) can
+# ADR-0092 section 10: a ballot row any member (or the Delivery Service) can
 # post to a group journal. The row split, AEAD refusal, padding and ballot
 # parser, and proof verification under a fixed ring nobody holds a key of.
 [[bin]]
@@ -28,7 +28,7 @@ test = false
 doc = false
 bench = false
 
-# ADR-0090 section 3.9: the ring encoding the open-items hand-over carries,
+# ADR-0092 section 3.9: the ring encoding the open-items hand-over carries,
 # written by the admitting committer.
 [[bin]]
 name = "ring_decode"

@@ -374,7 +374,7 @@ struct PipCallView: View {
                         name: model.shown?.name ?? model.label,
                         identity: model.shown?.stage?.id ?? model.label,
                         size: min(proxy.size.width, proxy.size.height) * 0.4,
-                        placeholderSymbol: "person.fill",
+                        placeholderIcon: .personFill,
                         photo: model.shown?.stage?.isLocal == true
                             ? .own : model.peerKey.map(AvatarPhoto.person))
                 }

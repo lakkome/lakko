@@ -65,14 +65,36 @@ public object DeviceGroupLifecycle {
      * [currentSeed], else the cached account seed. `null` when the device
      * holds none. Always a fresh copy.
      */
-    public fun lineageSeed(context: Context, accountIdB64: String, currentSeed: ByteArray? = null): ByteArray? =
-        try {
+    public fun lineageSeed(context: Context, accountIdB64: String, currentSeed: ByteArray? = null): ByteArray? {
+        val seed = try {
             OwnPredecessorStore.onDevice(context).conversationSeed(accountIdB64)
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "own predecessors unreadable; the current seed names the DeviceGroup", cause)
             null
         } ?: currentSeed?.copyOf()
             ?: AccountIdentitySeedStore.getAccountIdentitySeed(context, accountIdB64)
+            ?: return null
+        // G-56 (contract section 2.4): the account's own conversation link,
+        // as this device last read it, names the key its siblings' lineage
+        // derives. A seed that does not derive it names another journal:
+        // "none", and nothing opens, founds or knocks a DeviceGroup.
+        val recorded = try {
+            me.lakko.app.auth.OwnConversationKeyStore.onDevice(context).load(accountIdB64)?.conversationKey
+        } catch (_: Throwable) {
+            null
+        } ?: return seed
+        val lineageKey = try {
+            Identity.fromSeed(seed).use { it.signaturePublicKey() }
+        } catch (cause: Throwable) {
+            seed.fill(0)
+            Log.w(LOG_TAG, "lineage key not derived", cause)
+            return null
+        }
+        if (me.lakko.app.auth.lineageFollowsLink(recorded, lineageKey)) return seed
+        seed.fill(0)
+        Log.w(LOG_TAG, "G-56: the account's earlier keys are not on this device; no DeviceGroup")
+        return null
+    }
 
     /** The account's DeviceGroup journal id ([lineageSeed]); `null` when this
      *  device cannot derive it yet. */

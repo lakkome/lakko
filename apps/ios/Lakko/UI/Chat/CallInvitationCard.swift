@@ -22,8 +22,7 @@ struct CallInvitationCard: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "phone.fill")
-                .font(.system(size: 16, weight: .semibold))
+            LkIconView(.phoneFill, size: 20, relativeTo: nil)
                 .frame(width: 36, height: 36)
                 .background(
                     Circle().fill(

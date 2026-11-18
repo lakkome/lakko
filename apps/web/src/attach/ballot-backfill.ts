@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.9 — a device that adopts an open anonymous poll from a
+ * ADR-0092 section 3.9 — a device that adopts an open anonymous poll from a
  * hand-over fetches the poll's earlier ballot rows from the group journal
  * itself: a ballot is a journal row sealed under the poll's secret (which the
  * hand-over carried), not an MLS message, so the device can open and verify

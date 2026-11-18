@@ -367,12 +367,12 @@ public enum CallHistory {
     /// The direction glyph at the leading edge, so the direction does not rest
     /// on the wording alone. The same three the conversation's own call row
     /// uses.
-    public static func directionGlyph(_ entry: CallHistoryEntry) -> String {
+    static func directionGlyph(_ entry: CallHistoryEntry) -> LkIcon {
         switch entry.outcome {
         case .answered:
-            return entry.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
+            return entry.direction == .outgoing ? .phoneOutgoing : .phoneIncoming
         case .missed, .declined, .failed:
-            return "phone.down"
+            return .phoneDown
         }
     }
 

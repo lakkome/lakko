@@ -5,11 +5,11 @@
 # `poll` — poll body, author signature and non-anonymous vote fold (spec)
 
 **Module:** `crates/lakko-attachments/src/poll.rs`
-**One line:** The canonical binary poll body of ADR-0090 section 3.1, the author signature over it, and the one fold every client runs over non-anonymous votes and closes.
+**One line:** The canonical binary poll body of ADR-0092 section 3.1, the author signature over it, and the one fold every client runs over non-anonymous votes and closes.
 
 ## Why this module exists
 
-A poll is a chat message whose body every member must read identically, and whose tally every client must compute identically, or the three clients disagree on a vote count. The body is binary and canonical so the author signature covers exactly one encoding; the signature lets a poll reach a newcomer through another member (the ADR-0090 section 3.9 hand-over) without that member being able to forge or alter it. The fold lives here, once, so no client re-implements last-writer-wins.
+A poll is a chat message whose body every member must read identically, and whose tally every client must compute identically, or the three clients disagree on a vote count. The body is binary and canonical so the author signature covers exactly one encoding; the signature lets a poll reach a newcomer through another member (the ADR-0092 section 3.9 hand-over) without that member being able to forge or alter it. The fold lives here, once, so no client re-implements last-writer-wins.
 
 ## Public contract
 
@@ -47,4 +47,4 @@ The body is base64 in a chat envelope any member writes; bounded by `MAX_POLL_BO
 
 ## References
 
-ADR-0090 sections 3.1, 3.2, 3.5; C-68; tests in `poll.rs` and `tests/attachment_kinds.rs`.
+ADR-0092 sections 3.1, 3.2, 3.5; C-68; tests in `poll.rs` and `tests/attachment_kinds.rs`.

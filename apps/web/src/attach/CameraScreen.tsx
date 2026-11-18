@@ -179,7 +179,7 @@ export function CameraScreen(props: {
           title={t("common.close")}
           onClick={() => props.onCancel()}
         >
-          <Icon name="close" />
+          <Icon name="xmark" />
         </button>
         <Show when={cameraCount() > 1 && phase() === "live"}>
           <button

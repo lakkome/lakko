@@ -190,7 +190,7 @@ public final class BackupClient {
             own: await ownEnvelopes(accountIdB64)
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
-        let (blob, floor) = await frameWithHead(envelope: envelope)
+        let (blob, floor) = try await frameWithHead(envelope: envelope)
         try await storage.putBackup(envelopeBytes: blob)
         // Persist the floor ONLY on a successful mint (ADR-0037 §6).
         // `putFloor` never lowers an existing floor.
@@ -208,7 +208,12 @@ public final class BackupClient {
     /// failure (network, 5xx, no session token) falls back to the UNFRAMED
     /// legacy envelope so a backup never fails because the head could not be
     /// minted — the mirror image of the restore-side fail-open on an absent head.
-    private func frameWithHead(envelope: Data) async -> (blob: Data, floor: BackupFloor?) {
+    ///
+    /// Except a sign-out: auth answering `key-generation-superseded` or
+    /// `device-revoked` stops the upload (``BackupHeadMintError/signedOut``).
+    /// Storage checks the token without auth, so a legacy envelope from a
+    /// superseded device would replace the account's backup with stale state.
+    private func frameWithHead(envelope: Data) async throws -> (blob: Data, floor: BackupFloor?) {
         do {
             let hash = backupEnvelopeHash(envelopeBytes: envelope)
             let minted = try await mintBackupHead(
@@ -219,6 +224,9 @@ public final class BackupClient {
             )
             let blob = try frameBackupBlob(head: minted.head, envelope: envelope)
             return (blob, BackupFloor(version: minted.version, envelopeHash: hash))
+        } catch BackupHeadMintError.signedOut {
+            NSLog("backup-head mint: this device was signed out; nothing is uploaded")
+            throw BackupHeadMintError.signedOut
         } catch {
             NSLog("backup-head mint failed, writing legacy envelope: \(error)")
             return (envelope, nil)

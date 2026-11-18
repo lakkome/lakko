@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3 end to end on this client's wiring, against the real
+ * ADR-0092 section 3 end to end on this client's wiring, against the real
  * core: a member signs an anonymous poll over the roster, every receiver
  * files it with version 0 of its ring, two members cast ballots, the rows
  * are filed by the receive path and the fold counts each account once.

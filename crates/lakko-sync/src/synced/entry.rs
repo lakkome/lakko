@@ -292,8 +292,39 @@ pub enum BoundsError {
     /// `reactions-and-emoji.md` D3).
     #[error("quick reaction length is out of bounds")]
     QuickReaction,
+    /// A channel subscription's state byte was neither left nor subscribed
+    /// (maintainer decision of 2026-11-13).
+    #[error("unknown channel subscription state")]
+    ChannelSubscriptionState,
+    /// A channel subscription's role byte was none this build knows.
+    #[error("unknown channel subscription role")]
+    ChannelSubscriptionRole,
+    /// A channel subscription's read key was neither absent nor 32 bytes.
+    #[error("channel subscription read key length is out of bounds")]
+    ChannelSubscriptionReadKey,
+    /// A channel subscription's PublisherGroup id was not 32 bytes for a
+    /// co-publisher, or present for another role.
+    #[error("channel subscription publisher group id does not fit its role")]
+    ChannelSubscriptionPublisherGroup,
+    /// A channel subscription's owner account key was not 32 bytes for a
+    /// co-publisher, or present for another role (ADR-0090 section 2.3).
+    #[error("channel subscription owner key does not fit its role")]
+    ChannelSubscriptionOwnerKey,
+    /// A channel subscription's name was neither empty nor a display name.
+    #[error("channel subscription name fails the display-name rule")]
+    ChannelSubscriptionName,
+    /// A channel subscription's handle was neither empty nor a canonical
+    /// name.
+    #[error("channel subscription handle is not a canonical name")]
+    ChannelSubscriptionHandle,
+    /// The account already holds the most live channel subscriptions a
+    /// client writes
+    /// ([`super::channel_subscription::CHANNEL_SUBSCRIPTIONS_MAX_CLIENT`]). A
+    /// writer-side rule, never a decode bound.
+    #[error("too many channel subscriptions")]
+    TooManyChannelSubscriptions,
     /// An own poll choice list holds more than 10 indices, an index of 10 or
-    /// more, or indices not strictly ascending (ADR-0090 section 3.6).
+    /// more, or indices not strictly ascending (ADR-0092 section 3.6).
     #[error("poll choices are out of bounds")]
     PollChoices,
     /// A new own poll-choice register would pass
@@ -1034,7 +1065,13 @@ pub enum SyncEntry {
     ChannelComment(super::channel_comment::ChannelCommentEntry),
     /// The account's quick reaction (UX `reactions-and-emoji.md` D3).
     QuickReaction(super::quick_reaction::QuickReactionEntry),
-    /// The account's own choice in one poll (ADR-0090 section 3.6).
+    /// One of the account's channel subscriptions, or its leave (2026-11-13).
+    /// Appended last.
+    ChannelSubscription(super::channel_subscription::ChannelSubscriptionEntry),
+    /// One of a private channel's admission seeds, the owner account's own
+    /// copy (ADR-0090 open question 4). Appended last.
+    ChannelAdmissionSeed(super::channel_admission_seed::ChannelAdmissionSeedEntry),
+    /// The account's own choice in one poll (ADR-0092 section 3.6).
     /// Appended last.
     PollChoice(super::poll_choice::PollChoiceEntry),
 }
@@ -1095,6 +1132,17 @@ pub enum RegisterKey {
     ),
     /// The account's one quick-reaction register.
     QuickReaction,
+    /// The subscription register of this channel. Appended last, so the
+    /// register order of every older kind is unchanged.
+    ChannelSubscription([u8; super::channel_subscription::CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN]),
+    /// The admission-seed register of this channel, version and seed id
+    /// (two seeds of one version coexist). Appended
+    /// last, so the register order of every older kind is unchanged.
+    ChannelAdmissionSeed(
+        [u8; super::channel_admission_seed::CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        u16,
+        [u8; 32],
+    ),
     /// The own-choice register of this poll (conversation, poll message id).
     /// Appended last, so the register order of every older kind is unchanged.
     PollChoice(ConversationRef, i64),
@@ -1133,7 +1181,9 @@ const TAG_DEVICE_ACK: u8 = 16;
 const TAG_CHANNEL_REACTION: u8 = 17;
 const TAG_CHANNEL_COMMENT: u8 = 18;
 const TAG_QUICK_REACTION: u8 = 19;
-const TAG_POLL_CHOICE: u8 = 20;
+const TAG_CHANNEL_SUBSCRIPTION: u8 = 20;
+const TAG_CHANNEL_ADMISSION_SEED: u8 = 21;
+const TAG_POLL_CHOICE: u8 = 22;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1166,6 +1216,11 @@ impl SyncEntry {
                 RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },
             Self::QuickReaction(_) => RegisterKey::QuickReaction,
+            Self::ChannelSubscription(c) => RegisterKey::ChannelSubscription(c.channel_id),
+            Self::ChannelAdmissionSeed(a) => {
+                let (channel, version, seed_id) = a.sort_key();
+                RegisterKey::ChannelAdmissionSeed(channel, version, seed_id)
+            },
             Self::PollChoice(p) => {
                 RegisterKey::PollChoice(p.conversation.clone(), p.poll_message_id)
             },
@@ -1196,6 +1251,7 @@ impl SyncEntry {
             Self::ConversationEnd(e) => e.validate(),
             Self::ChannelReaction(r) => r.validate(),
             Self::QuickReaction(q) => q.validate(),
+            Self::ChannelSubscription(c) => c.validate(),
             Self::PollChoice(p) => p.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
@@ -1203,7 +1259,8 @@ impl SyncEntry {
             | Self::Draft(_)
             | Self::ConversationOrder(_)
             | Self::DeviceAck(_)
-            | Self::ChannelComment(_) => Ok(()),
+            | Self::ChannelComment(_)
+            | Self::ChannelAdmissionSeed(_) => Ok(()),
         }
     }
 
@@ -1295,6 +1352,16 @@ impl SyncEntry {
             Self::QuickReaction(q) => {
                 out.push(TAG_QUICK_REACTION);
                 q.encode_body(&mut out);
+            },
+            // The key first, the state byte after it: on an exact stamp tie a
+            // subscription (state 2) beats a leave (state 1).
+            Self::ChannelSubscription(c) => {
+                out.push(TAG_CHANNEL_SUBSCRIPTION);
+                c.encode_body(&mut out);
+            },
+            Self::ChannelAdmissionSeed(a) => {
+                out.push(TAG_CHANNEL_ADMISSION_SEED);
+                a.encode_body(&mut out);
             },
             Self::PollChoice(p) => {
                 out.push(TAG_POLL_CHOICE);
@@ -1487,6 +1554,12 @@ impl SyncEntry {
             ),
             TAG_QUICK_REACTION => Self::QuickReaction(
                 super::quick_reaction::QuickReactionEntry::take_body(&mut cur)?,
+            ),
+            TAG_CHANNEL_SUBSCRIPTION => Self::ChannelSubscription(
+                super::channel_subscription::ChannelSubscriptionEntry::take_body(&mut cur)?,
+            ),
+            TAG_CHANNEL_ADMISSION_SEED => Self::ChannelAdmissionSeed(
+                super::channel_admission_seed::ChannelAdmissionSeedEntry::take_body(&mut cur)?,
             ),
             TAG_POLL_CHOICE => {
                 Self::PollChoice(super::poll_choice::PollChoiceEntry::take_body(&mut cur)?)

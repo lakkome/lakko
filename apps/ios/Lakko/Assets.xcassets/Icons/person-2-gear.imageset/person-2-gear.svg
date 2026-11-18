@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+  <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+  <path d="M8.5 5.1A3.4 3.4 0 0 1 8.5 11.9A3.4 3.4 0 0 1 8.5 5.1M11.84 20.5L3 20.5A1 1 0 0 1 2 19.5C2 16.88 4.73 14.6 8.5 14.6C9.7 14.6 10.8 14.83 11.74 15.23" fill="none" stroke="#000000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M13.64 5.12A3 3 0 0 1 15.75 4.25A3 3 0 1 1 14.47 9.96" fill="none" stroke="#000000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M17.2 15.17L17.39 14.2L18.61 14.2L18.8 15.17L19.26 15.36L20.08 14.81L20.94 15.67L20.39 16.49L20.58 16.95L21.55 17.14L21.55 18.36L20.58 18.55L20.39 19.01L20.94 19.83L20.08 20.69L19.26 20.14L18.8 20.33L18.61 21.3L17.39 21.3L17.2 20.33L16.74 20.14L15.92 20.69L15.06 19.83L15.61 19.01L15.42 18.55L14.45 18.36L14.45 17.14L15.42 16.95L15.61 16.49L15.06 15.67L15.92 14.81L16.74 15.36L17.2 15.17ZM18 15.97A1.77 1.77 0 0 0 18 19.52A1.77 1.77 0 0 0 18 15.97Z" fill="#000000" fill-rule="evenodd" stroke="#000000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

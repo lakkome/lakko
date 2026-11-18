@@ -7,7 +7,7 @@ import LakkoCore
 import UIKit
 import UniformTypeIdentifiers
 
-// ADR-0090 — the chat screen's side of the attachment menu and the content
+// ADR-0092 — the chat screen's side of the attachment menu and the content
 // kinds: which rows the menu has, what the poll editor offers, and every
 // content action, each a thin call into ``ChatRepository``.
 
@@ -57,7 +57,7 @@ extension ChatViewModel {
             do {
                 try await repository.sendContent(groupIdHex: groupIdHex, content: draft, attachments: attachments)
             } catch {
-                NSLog("ADR-0090: content send failed")
+                NSLog("ADR-0092: content send failed")
                 self?.reportAttachmentProblem(.key("attach.error.not_sent"))
             }
         }
@@ -95,7 +95,7 @@ extension ChatViewModel {
             do {
                 try await op(repository, groupIdHex)
             } catch {
-                NSLog("ADR-0090: content op failed")
+                NSLog("ADR-0092: content op failed")
                 self?.reportAttachmentProblem(.key("attach.error.not_sent"))
             }
         }

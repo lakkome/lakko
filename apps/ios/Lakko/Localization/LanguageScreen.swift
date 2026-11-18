@@ -46,7 +46,7 @@ struct LanguageScreen: View {
                     NavigationLink {
                         TranslationSettingsScreen()
                     } label: {
-                        Label(l10n.t("settings.translation.title"), systemImage: "character.bubble")
+                        Label(l10n.t("settings.translation.title"), icon: .translate)
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -104,8 +104,7 @@ struct LanguageScreen: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if checked {
-                    Image(systemName: "checkmark")
-                        .font(.body.weight(.semibold))
+                    LkIconView(.checkmark, size: 20)
                         .foregroundStyle(Color.lakkoAccent)
                 }
             }
@@ -142,7 +141,7 @@ struct LanguageButton: View {
             presented = true
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "globe")
+                LkIconView(.globe, size: 20)
                 Text(l10n.ownName(of: l10n.language))
                     .lineLimit(1)
             }
@@ -161,7 +160,7 @@ struct LanguageButton: View {
                             Button {
                                 presented = false
                             } label: {
-                                Image(systemName: "xmark")
+                                LkIconView(.xmark, size: 24)
                             }
                             .accessibilityLabel(l10n.t("common.close"))
                         }

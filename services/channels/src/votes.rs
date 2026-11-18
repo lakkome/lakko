@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Channel poll votes: the stored shapes, the ordering rule, the in-memory
-//! store and the per-tag replace cap ([ADR-0090] section 4.3).
+//! store and the per-tag replace cap ([ADR-0092] section 4.3).
 //!
 //! A vote row is `(post, tag, labels, at_ms)`. The tag is the anonymous
 //! credential's per-poll tag (`lakko-anon-cred`): the same for one account
@@ -19,7 +19,7 @@
 //! [`VOTE_WINDOW_MS`] of the service clock, so a captured request that never
 //! landed expires.
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -155,7 +155,7 @@ impl MemoryVotes {
 /// One cap entry: requests counted and the start of their window.
 type CapEntries = HashMap<(ChannelId, u64, Tag), (u32, Instant)>;
 
-/// The in-memory cap on accepted requests per tag (ADR-0090 4.3: "repeated
+/// The in-memory cap on accepted requests per tag (ADR-0092 4.3: "repeated
 /// replaces under one tag are capped in memory per tag"). Per process; a
 /// restart resets it.
 #[derive(Default)]

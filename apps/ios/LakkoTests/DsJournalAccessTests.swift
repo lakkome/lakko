@@ -13,9 +13,12 @@ private final class FakeSigner: DsGroupSigner {
     let label: String
     var signed: [(method: String, path: String, query: String, body: Data)] = []
 
-    init(epoch: UInt64, label: String? = nil) {
+    let keyByte: UInt8?
+
+    init(epoch: UInt64, label: String? = nil, key: UInt8? = nil) {
         epochValue = epoch
         self.label = label ?? "sig-e\(epoch)"
+        keyByte = key
     }
 
     func epoch() -> UInt64 { epochValue }
@@ -25,7 +28,9 @@ private final class FakeSigner: DsGroupSigner {
         return label
     }
 
-    func verifyingKey() -> Data { Data(repeating: UInt8(truncatingIfNeeded: epochValue), count: 32) }
+    func verifyingKey() -> Data {
+        Data(repeating: keyByte ?? UInt8(truncatingIfNeeded: epochValue), count: 32)
+    }
 }
 
 /// A DS stand-in whose answers are scripted per request, recording every
@@ -339,6 +344,20 @@ final class DsJournalAccessTests: XCTestCase {
         memory.observe(journal: "g", signer: FakeSigner(epoch: 4))
         memory.observe(journal: "g", signer: FakeSigner(epoch: 5))
         XCTAssertNil(memory.observe(journal: "g", signer: FakeSigner(epoch: 4)))
+    }
+
+    /// ADR-0081 third amendment — a journal founded afresh restarts its epoch
+    /// numbers: the same number under another key is another chain, and the
+    /// old chain's signer is no "previous" for it.
+    func testTheSameEpochUnderAnotherKeyIsANewChain() {
+        let memory = DsSignerMemory()
+        memory.observe(journal: "g", signer: FakeSigner(epoch: 0, key: 0xA0))
+        memory.observe(journal: "g", signer: FakeSigner(epoch: 1, key: 0xA1))
+        XCTAssertNil(memory.observe(journal: "g", signer: FakeSigner(epoch: 1, key: 0xB1)))
+        XCTAssertNil(memory.previousSigner(journal: "g", before: 2))
+        XCTAssertEqual(
+            (memory.observe(journal: "g", signer: FakeSigner(epoch: 2, key: 0xB2)) as? FakeSigner)?.verifyingKey(),
+            Data(repeating: 0xB1, count: 32), "the new chain's epoch 1 is the previous one")
     }
 
     // MARK: ADR-0081 — which failed commit is lost (the sweep's classification)

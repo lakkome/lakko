@@ -5,7 +5,7 @@ import AVFoundation
 import LakkoCore
 import SwiftUI
 
-// ADR-0090 / `docs/ux/attachments.md` — the bubbles of the new kinds: poll
+// ADR-0092 / `docs/ux/attachments.md` — the bubbles of the new kinds: poll
 // (section 7.2), checklist (8.2), location (9.3), contact card (10.2),
 // article (11.2) and audio (section 6). Each folds through the core and
 // draws; the actions go back through ``ChatViewModel``.
@@ -165,7 +165,7 @@ struct PollCard: View {
                         .frame(width: geo.size.width * CGFloat(percent) / 100)
                 }
                 HStack {
-                    if mine { Image(systemName: "checkmark").font(.footnote.weight(.bold)) }
+                    if mine { LkIconView(.checkmark, size: 14, relativeTo: .footnote) }
                     Text(text)
                     Spacer()
                     Text("\(percent)%").font(.footnote.monospacedDigit())
@@ -191,9 +191,9 @@ struct PollCard: View {
                     if sendState == .sending, mine {
                         ProgressView().controlSize(.small)
                     } else {
-                        Image(systemName: view.poll.body.multiple
-                              ? (ticked.contains(i) ? "checkmark.square.fill" : "square")
-                              : "circle")
+                        LkIconView(view.poll.body.multiple
+                                   ? (ticked.contains(i) ? .checkmarkCircleFill : .circle)
+                                   : .circle, size: 20)
                             .foregroundStyle(Color.lakkoAccent)
                     }
                     Text(text).foregroundStyle(Color.lakkoText)
@@ -341,7 +341,7 @@ struct ChecklistCard: View {
             onTick(item.item, !done)
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: done ? "checkmark.square.fill" : "square")
+                LkIconView(done ? .checkmarkCircleFill : .circle, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                 Text(item.text).foregroundStyle(done ? Color.lakkoTextMuted : Color.lakkoText)
                 Spacer()
@@ -375,7 +375,7 @@ struct LocationCard: View {
             }
         } label: {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "mappin")
+                LkIconView(.location, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                     .frame(width: 40, height: 40)
                     .background(Circle().fill(Color.lakkoAccentSoft))
@@ -560,7 +560,7 @@ struct AudioBubble: View {
         let title = ref.title ?? ref.name ?? l10n.t("attach.menu.audio")
         HStack(spacing: 12) {
             Button { player.toggle(ref: ref) } label: {
-                Image(systemName: playing ? "pause.fill" : "play.fill")
+                LkIconView(playing ? .pauseFill : .playFill, size: 20)
                     .foregroundStyle(Color.lakkoAccentForeground)
                     .frame(width: 40, height: 40)
                     .background(RoundedRectangle(cornerRadius: LakkoRadius.control).fill(Color.lakkoAccent))

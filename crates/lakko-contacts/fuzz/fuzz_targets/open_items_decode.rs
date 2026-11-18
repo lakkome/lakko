@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target — `decode_open_items` (ADR-0090 section 3.9).
+//! Fuzz target — `decode_open_items` (ADR-0092 section 3.9).
 //!
 //! An open-items hand-over is an MLS application message any member of a
 //! group (or the zero-trust DS replaying a corrupt row) can craft, and it

@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -50,6 +48,8 @@ import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.contactRouteKey
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * New group — docs/ux/new-group.md, the Android shape.
@@ -122,6 +122,9 @@ public fun NewGroupScreen(
     androidx.compose.runtime.LaunchedEffect(handle, public) {
         visiblyTaken = false
         if (!public || handle.length < 3 || !wellFormed) return@LaunchedEffect
+        // A name a failed create of this account claimed is this account's (a
+        // retry takes it back): the lookup answering it is not "taken".
+        if (chatRepository.isNewGroupHandleKept(handle)) return@LaunchedEffect
         kotlinx.coroutines.delay(500)
         visiblyTaken = chatRepository.handleVisiblyTaken(handle) == true
     }
@@ -135,7 +138,7 @@ public fun NewGroupScreen(
                 title = { Text(t("chats.new_group.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !creating) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -293,7 +296,9 @@ public fun NewGroupScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(resolved.primary, style = MaterialTheme.typography.titleMedium)
                                 val line = when {
-                                    canPick -> resolved.verifiedUsername?.let { "@$it" }
+                                    // A contact with no display name is titled "@username"; the
+                                    // line would repeat it.
+                                    canPick -> resolved.verifiedUsername?.let { "@$it" }?.takeIf { it != resolved.primary }
                                     else -> t("chats.new_group.accept_again")
                                 }
                                 line?.let {
@@ -363,7 +368,7 @@ public fun NewGroupScreen(
                                     null
                                 }
                                 claimed = chatRepository.claimHandleForNewGroup(groupId, handle, public, facts)
-                            }
+                            }.also { chatRepository.forgetNewGroupHandle(handle) }
                         } catch (cause: Throwable) {
                             me.lakko.app.rethrowIfCancelled(cause) {
                                 creating = false
@@ -371,6 +376,7 @@ public fun NewGroupScreen(
                             android.util.Log.w("NewGroupScreen", "group creation failed", cause)
                             val handleCopy = me.lakko.app.chat.handleWriteFailure(cause)
                             if (handleCopy.key == "group_handle.error.held") {
+                                chatRepository.forgetNewGroupHandle(handle)
                                 handleError = handleCopy
                             } else if (handleCopy.key != "group_handle.error.failed") {
                                 error = handleCopy

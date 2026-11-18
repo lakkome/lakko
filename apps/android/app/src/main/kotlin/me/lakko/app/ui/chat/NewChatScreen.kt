@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -44,6 +42,8 @@ import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.MessageAction
 import me.lakko.app.ui.contacts.contactRouteKey
 import me.lakko.app.ui.contacts.messageAction
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * New chat — the contact picker behind the Chats tab's compose action.
@@ -81,7 +81,7 @@ public fun NewChatScreen(
                 title = { Text(t("chats.create.chat")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - the ADR-0090 content payload and state snapshot a history
+//! Fuzz target - the ADR-0092 content payload and state snapshot a history
 //! bundle or a vault record carries (`Content::from_payload`,
 //! `ContentState::decode`). The bytes were written by one of the account's
 //! own devices, possibly a compromised one, and reach these decoders on a

@@ -9,15 +9,15 @@
 
 ## Why this module exists
 
-ADR-0090 section 3.6 ("Own choice"): an anonymous group ballot is proven by a shared key and a tag, and a channel vote is anonymous at the channel service, so the voter's other devices cannot learn the voter's own choice from what they read. The account's devices keep it among themselves in this register. It never reaches a tally.
+ADR-0092 section 3.6 ("Own choice"): an anonymous group ballot is proven by a shared key and a tag, and a channel vote is anonymous at the channel service, so the voter's other devices cannot learn the voter's own choice from what they read. The account's devices keep it among themselves in this register. It never reaches a tally.
 
 ## The register
 
 - Key: `(conversation, poll message id)`. The conversation is the `ConversationRef` every synced register uses (a group by MLS group id, a channel by channel id). The poll message id is an `i64`: the DS `messageId` of the poll row in a group, the post cursor in a channel. One register serves group and channel polls (maintainer, 2026-11-15).
 - Value: the chosen option indices, strictly ascending, at most 10, each below 10, and `set_version` (u32). An empty list is a retracted vote and is kept, so a device offline across the retraction cannot bring the vote back with an older stamp.
-- `set_version` is the ring version the account's anonymity set in this poll was drawn from at its first vote (`lakko_ballot::draw_set`, ADR-0090 section 3.6 as amended 2026-11-15); 0 for a channel poll. Every later vote, from any device of the account, passes it to `lakko_ballot::cast` so it draws the same set; only a first vote, with no register held, draws from the newest version.
+- `set_version` is the ring version the account's anonymity set in this poll was drawn from at its first vote (`lakko_ballot::draw_set`, ADR-0092 section 3.6 as amended 2026-11-15); 0 for a channel poll. Every later vote, from any device of the account, passes it to `lakko_ballot::cast` so it draws the same set; only a first vote, with no register held, draws from the newest version.
 - Folded by the ordinary rule of `state.rs`: the greater HLC stamp wins, on an exact tie the larger canonical bytes. Commutative, associative, idempotent (the state property tests include this register in `arb_entry`).
-- Canonical persistence tag 20; the persisted state version is 14 (13, which had no set version, and older refused; no back-compat: nothing is deployed).
+- Canonical persistence tag 22; the persisted state version is 16 (15 and older refused; no back-compat: nothing is deployed). Renumbered from tag 20 and version 14 when main was merged (main took tags 20 and 21 and versions 13 to 15).
 
 ## Retention
 
@@ -53,4 +53,4 @@ Bytes from another device of the account or from a backup. A hostile device of t
 
 ## References
 
-ADR-0090 section 3.6; ADR-0087 section 9. Tests: `state::tests::a_poll_choice_round_trips_retracts_and_goes_with_its_ended_conversation`, `the_poll_choice_cap_bounds_new_registers_only`, `poll_choice::tests::*`, `fuzz_api_tests::the_synced_decode_oracle_holds_on_poll_choices`.
+ADR-0092 section 3.6; ADR-0087 section 9. Tests: `state::tests::a_poll_choice_round_trips_retracts_and_goes_with_its_ended_conversation`, `the_poll_choice_cap_bounds_new_registers_only`, `poll_choice::tests::*`, `fuzz_api_tests::the_synced_decode_oracle_holds_on_poll_choices`.

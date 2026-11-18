@@ -8,8 +8,6 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.Bookmark
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,10 +34,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import me.lakko.app.ui.components.submitOnHardwareEnter
@@ -54,7 +50,6 @@ import me.lakko.app.chat.ForwardRef
 import me.lakko.app.chat.ForwardRequest
 import me.lakko.app.chat.PendingMessageJump
 import me.lakko.app.chat.forwardLineLabel
-import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -62,15 +57,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.filled.Mood
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.FilterChip
@@ -143,8 +129,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.selected
@@ -177,6 +161,9 @@ import uniffi.lakko_ffi_uniffi.conversationInfoSections
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * 1×1 chat screen — `LazyColumn` of messages + composer.
@@ -486,7 +473,7 @@ public fun ChatScreen(
     val pickFilesLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> ->
-        // ADR-0090 / attachments UX section 4 — the same send preview, file
+        // ADR-0092 / attachments UX section 4 — the same send preview, file
         // chips, the bytes unchanged.
         viewModel.openSendPreview(uris, filesOnly = true)
     }
@@ -496,11 +483,11 @@ public fun ChatScreen(
     val pickVisualLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(),
     ) { uris: List<Uri> ->
-        // ADR-0090 / attachments UX section 3 — the send preview: a photo is
+        // ADR-0092 / attachments UX section 3 — the send preview: a photo is
         // re-encoded with its metadata dropped, each item its own message.
         viewModel.openSendPreview(uris, filesOnly = false)
     }
-    // ADR-0090 / attachments UX section 6 — the document picker filtered to audio.
+    // ADR-0092 / attachments UX section 6 — the document picker filtered to audio.
     val pickAudioLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> -> viewModel.onPickedAudio(uris) }
@@ -512,7 +499,7 @@ public fun ChatScreen(
         // all-groups poll hands this group to this screen (and stops holding
         // its in-flight slot) before the refresh below runs.
         viewModel.claimScreenPoll()
-        // ADR-0090 / UX 7.5 — an anonymous vote left unsent goes again at open.
+        // ADR-0092 / UX 7.5 — an anonymous vote left unsent goes again at open.
         viewModel.retryFailedBallots()
         try {
             // ADR-0040 (G-35) — re-publish any pending commit that crashed
@@ -1345,7 +1332,7 @@ public fun ChatScreen(
         // multiplied.
         val liveSelection = selection
         if (liveSelection != null) {
-            // ADR-0090 / UX 11a — a selection holding a poll, a checklist or a
+            // ADR-0092 / UX 11a — a selection holding a poll, a checklist or a
             // card that may not be shared is not forwarded at all (a forward
             // that silently left a message out would not be what was chosen).
             val selectionForwardable = viewModel.selectedMessagesInOrder()
@@ -1355,8 +1342,12 @@ public fun ChatScreen(
                 busy = bulkBusy,
                 status = bulkStatus,
                 forwardAllowed = selectionForwardable,
-                onForward = {
-                    if (!selectionForwardable) return@SelectionActionBar
+                onForward = onForward@{
+                    // A channel invitation card is never forwarded
+                    // (maintainer, 2026-11-13), nor a poll, a checklist or a
+                    // card that may not be shared (ADR-0092 / UX 11a): Forward
+                    // is disabled for such a selection; this is the floor.
+                    if (!liveSelection.forwardEnabled || !selectionForwardable) return@onForward
                     val requests = viewModel.selectedMessagesInOrder().map { msg ->
                         ForwardRequest(
                             sourceGroupIdHex = state.groupIdHex,
@@ -1553,7 +1544,7 @@ private fun Header(
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onNavigateBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("chat.header.back"))
+                LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("chat.header.back"))
             }
         },
         title = {
@@ -1600,10 +1591,10 @@ private fun Header(
             // (the overlay carries the Accept / Decline / Hang up affordances).
             if (!callActive) {
                 IconButton(onClick = onStartCall) {
-                    Icon(Icons.Filled.Call, contentDescription = t("chat.call.voice"))
+                    LkIcon(R.drawable.ic_lk_phone, contentDescription = t("chat.call.voice"))
                 }
                 IconButton(onClick = onStartVideoCall) {
-                    Icon(Icons.Filled.Videocam, contentDescription = t("chat.call.video"))
+                    LkIcon(R.drawable.ic_lk_video, contentDescription = t("chat.call.video"))
                 }
             }
             // The overflow menu held one item, `Members` / `Details`, and it
@@ -1933,11 +1924,11 @@ private fun CallHistoryRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
-                Icon(
-                    imageVector = if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call,
+                LkIcon(
+                    icon = if (entry.video) R.drawable.ic_lk_video else R.drawable.ic_lk_phone,
                     contentDescription = null,
                     tint = tint,
-                    modifier = Modifier.size(16.dp),
+                    size = LkIconSize.Mark,
                 )
                 Text(
                     text = me.lakko.app.calls.callRowText(entry, strings),
@@ -2024,11 +2015,11 @@ private fun CallInviteCard(
                 .background(contentColor.copy(alpha = 0.14f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                Icons.Filled.Call,
+            LkIcon(
+                R.drawable.ic_lk_phone_fill,
                 contentDescription = null,
                 tint = contentColor,
-                modifier = Modifier.size(20.dp),
+                size = LkIconSize.Row,
             )
         }
         Text(
@@ -2144,6 +2135,27 @@ internal fun Bubble(
     // ADR-0082 — translation of this message, and the transcript of its voice
     // or video message, on this device. A row of an older segment takes none.
     val tr = rememberBubbleTranslation(msg, isOwn)
+    // ADR-0087 section 14 — a message carrying a channel invitation card that
+    // opens is the card, not its text (the `/g/` link with its secret): the
+    // bubble leaves the text out, and Copy and Translate have nothing to take.
+    // A link sent as text alone that resolves to a channel's is the same once
+    // the card says so.
+    val cardReplacesText = remember(msg.channelInvite, msg.deleted) {
+        !msg.deleted && channelPost == null &&
+            me.lakko.app.ui.channels.ChannelInviteActionsHolder.actions != null &&
+            me.lakko.app.ui.channels.channelInviteLine(msg.channelInvite) != null
+    }
+    var linkCardResolved by remember(msg.messageId, msg.text) { mutableStateOf(false) }
+    val textHidden = cardReplacesText || (channelPost == null && linkCardResolved)
+    // A bare `/g/` link with no card (`BareGroupLink.kt`): Copy takes the
+    // words the bubble shows in its place, never the secret.
+    val bareCopyLink = remember(msg.text, msg.channelInvite) {
+        if (channelPost == null && msg.channelInvite?.isEmpty() != false) {
+            me.lakko.app.ui.channels.bareGroupLinkOf(msg.text, me.lakko.app.config.ApiEndpoints.webOrigin)
+        } else {
+            null
+        }
+    }
 
     // docs/ux/text-size.md — the message's text, its meta line, the quote,
     // the forwarded line, link previews and the reaction chips follow the
@@ -2299,7 +2311,7 @@ internal fun Bubble(
                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
                         )
                     } else if (msg.content != null) {
-                        // ADR-0090 — a poll, checklist, location, contact card
+                        // ADR-0092 — a poll, checklist, location, contact card
                         // or article: a card of its own kind. UX 11a — a
                         // forwarded one carries the ordinary forward line.
                         msg.forward?.let { forward ->
@@ -2372,17 +2384,54 @@ internal fun Bubble(
                                 lineHeight = largeEmojiSize(emojiOnly) * 1.15f,
                             )
                         } else if (msg.text.isNotEmpty()) {
-                            // docs/ux/message-links.md section 1 — the accent on
-                            // an incoming bubble; on an outgoing one the accent
-                            // is the background, so the bubble's own text colour.
-                            me.lakko.app.ui.components.MessageLinkText(
-                                // Translation UX 3.2 — the translation takes the
-                                // place of the text inside the same bubble.
-                                text = tr.shownText,
-                                style = MaterialTheme.typography.bodyMedium,
-                                linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
-                                onLongPress = openMenu,
-                            )
+                            // A bare `/g/` link with no card (an older message,
+                            // `BareGroupLink.kt`): until it is drawn as its card,
+                            // or opened as a group's live link, the words in
+                            // its place, never its secret.
+                            val bareLink = remember(msg.text, msg.channelInvite) {
+                                if (channelPost == null && msg.channelInvite?.isEmpty() != false) {
+                                    me.lakko.app.ui.channels.bareGroupLinkOf(
+                                        msg.text,
+                                        me.lakko.app.config.ApiEndpoints.webOrigin,
+                                    )
+                                } else {
+                                    null
+                                }
+                            }
+                            val bareOpenings = me.lakko.app.ui.channels.BareGroupLinks.openings
+                                .collectAsStateWithLifecycle().value
+                            LaunchedEffect(bareLink) { bareLink?.let(me.lakko.app.ui.channels.BareGroupLinks::start) }
+                            val bareWords = bareLink?.let {
+                                me.lakko.app.ui.channels.bareGroupLinkBubbleWords(it, bareOpenings[it])
+                            }
+                            // ADR-0087 section 14.1 — a bubble whose channel
+                            // invitation card is drawn shows the card alone:
+                            // the text is the `/g/` link with its secret.
+                            if (bareWords != null && me.lakko.app.ui.channels.bubbleDrawsMessageText(
+                                    cardDrawn = channelPost == null,
+                                    cardOpens = cardReplacesText,
+                                    linkCardResolved = linkCardResolved,
+                                )
+                            ) {
+                                Text(text = bareWords, style = MaterialTheme.typography.bodyMedium)
+                            } else if (me.lakko.app.ui.channels.bubbleDrawsMessageText(
+                                    cardDrawn = channelPost == null,
+                                    cardOpens = cardReplacesText,
+                                    linkCardResolved = linkCardResolved,
+                                )
+                            ) {
+                                // docs/ux/message-links.md section 1 — the accent on
+                                // an incoming bubble; on an outgoing one the accent
+                                // is the background, so the bubble's own text colour.
+                                me.lakko.app.ui.components.MessageLinkText(
+                                    // Translation UX 3.2 — the translation takes the
+                                    // place of the text inside the same bubble.
+                                    text = tr.shownText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
+                                    onLongPress = openMenu,
+                                )
+                            }
                             // ADR-0087 section 14.1 — a channel invitation:
                             // the link drawn as a card with Subscribe / Open.
                             if (channelPost == null) {
@@ -2392,6 +2441,8 @@ internal fun Bubble(
                                     msg.messageId,
                                     bubbleColor = background,
                                     contentColor = contentColor,
+                                    outgoing = isOwn,
+                                    onResolved = { drawn -> linkCardResolved = drawn },
                                 )
                             }
                             tr.captionLine?.let { line ->
@@ -2514,8 +2565,18 @@ internal fun Bubble(
                         messageActionsFor(
                             isOwn = isOwn,
                             deleted = msg.deleted,
-                            // Translation UX 3.2 — Copy copies the text shown.
-                            text = tr.copyText,
+                            // Translation UX 3.2 — Copy copies the text shown;
+                            // an invitation card shows none.
+                            text = if (textHidden) {
+                                ""
+                            } else {
+                                bareCopyLink?.let {
+                                    me.lakko.app.ui.channels.bareGroupLinkBubbleWords(
+                                        it,
+                                        me.lakko.app.ui.channels.BareGroupLinks.openings.value[it],
+                                    )
+                                } ?: tr.copyText
+                            },
                             menuAvailable = menuAvailable,
                             // UX 5.1 — no Forward on a row still sending or
                             // one that failed.
@@ -2523,11 +2584,12 @@ internal fun Bubble(
                             // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
                             pinLabel = pinLabel,
                             saved = savedMessage,
+                            invitationCard = textHidden || me.lakko.app.chat.carriesInvitationCard(msg),
                         ).copy(
-                            canTranslate = menuAvailable && tr.menuOffered,
+                            canTranslate = menuAvailable && tr.menuOffered && !textHidden,
                             translateLabel = tr.menuLabel,
                         ).let { base ->
-                            // ADR-0090 — a content message has no text to copy
+                            // ADR-0092 — a content message has no text to copy
                             // or edit; its own rows replace those (UX 7.3: no
                             // Edit on a poll).
                             val contentCtx = contentBubbleCtx
@@ -2561,7 +2623,7 @@ internal fun Bubble(
                                 )
                             }
                         }.let { base ->
-                            // ADR-0090 / UX 11a and 10.1 — no Forward on a poll
+                            // ADR-0092 / UX 11a and 10.1 — no Forward on a poll
                             // or checklist, nor on a card of a person who does
                             // not let others share it.
                             if (!base.canForward || me.lakko.app.chat.isForwardableMessage(msg, cardShareableOf(context))) {
@@ -2746,10 +2808,11 @@ internal fun ReplyStrip(
             modifier = Modifier.weight(1f),
         )
         IconButton(onClick = onClose) {
-            Icon(
-                imageVector = Icons.Filled.Close,
+            LkIcon(
+                icon = R.drawable.ic_lk_xmark,
                 contentDescription = t(CANCEL_REPLY_LABEL),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Row,
             )
         }
     }
@@ -2784,11 +2847,11 @@ internal fun ForwardLine(
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.Forward,
+        LkIcon(
+            icon = R.drawable.ic_lk_forward,
             contentDescription = null,
             tint = contentColor.copy(alpha = 0.7f),
-            modifier = Modifier.size(14.dp),
+            size = LkIconSize.Mark,
         )
         Spacer(Modifier.width(4.dp))
         Text(
@@ -2902,11 +2965,11 @@ private fun BubbleMeta(
         }
         if (saved) {
             // Saved section 2 — a small mark, only the person sees it.
-            Icon(
-                imageVector = Icons.Filled.Bookmark,
+            LkIcon(
+                icon = R.drawable.ic_lk_bookmark_fill,
                 contentDescription = t("chat.message.saved_mark"),
                 tint = contentColor.copy(alpha = 0.7f),
-                modifier = Modifier.size(12.dp),
+                size = LkIconSize.Mark,
             )
         }
         if (time != null) {
@@ -2930,11 +2993,11 @@ private fun BubbleMeta(
         }
         if (readState != OwnReadState.None) {
             val read = readState == OwnReadState.Read
-            Icon(
-                imageVector = if (read) Icons.Filled.DoneAll else Icons.Filled.Check,
+            LkIcon(
+                icon = if (read) R.drawable.ic_lk_checkmark_double else R.drawable.ic_lk_checkmark,
                 contentDescription = t(if (read) "chat.message.read" else "chat.message.sent"),
                 tint = if (read) contentColor else contentColor.copy(alpha = 0.7f),
-                modifier = Modifier.height(14.dp),
+                size = LkIconSize.Mark,
             )
         }
     }
@@ -3632,7 +3695,7 @@ internal fun Composer(
                 // ACTION_OPEN_DOCUMENT picker via the launcher
                 // wired in [ChatScreen]; the contract surfaces both
                 // photos and arbitrary files behind a single tap.
-                // ADR-0090 / docs/ux/attachments.md section 2 — the paperclip
+                // ADR-0092 / docs/ux/attachments.md section 2 — the paperclip
                 // opens the one attachment menu (a LakkoMenu sheet) owned by
                 // ChatScreen; never a stock dropdown.
                 IconButton(
@@ -3640,7 +3703,7 @@ internal fun Composer(
                     enabled = !sending && !uploading,
                     modifier = Modifier.testTag("composer-attach"),
                 ) {
-                    Icon(Icons.Filled.AttachFile, contentDescription = t("chat.composer.attach"))
+                    LkIcon(R.drawable.ic_lk_paperclip, contentDescription = t("chat.composer.attach"), size = LkIconSize.Row)
                 }
                 // UX 5.2 — a pill field on the sunken surface that grows to
                 // five lines and then scrolls; the IME resizes the screen
@@ -3655,7 +3718,11 @@ internal fun Composer(
                     placeholder = { Text(t("chat.composer.placeholder")) },
                     singleLine = false,
                     maxLines = 5,
-                    enabled = !sending,
+                    // Not disabled while a message is on its way: the draft was
+                    // cleared when it was sent, and a disabled field loses the
+                    // focus, so the keyboard closed after every message and what
+                    // was typed next went nowhere (base scenario 17, seen
+                    // 2026-11-11). Send stays off until the message is out.
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -3695,7 +3762,7 @@ internal fun Composer(
                     onClick = onOpenPicker,
                     enabled = !sending,
                 ) {
-                    Icon(Icons.Filled.Mood, contentDescription = t("chat.composer.emoji_gifs"))
+                    LkIcon(R.drawable.ic_lk_face_smiling, contentDescription = t("chat.composer.emoji_gifs"), size = LkIconSize.Row)
                 }
             }
             Spacer(Modifier.width(4.dp))
@@ -3732,7 +3799,7 @@ internal fun Composer(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                     } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                        LkIcon(R.drawable.ic_lk_send_fill, contentDescription = null, size = LkIconSize.Row)
                     }
                 }
             } else if (recState !is me.lakko.app.media.RecState.Preview) {
@@ -4543,7 +4610,7 @@ private fun MembersSheet(
                     title = { Text(t("chat.transfer.action")) },
                     navigationIcon = {
                         IconButton(onClick = viewModel::cancelTransferStep) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     },
                 )
@@ -4594,7 +4661,7 @@ private fun MembersSheet(
                 },
                 navigationIcon = {
                     IconButton(onClick = viewModel::toggleMembersPanel) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -5026,8 +5093,8 @@ private fun MembersSheet(
                                 .clickable(enabled = !busy, onClick = viewModel::openAddMembers)
                                 .padding(vertical = 8.dp),
                         ) {
-                            Icon(
-                                Icons.Filled.PersonAdd,
+                            LkIcon(
+                                R.drawable.ic_lk_person_plus,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(32.dp).padding(4.dp),
@@ -5327,7 +5394,7 @@ private fun selectionRowLabel(msg: ChatMessage): String =
 
 /** Diameter of the selection mark; also its tap-friendly footprint inside the
  *  row (the whole row is the target, so the mark itself needs no 40dp). */
-private val SELECTION_MARK_SIZE: Dp = 22.dp
+private val SELECTION_MARK_SIZE: Dp = 26.dp
 
 /** Gap between the mark and the row it belongs to. */
 private val SELECTION_MARK_GAP: Dp = 8.dp
@@ -5411,21 +5478,18 @@ private fun SelectableTimelineRow(
 @Composable
 private fun SelectionMark(selected: Boolean) {
     if (selected) {
-        Icon(
-            imageVector = Icons.Filled.CheckCircle,
+        LkIcon(
+            icon = R.drawable.ic_lk_checkmark_circle_fill,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(SELECTION_MARK_SIZE),
+            size = SELECTION_MARK_SIZE,
         )
     } else {
-        Box(
-            modifier = Modifier
-                .size(SELECTION_MARK_SIZE)
-                .border(
-                    width = 1.5.dp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    shape = CircleShape,
-                ),
+        LkIcon(
+            icon = R.drawable.ic_lk_circle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = SELECTION_MARK_SIZE,
         )
     }
 }
@@ -5464,7 +5528,7 @@ private fun SelectionBar(
  * The same elevated surface and hairline top as the composer it stands in
  * for (design system: composer = elevated surface, hairline top).
  */
-/** ADR-0090 section 7 — whether the person behind a card's account key lets
+/** ADR-0092 section 7 — whether the person behind a card's account key lets
  *  others share their card, per the newest profile this device holds. */
 private fun cardShareableOf(context: android.content.Context): (ByteArray) -> Boolean = { key ->
     me.lakko.app.profile.ProfileDirectory.get(context)
@@ -5480,7 +5544,7 @@ private fun SelectionActionBar(
     onDelete: () -> Unit,
     /** Saved section 2 — Select mode's Save, beside Delete and Forward. */
     onSave: () -> Unit = {},
-    /** ADR-0090 / UX 11a — `false` when the selection holds a message that is
+    /** ADR-0092 / UX 11a — `false` when the selection holds a message that is
      *  never forwarded (a poll, a checklist, a card that may not be shared). */
     forwardAllowed: Boolean = true,
 ) {
@@ -5502,23 +5566,23 @@ private fun SelectionActionBar(
                     enabled = selection.forwardEnabled && forwardAllowed && !busy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Forward,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_forward,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("chat.message.forward"))
                 }
                 TextButton(
                     onClick = onSave,
-                    enabled = selection.forwardEnabled && !busy,
+                    enabled = selection.saveEnabled && !busy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.BookmarkBorder,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_bookmark,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("chat.select.save"))
@@ -5533,10 +5597,10 @@ private fun SelectionActionBar(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Delete,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_trash,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("common.delete"))

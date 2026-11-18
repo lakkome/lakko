@@ -18,7 +18,7 @@ import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.MessageContent
 
 /**
- * ADR-0063 / ADR-0090 — a channel post's files and content reach the feed's
+ * ADR-0063 / ADR-0092 — a channel post's files and content reach the feed's
  * log, the feed item, and a forward from the feed.
  */
 class FeedChannelPostContentTest {
@@ -41,6 +41,7 @@ class FeedChannelPostContentTest {
         thumb = null,
     )
     private val stored: PersistedAttachment = PersistedAttachment.from(photo)
+    private val storedMedia = PersistedChannelPostMedia(mime = photo.mime, kind = photo.kind, ref = stored)
     private val location = MessageContent.Location(
         uniffi.lakko_ffi_uniffi.SharedLocation(latE7 = 1, lonE7 = 2, accuracyM = 3u, fixAtMs = 4L, name = null),
     )
@@ -48,8 +49,8 @@ class FeedChannelPostContentTest {
     @Test
     fun theFeedKeepsFilesAndLocationCardArticlePostsAndSkipsPollsAndChecklists() {
         val envelope = "{}".toByteArray()
-        val chat = feedPostOutcome(MessageBodyKind.CHAT, "", listOf(stored), envelope) as PostOutcome.Text
-        assertEquals(listOf(stored), chat.attachments)
+        val chat = feedPostOutcome(MessageBodyKind.CHAT, "", listOf(storedMedia), envelope) as PostOutcome.Text
+        assertEquals(listOf(storedMedia), chat.media)
         assertNull(chat.contentEnvelopeB64)
         assertEquals(PostOutcome.Skip, feedPostOutcome(MessageBodyKind.CHAT, "", emptyList(), envelope))
         for (k in listOf(MessageBodyKind.LOCATION, MessageBodyKind.CONTACT_CARD, MessageBodyKind.ARTICLE)) {
@@ -67,11 +68,11 @@ class FeedChannelPostContentTest {
                 ChannelPostPage(listOf(ChannelPostWire(1, now, "w1")).filter { it.cursor > after })
 
             override suspend fun decode(channelIdHex: String, payloadB64: String): PostOutcome =
-                PostOutcome.Text("", listOf(stored), "ZW52")
+                PostOutcome.Text("", listOf(storedMedia), "ZW52")
         }
         val slot = syncChannelSlot(id, null, deps, now)
         val post = slot.posts.single()
-        assertEquals(listOf(stored), post.attachments)
+        assertEquals(listOf(storedMedia), post.media)
         assertEquals("ZW52", post.contentEnvelopeB64)
         val json = Json { ignoreUnknownKeys = true }
         val old = json.decodeFromString(
@@ -79,7 +80,7 @@ class FeedChannelPostContentTest {
             """{"version":1,"channels":{"$id":{"cursor":1,"posts":[{"cursor":1,"serverTsMs":$now,"text":"t"}]}}}""",
         )
         val oldPost = old.channels.getValue(id).posts.single()
-        assertTrue(oldPost.attachments.isEmpty())
+        assertTrue(oldPost.media.isEmpty())
         assertNull(oldPost.contentEnvelopeB64)
     }
 
@@ -98,7 +99,7 @@ class FeedChannelPostContentTest {
 
     @Test
     fun aChannelItemCarriesItsFilesAndContentAndAForwardTakesBoth() {
-        val input = buildFeedInput(ctx(listOf(PersistedChannelPost(1, now, "", listOf(stored), "ZW52"))))
+        val input = buildFeedInput(ctx(listOf(PersistedChannelPost(1, now, "", listOf(storedMedia), "ZW52"))))
         val ref = input.refs.single()
         assertTrue(input.candidates.single().hasMedia)
         assertEquals(photo, ref.message.attachments.single().ref)

@@ -11,13 +11,13 @@ public enum ChannelPostBody: Equatable {
     case chat(text: String, attachments: [AttachmentRef], forward: ForwardRef?)
     case edit(target: UInt64, text: String)
     case delete(target: UInt64)
-    /// ADR-0090 — a poll, checklist, location, contact card or article post:
+    /// ADR-0092 — a poll, checklist, location, contact card or article post:
     /// the envelope bytes (standard base64) it is stored as.
     case content(envelopeB64: String, attachments: [AttachmentRef])
-    /// ADR-0090 section 4.3 — a publisher closed the poll `target`, with the
+    /// ADR-0092 section 4.3 — a publisher closed the poll `target`, with the
     /// tally it read then (frozen for every reader).
     case pollClose(target: UInt64, tally: ChannelPollTally?)
-    /// ADR-0090 section 5 — a publisher's tick, added item or edit on the
+    /// ADR-0092 section 5 — a publisher's tick, added item or edit on the
     /// checklist (or an article edit) `target`, as a signed post op.
     case contentOp(target: UInt64, envelopeB64: String)
     /// Anything else a post may carry that a channel does not show (a
@@ -111,13 +111,13 @@ public struct ChannelTimelineItem: Equatable, Identifiable {
     /// The ADR-0023 op that changed it last (its cursor), for the `edited`
     /// mark's ordering.
     public var lastOpCursor: UInt64?
-    /// ADR-0090 — a content post's envelope (standard base64).
+    /// ADR-0092 — a content post's envelope (standard base64).
     public var contentEnvelopeB64: String?
-    /// ADR-0090 section 4.3 — closed by a publisher's close op, with the
+    /// ADR-0092 section 4.3 — closed by a publisher's close op, with the
     /// tally it froze.
     public var closedByOp = false
     public var frozenTally: ChannelPollTally?
-    /// ADR-0090 section 5 — the publishers' ticks, added items and edits.
+    /// ADR-0092 section 5 — the publishers' ticks, added items and edits.
     public var contentOps = PersistedContentOps()
 
     public var id: UInt64 { cursor }
@@ -254,7 +254,7 @@ public enum ChannelTimeline {
             content: item.contentEnvelopeB64.map { PersistedContent(envelopeB64: $0, ops: item.contentOps) })
     }
 
-    /// ADR-0090 section 5 — in a channel every post is the channel's: the
+    /// ADR-0092 section 5 — in a channel every post is the channel's: the
     /// author and every publisher's op are filed under one stand-in key, so
     /// the checklist fold treats publishers as the author (only publishers
     /// write to a post).

@@ -291,7 +291,7 @@ pub mod fuzz_api {
         crate::public_seed::fuzz_open(wire)
     }
 
-    /// Decode `bytes` as a channel poll's frozen tally (ADR-0090 section
+    /// Decode `bytes` as a channel poll's frozen tally (ADR-0092 section
     /// 4.3). `true` when it is refused, or decodes and re-encodes to the
     /// identical bytes with every count at most its voters.
     #[must_use]

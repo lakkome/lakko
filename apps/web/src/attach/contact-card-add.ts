@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 7 / UX 10.2 — `Add contact` on a shared contact card.
+ * ADR-0092 section 7 / UX 10.2 — `Add contact` on a shared contact card.
  * The card carries nothing that lets the receiver write to the person
  * described: the ordinary username lookup runs (so that person's "Who can
  * find me" decides), and a request goes out only when the account it finds

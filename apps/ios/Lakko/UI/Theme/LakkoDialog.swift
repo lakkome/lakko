@@ -356,13 +356,13 @@ private struct LakkoActionSheetPresenter: ViewModifier {
     private func deferring(_ items: [LakkoMenuItem]) -> [LakkoMenuItem] {
         items.map { item in
             switch item.kind {
-            case let .action(systemImage, destructive, enabled, perform):
-                return .action(item.title, systemImage: systemImage, destructive: destructive,
+            case let .action(icon, destructive, enabled, perform):
+                return .action(item.title, icon: icon, destructive: destructive,
                                enabled: enabled) { pick(perform) }
             case let .choice(checked, perform):
                 return .choice(item.title, checked: checked) { pick(perform) }
-            case let .submenu(systemImage, sub):
-                return .submenu(item.title, systemImage: systemImage, items: deferring(sub))
+            case let .submenu(icon, sub):
+                return .submenu(item.title, icon: icon, items: deferring(sub))
             case .text:
                 return item
             }
@@ -426,7 +426,7 @@ struct LakkoPickerOption<Value: Hashable>: Identifiable {
 /// action-sheet rows with a check mark on the current value.
 struct LakkoPicker<Value: Hashable>: View {
     let title: String
-    var systemImage: String?
+    var icon: LkIcon?
     @Binding var selection: Value
     let options: [LakkoPickerOption<Value>]
 
@@ -434,19 +434,19 @@ struct LakkoPicker<Value: Hashable>: View {
     @Environment(\.isEnabled) private var isEnabled
 
     init(
-        _ title: String, systemImage: String? = nil, selection: Binding<Value>,
+        _ title: String, icon: LkIcon? = nil, selection: Binding<Value>,
         options: [LakkoPickerOption<Value>]
     ) {
         self.title = title
-        self.systemImage = systemImage
+        self.icon = icon
         self._selection = selection
         self.options = options
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            if let systemImage {
-                Label(title, systemImage: systemImage)
+            if let icon {
+                Label(title, icon: icon)
             } else {
                 Text(title)
             }
@@ -455,8 +455,7 @@ struct LakkoPicker<Value: Hashable>: View {
                 HStack(spacing: 6) {
                     Text(currentLabel)
                         .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.footnote)
+                    LkIconView(.chevronUpDown, size: 14, relativeTo: .footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
                 .foregroundStyle(Color.lakkoText)
@@ -498,8 +497,7 @@ struct LakkoInlinePicker<Value: Hashable>: View {
                     Text(option.label).foregroundStyle(Color.lakkoText)
                     Spacer()
                     if option.value == selection {
-                        Image(systemName: "checkmark")
-                            .font(.body.weight(.semibold))
+                        LkIconView(.checkmark, size: 20)
                             .foregroundStyle(Color.lakkoAccent)
                     }
                 }

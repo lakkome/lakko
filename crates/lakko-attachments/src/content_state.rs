@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A content message as it travels outside the journal (ADR-0090 section
+//! A content message as it travels outside the journal (ADR-0092 section
 //! 3.11, "History bundles and the vault"): the content payload and a
 //! snapshot of a poll's or a checklist's folded state as the saving device
 //! saw it.

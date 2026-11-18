@@ -47,7 +47,7 @@ struct RecordButton: View {
             Circle()
                 .fill(recording ? Color.lakkoDanger : Color.lakkoAccent.opacity(media.callActive ? 0.35 : 1))
                 .frame(width: recording ? 56 : 40, height: recording ? 56 : 40)
-            Image(systemName: isVideo ? "video.fill" : "mic.fill")
+            LkIconView(isVideo ? .videoFill : .micFill, size: 20)
                 .foregroundStyle(Color.lakkoAccentForeground)
         }
         .frame(width: 44, height: 44)
@@ -60,8 +60,8 @@ struct RecordButton: View {
             if recording {
                 // §2.5 — the lock target: slide up onto it.
                 VStack(spacing: 2) {
-                    Image(systemName: "lock.fill")
-                    Image(systemName: "chevron.up")
+                    LkIconView(.lockFill, size: 14, relativeTo: .caption)
+                    LkIconView(.chevronUp, size: 14, relativeTo: .caption)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -275,7 +275,7 @@ struct RecordingBar: View {
         case .locked(let kind, _):
             HStack(spacing: 8) {
                 Button(role: .destructive) { media.deleteTake() } label: {
-                    Image(systemName: "trash")
+                    LkIconView(.trash, size: 20)
                 }
                 .accessibilityLabel(Localization.text("chat.record.delete"))
                 pulsingDot
@@ -302,7 +302,7 @@ struct RecordingBar: View {
         case .preview(let kind, let durationMs):
             HStack(spacing: 10) {
                 Button(role: .destructive) { media.deleteTake() } label: {
-                    Image(systemName: "trash")
+                    LkIconView(.trash, size: 20)
                 }
                 .accessibilityLabel(Localization.text("chat.record.delete"))
                 if kind == .voice, let take = media.previewTake {
@@ -360,7 +360,7 @@ struct RecordingBar: View {
         Button {
             media.toggleVoice(key: ChatMediaController.previewKey, ref: nil, fileURL: take.fileURL)
         } label: {
-            Image(systemName: active?.playing == true ? "pause.fill" : "play.fill")
+            LkIconView(active?.playing == true ? .pauseFill : .playFill, size: 20)
         }
         .accessibilityLabel(
             active?.playing == true
@@ -454,8 +454,7 @@ struct VideoNoteOverlay: View {
                     }
                     if case .locked = media.recState {
                         Button { media.flipCamera() } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath.camera")
-                                .font(.title2)
+                            LkIconView(.cameraFlip, size: 26, relativeTo: .title2)
                                 .foregroundStyle(.white)
                                 .padding(12)
                                 .background(Circle().fill(Color.black.opacity(0.5)))
@@ -536,7 +535,7 @@ struct MediaDeniedCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: resource == .camera ? "video.slash" : "mic.slash")
+            LkIconView(resource == .camera ? .videoSlash : .micSlash, size: 20)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 6) {
@@ -551,7 +550,7 @@ struct MediaDeniedCard: View {
             }
             Spacer(minLength: 0)
             Button(action: onDismiss) {
-                Image(systemName: "xmark")
+                LkIconView(.xmark, size: 20)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)

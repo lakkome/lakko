@@ -68,7 +68,7 @@ struct ConversationCardScreen: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button { onClose() } label: { Image(systemName: "chevron.backward") }
+                    Button { onClose() } label: { LkIconView(.chevronBack, size: 24) }
                         .accessibilityLabel(l10n.t("common.back"))
                 }
             }

@@ -24,8 +24,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -146,8 +144,8 @@ internal fun LocationScreen(onSend: (SharedLocation) -> Unit, onClose: () -> Uni
         onClose = onClose,
     ) {
         Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
-            Icon(
-                Icons.Filled.Place,
+            me.lakko.app.ui.components.LkIcon(
+                me.lakko.app.R.drawable.ic_lk_location,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(72.dp),
@@ -203,7 +201,7 @@ internal data class ContactPickRow(
     val name: String,
     val username: String?,
     val accountKey: ByteArray,
-    /** ADR-0090 section 7 — `false` when the newest profile this device holds
+    /** ADR-0092 section 7 — `false` when the newest profile this device holds
      *  from the contact says their card may not be shared. */
     val shareable: Boolean = true,
 ) {

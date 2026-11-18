@@ -83,7 +83,7 @@ lakko-crypto.workspace = true
 # spends `directory-search`, through the shared spend gate.
 lakko-anon-token.workspace = true
 lakko-anon-token-server.workspace = true
-# ADR-0090 section 4.4 — verify the anonymous-credential presentation a
+# ADR-0092 section 4.4 — verify the anonymous-credential presentation a
 # channel poll vote carries, under a key derived from the master shared with
 # auth.
 lakko-anon-cred.workspace = true

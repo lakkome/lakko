@@ -31,4 +31,20 @@ class ChannelInvitePreviewTest {
             channelInvitePreviewText(ChannelInviteSummary("Pixel Pub Walk", publisher = true), strings),
         )
     }
+
+    // Seen live 2026-11-12: the notification and the row read the message
+    // text, which is the `/g/` link with its secret after `#`.
+    @Test
+    fun `a notification for an invitation card reads like the card, never the link`() {
+        val link = "https://test.lakko.me/g/AAAAAAAA#fakesecretxyz1"
+        val card = byteArrayOf(1, 2, 3)
+        assertEquals(
+            "Invitation to publish in Walk 22 channel",
+            invitationAwarePreviewText(link, card, strings) { ChannelInviteSummary("Walk 22 channel", publisher = true) },
+        )
+        // A card that does not open never falls back to the link.
+        assertEquals("New message", invitationAwarePreviewText(link, card, strings) { null })
+        // A message with no card is its text.
+        assertEquals("hello", invitationAwarePreviewText("hello", null, strings) { error("not called") })
+    }
 }

@@ -22,7 +22,7 @@ use crate::relations::{
 use crate::verifier::{PollScope, Presentation};
 use crate::{MAX_MESSAGE_LEN, WIRE_VERSION};
 
-/// BLAKE3 derive-key context of the credential secret (ADR-0090 4.2).
+/// BLAKE3 derive-key context of the credential secret (ADR-0092 4.2).
 pub const SECRET_DERIVE_CONTEXT: &str = "lakko/anon-credential/secret/v1";
 
 /// Length of an encoded commitment.

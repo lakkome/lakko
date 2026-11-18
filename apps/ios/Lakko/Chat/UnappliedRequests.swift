@@ -58,8 +58,9 @@ import Foundation
 /// than a signal. Inference does not work either: an epoch advancing with no
 /// rendezvous for us is byte-for-byte what *no admin has approved yet* looks
 /// like, which is the ordinary state of a request that by design has no
-/// deadline. So the joiner gets no notice; it gets the **repair** —
-/// ``joinRequestAgain`` on the `/g/` landing screen, user-driven and never
+/// deadline. So the joiner gets no notice; it gets the **repair** — after a
+/// day with no answer, `Ask again` on the `/g/` landing screen and in
+/// Requests sent (`RequestsSentStore.mayAskAgain`), user-driven and never
 /// automatic, which re-mints a fresh KeyPackage.
 
 /// What kind of own request a `Not applied` row is about.
@@ -189,32 +190,14 @@ public func unappliedHeading(_ count: Int) -> String {
 
 // MARK: - The joiner's half of the same residual
 
-/// What the `/g/` landing screen says while a request is outstanding.
-///
-/// The joiner is told **nothing** about an exclusion, for the reasons in this
-/// file's header. What it is told instead is the truth about the wait itself,
-/// which the previous copy left out: **both** steps are unbounded.
+/// What the `/g/` landing screen says while a request is outstanding and
+/// under a day old (`docs/ux/group-invite-page.md`, "After `Request to
+/// join`"). The joiner is told **nothing** about an exclusion, for the
+/// reasons in this file's header. There is no control beside it: after a day
+/// the page says "No answer yet." and offers `Ask again`
+/// (`requests_sent.no_answer`, `requests_sent.ask_again`), the same request
+/// the Requests sent list sends.
 public var joinWaitPrimary: String { Localization.text("group.join.wait_primary") }
-
-/// The second line — the part that was missing, and the only thing that makes
-/// the ``joinRequestAgain`` control legible.
-public var joinWaitSecondary: String { Localization.text("group.join.wait_secondary") }
-
-/// The joiner's one repair, and the ONLY thing available to this side.
-///
-/// A fresh request mints a fresh KeyPackage, which is what fixes the commonest
-/// cause of an exclusion — but the button never says so, because this side
-/// cannot know that was the cause. Deliberately **user-driven and never
-/// automatic**: each press is a journal row held to the DS's 30-day TTL, and a
-/// timer would spin against a group that is merely quiet.
-///
-/// Its reach is honest but partial: an admin still holding an earlier request
-/// for the same signature key **keeps the older KeyPackage**
-/// (`retain_external_join` de-dups by signature key and skips the push), so a
-/// re-request refreshes the material only where the earlier entry is gone —
-/// which is exactly the case that matters here, because a successful approve
-/// consumed it.
-public var joinRequestAgain: String { Localization.text("group.join.request_again") }
 
 // MARK: - The store
 

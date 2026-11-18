@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Tests for the channel-poll credential routes (ADR-0090 section 4.2). The
+//! Tests for the channel-poll credential routes (ADR-0092 section 4.2). The
 //! dormant and malformed cases run without a database; the issuance flow,
 //! the commitment conflict and the key-reset replacement are gated on
 //! `LAKKO_AUTH_TEST_DATABASE_URL` and skip when it is unset.

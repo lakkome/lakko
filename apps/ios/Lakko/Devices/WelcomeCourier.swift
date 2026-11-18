@@ -189,7 +189,7 @@ public enum WelcomeCourier {
                 // keep polling. Mirror of the web's
                 // `welcome-courier.ts` + Android's
                 // `WelcomeCourier.kt` skip.
-                if RecoveryPayload.isRecoveryPayloadRow(first.payload)
+                if RecoveryPayload.isRecoveryRow(first.payload)
                     || StateBundle.isStateRow(first.payload) {
                     cursor = first.id
                     continue

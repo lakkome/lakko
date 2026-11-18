@@ -36,7 +36,7 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// claim like every other field, bound to the signature key the receiver
     /// supplies; its blob key is SECRET and kept app-private with the profile.
     public let avatar: ProfileAvatar?
-    /// ADR-0090 section 7 — whether the person lets others share their
+    /// ADR-0092 section 7 — whether the person lets others share their
     /// contact card (profile envelope v5: off exactly when their "who can find
     /// me" setting is `Nobody`). The person's own statement; `true` for a row
     /// stored before the field existed and for a claim this device made up (a
@@ -224,7 +224,7 @@ final class ReceivedProfileStore {
         // nothing does not: it would put the stand-in back.
         let replacesFoundName = stored?.isFoundName == true && !claim.isFoundName
             && (claim.displayName != nil || claim.username != nil)
-        // ADR-0090 section 7 — a name-less profile newer than a found name
+        // ADR-0092 section 7 — a name-less profile newer than a found name
         // (a person on `Nobody` re-stamps their profile to say so) keeps the
         // found name, which still stands in for the name they never set, and
         // takes only what it says about sharing their card.
@@ -349,7 +349,7 @@ public struct OwnProfile: Codable, Equatable, Sendable {
     public let updatedAtMs: UInt64
     /// ADR-0084 — the published profile photo, or `nil` for none.
     public let avatar: ProfileAvatar?
-    /// ADR-0090 section 7 — the "my card may be shared" value this stamp was
+    /// ADR-0092 section 7 — the "my card may be shared" value this stamp was
     /// set with, `nil` for a profile stored before the field existed (read as
     /// shareable). What is SENT is always computed from the current "who can
     /// find me" setting; this only tells ``ProfileDirectory`` when a change of

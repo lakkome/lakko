@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 — the app-wide part of the attachment kinds: binds the poll and
+ * ADR-0092 — the app-wide part of the attachment kinds: binds the poll and
  * checklist store and the anonymous-ballot queue to the signed-in account.
  * Mounted once at the top of the app, like `BlobAccessRuntime`, so a queued
  * ballot leaves the device even when its conversation is not open (UX 7.5:
  * "The person may leave the conversation").
  *
- * "Never before a successful session landing" (ADR-0090 section 3.4a): the
+ * "Never before a successful session landing" (ADR-0092 section 3.4a): the
  * queue posts nothing until this run's auth state reached `session`.
  */
 import { createEffect, onCleanup, type JSX } from "solid-js";

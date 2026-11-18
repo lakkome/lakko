@@ -3693,7 +3693,7 @@ export function CallHostView(): JSX.Element {
         {(text) => (
           <div class="lk-call-incoming bottom" role="status">
             <span class="lk-call-incoming-icon" aria-hidden="true">
-              <Icon name="phoneEnd" size={20} />
+              <Icon name="phone-down-fill" size={20} />
             </span>
             <div class="lk-call-incoming-text">
               <span>{text()}</span>
@@ -3952,7 +3952,7 @@ function GroupCallBanner(): JSX.Element {
       {(ref) => (
         <div class="lk-call-incoming" role="status" aria-label={t("chat.call.group_in_progress")}>
           <span class="lk-call-incoming-icon" aria-hidden="true">
-            <Icon name="groups" size={20} />
+            <Icon name="phone-connection-fill" size={20} />
           </span>
           <div class="lk-call-incoming-text">
             <strong>{t("call.group_banner.title", { name: internals.nameFor(ref().groupIdB64) })}</strong>
@@ -3983,7 +3983,7 @@ function GroupCallBanner(): JSX.Element {
               {t("call.group_banner.open_chat")}
             </A>
             <button type="button" disabled={joining()} onClick={() => void join(true)}>
-              <Icon name="video" size={18} />
+              <Icon name="video-fill" size={20} />
               {t("call.group_banner.join_video")}
             </button>
             <button
@@ -3992,7 +3992,7 @@ function GroupCallBanner(): JSX.Element {
               disabled={joining()}
               onClick={() => void join(false)}
             >
-              <Icon name="phone" size={18} />
+              <Icon name="phone-fill" size={20} />
               {t("chat.call.join_short")}
             </button>
           </div>

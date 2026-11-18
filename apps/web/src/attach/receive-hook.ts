@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 — the one seam the chat receive paths (`chat/client.ts` poll and
+ * ADR-0092 — the one seam the chat receive paths (`chat/client.ts` poll and
  * the ADR-0045 sweep verdict in `contacts/client.ts`) call for polls and
  * checklists. A replaceable object so a test can stub it; the default files
  * everything in `content-store.ts` through `receive.ts` and `handover.ts`.

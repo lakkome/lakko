@@ -584,7 +584,8 @@ final class GuestAccountRepositoryTests: XCTestCase {
                 self.launchWiped.append(accountIdB64)
                 GuestAccountMarker(defaults: self.defaults).clear(accountIdB64: accountIdB64)
                 try? PhraseStore().deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
-            }
+            },
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 
@@ -1254,7 +1255,8 @@ final class GuestAccountRepositoryTests: XCTestCase {
             },
             backupDefaults: defaults,
             markerDefaults: defaults,
-            pushSubscribe: { [weak self] accountIdB64, _ in self?.pushSubscribed.append(accountIdB64) }
+            pushSubscribe: { [weak self] accountIdB64, _ in self?.pushSubscribed.append(accountIdB64) },
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 
@@ -1371,7 +1373,8 @@ final class JoinCallLandingGuestLatchTests: XCTestCase {
             backupDefaults: defaults,
             markerDefaults: defaults,
             pushSubscribe: { _, _ in },
-            wipeAccountStores: { _ in }
+            wipeAccountStores: { _ in },
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 

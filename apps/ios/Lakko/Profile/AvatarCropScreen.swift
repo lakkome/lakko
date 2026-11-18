@@ -108,14 +108,14 @@ struct AvatarCropScreen: View {
 
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
-                    Image(systemName: "minus.magnifyingglass").foregroundStyle(.white.opacity(0.7))
+                    LkIconView(.zoomOut, size: 20).foregroundStyle(.white.opacity(0.7))
                     Slider(
                         value: Binding(
                             get: { Double(geometry?.zoom ?? 1) },
                             set: { geometry?.setZoom(CGFloat($0)) }),
                         in: 1...Double(AvatarCropGeometry.maxZoom))
                         .accessibilityLabel(l10n.t("profile.crop.zoom"))
-                    Image(systemName: "plus.magnifyingglass").foregroundStyle(.white.opacity(0.7))
+                    LkIconView(.zoomIn, size: 20).foregroundStyle(.white.opacity(0.7))
                 }
                 if case .video(let source) = input, source.durationSeconds > AvatarVideoWindow.maxSeconds {
                     startStrip(source)
@@ -337,13 +337,13 @@ struct AvatarCameraScreen: View {
                 VStack(spacing: 24) {
                     HStack {
                         Button(action: close) {
-                            Image(systemName: "xmark").font(.title3.weight(.semibold))
+                            LkIconView(.xmark, size: 24, relativeTo: .title3)
                         }
                         .foregroundStyle(.white)
                         .accessibilityLabel(l10n.t("profile.camera.close"))
                         Spacer()
                         Button { recorder.flip() } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath.camera").font(.title3)
+                            LkIconView(.cameraFlip, size: 24, relativeTo: .title3)
                         }
                         .foregroundStyle(.white)
                         .disabled(phase == .recording)

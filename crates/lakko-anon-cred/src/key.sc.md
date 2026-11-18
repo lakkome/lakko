@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-The issuer (`services/auth`) and the verifier (`services/channels`) must hold the same key for a period with no key table and no distribution protocol (ADR-0090 4.4, the ADR-0054 anonymous-token pattern). Deriving each period's key from one master secret gives that, and the key rotates on its own each period.
+The issuer (`services/auth`) and the verifier (`services/channels`) must hold the same key for a period with no key table and no distribution protocol (ADR-0092 4.4, the ADR-0054 anonymous-token pattern). Deriving each period's key from one master secret gives that, and the key rotates on its own each period.
 
 ## Public contract
 
@@ -25,9 +25,9 @@ The issuer (`services/auth`) and the verifier (`services/channels`) must hold th
 
 ## Attacker exposure
 
-A holder of the master can mint credentials and cast votes (ADR-0090 4.4, accepted). It learns no account and no secret `s`.
+A holder of the master can mint credentials and cast votes (ADR-0092 4.4, accepted). It learns no account and no secret `s`.
 
 ## References
 
-- ADR-0090 4.2, 4.4; ADR-0054 decision 2.
+- ADR-0092 4.2, 4.4; ADR-0054 decision 2.
 - Tests: `derivation_is_deterministic_and_separated`, `public_key_round_trip`, `periods`, `master_secret_hex`; `golden_values_are_pinned` in `tests/protocol.rs`.

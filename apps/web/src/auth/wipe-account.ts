@@ -99,6 +99,7 @@ import { deleteBackgroundPhotos } from "../calls/background-photos";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearClaimedHandles } from "../channels/claimed-handles";
+import { clearClaimedGroupHandles } from "../chat/claimed-group-handles";
 import { clearOrphanedByResetForAccount } from "../channels/orphaned-by-reset";
 import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
@@ -126,6 +127,7 @@ import { deletePhrase } from "../backup/phrase-store";
 import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
 import { clearKeyResetOwed } from "./key-reset-owed";
 import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
+import { clearNoPrfPasskeys } from "./passkey-no-prf";
 import { clearLogoutOwed } from "./logout-owed";
 import { clearRemovals } from "../devices/removal";
 import { deleteRecallRecord } from "./recall-record";
@@ -138,6 +140,7 @@ import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
 import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
+import { clearChannelNotified } from "../feed/channel-notified-store";
 import { cardsStorageKey, cityStorageKey, showCityStorageKey } from "../devices/device-cards";
 
 /**
@@ -219,6 +222,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // whether or not the channel log's IndexedDB delete did.
     { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
     { name: "channels-claimed-handles", run: () => clearClaimedHandles(accountIdB64) },
+    { name: "groups-claimed-handles", run: () => clearClaimedGroupHandles(accountIdB64) },
     // ADR-0074 section 3.5: which channels' owner key moved to the key of a
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
@@ -315,11 +319,14 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // was finishing (they need the account seed, which is gone).
     { name: "known-device-id", run: () => clearKnownDeviceId(storage, accountIdB64) },
     { name: "genesis-recorded", run: () => clearGenesisRecorded(storage, accountIdB64) },
+    // UX 10.2: the passkeys this device found cannot carry keys.
+    { name: "passkey-no-prf", run: () => clearNoPrfPasskeys(storage, accountIdB64) },
     { name: "logout-owed", run: () => clearLogoutOwed(storage, accountIdB64) },
     { name: "device-removals-owed", run: () => clearRemovals(storage, accountIdB64) },
     // ADR-0074 part 3: a key rotation this device was finishing, the "keys
     // were changed on another device" line, and the sealed row holding the
-    // predecessor seeds, the pending envelopes and a prepared rotation.
+    // predecessor seeds, the pending envelopes, a prepared rotation and (G-56)
+    // the id of the DeviceGroup this device joined by pairing.
     { name: "key-rotation-owed", run: () => clearRotation(storage, accountIdB64) },
     { name: "key-rotation-notice", run: () => clearRotatedNotice(storage, accountIdB64) },
     { name: "key-rotation-state", run: () => deleteKeyRotationState(accountIdB64) },
@@ -334,6 +341,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "predecessor-mailbox-adopted",
       run: () => removeLocal(predecessorAdoptionStorageKey(accountIdB64)),
     },
+    // docs/ux/channel-notifications.md section 5: the last post notified per
+    // channel on this device.
+    { name: "channel-notified", run: () => clearChannelNotified(accountIdB64, storage) },
     { name: "guest-account", run: () => clearGuestAccount(storage, accountIdB64) },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
@@ -349,7 +359,22 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // ADR-0087 section 13a: own channel reactions and comments not yet sent
     // to the account's other devices.
     { name: "channel-feedback-unsent", run: () => removeLocal(`lakko.channel-feedback.unsent.v1.${accountIdB64}`) },
-    // ADR-0090 section 3.6 — the own poll-choice register's unsent marker.
+    {
+      name: "channel-subscriptions-unsent",
+      run: () => removeLocal(`lakko.channel-subscriptions.unsent.v1.${accountIdB64}`),
+    },
+    // ADR-0090 decision A: the "founded the DeviceGroup alone" marker.
+    { name: "channels-founded-alone", run: () => removeLocal(`lakko.channels.founded-alone.v1.${accountIdB64}`) },
+    // ADR-0090 walk follow-up: channel Welcomes held because they came before
+    // this device applied its removal.
+    { name: "channels-held-welcomes", run: () => removeLocal(`lakko.channels.held-welcomes.v1.${accountIdB64}`) },
+    // ADR-0090 open question 4: admission seeds not yet sent to the
+    // account's other devices.
+    {
+      name: "channel-admission-seeds-unsent",
+      run: () => removeLocal(`lakko.channel-admission-seeds.unsent.v1.${accountIdB64}`),
+    },
+    // ADR-0092 section 3.6 — the own poll-choice register's unsent marker.
     { name: "poll-choice-unsent", run: () => removeLocal(`lakko.poll-choice.unsent.v1.${accountIdB64}`) },
     { name: "unseen-reactions", run: () => removeLocal(`lakko.unseen-reactions.v1:${accountIdB64}`) },
     // ADR-0080: the cards of the account's devices, this device's own card,

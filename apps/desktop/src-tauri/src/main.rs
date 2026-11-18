@@ -7,7 +7,7 @@
 //! scheme. The same scheme handler forwards every relative `/api/<service>/`
 //! request to one configured Lakko origin, so the web client's `fetch` calls
 //! run unchanged and nothing crosses an origin; it also answers the host's
-//! own routes (`/__host/device-key/*`, `/__host/app/*`).
+//! own routes (`/__host/device-key/*`, `/__host/app/*`, `/__host/engines/*`).
 //!
 //! `LAKKO_DESKTOP_PROBE=1` opens the measurement page of `probe.rs` instead
 //! of the app and hides the window for a while, to see what a hidden webview
@@ -18,6 +18,7 @@
 mod app_shell;
 mod call_window;
 mod device_key;
+mod engines;
 mod key_store;
 mod link;
 mod notify;
@@ -56,6 +57,8 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    // The system engines' probe runs while Tauri starts; setup joins it.
+    let engines_probe = engines::start_probe();
     let config = match proxy::ProxyConfig::from_env() {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -157,10 +160,20 @@ fn main() {
             // Links the person shares name the public origin, never the app's
             // internal scheme (`apps/web/src/platform/index.ts`).
             let public_origin = serde_json::to_string(&setup_config.api_origin.origin().ascii_serialization())?;
+            // Which on-device engines this computer has, before any page
+            // script reads them (`engines.rs`).
+            let engines_caps = engines_probe.wait();
+            setup_config.engines.set_capabilities(engines_caps);
+            info!(
+                translation = engines_caps.translation,
+                transcription = engines_caps.transcription,
+                "system engines"
+            );
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::CustomProtocol(url))
                 .initialization_script(format!(
                     "Object.defineProperty(globalThis, '__LAKKO_PUBLIC_ORIGIN__', {{ value: {public_origin}, writable: false, configurable: false }});"
                 ))
+                .initialization_script(engines_caps.script())
                 // A new page has no collapsed call: whatever the old one
                 // relayed to the call window goes with it.
                 .on_page_load(|w, payload| {

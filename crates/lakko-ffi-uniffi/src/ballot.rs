@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0090 section 3 anonymous group-poll ballots on the UniFFI surface.
+//! ADR-0092 section 3 anonymous group-poll ballots on the UniFFI surface.
 //!
 //! The ring ([`PollRing`]) is the poll's electorate and its versions: built
 //! from version 0 (the poll body's `ring0Hash` must equal its hash) and

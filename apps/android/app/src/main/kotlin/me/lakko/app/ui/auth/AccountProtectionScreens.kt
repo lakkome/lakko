@@ -16,10 +16,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -96,6 +92,9 @@ import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /*
  * ADR-0075 / `docs/ux/identity-recovery.md` section 19 - the screens of an
@@ -705,7 +704,7 @@ public fun ProtectAccountStep(
         Spacer(Modifier.height(16.dp))
         if (rows.email) {
             MethodRow(
-                icon = Icons.Filled.Email,
+                icon = R.drawable.ic_lk_envelope,
                 title = t("protect.email.title") + " · " +
                     if (done.email) doneMark else t("protect.email.badge"),
                 subtitle = t("protect.email.body"),
@@ -715,7 +714,7 @@ public fun ProtectAccountStep(
         }
         if (rows.passkey) {
             MethodRow(
-                icon = Icons.Filled.Shield,
+                icon = R.drawable.ic_lk_passkey,
                 title = t("protect.passkey.title") + if (done.passkey) " · $doneMark" else "",
                 subtitle = t("protect.passkey.body"),
                 onClick = { sub = ProtectSub.Passkey },
@@ -724,7 +723,7 @@ public fun ProtectAccountStep(
         }
         if (rows.phrase) {
             MethodRow(
-                icon = Icons.Filled.Key,
+                icon = R.drawable.ic_lk_key,
                 title = t("protect.phrase.title") + if (done.phrase) " · $doneMark" else "",
                 subtitle = t("protect.phrase.body"),
                 onClick = { sub = ProtectSub.Phrase },
@@ -811,14 +810,15 @@ public fun AccountProtectionSection(
     ListItem(
         headlineContent = { Text(t(protectionStatusKey(protection))) },
         leadingContent = {
-            Icon(
-                Icons.Filled.Shield,
+            LkIcon(
+                R.drawable.ic_lk_lock_shield,
                 contentDescription = null,
                 tint = if (protection == AccountProtection.None) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
+                size = LkIconSize.Row,
             )
         },
         colors = background,
@@ -877,7 +877,7 @@ public fun AccountProtectionSection(
                 )
             },
             leadingContent = {
-                Icon(Icons.Filled.Email, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                LkIcon(R.drawable.ic_lk_envelope, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
             },
             colors = background,
             modifier = if (on) Modifier else Modifier.clickable(onClick = onOpenRecoveryEmail),
@@ -897,7 +897,7 @@ public fun AccountProtectionSection(
             headlineContent = { Text(t("protect.phrase.title")) },
             supportingContent = { Text(t("protect.phrase.body")) },
             leadingContent = {
-                Icon(Icons.Filled.Key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                LkIcon(R.drawable.ic_lk_key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
             },
             colors = background,
             modifier = Modifier.clickable(onClick = onOpenSavePhrase),
@@ -906,7 +906,7 @@ public fun AccountProtectionSection(
             headlineContent = { Text(t("recovery.method.phrase.title")) },
             supportingContent = { Text(t("settings.recovery.phrase.show")) },
             leadingContent = {
-                Icon(Icons.Filled.Key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                LkIcon(R.drawable.ic_lk_key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
             },
             colors = background,
             modifier = Modifier.clickable(onClick = onOpenShowPhrase),
@@ -915,7 +915,7 @@ public fun AccountProtectionSection(
             headlineContent = { Text(t("recovery.method.phrase.title")) },
             supportingContent = { Text(t("settings.recovery.phrase.not_saved_here")) },
             leadingContent = {
-                Icon(Icons.Filled.Key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                LkIcon(R.drawable.ic_lk_key, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
             },
             colors = background,
         )

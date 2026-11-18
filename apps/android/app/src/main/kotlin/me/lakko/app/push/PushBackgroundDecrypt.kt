@@ -314,7 +314,7 @@ private class RealThrowawayGroup(
         // commit throws, and the throw reaches the caller's loop, which
         // drops the row (fail-closed) and tells this device's own message
         // apart from one it cannot read.
-        // ADR-0090 section 3.6 — an anonymous ballot row is not an MLS
+        // ADR-0092 section 3.6 — an anonymous ballot row is not an MLS
         // message and never a preview; it is skipped before the MLS path.
         if (me.lakko.app.chat.isPollBallotRowSafe(payload)) return null
         val processed = group.processIncomingVerifyingRoles(identity, payload)
@@ -372,7 +372,15 @@ private class RealThrowawayGroup(
         val kind = previewKindOf(body.kind) ?: return null
         return ProcessedRow(
             kind = kind,
-            text = contentPreviewText(body.content, body.text),
+            // ADR-0092 — a poll, checklist, location, contact card or article
+            // reads as its one-line summary; ADR-0087 section 14 — a channel
+            // invitation card reads like the card, never as its text (the
+            // `/g/` link with its secret).
+            text = if (body.content != null) {
+                contentPreviewText(body.content, body.text)
+            } else {
+                me.lakko.app.ui.channels.invitationAwarePreviewText(body.text, body.channelInvite)
+            },
             attachmentCount = body.attachments.size,
             senderName = senderNameOf(app.senderLeaf),
             senderAccountB64 = senderAccountOf(app),

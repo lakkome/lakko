@@ -270,7 +270,8 @@ final class SignupCancelTests: XCTestCase {
             persistence: NullPersistence(),
             nowMs: { 1_000_000 },
             accountDirectory: UnusedDirectory(),
-            restoreDirectory: OfflineRestoreDirectory()
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate
         )
         let viewModel = SignupViewModel(repository: repository)
         viewModel.username = "alice_1"

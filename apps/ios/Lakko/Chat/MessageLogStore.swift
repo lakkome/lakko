@@ -408,7 +408,7 @@ public struct PersistedMessage: Codable, Equatable {
     /// ADR-0082 section 5 — the DS id of the newest edit or delete op folded
     /// into the message; absent when never edited.
     public var lastOpId: Int64?
-    /// ADR-0090 — a poll, checklist, location, contact card or article, with
+    /// ADR-0092 — a poll, checklist, location, contact card or article, with
     /// the ops folded into it. Absent on every other row.
     public var content: PersistedContent?
 
@@ -479,9 +479,9 @@ public struct PersistedMessage: Codable, Equatable {
     }
 }
 
-// MARK: - ADR-0090 content persistence (FFI-free)
+// MARK: - ADR-0092 content persistence (FFI-free)
 
-/// ADR-0090 — a content message as stored: the envelope bytes it can be read
+/// ADR-0092 — a content message as stored: the envelope bytes it can be read
 /// back from (the core's own decoder, so the store never re-implements the
 /// format), the folded snapshot a history bundle brought, and the ops folded
 /// into it since.
@@ -489,7 +489,7 @@ public struct PersistedContent: Codable, Equatable {
     /// Standard base64 of a chat envelope carrying the content (composed by
     /// the core, or received verbatim).
     public var envelopeB64: String
-    /// ADR-0090 section 3.11 — the snapshot a history bundle or vault row
+    /// ADR-0092 section 3.11 — the snapshot a history bundle or vault row
     /// carried for a poll or checklist.
     public var state: PersistedContentState?
     /// The ops folded into the item since.
@@ -502,7 +502,7 @@ public struct PersistedContent: Codable, Equatable {
     }
 }
 
-/// ADR-0090 section 3.11 — `ContentState` as stored.
+/// ADR-0092 section 3.11 — `ContentState` as stored.
 public struct PersistedContentState: Codable, Equatable {
     /// `poll` or `checklist`.
     public var kind: String
@@ -557,7 +557,7 @@ public struct PersistedItemRef: Codable, Equatable, Hashable {
     }
 }
 
-/// ADR-0090 — the ops on a content message, as the fold takes them.
+/// ADR-0092 — the ops on a content message, as the fold takes them.
 public struct PersistedContentOps: Codable, Equatable {
     public struct Vote: Codable, Equatable {
         public var messageId: Int64
@@ -619,7 +619,7 @@ public struct PersistedContentOps: Codable, Equatable {
     public var adds: [Add] = []
     public var ticks: [Tick] = []
     public var ballots: [Ballot] = []
-    /// ADR-0090 section 3.4 — the encoded ring of an anonymous poll
+    /// ADR-0092 section 3.4 — the encoded ring of an anonymous poll
     /// (`PollRing.encode()`), versions included.
     public var ringB64: String?
     /// A poll whose ring did not check at receipt: no totals, no voting.
@@ -718,7 +718,7 @@ public struct PersistedAttachment: Codable, Equatable {
     public let height: UInt32?
     /// The video-note poster blob.
     public let thumb: PersistedThumb?
-    /// ADR-0090 section 2 — an audio file's title and artist tags.
+    /// ADR-0092 section 2 — an audio file's title and artist tags.
     public var title: String?
     public var artist: String?
 

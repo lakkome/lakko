@@ -13,12 +13,12 @@ import SwiftUI
 /// input, and orchestrates what the UI surfaces:
 ///
 ///   * `refresh()`     — `GET /webauthn/credentials` + `GET /vault/passkeys`.
-///   * `addPasskey()`  — register (``PasskeyAdder``), then the opt-in keys
-///     choice when the platform can protect keys with the passkey. Adding a
-///     passkey stores NOTHING for it automatically.
-///   * `offerKeysChoice(for:)` / `finishKeysChoice(_:)` — "Turn on restoring
-///     keys" from a passkey's row.
-///   * `stopRestoringKeys(_:)` — `DELETE /vault/passkey`.
+///   * `addPasskey()`  — register (``PasskeyAdder``), then store the keys for
+///     the new passkey with nothing to choose, wherever the platform can
+///     carry them (UX `docs/ux/identity-recovery.md` 10.2).
+///   * `restoreKeys(for:)` / `submitRepairPhrase()` — "Restore keys with this
+///     passkey" on the row of a passkey that holds no keys: a repair, not a
+///     setting.
 ///   * `deleteCredential(_:)` — `DELETE /webauthn/credentials/:id` (the
 ///     server also deletes that passkey's blob).
 @MainActor
@@ -28,16 +28,14 @@ public final class PasskeysViewModel: ObservableObject {
     /// The credential ids (base64url) that have keys stored for them; `nil`
     /// when not loaded or the server keeps no keys for passkeys.
     @Published public private(set) var withKeys: [String]?
-    /// The passkey the keys choice is open for, or `nil`.
-    @Published public private(set) var keysChoice: KeysChoiceTarget?
-
-    /// What the keys choice needs to know about its passkey.
-    public struct KeysChoiceTarget: Equatable {
-        public let credentialIdB64: String
-        public let nickname: String
-        /// The registration's PRF output, when the choice follows an add.
-        public let prfOutput: Data?
-    }
+    /// The passkeys this device found cannot carry keys (base64url
+    /// credential ids, ``PasskeyNoPrfStore``): their rows offer no repair.
+    @Published public private(set) var knownNoPrf: Set<String> = []
+    /// The passkey "Restore keys with this passkey" is asking the recovery
+    /// phrase for, or `nil`.
+    @Published public private(set) var repairAskingPhrase: String?
+    /// The phrase typed for the repair.
+    @Published public var repairPhrase: String = ""
 
     /// Whether this platform can ask a passkey for the secret that protects
     /// keys: the PRF API exists from iOS 18.
@@ -132,6 +130,7 @@ public final class PasskeysViewModel: ObservableObject {
         do {
             let response = try await client.listCredentials()
             credentials = response.credentials
+            reloadKnownNoPrf()
             await refreshWithKeys()
         } catch let error where Cancellation.endedByCancellation(error) {
             // The screen was left while the list was loading: nothing failed,
@@ -161,6 +160,15 @@ public final class PasskeysViewModel: ObservableObject {
         withKeys = try? await AuthClient().passkeyVaultList(sessionToken: token)
     }
 
+    /// Read what this device remembers about passkeys that cannot carry keys.
+    private func reloadKnownNoPrf() {
+        guard case .session(let account) = authRepository.state else {
+            knownNoPrf = []
+            return
+        }
+        knownNoPrf = PasskeyNoPrfStore().load(accountIdB64: account.accountIdB64)
+    }
+
     /// The label of one passkey's row.
     func keysLabel(for cred: CredentialSummary) -> PasskeyVault.KeysLabel {
         PasskeyVault.keysLabel(credentialIdB64: cred.credential_id_b64, withKeys: withKeys)
@@ -168,46 +176,82 @@ public final class PasskeysViewModel: ObservableObject {
 
     // MARK: - Restoring keys
 
-    /// The enrollment the keys choice runs.
+    /// The enrollment storing the keys runs.
     var keysEnrollment: PasskeyKeysEnrollment {
         .live(authRepository: authRepository, client: client)
     }
 
-    /// "Turn on restoring keys" on a passkey's row.
-    public func offerKeysChoice(for cred: CredentialSummary) {
-        message = nil
-        keysChoice = KeysChoiceTarget(
-            credentialIdB64: cred.credential_id_b64, nickname: cred.nickname, prfOutput: nil)
+    /// Whether a passkey's row offers "Restore keys with this passkey": it
+    /// holds no keys, this platform can ask a passkey for the secret, and it
+    /// is not known to give none.
+    func offersRestoreKeys(for cred: CredentialSummary) -> Bool {
+        keysLabel(for: cred) == .signInOnly
+            && Self.prfApiAvailable
+            && !knownNoPrf.contains(cred.credential_id_b64)
     }
 
-    /// The keys choice ended.
-    func finishKeysChoice(_ result: KeysChoiceResult) async {
-        keysChoice = nil
-        if let key = result.messageKey {
-            message = result == .stored ? .ok(.key(key)) : .error(.key(key))
+    /// "Restore keys with this passkey" on a passkey's row. One passkey
+    /// sheet; the recovery phrase is asked for first when this device does
+    /// not hold it.
+    public func restoreKeys(for cred: CredentialSummary) async {
+        if repairAskingPhrase != cred.credential_id_b64 {
+            repairAskingPhrase = nil
+            repairPhrase = ""
         }
-        await refreshWithKeys()
+        await runRepair(credentialIdB64: cred.credential_id_b64, typedPhrase: nil)
     }
 
-    /// "Stop restoring keys": remove the blob stored for the passkey. The
-    /// passkey keeps signing in; keys already restored on other devices
-    /// stay there.
-    public func stopRestoringKeys(_ cred: CredentialSummary) async {
-        guard let token = authRepository.identitySecrets?.sessionToken else {
-            message = .error(.key("common.error.session_not_ready"))
-            return
-        }
+    /// The phrase typed for the repair was submitted.
+    public func submitRepairPhrase() async {
+        guard let credentialIdB64 = repairAskingPhrase else { return }
+        await runRepair(credentialIdB64: credentialIdB64, typedPhrase: repairPhrase)
+    }
+
+    /// The phrase input of the repair was closed: nothing is stored.
+    public func cancelRepair() {
+        repairAskingPhrase = nil
+        repairPhrase = ""
+    }
+
+    private func runRepair(credentialIdB64: String, typedPhrase: String?) async {
+        rebindSession()
         isBusy = true
         message = nil
         defer { isBusy = false }
         do {
-            try await AuthClient().passkeyVaultDelete(
-                sessionToken: token, credentialIdB64: cred.credential_id_b64)
-            message = .ok(.key("settings.passkeys.stop_restoring.done"))
-            await refreshWithKeys()
+            let step = try await keysEnrollment.turnOn(
+                credentialIdB64: credentialIdB64,
+                registrationPrfOutput: nil,
+                typedPhrase: typedPhrase
+            )
+            switch step {
+            case .needsPhrase:
+                repairAskingPhrase = credentialIdB64
+            case .refused(let key):
+                message = .error(.key(PasskeyKeysRepair.refusalKey(key)))
+            case .done(let result):
+                cancelRepair()
+                reloadKnownNoPrf()
+                switch result {
+                case .stored:
+                    message = .ok(.key("settings.passkeys.keys_choice.done"))
+                case .noPrf:
+                    message = .error(.key("settings.passkeys.keys_choice.no_prf"))
+                case .unavailable:
+                    message = .error(.key("settings.passkeys.keys_choice.unavailable"))
+                }
+                await refreshWithKeys()
+            }
         } catch {
-            NSLog("[passkeys] WARN stop restoring keys failed")
-            message = .error(.key("settings.passkeys.error.generic"))
+            // Dismissing the passkey sheet is not a failure: the passkey
+            // stays "Logs in only" and its row still offers the repair.
+            if AuthErrorCopy.isPasskeyCancelled(error) { return }
+            if PasskeyKeysAddOutcome.isOffline(error) {
+                message = .error(.key("settings.passkeys.error.network"))
+            } else {
+                NSLog("[passkeys] WARN restoring keys with a passkey failed")
+                message = .error(.key("settings.passkeys.error.generic"))
+            }
         }
     }
 
@@ -253,25 +297,21 @@ public final class PasskeysViewModel: ObservableObject {
                 freshGrant: freshGrant,
                 presentationAnchor: presentationAnchor
             )
-            switch added.outcome {
-            case .offerKeysChoice:
-                // The platform can protect keys with this passkey: the
-                // person chooses. Nothing is stored until "Turn on".
-                keysChoice = KeysChoiceTarget(
-                    credentialIdB64: added.credentialIdB64,
-                    nickname: trimmed,
-                    prfOutput: added.prfOutput
-                )
-                message = .ok(.key("settings.passkeys.added", texts: ["name": trimmed]))
-            case .signInOnly:
-                message = .ok(.key("settings.passkeys.added_no_keys"))
-            }
             nickname = ""
+            cancelRepair()
+            // The passkey is added. Its keys are stored with nothing to
+            // choose, from the registration's output or one more sheet for
+            // this passkey (UX 10.2).
+            let outcome = await keysEnrollment.storeAfterAdd(added)
+            let line = outcome.message(nickname: trimmed)
+            message = outcome.isError ? .error(line) : .ok(line)
             await refresh()
         } catch let error as WebauthnRegistration.RegistrationError {
             switch error {
             case .cancelled:
                 message = .error(.key("settings.passkeys.error.cancelled"))
+            case .alreadyExists:
+                message = .error(.key("settings.passkeys.error.already_exists"))
             case .noCredential, .underlying:
                 NSLog("[passkeys] WARN registration failed: \(error)")
                 message = .error(.key("settings.passkeys.error.generic"))
@@ -374,6 +414,10 @@ public final class PasskeysViewModel: ObservableObject {
             // directory cannot delete this account's links. Revoke every live
             // link this device keeps a record of first, while the session
             // still works; one it has no record of lives until it expires.
+            // ADR-0064 section 1 — the vaults of the channels this account
+            // owns go before the account, best effort and bounded in time.
+            await ChannelVaultHead.deleteOwnedVaults(
+                accountIdB64: base64Encode(secrets.accountId), currentSeed: secrets.accountIdentitySeed)
             await OwnLinks.revokeAll(
                 accountIdB64: base64Encode(secrets.accountId),
                 discovery: DiscoveryClient(

@@ -246,6 +246,17 @@ public fun invitedByLine(preview: GroupInvitePreviewUi?): UiText? =
 public fun groupInvitePageLines(preview: GroupInvitePreviewUi?): GroupInvitePageLines {
     val inviter = preview?.inviterName?.trim()?.takeIf { it.isNotEmpty() }
     val groupName = preview?.groupName?.trim()?.takeIf { it.isNotEmpty() }
+    // ADR-0087 section 15.2 — a co-publisher link (kind 2) invites to publish
+    // in a channel, never to a group: the one sentence, no member count (the
+    // preview carries none for a channel). Seen live 2026-11-12 on an iPhone:
+    // "Icons QA invites you to a group, 0 members".
+    if (preview?.coPublisher == true) {
+        return GroupInvitePageLines(
+            headline = publisherInviteLine(inviter, groupName),
+            groupLine = null,
+            membersLine = null,
+        )
+    }
     // One catalog sentence per shape (docs/l10n/batch-4-contacts-channels.md).
     val headline = when {
         inviter != null && groupName != null -> UiText("invite.group.lead_named", texts = mapOf("name" to inviter))
@@ -258,6 +269,25 @@ public fun groupInvitePageLines(preview: GroupInvitePreviewUi?): GroupInvitePage
         headline = headline,
         groupLine = groupName,
         membersLine = membersLine,
+    )
+}
+
+/** UX 15.2 — "{name} invites you to be a publisher of {channel}." when the
+ *  invitation names who sent it, else "You are invited to be a publisher of
+ *  {channel}."; a channel the invitation does not name reads "Channel". The
+ *  link page and the card in a chat say the same sentence. */
+public fun publisherInviteLine(inviterName: String?, channelName: String?): UiText {
+    val inviter = inviterName?.trim()?.takeIf { it.isNotEmpty() }
+    val channel = channelName?.trim()?.takeIf { it.isNotEmpty() }
+    val texts = buildMap {
+        inviter?.let { put("name", it) }
+        channel?.let { put("channel", it) }
+    }
+    val parts = if (channel == null) mapOf("channel" to UiText("channels.fallback_name")) else emptyMap()
+    return UiText(
+        if (inviter != null) "channels.publishers.invite_page_from" else "channels.publishers.invite_page",
+        texts = texts,
+        parts = parts,
     )
 }
 
@@ -299,6 +329,9 @@ public class GroupInviteCard(
     /** The opened capability's plaintext wire bytes: what the join request,
      *  the consume dedup tag and the join attribution are computed over. */
     public val capabilityWire: ByteArray = ByteArray(0),
+    /** The group the link points at, lowercase hex: how the page finds a
+     *  request this device already sent (UX 6.2) or a group it already holds. */
+    public val groupIdHex: String = "",
 )
 
 /** Why a `/g/` link did not open, as the page shows it. */

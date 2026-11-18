@@ -9,11 +9,15 @@
  *   model in the browser (Chrome 138+ desktop, Edge 148; not Firefox, not
  *   Safari, not mobile, not in workers - developer.chrome.com, checked
  *   2026-10-25).
- * - **Detection**: the `LanguageDetector` API, same availability. Used only
+ * - **Detection**: the `LanguageDetector` API, same availability, used only
  *   when its model is already on the device: detection runs on every
  *   incoming message as it is shown, and nothing is downloaded without the
- *   person choosing to (UX 3.5), so a detector that would need a download is
- *   treated as absent and the menu row falls back to the language picker.
+ *   person choosing to (UX 3.5). Otherwise, which in practice is most of the
+ *   time, the core detector `detectTextLanguageCandidates` (wasm,
+ *   `lakko_ui_rules::language_detect`; ADR-0082 note of 2026-11-15) answers.
+ *   Either answer carries its close candidates: the browser's ranked list
+ *   goes through the shared rule `languageCandidatesFromHypotheses`.
+ *   It runs in this page on text already decrypted here and sends nothing.
  * - **Transcription**: `SpeechRecognition` with `processLocally = true`, fed
  *   the decoded recording through a Web Audio `MediaStreamTrack`
  *   (`start(audioTrack)`). The draft specification defines `processLocally`
@@ -45,6 +49,7 @@
  * transcription off on this device for good.
  */
 
+import { loadWasm } from "../wasm";
 import {
   engineStateOf,
   permilleOf,
@@ -140,6 +145,21 @@ function globalOf<T>(name: string): T | null {
 
 // ----- translation ----------------------------------------------------------
 
+/**
+ * The tag Chrome's `Translator` takes for a language Lakko names otherwise.
+ *
+ * Chrome's documented list (developer.chrome.com/docs/ai/translator-api,
+ * read 2026-11-15) names Norwegian `no`; the core detector answers `nb`
+ * (Norwegian Bokmal, ADR-0082), so `nb` is asked as `no`. The same list has
+ * neither `tl` nor `fil`, so Tagalog is passed through unchanged and the
+ * browser answers for it whatever it answers. Every other tag is unchanged.
+ */
+export function translatorTag(tag: string): string {
+  const lower = tag.toLowerCase();
+  if (lower === "nb" || lower.startsWith("nb-")) return "no";
+  return tag;
+}
+
 /** The browser `Translator` API, or an engine that offers nothing. */
 export function browserTranslation(api: TranslatorStatic | null = globalOf("Translator")): TranslationEngine {
   if (api === null || typeof api.availability !== "function" || typeof api.create !== "function") {
@@ -154,12 +174,16 @@ export function browserTranslation(api: TranslatorStatic | null = globalOf("Tran
     present: true,
     async state(source, target): Promise<EngineState> {
       try {
-        return engineStateOf(await api.availability({ sourceLanguage: source, targetLanguage: target }));
+        return engineStateOf(
+          await api.availability({ sourceLanguage: translatorTag(source), targetLanguage: translatorTag(target) }),
+        );
       } catch {
         return "unavailable";
       }
     },
-    async translate(source, target, text, options = {}): Promise<string> {
+    async translate(sourceTag, targetTag, text, options = {}): Promise<string> {
+      const source = translatorTag(sourceTag);
+      const target = translatorTag(targetTag);
       const key = `${source}>${target}`;
       let pending = translators.get(key);
       if (pending === undefined) {
@@ -187,8 +211,21 @@ export function browserTranslation(api: TranslatorStatic | null = globalOf("Tran
 
 // ----- detection ------------------------------------------------------------
 
-/** The browser `LanguageDetector` API, used only when its model is present. */
-export function browserDetection(api: DetectorStatic | null = globalOf("LanguageDetector")): DetectionEngine {
+/** Turns a detector's ranked hypotheses into a detection with its close
+ *  candidates, through the shared rule (`languageCandidatesFromHypotheses`). */
+export type HypothesisRanker = (
+  text: string,
+  tags: readonly string[],
+  permilles: readonly number[],
+) => Promise<Detection | null>;
+
+/** The browser `LanguageDetector` API, used only when its model is present.
+ *  `rank` turns its ranked list into the close candidates; without it the top
+ *  hypothesis alone is answered. */
+export function browserDetection(
+  api: DetectorStatic | null = globalOf("LanguageDetector"),
+  rank: HypothesisRanker | null = null,
+): DetectionEngine {
   if (api === null || typeof api.availability !== "function" || typeof api.create !== "function") {
     return { present: false, detect: () => Promise.resolve(null) };
   }
@@ -218,13 +255,120 @@ export function browserDetection(api: DetectorStatic | null = globalOf("Language
         return null;
       }
       try {
-        const [best] = await d.detect(text);
-        if (best === undefined || typeof best.detectedLanguage !== "string") return null;
-        if (best.detectedLanguage === "und") return null;
-        return { tag: best.detectedLanguage, permille: permilleOf(best.confidence) };
+        const list: Array<{ tag: string; permille: number }> = [];
+        for (const h of await d.detect(text)) {
+          if (typeof h.detectedLanguage !== "string" || h.detectedLanguage === "und") continue;
+          list.push({ tag: h.detectedLanguage, permille: permilleOf(h.confidence) });
+        }
+        const [best] = list;
+        if (best === undefined) return null;
+        const top: Detection = { tag: best.tag, permille: best.permille };
+        if (rank === null) return top;
+        const ranked = await rank(
+          text,
+          list.map((h) => h.tag),
+          list.map((h) => h.permille),
+        ).catch(() => null);
+        return ranked ?? top;
       } catch {
         return null;
       }
+    },
+  };
+}
+
+/** A wasm answer: a tag, a confidence and, for candidates, the alternatives. */
+interface WasmDetected {
+  readonly tag: string;
+  readonly confidencePermille: number;
+  readonly alternatives?: string[];
+  free(): void;
+}
+
+/** The part of the wasm namespace the core detector needs. */
+export interface CoreLanguageDetector {
+  detectTextLanguage(text: string): WasmDetected | undefined;
+  detectTextLanguageCandidates?(text: string): WasmDetected | undefined;
+  languageCandidatesFromHypotheses?(text: string, tags: string[], permilles: Uint16Array): WasmDetected | undefined;
+}
+
+/** The core detector, which can also rank another detector's hypotheses. */
+export interface CoreDetectionEngine extends DetectionEngine {
+  readonly rank: HypothesisRanker;
+}
+
+/**
+ * The core detector over wasm (`lakko_ui_rules::language_detect`). It reads
+ * at most the first 2048 characters, offline; the controller asks it once per
+ * message version. The answer carries the close candidates
+ * (`detectTextLanguageCandidates`). `null` when wasm did not load or the text
+ * has no letters.
+ */
+export function coreDetection(
+  load: () => Promise<CoreLanguageDetector | null> = loadWasm,
+): CoreDetectionEngine {
+  let core: Promise<CoreLanguageDetector | null> | null = null;
+  const ask = async (call: (wasm: CoreLanguageDetector) => WasmDetected | undefined): Promise<Detection | null> => {
+    core ??= load().catch(() => null);
+    const wasm = await core;
+    if (wasm === null) {
+      core = null;
+      return null;
+    }
+    try {
+      const found = call(wasm);
+      if (found === undefined) return null;
+      try {
+        const alternatives = found.alternatives ?? [];
+        return {
+          tag: found.tag,
+          permille: Math.max(0, Math.min(1000, found.confidencePermille)),
+          ...(alternatives.length > 0 ? { alternatives } : {}),
+        };
+      } finally {
+        found.free();
+      }
+    } catch {
+      return null;
+    }
+  };
+  return {
+    present: true,
+    detect: (text) =>
+      ask((wasm) =>
+        wasm.detectTextLanguageCandidates !== undefined
+          ? wasm.detectTextLanguageCandidates(text)
+          : wasm.detectTextLanguage(text),
+      ),
+    rank: (text, tags, permilles) =>
+      ask((wasm) =>
+        wasm.languageCandidatesFromHypotheses === undefined
+          ? undefined
+          : wasm.languageCandidatesFromHypotheses(
+              text,
+              [...tags],
+              Uint16Array.from(permilles.map((p) => Math.max(0, Math.min(1000, Math.round(p))))),
+            ),
+      ),
+  };
+}
+
+/** The browser's detector when it has an answer, else the core one. */
+export function layeredDetection(
+  browserEngine?: DetectionEngine,
+  core: DetectionEngine & { readonly rank?: HypothesisRanker } = coreDetection(),
+): DetectionEngine {
+  // The browser's ranked list goes through the same close-candidate rule as
+  // the core detector's scores.
+  const browser = browserEngine ?? browserDetection(globalOf("LanguageDetector"), core.rank ?? null);
+  return {
+    present: true,
+    async detect(text): Promise<Detection | null> {
+      if (browser.present) {
+        const d = await browser.detect(text).catch(() => null);
+        if (d !== null) return d;
+      }
+      return core.detect(text);
     },
   };
 }
@@ -397,7 +541,7 @@ export function browserTranscription(
 export function browserEngines(): Engines {
   return {
     translation: browserTranslation(),
-    detection: browserDetection(),
+    detection: layeredDetection(),
     transcription: browserTranscription(),
   };
 }

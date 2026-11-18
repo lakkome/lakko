@@ -481,8 +481,7 @@ final class NewDeviceNoticeCenter: ObservableObject {
 /// element its accessible name.
 struct NewDeviceAttentionBadge: View {
     var body: some View {
-        Image(systemName: "exclamationmark.circle.fill")
-            .font(.body)
+        LkIconView(.exclamationCircleFill, size: 20)
             .foregroundStyle(Color.lakkoWarning)
             .accessibilityHidden(true)
     }
@@ -529,8 +528,7 @@ struct NewDeviceNoticeExplanation: View {
                 texts: ["date": Self.when(explanation.latestMs, locale: l10n.locale)])
             let notYou = l10n.t("devices.added_notice.not_you")
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "laptopcomputer.and.iphone")
-                    .font(.subheadline)
+                LkIconView(.devices, size: 20, relativeTo: .subheadline)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
@@ -560,8 +558,7 @@ struct NewDeviceNoticeExplanation: View {
             .accessibilityLabel("\(title) \(when) \(notYou)")
         } else if center.showsRemovedLine {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "exclamationmark.shield")
-                    .font(.subheadline)
+                LkIconView(.shieldExclamation, size: 20, relativeTo: .subheadline)
                     .foregroundStyle(Color.lakkoWarning)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {

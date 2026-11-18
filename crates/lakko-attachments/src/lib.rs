@@ -242,15 +242,15 @@ pub const MEDIA_KIND_VIDEO_NOTE: &str = "video_note";
 /// picked from the GIF proxy and re-uploaded as an attachment.
 pub const MEDIA_KIND_GIF: &str = "gif";
 
-/// ADR-0090 section 2 — the wire value of [`AttachmentRef::kind`] for a
+/// ADR-0092 section 2 — the wire value of [`AttachmentRef::kind`] for a
 /// music or other audio file (not a voice message).
 pub const MEDIA_KIND_AUDIO: &str = "audio";
 
-/// ADR-0090 section 2 — the longest `duration_ms` an `audio` attachment may
+/// ADR-0092 section 2 — the longest `duration_ms` an `audio` attachment may
 /// carry (24 hours; chosen). A longer value is dropped at parse and compose.
 pub const MAX_AUDIO_DURATION_MS: u32 = 86_400_000;
 
-/// ADR-0090 section 2 — the longest `title` or `artist` an `audio`
+/// ADR-0092 section 2 — the longest `title` or `artist` an `audio`
 /// attachment may carry, in bytes.
 pub const MAX_AUDIO_TAG_BYTES: usize = 255;
 
@@ -453,13 +453,13 @@ pub struct AttachmentRef {
     /// its size is outside 1..=[`MAX_THUMB_BYTES`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumb: Option<ThumbRef>,
-    /// ADR-0090 section 2 — the title tag of an `audio` attachment, read on
+    /// ADR-0092 section 2 — the title tag of an `audio` attachment, read on
     /// the sender's device. Kept only for kind `audio`, 1..=
     /// [`MAX_AUDIO_TAG_BYTES`] bytes with no control or format character;
     /// otherwise dropped alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// ADR-0090 section 2 — the artist tag of an `audio` attachment, under
+    /// ADR-0092 section 2 — the artist tag of an `audio` attachment, under
     /// the same rule as [`Self::title`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artist: Option<String>,
@@ -475,7 +475,7 @@ pub enum MediaKind {
     VideoNote,
     /// [`MEDIA_KIND_GIF`] — a GIF re-uploaded from the GIF proxy.
     Gif,
-    /// [`MEDIA_KIND_AUDIO`] — a music or other audio file (ADR-0090).
+    /// [`MEDIA_KIND_AUDIO`] — a music or other audio file (ADR-0092).
     Audio,
     /// Any other value — a kind this build does not know. Renders as a
     /// plain file.
@@ -685,7 +685,7 @@ impl AttachmentRef {
         }
     }
 
-    /// ADR-0090 — set the audio `title` and `artist` tags. Kept on the wire
+    /// ADR-0092 — set the audio `title` and `artist` tags. Kept on the wire
     /// only for kind [`MEDIA_KIND_AUDIO`] within their bound.
     #[must_use]
     pub fn with_audio_tags(mut self, title: Option<String>, artist: Option<String>) -> Self {
@@ -953,9 +953,9 @@ pub struct RawMediaMetadata {
     pub height: Option<u32>,
     /// Poster-frame metadata.
     pub thumb: Option<RawThumbMetadata>,
-    /// ADR-0090 audio title tag.
+    /// ADR-0092 audio title tag.
     pub title: Option<String>,
-    /// ADR-0090 audio artist tag.
+    /// ADR-0092 audio artist tag.
     pub artist: Option<String>,
 }
 
@@ -1221,65 +1221,65 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub channel_invite: Option<String>,
-    /// ADR-0090 section 3 — a poll: `{"body": base64, "author_sig": base64?}`. A content field; at most one per envelope. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 3 — a poll: `{"body": base64, "author_sig": base64?}`. A content field; at most one per envelope. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) poll: Option<serde_json::Value>,
-    /// ADR-0090 section 5 — a checklist, in the poll shape. A content field; also the replacement payload of a checklist edit. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 5 — a checklist, in the poll shape. A content field; also the replacement payload of a checklist edit. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checklist: Option<serde_json::Value>,
-    /// ADR-0090 section 6 — a location object. A content field. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 6 — a location object. A content field. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) location: Option<serde_json::Value>,
-    /// ADR-0090 section 7 — a contact card object. A content field. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 7 — a contact card object. A content field. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) contact_card: Option<serde_json::Value>,
-    /// ADR-0090 section 8 — standard base64 of an article. A content field; also the replacement payload of an article edit. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 8 — standard base64 of an article. A content field; also the replacement payload of an article edit. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) article: Option<serde_json::Value>,
-    /// ADR-0090 section 3.2 — a non-anonymous vote op on the poll with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 3.2 — a non-anonymous vote op on the poll with this DS `messageId`. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) poll_vote_of: Option<serde_json::Value>,
-    /// ADR-0090 — the option indices of a vote, strictly ascending; empty retracts. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 — the option indices of a vote, strictly ascending; empty retracts. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) choices: Option<serde_json::Value>,
-    /// ADR-0090 section 3.5 — a close op on the poll or checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 3.5 — a close op on the poll or checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) poll_close_of: Option<serde_json::Value>,
-    /// ADR-0090 section 4.3 — on a channel poll's close, standard base64 of
+    /// ADR-0092 section 4.3 — on a channel poll's close, standard base64 of
     /// the frozen tally (`lakko_channels::ChannelPollTally`, opaque here, at
     /// most [`poll::MAX_POLL_CLOSE_TALLY_BYTES`]). Lenient: a value that is
     /// not such base64 is dropped and the close stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tally: Option<serde_json::Value>,
-    /// ADR-0090 section 5 — a tick op on the checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 5 — a tick op on the checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) check_of: Option<serde_json::Value>,
-    /// ADR-0090 — the item a tick names: an author item id, or with `item_added` the DS `messageId` of an add row. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 — the item a tick names: an author item id, or with `item_added` the DS `messageId` of an add row. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) item: Option<serde_json::Value>,
-    /// ADR-0090 — `true` when `item` names an added item. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 — `true` when `item` names an added item. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) item_added: Option<serde_json::Value>,
-    /// ADR-0090 — the tick state. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 — the tick state. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) done: Option<serde_json::Value>,
-    /// ADR-0090 section 5 — an add-item op on the checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 section 5 — an add-item op on the checklist with this DS `messageId`. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) check_add_of: Option<serde_json::Value>,
-    /// ADR-0090 — the added item's text. Read as untyped JSON so presence is known; validated
+    /// ADR-0092 — the added item's text. Read as untyped JSON so presence is known; validated
     /// when the envelope is classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) item_text: Option<serde_json::Value>,
@@ -1566,7 +1566,7 @@ pub enum MessageBody {
         /// The highest `messageId` the sender has read.
         up_to: i64,
     },
-    /// ADR-0090 section 3 — a poll. The author signature is NOT checked
+    /// ADR-0092 section 3 — a poll. The author signature is NOT checked
     /// here: the receiver calls [`SignedPoll::verify`] with the group id and
     /// the account key the MLS sender resolves to (C-68) and drops the poll
     /// when it fails.
@@ -1578,7 +1578,7 @@ pub enum MessageBody {
         /// Forward attribution, if any.
         forward: Option<Forward>,
     },
-    /// ADR-0090 section 5 — a checklist; its signature is checked like a
+    /// ADR-0092 section 5 — a checklist; its signature is checked like a
     /// poll's ([`SignedChecklist::verify`]).
     Checklist {
         /// The checklist and its author signature.
@@ -1588,7 +1588,7 @@ pub enum MessageBody {
         /// Forward attribution, if any.
         forward: Option<Forward>,
     },
-    /// ADR-0090 section 6 — a location.
+    /// ADR-0092 section 6 — a location.
     Location {
         /// The location.
         location: Location,
@@ -1597,7 +1597,7 @@ pub enum MessageBody {
         /// Forward attribution, if any.
         forward: Option<Forward>,
     },
-    /// ADR-0090 section 7 — a contact card.
+    /// ADR-0092 section 7 — a contact card.
     ContactCard {
         /// The card.
         card: ContactCard,
@@ -1606,7 +1606,7 @@ pub enum MessageBody {
         /// Forward attribution, if any.
         forward: Option<Forward>,
     },
-    /// ADR-0090 section 8 — an article; every image block points at an
+    /// ADR-0092 section 8 — an article; every image block points at an
     /// image attachment of `attachments`.
     Article {
         /// The article.
@@ -1618,7 +1618,7 @@ pub enum MessageBody {
         /// Forward attribution, if any.
         forward: Option<Forward>,
     },
-    /// ADR-0090 section 3.2 — a non-anonymous vote on the poll `target`.
+    /// ADR-0092 section 3.2 — a non-anonymous vote on the poll `target`.
     /// The structural rule ([`poll::choices_shape_valid`]) is checked here;
     /// whether the choices fit the poll is [`poll::fold`]'s.
     PollVote {
@@ -1627,17 +1627,17 @@ pub enum MessageBody {
         /// Option indices, strictly ascending; empty retracts.
         choices: Vec<u8>,
     },
-    /// ADR-0090 section 3.5 — close the poll or checklist `target`.
+    /// ADR-0092 section 3.5 — close the poll or checklist `target`.
     PollClose {
         /// DS `messageId` of the poll or checklist.
         target: i64,
-        /// ADR-0090 section 4.3 — a channel poll's frozen tally, the encoded
+        /// ADR-0092 section 4.3 — a channel poll's frozen tally, the encoded
         /// `lakko_channels::ChannelPollTally` (opaque here; decode it at the
         /// FFI, drop it when it does not decode). `None` in a group, and
         /// when the envelope carried none or an out-of-bound one.
         tally: Option<Vec<u8>>,
     },
-    /// ADR-0090 section 5 — mark an item of the checklist `target`.
+    /// ADR-0092 section 5 — mark an item of the checklist `target`.
     ChecklistTick {
         /// DS `messageId` of the checklist.
         target: i64,
@@ -1646,7 +1646,7 @@ pub enum MessageBody {
         /// Done or not.
         done: bool,
     },
-    /// ADR-0090 section 5 — add an item to the checklist `target`; the item's
+    /// ADR-0092 section 5 — add an item to the checklist `target`; the item's
     /// id is this row's DS `messageId`.
     ChecklistAdd {
         /// DS `messageId` of the checklist.
@@ -1654,7 +1654,7 @@ pub enum MessageBody {
         /// The item text.
         text: String,
     },
-    /// ADR-0090 section 1 — an edit of the checklist `target` by its author,
+    /// ADR-0092 section 1 — an edit of the checklist `target` by its author,
     /// replacing it with `checklist` (signature checked by the receiver).
     EditChecklist {
         /// DS `messageId` of the checklist.
@@ -1662,7 +1662,7 @@ pub enum MessageBody {
         /// The replacement.
         checklist: SignedChecklist,
     },
-    /// ADR-0090 section 1 — an edit of the article `target`, replacing the
+    /// ADR-0092 section 1 — an edit of the article `target`, replacing the
     /// whole article.
     EditArticle {
         /// DS `messageId` of the article.
@@ -1684,8 +1684,8 @@ pub enum MessageBody {
     ServiceEnvelope,
     /// A JSON chat envelope whose `v` is not [`WIRE_VERSION`]: a message
     /// from a client on a newer wire version. Also, with `version ==`
-    /// [`WIRE_VERSION`] (ADR-0090): a v1 envelope whose content this build
-    /// refuses (two content fields, an ADR-0090 payload that broke a bound
+    /// [`WIRE_VERSION`] (ADR-0092): a v1 envelope whose content this build
+    /// refuses (two content fields, an ADR-0092 payload that broke a bound
     /// with nothing else to show, an op carrying content, a refused edit
     /// payload). It carries no text for this
     /// build to show; the client renders its own catalog sentence in the
@@ -1718,7 +1718,7 @@ impl Envelope {
     /// trust a half-formed op to mutate another message (fail-safe,
     /// the same posture the rest of the parser takes).
     ///
-    /// ADR-0090: at most one content field (`poll`, `checklist`,
+    /// ADR-0092: at most one content field (`poll`, `checklist`,
     /// `location`, `contact_card`, `article`) with an empty text; a second
     /// one, or one beside an op other than `edit_of`, is
     /// [`MessageBody::Unsupported`]. A content payload or a new op that
@@ -1926,7 +1926,7 @@ impl Envelope {
     }
 }
 
-// ---- ADR-0090 content and op decoding from the envelope's JSON ----
+// ---- ADR-0092 content and op decoding from the envelope's JSON ----
 
 /// The JSON shape of a signed binary body (poll, checklist).
 #[derive(Serialize, Deserialize)]
@@ -2053,7 +2053,7 @@ fn checklist_add_from_json(
     })
 }
 
-/// One ADR-0090 content payload, for [`compose_content`].
+/// One ADR-0092 content payload, for [`compose_content`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
     /// A poll.
@@ -2068,7 +2068,7 @@ pub enum Content {
     Article(Article),
 }
 
-/// Encode an ADR-0090 content message: one content payload with empty text,
+/// Encode an ADR-0092 content message: one content payload with empty text,
 /// optionally a reply and a forward attribution (under the rules of
 /// [`compose_chat`]). Only an article carries attachments, and every image
 /// block must point at an image attachment. Refuses exactly what a receiver
@@ -2164,7 +2164,7 @@ pub(crate) fn content_from_field_value(
 }
 
 impl MessageBody {
-    /// The ADR-0090 content this body carries, for a content message (not
+    /// The ADR-0092 content this body carries, for a content message (not
     /// an edit or an op).
     #[must_use]
     pub fn content(&self) -> Option<Content> {
@@ -2183,7 +2183,7 @@ fn compose_op(envelope: &Envelope, what: &str) -> Result<Vec<u8>, AttachmentErro
     serde_json::to_vec(envelope).map_err(|e| AttachmentError::WireFormat(format!("{what}: {e}")))
 }
 
-/// Encode a non-anonymous VOTE (ADR-0090 section 3.2) on the poll `target`:
+/// Encode a non-anonymous VOTE (ADR-0092 section 3.2) on the poll `target`:
 /// option indices strictly ascending, empty to retract.
 ///
 /// # Errors
@@ -2209,7 +2209,7 @@ pub fn compose_poll_vote(target: i64, choices: &[u8]) -> Result<Vec<u8>, Attachm
     compose_op(&envelope, "compose_poll_vote")
 }
 
-/// Encode a CLOSE (ADR-0090 section 3.5) of the poll or checklist `target`;
+/// Encode a CLOSE (ADR-0092 section 3.5) of the poll or checklist `target`;
 /// a channel poll's close carries its frozen tally (section 4.3), the encoded
 /// `lakko_channels::ChannelPollTally`, opaque here.
 ///
@@ -2234,7 +2234,7 @@ pub fn compose_poll_close(target: i64, tally: Option<&[u8]>) -> Result<Vec<u8>, 
     compose_op(&envelope, "compose_poll_close")
 }
 
-/// Encode a TICK (ADR-0090 section 5) of `item` in the checklist `target`.
+/// Encode a TICK (ADR-0092 section 5) of `item` in the checklist `target`.
 ///
 /// # Errors
 ///
@@ -2258,7 +2258,7 @@ pub fn compose_checklist_tick(
     compose_op(&envelope, "compose_checklist_tick")
 }
 
-/// Encode an ADD-ITEM (ADR-0090 section 5) to the checklist `target`.
+/// Encode an ADD-ITEM (ADR-0092 section 5) to the checklist `target`.
 ///
 /// # Errors
 ///
@@ -2651,7 +2651,7 @@ pub enum AttachmentError {
     /// message is for logs only.
     #[error("attachment wire format: {0}")]
     WireFormat(String),
-    /// ADR-0090 — a content payload or op refused by its codec.
+    /// ADR-0092 — a content payload or op refused by its codec.
     #[error("attachment content: {0}")]
     Content(#[from] ContentError),
 }
@@ -2831,7 +2831,7 @@ pub mod fuzz_api {
             }
     }
 
-    /// ADR-0090 property oracle over attacker-controlled bytes: every new
+    /// ADR-0092 property oracle over attacker-controlled bytes: every new
     /// content kind and op that survives [`parse_body`] is within its bounds
     /// (it re-encodes), and composing it again then parsing yields the same
     /// body. Anything else passes trivially.
@@ -2914,7 +2914,7 @@ pub mod fuzz_api {
         parse_body(&recomposed) == body
     }
 
-    /// ADR-0090 bundle oracle over attacker-controlled bytes: the first
+    /// ADR-0092 bundle oracle over attacker-controlled bytes: the first
     /// byte is a content kind, the rest a payload. A payload that decodes
     /// re-encodes to a payload that decodes to the same content; a state
     /// snapshot (the same bytes read as one) that decodes re-encodes to the
@@ -2940,7 +2940,7 @@ pub mod fuzz_api {
             .is_some_and(|back| back == content)
     }
 
-    /// ADR-0090 article oracle over attacker-controlled bytes: decoding never
+    /// ADR-0092 article oracle over attacker-controlled bytes: decoding never
     /// panics, and an article that decodes re-encodes to the identical bytes
     /// and has an excerpt within its bound.
     #[must_use]
@@ -3075,7 +3075,7 @@ pub mod fuzz_api {
             },
             // Never rendered; a service envelope must never be chat.
             MessageBody::ServiceEnvelope => assert!(super::is_service_envelope(bytes)),
-            // A JSON envelope of another wire version, or (ADR-0090) a v1
+            // A JSON envelope of another wire version, or (ADR-0092) a v1
             // envelope whose content was refused: JSON either way.
             MessageBody::Unsupported { version } => {
                 assert!(
@@ -3083,7 +3083,7 @@ pub mod fuzz_api {
                         || serde_json::from_slice::<super::Envelope>(bytes).is_ok()
                 );
             },
-            // ADR-0090: touch the content each new kind carries.
+            // ADR-0092: touch the content each new kind carries.
             MessageBody::Poll { poll, .. } => {
                 let _ = (poll.body.options.len(), poll.author_sig.is_some());
             },

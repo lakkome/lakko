@@ -26,10 +26,34 @@
  * `/signup` / `/i/:slug` paths (the auth-shell layout renders
  * the banner too via a sibling mount).
  */
-import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { SW_UPDATE_EVENT, waitingServiceWorker } from "./register";
 import { reloadIntoUpdate } from "./update-reload";
 import { t } from "../l10n";
+import { setBottomStripPx } from "../ui/bottom-strip";
+
+/** The attribute and the custom property on `<html>` that hand the banner's
+ *  strip to the layout: `#root` (every route, its forms and composers)
+ *  ends above it, so the banner never sits on a control (base walk
+ *  2026-11-13: on a 1024x768 window it covered New channel's `Create`). */
+export const BANNER_ATTR = "data-update-banner";
+export const BANNER_HEIGHT_VAR = "--lk-update-banner-h";
+
+/** Reserve `heightPx` at the bottom of the viewport for the banner, or give
+ *  it back with `null`. */
+export function reserveBannerStrip(root: HTMLElement, heightPx: number | null): void {
+  if (heightPx === null) {
+    root.removeAttribute(BANNER_ATTR);
+    root.style.removeProperty(BANNER_HEIGHT_VAR);
+    setBottomStripPx(0);
+    return;
+  }
+  const px = Math.max(0, Math.ceil(heightPx));
+  root.setAttribute(BANNER_ATTR, "");
+  root.style.setProperty(BANNER_HEIGHT_VAR, `${px}px`);
+  // The collapsed call window places itself from script (CallWindow.tsx).
+  setBottomStripPx(px);
+}
 
 export function SwUpdateBanner(): JSX.Element {
   const [waiting, setWaiting] = createSignal<ServiceWorker | null>(null);
@@ -76,40 +100,35 @@ export function SwUpdateBanner(): JSX.Element {
     );
   }
 
+  // While it shows, the banner owns a strip at the bottom of the viewport and
+  // the page ends above it (`styles.css`, `html[data-update-banner]`).
+  let strip: HTMLDivElement | undefined;
+  createEffect(() => {
+    const html = document.documentElement;
+    if (waiting() === null || strip === undefined) {
+      reserveBannerStrip(html, null);
+      return;
+    }
+    const el = strip;
+    const measure = (): void => reserveBannerStrip(html, el.getBoundingClientRect().height);
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(el);
+    onCleanup(() => {
+      observer?.disconnect();
+      reserveBannerStrip(html, null);
+    });
+  });
+
   return (
     <Show when={waiting() !== null}>
-      <div
-        role="status"
-        aria-live="polite"
-        style={{
-          position: "fixed",
-          bottom: "1rem",
-          left: "50%",
-          transform: "translateX(-50%)",
-          "max-width": "32rem",
-          "z-index": 1000,
-          background: "var(--surface-elevated)",
-          color: "var(--surface-fg)",
-          border: "1px solid var(--surface-border)",
-          "border-radius": "var(--radius-md)",
-          "box-shadow": "var(--shadow-1)",
-          padding: "0.75rem 1rem",
-          display: "flex",
-          "align-items": "center",
-          gap: "1rem",
-        }}
-      >
-        <span style={{ flex: 1, "font-size": "0.9rem" }}>
-          {t("app.update.ready")}
-        </span>
-        <button
-          class="primary"
-          type="button"
-          onClick={reload}
-          disabled={reloading()}
-        >
-          {reloading() ? t("app.update.reloading") : t("app.update.reload")}
-        </button>
+      <div ref={(el) => (strip = el)} class="lk-update-banner" role="status" aria-live="polite">
+        <div class="lk-update-banner-inner">
+          <span class="lk-update-banner-text">{t("app.update.ready")}</span>
+          <button class="primary" type="button" onClick={reload} disabled={reloading()}>
+            {reloading() ? t("app.update.reloading") : t("app.update.reload")}
+          </button>
+        </div>
       </div>
     </Show>
   );

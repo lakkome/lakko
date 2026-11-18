@@ -133,7 +133,7 @@ export interface ProfileApi {
    *  call tile shows it as plain text while verification is still running
    *  (`calls/tile-name.ts`). Reactive. */
   claimedUsernameOf(keyB64: string): string | null;
-  /** ADR-0090 section 7 — whether the newest profile held from `keyB64` lets
+  /** ADR-0092 section 7 — whether the newest profile held from `keyB64` lets
    *  others share the person's contact card; `true` when none is held.
    *  Reactive. */
   cardShareableOf(keyB64: string): boolean;
@@ -421,7 +421,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         grants,
         // ADR-0084 — the saved photo, in every envelope this account sends.
         own.avatar === null ? undefined : avatarToWasm<InstanceType<Wasm["ProfileAvatar"]>>(w, own.avatar),
-        // ADR-0090 section 7 — off exactly when "who can find me" is Nobody.
+        // ADR-0092 section 7 — off exactly when "who can find me" is Nobody.
         ownCardShareable(visibilitySetting()),
       );
     } finally {
@@ -487,7 +487,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /** What a profile into a conversation carries that may change without a
-   *  new name: its grants (ADR-0060), the card flag (ADR-0090 section 7)
+   *  new name: its grants (ADR-0060), the card flag (ADR-0092 section 7)
    *  and, in a group, whether the username goes (UX `who-can-find-me.md`
    *  section 6.2). A conversation whose published signature differs gets the
    *  profile again. */
@@ -558,8 +558,19 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     random: () => Math.random(),
     publish: publishInto,
     onError: (_groupIdB64, err) => {
+      // The DS answer (status and error code) explains a failure; the
+      // endpoint is left out because it names the conversation.
+      const cause = (err as { cause?: unknown }).cause as
+        | { name?: unknown; status?: unknown; body?: unknown; message?: unknown }
+        | undefined;
+      const detail =
+        cause === undefined || cause === null
+          ? ""
+          : ` (${String(cause.name ?? "")}${
+              typeof cause.status === "number" ? ` ${cause.status} ${String(cause.body ?? "").slice(0, 80)}` : ""
+            })`;
       // eslint-disable-next-line no-console
-      console.warn("[profile] publish failed", err);
+      console.warn(`[profile] publish failed${detail}`, err);
     },
   });
 
@@ -629,7 +640,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     });
   });
 
-  // ADR-0090 section 7 — a switch to or from `Nobody` changes the card flag
+  // ADR-0092 section 7 — a switch to or from `Nobody` changes the card flag
   // every profile carries. Receivers keep a strictly newer profile only, so
   // the own profile is restamped (the same name and photo, a new stamp) and
   // published everywhere, and sent to this account's other devices like an
@@ -826,6 +837,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     async usernameClaimed(certificate) {
       if (certificate !== null) ownCertSlot.put(accountId(), certificate);
       else await ensureOwnCertificate();
+      // The username is part of the profile, so a new one is a new profile:
+      // re-stamp the saved fields. With the old stamp every receiver took the
+      // republished envelope for one it already held, and a rename never
+      // reached a contact or a group (base scenario 3, 2026-11-11).
+      const account = accountId();
+      if (account !== null) {
+        const mine = ownProfile();
+        saveOwnProfileFields(account, { displayName: mine.displayName, avatar: mine.avatar }, Date.now());
+        setOwnProfileTick((t) => t + 1);
+      }
       bump();
       ownProfileChanged();
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));

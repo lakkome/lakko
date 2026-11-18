@@ -197,7 +197,7 @@ extension ChannelsClient {
         /// The post's comment count (ADR-0087 phase B, the service's own
         /// count); `nil` from a service that does not send it.
         public var comments: UInt64? = nil
-        /// ADR-0090 section 4.3 — a poll post's distinct voters and votes per
+        /// ADR-0092 section 4.3 — a poll post's distinct voters and votes per
         /// opaque option label; `nil` when the post has no votes field.
         public var voters: UInt64? = nil
         public var votes: [FfiReactionLabelCount] = []

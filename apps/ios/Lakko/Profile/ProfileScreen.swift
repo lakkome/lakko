@@ -61,8 +61,7 @@ struct ProfileScreen: View {
                     Button {
                         if model.requestLeave({ dismiss() }) { dismiss() }
                     } label: {
-                        Image(systemName: "chevron.backward")
-                            .font(.body.weight(.semibold))
+                        LkIconView(.chevronBack, size: 24)
                     }
                     .accessibilityLabel(l10n.t("common.back"))
                 }
@@ -127,8 +126,7 @@ struct ProfileScreen: View {
             avatarPicture
                 .frame(width: 112, height: 112)
             Button { menuOpen = true } label: {
-                Image(systemName: "pencil")
-                    .font(.system(size: 14, weight: .semibold))
+                LkIconView(.pencil, size: 14, relativeTo: nil)
                     .foregroundStyle(Color.lakkoAccentForeground)
                     .frame(width: 32, height: 32)
                     .background(Circle().fill(Color.lakkoAccent))
@@ -147,30 +145,30 @@ struct ProfileScreen: View {
         case .set(let media):
             PendingAvatarPicture(media: media, size: 112)
         case .removed:
-            InitialsAvatar(name: initialsName, identity: tintIdentity, size: 112, placeholderSymbol: "person.fill")
+            InitialsAvatar(name: initialsName, identity: tintIdentity, size: 112, placeholderIcon: .personFill)
         case .unchanged:
             InitialsAvatar(
-                name: initialsName, identity: tintIdentity, size: 112, placeholderSymbol: "person.fill",
+                name: initialsName, identity: tintIdentity, size: 112, placeholderIcon: .personFill,
                 photo: model.saved.avatar == nil ? nil : .own, playsVideo: true)
         }
     }
 
     private var photoMenu: some View {
         VStack(spacing: 0) {
-            menuRow(l10n.t("profile.avatar.menu.library"), systemImage: "photo.on.rectangle") {
+            menuRow(l10n.t("profile.avatar.menu.library"), icon: .photoStack) {
                 menuOpen = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { libraryOpen = true }
             }
             if AvatarCameraScreen.hasCamera {
                 Divider()
-                menuRow(l10n.t("profile.avatar.menu.camera"), systemImage: "camera") {
+                menuRow(l10n.t("profile.avatar.menu.camera"), icon: .camera) {
                     menuOpen = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { cameraOpen = true }
                 }
             }
             if model.showsPhoto {
                 Divider()
-                menuRow(l10n.t("profile.avatar.menu.remove"), systemImage: "trash", destructive: true) {
+                menuRow(l10n.t("profile.avatar.menu.remove"), icon: .trash, destructive: true) {
                     menuOpen = false
                     model.removePhoto()
                 }
@@ -182,11 +180,11 @@ struct ProfileScreen: View {
     }
 
     private func menuRow(
-        _ title: String, systemImage: String, destructive: Bool = false, action: @escaping () -> Void
+        _ title: String, icon: LkIcon, destructive: Bool = false, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage).frame(width: 24)
+                LkIconView(icon, size: 20).frame(width: 24)
                 Text(title)
                 Spacer()
             }
@@ -237,9 +235,8 @@ struct ProfileScreen: View {
                             .font(.title2.weight(.semibold))
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    Image(systemName: "pencil")
+                    LkIconView(.pencil, size: 20, label: l10n.t("profile.name.change"))
                         .foregroundStyle(Color.lakkoAccent)
-                        .accessibilityLabel(l10n.t("profile.name.change"))
                 }
                 .multilineTextAlignment(.center)
             }
@@ -302,9 +299,8 @@ struct ProfileScreen: View {
             } label: {
                 HStack(spacing: 8) {
                     usernameLabel
-                    Image(systemName: "pencil")
+                    LkIconView(.pencil, size: 20, label: l10n.t("profile.username.change"))
                         .foregroundStyle(Color.lakkoAccent)
-                        .accessibilityLabel(l10n.t("profile.username.change"))
                 }
             }
             .buttonStyle(.plain)

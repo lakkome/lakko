@@ -16,7 +16,8 @@ import me.lakko.app.chat.toAttachmentRef
  * channel-post log into the flat conversation and candidate lists the ranking
  * reads, and keeps a reference from each candidate back to the row it came
  * from. Plain data in, plain data out: no Compose, no storage, and no FFI call
- * ([FeedAttachment.ref] is a generated record, which loads no native code).
+ * ([FeedAttachment.ref] is a generated record, which loads no native code; a
+ * channel post's is rebuilt from the reference its log entry keeps).
  *
  * One-to-one chats never reach it: the caller passes groups and channels only
  * (UX spec section 3).
@@ -118,7 +119,7 @@ public data class FeedMessage(
     val reactions: List<FeedReaction> = emptyList(),
     val replyTarget: Long? = null,
     val forwardAuthor: String? = null,
-    /** ADR-0090 — a poll, checklist, location, contact card or article. */
+    /** ADR-0092 — a poll, checklist, location, contact card or article. */
     val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
 )
 
@@ -212,6 +213,13 @@ private fun addChannelPosts(
     val fromSelf = source.idHex in ctx.ownChannels
     for (p in slot.posts) {
         if (p.cursor <= 0 || p.serverTsMs < oldest) continue
+        // A post shows its text and its attachments, as a group's message
+        // does (`docs/ux/feed.md` section 3, base scenario 32); one with
+        // neither has nothing to show.
+        if (p.text.isBlank() && p.media.isEmpty() && p.contentEnvelopeB64 == null) continue
+        val attachments = p.media.map { m ->
+            FeedAttachment(kind = m.kind, mime = m.mime, ref = m.ref?.let { ctx.attachmentRef(it) })
+        }
         val mentionsMe = !fromSelf && ctx.ownUsername != null && ctx.mentions(p.text, ctx.ownUsername)
         candidates += FeedCandidateInput(
             conversation = conversation,
@@ -223,14 +231,14 @@ private fun addChannelPosts(
             mentionsMe = mentionsMe,
             repliesToMe = false,
             reactionsDistinct = 0,
-            hasMedia = p.attachments.isNotEmpty(),
+            hasMedia = attachments.isNotEmpty(),
             text = p.text,
         )
         val message = FeedMessage(
             messageId = p.cursor,
             direction = if (fromSelf) "outgoing" else "incoming",
             text = p.text,
-            attachments = p.attachments.map { a -> FeedAttachment(a.kind, a.mime, ctx.attachmentRef(a)) },
+            attachments = attachments,
             createdAt = java.time.Instant.ofEpochMilli(p.serverTsMs).toString(),
             content = p.contentEnvelopeB64?.let(ctx.parseContent),
         )

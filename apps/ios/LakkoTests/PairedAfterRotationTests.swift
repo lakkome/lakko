@@ -47,14 +47,14 @@ final class PairedAfterRotationTests: XCTestCase {
     private func publicKey(_ seed: Data) throws -> Data { try Identity.fromSeed(seed: seed).signaturePublicKey() }
 
     private func json(
-        v: Int = 3, own: String = "[]", pinPredecessors: String? = "[]"
+        v: Int = 4, own: String = "[]", pinPredecessors: String? = "[]"
     ) -> Data {
         let pinField = pinPredecessors.map { #","provenPredecessorsB64":\#($0)"# } ?? ""
         return Data("""
         {"v":\(v),"contacts":[],"pins":[{"accountIdB64":"\(peerAccount)",\
         "pinnedSignaturePubkeyB64":"\(key(0xC3))","rotationMarker":7\(pinField)}],\
         "knownGroupIdsB64":[],"ownPredecessors":\(own),\
-        "groupNames":[],"profiles":[],"pendingContacts":[]}
+        "groupNames":[],"profiles":[],"pendingContacts":[],"channelSeeds":[]}
         """.utf8)
     }
 
@@ -66,7 +66,7 @@ final class PairedAfterRotationTests: XCTestCase {
     // MARK: - The codec
 
     func testAFormat2BundleRoundTripsWithPredecessors() throws {
-        let bundle = StateBundle.V3(
+        let bundle = StateBundle.V4(
             contacts: [],
             pins: [StateBundle.CarriedPin(
                 accountIdB64: peerAccount, pinnedSignaturePubkeyB64: key(0xC3), rotationMarker: 7,
@@ -76,7 +76,7 @@ final class PairedAfterRotationTests: XCTestCase {
                 StateBundle.OwnPredecessor(seedB64: seed(1).base64EncodedString(), adoptedAtMs: 1_000),
                 StateBundle.OwnPredecessor(seedB64: seed(2).base64EncodedString(), adoptedAtMs: 2_000),
             ])
-        XCTAssertEqual(bundle.v, 3)
+        XCTAssertEqual(bundle.v, 4)
         XCTAssertEqual(StateBundle.decode(StateBundle.encode(bundle)), bundle)
 
         // The contract's field names, read from another client's JSON.
@@ -92,7 +92,8 @@ final class PairedAfterRotationTests: XCTestCase {
         XCTAssertNotNil(StateBundle.decode(json()))
         XCTAssertNil(StateBundle.decode(json(v: 1)), "flag day: no dual accept")
         XCTAssertNil(StateBundle.decode(json(v: 2)), "format 2 is refused too (bundle v3 flag day)")
-        XCTAssertNil(StateBundle.decode(json(v: 4)))
+        XCTAssertNil(StateBundle.decode(json(v: 3)), "format 3 is refused too (bundle v4 flag day)")
+        XCTAssertNil(StateBundle.decode(json(v: 5)))
         XCTAssertNil(StateBundle.decode(
             Data(#"{"v":1,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)))
     }
@@ -126,7 +127,7 @@ final class PairedAfterRotationTests: XCTestCase {
             "a proven key that is not 32 bytes")
         XCTAssertNil(StateBundle.decode(json(pinPredecessors: nil)), "the field is part of the format")
         XCTAssertNil(
-            StateBundle.decode(Data(#"{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)),
+            StateBundle.decode(Data(#"{"v":4,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)),
             "ownPredecessors is part of the format")
     }
 
@@ -167,7 +168,7 @@ final class PairedAfterRotationTests: XCTestCase {
             ownPredecessors: InMemoryOwnPredecessorStore(),
             adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults),
             provenStore: ProvenPredecessorStore(ownerAccountIdB64: account, defaults: defaults))
-        XCTAssertEqual(built.v, 3)
+        XCTAssertEqual(built.v, 4)
         XCTAssertEqual(built.ownPredecessors, [], "an account that never rotated sends an empty array")
     }
 
@@ -322,22 +323,10 @@ final class PairedAfterRotationTests: XCTestCase {
 
     // MARK: - The conversation binding
 
-    func testTheBindingVerdictTable() {
-        let current = Data(repeating: 3, count: 32)
-        let old = [Data(repeating: 1, count: 32), Data(repeating: 2, count: 32)]
-        func verdict(_ bound: Data?, _ predecessors: [Data], holds: Bool = false) -> OwnAccountKeys.BindingVerdict {
-            OwnAccountKeys.bindingVerdict(
-                boundKey: bound, currentKey: current, predecessorKeys: predecessors, holdsConversations: holds)
-        }
-        XCTAssertEqual(verdict(nil, []), .mint)
-        XCTAssertEqual(verdict(nil, old), .mint)
-        XCTAssertEqual(verdict(current, []), .keep, "an account that never rotated")
-        XCTAssertEqual(verdict(old[0], old), .keep, "a kept device stays under the old key")
-        XCTAssertEqual(verdict(old[1], old, holds: true), .keep)
-        XCTAssertEqual(verdict(current, old), .remint, "minted before the bundle arrived, no conversation yet")
-        XCTAssertEqual(verdict(current, old, holds: true), .keepUnderCurrentKey)
-        XCTAssertEqual(verdict(Data(repeating: 9, count: 32), old), .mint, "another account's key (a reset)")
+    // The binding verdict table moved to ``EarlierKeysGateTests`` (G-56: the
+    // core's `ownBindingVerdict`, the shared 17 vectors).
 
+    func testTheConversationSeedIsTheOldestPredecessor() {
         XCTAssertEqual(
             OwnAccountKeys.conversationSeed(currentSeed: seed(3), predecessorSeeds: [seed(1), seed(2)]), seed(1))
         XCTAssertEqual(OwnAccountKeys.conversationSeed(currentSeed: seed(3), predecessorSeeds: []), seed(3))
@@ -376,7 +365,7 @@ final class PairedAfterRotationTests: XCTestCase {
         try senderStore.add(seed(0xA0), accountIdB64: account)
 
         // Over the wire.
-        let sent = StateBundle.V3(
+        let sent = StateBundle.V4(
             contacts: [], pins: [], knownGroupIdsB64: [],
             ownPredecessors: StateBundle.carriedOwnPredecessors(
                 seeds: senderStore.load(accountIdB64: account)) { _ in 1_000 })

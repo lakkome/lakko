@@ -200,8 +200,16 @@ fn conversation() -> impl Strategy<Value = ConversationRef> {
 
 fn reentry() -> impl Strategy<Value = Vec<ReentryEpoch>> {
     prop::collection::vec(
-        (any::<u64>(), prop::collection::vec(any::<u8>(), 1..40))
-            .prop_map(|(epoch, group_info)| ReentryEpoch { epoch, group_info }),
+        (
+            any::<u64>(),
+            any::<[u8; 32]>(),
+            prop::collection::vec(any::<u8>(), 1..40),
+        )
+            .prop_map(|(epoch, seed, group_info)| ReentryEpoch {
+                epoch,
+                ds_access_seed: SecretBytes::new(seed),
+                group_info,
+            }),
         0..=2,
     )
 }

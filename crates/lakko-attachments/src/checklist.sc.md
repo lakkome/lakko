@@ -5,7 +5,7 @@
 # `checklist` — checklist body, author signature and fold (spec)
 
 **Module:** `crates/lakko-attachments/src/checklist.rs`
-**One line:** The canonical binary checklist body of ADR-0090 section 5, its author signature, and the fold of edits, added items, ticks and closes.
+**One line:** The canonical binary checklist body of ADR-0092 section 5, its author signature, and the fold of edits, added items, ticks and closes.
 
 ## Why this module exists
 
@@ -42,4 +42,4 @@ The body arrives base64 in a chat envelope any member writes; bounded by `MAX_CH
 
 ## References
 
-ADR-0090 section 5; C-68; tests in `checklist.rs` and `tests/attachment_kinds.rs`.
+ADR-0092 section 5; C-68; tests in `checklist.rs` and `tests/attachment_kinds.rs`.

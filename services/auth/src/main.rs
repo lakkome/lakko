@@ -90,7 +90,7 @@
 //!   the recovery email's limits, each `N/SECS` (defaults chosen, not
 //!   measured; see `src/limits.rs`).
 //! - `LAKKO_ANON_CRED_MASTER_SECRET` — 64 hex characters shared with
-//!   `lakko-svc-channels` only (ADR-0090 section 4.4; a master of its own,
+//!   `lakko-svc-channels` only (ADR-0092 section 4.4; a master of its own,
 //!   not the anonymous-token one). Optional; unset = `/auth/anon-credential*`
 //!   return 503 `anon-credential-disabled`.
 //! - `LAKKO_AUTH_LIMIT_ANON_CREDENTIAL` — per-account window of the two
@@ -128,9 +128,9 @@
 //! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
 //! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
 //! - `PUT  /auth/anon-credential/commitment` — register the channel-poll credential commitment
-//!   (ADR-0090 section 4.2, bearer-auth; `409 commitment-already-registered` for another one)
+//!   (ADR-0092 section 4.2, bearer-auth; `409 commitment-already-registered` for another one)
 //! - `POST /auth/anon-credential`    — issue the current period's channel-poll credential
-//!   (ADR-0090 section 4.2, bearer-auth)
+//!   (ADR-0092 section 4.2, bearer-auth)
 //! - `GET  /auth/anon-credential/key/{period}` — that credential's public key (anonymous)
 //! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth;
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
@@ -366,7 +366,7 @@ pub(crate) struct AppState {
     /// secret + epoch window + per-context quotas). `None` when
     /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset: `/auth/tokens*` return 503.
     pub(crate) anon_tokens: Option<Arc<anon_tokens::AnonTokenIssuer>>,
-    /// ADR-0090 section 4.2 — anonymous-credential issuance for channel
+    /// ADR-0092 section 4.2 — anonymous-credential issuance for channel
     /// polls. `None` when `LAKKO_ANON_CRED_MASTER_SECRET` is unset:
     /// `/auth/anon-credential*` return 503.
     pub(crate) anon_cred: Option<Arc<anon_credential::AnonCredIssuer>>,
@@ -554,7 +554,7 @@ async fn main() -> Result<()> {
     // master secret / window / quota; dormant (with a warning) when unset.
     let anon_tokens = anon_tokens::load_anon_tokens().context("load anonymous-token config")?;
     anon_tokens::log_startup(anon_tokens.as_ref());
-    // ADR-0090 section 4.2 — the channel-poll credential master.
+    // ADR-0092 section 4.2 — the channel-poll credential master.
     let anon_cred =
         anon_credential::load_anon_credential().context("load anonymous-credential config")?;
     anon_credential::log_startup(anon_cred.as_ref());
@@ -628,7 +628,7 @@ async fn main() -> Result<()> {
             .spawn_pruner()
     });
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.
-    // ADR-0090 — drop credential issuance rows older than the previous period.
+    // ADR-0092 — drop credential issuance rows older than the previous period.
     let _anon_cred_pruner = anon_credential::spawn_pruner(pool.clone());
     let _anon_token_pruner = anon_tokens.as_ref().map(|i| {
         lakko_anon_token_server::spawn_issuance_pruner(pool.clone(), i.server.window_secs)
@@ -860,7 +860,7 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
-    // ADR-0090 section 4.2 — the channel-poll credential: register the
+    // ADR-0092 section 4.2 — the channel-poll credential: register the
     // account's commitment once, then one credential per period. Bearer-auth;
     // the per-period public key is anonymous (public router below).
     let anon_cred_routes = Router::new()
@@ -1025,7 +1025,7 @@ fn build_app(state: AppState) -> Router {
             get(anon_tokens::public_key),
         )
         .merge(anon_token_routes)
-        // ADR-0090 — the channel-poll credential key of a period. ANONYMOUS:
+        // ADR-0092 — the channel-poll credential key of a period. ANONYMOUS:
         // a client checks the issuance proof against this key.
         .route(
             "/auth/anon-credential/key/{period}",

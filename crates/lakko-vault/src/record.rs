@@ -15,7 +15,7 @@
 //! All integers are big-endian. `opt<T>` is `0x00`, or `0x01` followed by
 //! `T`; a `bool` is `0x00` or `0x01`; any other byte in either is refused.
 //! Each of the four containers starts with `version(1) = 0x02` (version 1,
-//! before ADR-0090, is refused).
+//! before ADR-0092, is refused).
 //!
 //! ```text
 //! chunk := version || count u16 (<= 512) || message*
@@ -68,7 +68,8 @@
 //! shared_pin := message_id u64 || pinned bool || updated_at_ms u64
 //! personal_pin := message_id u64 || pinned_at_ms u64
 //! chunk_entry := count u16 || first_id u64 || last_id u64 || version u64
-//! reentry := epoch u64 || group_info_len u32 (1..=1 MiB) || group_info
+//! reentry := epoch u64 || ds_access_seed(32) || group_info_len u32 (1..=1 MiB)
+//!   || group_info
 //! registrar := rank u8 || seed(32)
 //!
 //! devices_head := version || reentry_count u8 (<= 2) || reentry*
@@ -77,7 +78,7 @@
 //! entry := ref || last_activity_ms u64 || membership u8
 //! ```
 //!
-//! A content block (ADR-0090 section 3.11) is a poll (1), checklist (2),
+//! A content block (ADR-0092 section 3.11) is a poll (1), checklist (2),
 //! location (3), contact card (4) or article (5): the JSON value of the
 //! envelope's content field and, for a poll or checklist, a folded-state
 //! snapshot (empty when none). Both are opaque here; the FFI decodes them
@@ -136,7 +137,7 @@ use thiserror::Error;
 use crate::keys::{ConversationRef, MAX_CONVERSATION_ID_LEN, REF_TAG_CONVERSATION};
 use crate::seal::MAX_PLAINTEXT_BYTES;
 
-/// The one version byte the four containers carry. Version 2 (ADR-0090):
+/// The one version byte the four containers carry. Version 2 (ADR-0092):
 /// audio title and artist on an attachment, and the content block on a
 /// message. Flag day: version 1 is refused.
 pub const RECORD_VERSION_V2: u8 = 0x02;
@@ -146,7 +147,7 @@ pub const MAX_RECORD_BYTES: usize = MAX_PLAINTEXT_BYTES;
 
 /// Longest message text, in UTF-8 bytes (1 MiB).
 pub const MAX_TEXT_BYTES: usize = 1 << 20;
-/// Longest audio title or artist, bytes (ADR-0090).
+/// Longest audio title or artist, bytes (ADR-0092).
 pub const MAX_AUDIO_TAG_BYTES: usize = 255;
 /// Largest content payload, bytes (chosen; matches
 /// `lakko_attachments::content_state::MAX_CONTENT_PAYLOAD_BYTES`).
@@ -217,7 +218,7 @@ const MIN_PERSON_LEN: usize = 32 + 1 + 1 + 1;
 const SHARED_PIN_LEN: usize = 8 + 1 + 8;
 const PERSONAL_PIN_LEN: usize = 8 + 8;
 const CHUNK_ENTRY_LEN: usize = 2 + 8 + 8 + 8;
-const MIN_REENTRY_LEN: usize = 8 + 4;
+const MIN_REENTRY_LEN: usize = 8 + 32 + 4;
 const MIN_INDEX_ENTRY_LEN: usize = 3 + 8 + 1;
 
 /// Why a record was refused. Reason codes only: no variant carries input.
@@ -291,7 +292,7 @@ pub enum RecordError {
     #[error("the index repeats a conversation")]
     RepeatedRef,
     /// A content block with an unknown kind, an empty or over-long payload,
-    /// or an over-long state (ADR-0090).
+    /// or an over-long state (ADR-0092).
     #[error("a content block is not admissible")]
     Content,
 }
@@ -472,9 +473,9 @@ pub struct VaultAttachment {
     pub height: Option<u16>,
     /// Poster frame.
     pub thumb: Option<VaultThumb>,
-    /// ADR-0090 audio title; empty when none.
+    /// ADR-0092 audio title; empty when none.
     pub title: String,
-    /// ADR-0090 audio artist; empty when none.
+    /// ADR-0092 audio artist; empty when none.
     pub artist: String,
 }
 
@@ -549,7 +550,7 @@ pub struct VaultCall {
     pub duration_secs: u32,
 }
 
-/// An ADR-0090 content message: kind, payload and state snapshot, opaque
+/// An ADR-0092 content message: kind, payload and state snapshot, opaque
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VaultContent {
@@ -595,7 +596,7 @@ pub struct VaultMessage {
     /// Set when the message was of a wire version the saving device could
     /// not read: that version.
     pub unsupported_version: Option<u32>,
-    /// ADR-0090 content, for a poll, checklist, location, contact card or
+    /// ADR-0092 content, for a poll, checklist, location, contact card or
     /// article message.
     pub content: Option<VaultContent>,
 }
@@ -658,11 +659,18 @@ pub struct ChunkEntry {
     pub version: u64,
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReentryEpoch {
     /// The epoch the GroupInfo describes.
     pub epoch: u64,
+    /// The Delivery Service access seed of that epoch: the group's
+    /// `export_secret("lakko/ds/access/v1", group_id, 32)` at `epoch`, the
+    /// input of the journal's access signer (ADR-0053). An entering device
+    /// signs the epoch-`epoch` proof of its entry commit with it. Secret;
+    /// redacted in `Debug`.
+    pub ds_access_seed: SecretBytes<32>,
     /// The GroupInfo with its ratchet tree, as MLS encodes it. Opaque here.
     pub group_info: Vec<u8>,
 }
@@ -1113,6 +1121,7 @@ fn put_reentry(out: &mut Vec<u8>, reentry: &[ReentryEpoch]) -> Result<(), Record
     put_len_u8(out, reentry.len());
     for epoch in reentry {
         out.extend_from_slice(&epoch.epoch.to_be_bytes());
+        out.extend_from_slice(epoch.ds_access_seed.as_bytes());
         put_bytes_u32(out, &epoch.group_info);
         check_size(out)?;
     }
@@ -1638,6 +1647,7 @@ fn read_reentry(r: &mut Reader<'_>) -> Result<Vec<ReentryEpoch>, RecordError> {
     let mut reentry = Vec::with_capacity(count);
     for _ in 0..count {
         let epoch = r.u64()?;
+        let ds_access_seed = SecretBytes::new(r.array::<32>()?);
         let info_len = r.len_u32()?;
         if info_len == 0 {
             return Err(RecordError::Reentry);
@@ -1645,7 +1655,11 @@ fn read_reentry(r: &mut Reader<'_>) -> Result<Vec<ReentryEpoch>, RecordError> {
         let group_info = r
             .bounded(info_len, MAX_GROUP_INFO_BYTES, RecordError::Reentry)?
             .to_vec();
-        reentry.push(ReentryEpoch { epoch, group_info });
+        reentry.push(ReentryEpoch {
+            epoch,
+            ds_access_seed,
+            group_info,
+        });
     }
     Ok(reentry)
 }

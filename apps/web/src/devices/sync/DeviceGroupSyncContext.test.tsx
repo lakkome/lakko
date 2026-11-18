@@ -172,6 +172,7 @@ vi.mock("../../chat/folders/folder-model", () => ({
 vi.mock("./hlc", () => ({ mintHlc: () => 1n, observeHlc: () => undefined }));
 
 import { renderUi } from "../../test/ui";
+import { keyRotationPort } from "./key-rotation-port";
 import {
   DeviceGroupSyncProvider,
   useDeviceGroupSync,
@@ -298,5 +299,30 @@ describe("DeviceGroupSyncProvider bootstrap", () => {
     expect(h.loaded).toEqual(["B"]);
     expect(h.polled).toEqual(["B"]);
     expect(b.group.free).not.toHaveBeenCalled();
+  });
+});
+
+describe("DeviceGroupSyncProvider journal catch-up with no session (base scenario 4b)", () => {
+  it("answers not-loaded, never offline, when no DeviceGroup handle is loaded", async () => {
+    const sync = mount();
+    // The port is installed for the whole page, session or not.
+    const port = keyRotationPort();
+    expect(port).not.toBeNull();
+    expect(port?.loaded()).toBe(false);
+    // Before the fix this was "offline", which a superseded device waited
+    // out every 20 seconds forever instead of signing out.
+    await expect(sync.catchUpJournal()).resolves.toBe("not-loaded");
+    await expect(port?.catchUp()).resolves.toBe("not-loaded");
+  });
+
+  it("reports a loaded handle once a session's DeviceGroup is up", async () => {
+    const sync = mount();
+    signIn("A");
+    await vi.waitFor(() => expect(h.ensures).toHaveLength(1));
+    h.ensures[0]?.resolve({ ...handles("A"), bootstrapped: false });
+    await vi.waitFor(() => expect(sync.ready()).toBe(true));
+    await vi.waitFor(() => expect(keyRotationPort()?.loaded()).toBe(true));
+    signOut();
+    await vi.waitFor(() => expect(keyRotationPort()?.loaded()).toBe(false));
   });
 });

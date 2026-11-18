@@ -352,11 +352,12 @@ final class KeptDeviceAdoptionTests: XCTestCase {
             rotationStore: rotations,
             sessionUpgradeOperation: { refreshToken, accountId, seed in
                 try upgrades.run(refreshToken, accountId, seed)
-            }
+            },
+            earlierKeysInputs: skipEarlierKeysGate
         )
         repository.readDeviceGroupJournalToHead = { _ in
             log.noteJournalRead()
-            return true
+            return .reached
         }
         repository.onAccountKeysRotated = { secrets, predecessor in
             log.noteRotated(secrets.accountIdentitySeed, predecessor)
@@ -621,7 +622,7 @@ final class KeptDeviceAdoptionTests: XCTestCase {
         h.repository.readDeviceGroupJournalToHead = { [weak repository = h.repository] _ in
             h.log.noteJournalRead()
             repository?.receiveKeyRotationEnvelope(made.envelope, arrival: .ownDeviceGroup)
-            return true
+            return .reached
         }
         h.upgrades.answers = [.success(.fixture(access: "tok-new", refresh: "r2.new", generation: 2))]
 
@@ -633,6 +634,41 @@ final class KeptDeviceAdoptionTests: XCTestCase {
         XCTAssertNil(h.repository.recall)
         XCTAssertEqual(h.log.staged, [])
         XCTAssertEqual(h.repository.identitySecrets?.accountIdentitySeed, made.mnemonic.toSeed())
+    }
+
+    func testAJournalThatDoesNotAnswerDecidesNothingAndWipesNothing() async throws {
+        let h = device()
+        h.repository.readDeviceGroupJournalToHead = { _ in
+            h.log.noteJournalRead()
+            return .noAnswer
+        }
+
+        h.repository.keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: nil)
+        let read = await waitUntil { h.log.journalReads == 1 }
+        XCTAssertTrue(read)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertTrue(h.repository.keysUpdating, "the line stays; the read is tried again later")
+        XCTAssertEqual(h.repository.state, session)
+        XCTAssertNil(h.repository.recall)
+        XCTAssertNil(h.repository.keysSignOut)
+        XCTAssertEqual(h.log.full + h.log.staged, [])
+        XCTAssertEqual(h.repository.identitySecrets?.accountIdentitySeed, oldSeed)
+    }
+
+    func testARefusedJournalOrNoDeviceGroupStateIsAReset() async throws {
+        for answer in [JournalHeadRead.refused, .noState] {
+            let h = device()
+            h.repository.readDeviceGroupJournalToHead = { _ in
+                h.log.noteJournalRead()
+                return answer
+            }
+            h.repository.keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: nil)
+            let reset = await waitUntil { h.repository.recall != nil }
+            XCTAssertTrue(reset, "\(answer)")
+            XCTAssertEqual(h.log.journalReads, 1)
+            XCTAssertEqual(h.upgrades.calls.count, 0)
+        }
     }
 
     func testAPendingEnvelopeTheServerDoesNotAcceptIsAReset() async throws {

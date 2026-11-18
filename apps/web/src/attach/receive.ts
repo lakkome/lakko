@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 — what the chat receive loop (`chat/client.ts`) does with a poll,
+ * ADR-0092 — what the chat receive loop (`chat/client.ts`) does with a poll,
  * a checklist, the ops on them, an anonymous ballot row, a commit and an
  * open-items hand-over. Called under the per-group MLS lock, at receipt, so
  * every attribution reads the roster of the epoch the row was sealed at
@@ -144,7 +144,7 @@ export async function receiveContent(
   }
   let ringB64: string | undefined;
   if (poll.body.anonymous != null) {
-    // An anonymous poll is refused in a one-to-one (ADR-0090 section 3.1).
+    // An anonymous poll is refused in a one-to-one (ADR-0092 section 3.1).
     if (isOneToOne(wasm, group)) verified = false;
     const keys = rosterAccountKeys(group);
     try {

@@ -32,7 +32,7 @@ import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 
 /**
- * ADR-0090 section 4 — one vote per account in a channel poll, through an
+ * ADR-0092 section 4 — one vote per account in a channel poll, through an
  * anonymous credential (`lakko-anon-cred`) issued by auth once per account and
  * period, presented to the channels service with a per-poll tag.
  */
@@ -47,7 +47,7 @@ public sealed interface ChannelVoteAnswer {
     public data class Refused(val status: Int, val code: String?) : ChannelVoteAnswer
 }
 
-/** The server's tolerance on `at_ms` (ADR-0090 section 4.3). */
+/** The server's tolerance on `at_ms` (ADR-0092 section 4.3). */
 public const val VOTE_WINDOW_MS: Long = 120_000L
 
 /** How many writes one vote may take (first try + stale / clock retries). Chosen. */
@@ -191,7 +191,7 @@ public class ChannelPollCredentials(
             ?: runCatching { (Json.parseToJsonElement(r.bodyAsText()) as JsonObject)["error"]?.jsonPrimitive?.content }.getOrNull()
 
     /**
-     * ADR-0090 section 4.3 — vote (or, with no [labels], take the vote back)
+     * ADR-0092 section 4.3 — vote (or, with no [labels], take the vote back)
      * on one channel poll post. Returns whether it was stored.
      */
     public suspend fun vote(

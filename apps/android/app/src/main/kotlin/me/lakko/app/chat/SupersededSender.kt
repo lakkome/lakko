@@ -101,7 +101,7 @@ internal fun senderActOf(
     is IncomingChatEvent.PushRoutingSecret -> SenderAct.CONTROL to personKeyOfLeaf(event.senderLeaf)
     is IncomingChatEvent.CommitterBeacon -> SenderAct.CONTROL to personKeyOfLeaf(event.senderLeaf)
     is IncomingChatEvent.System,
-    // ADR-0090 section 3.6 — a ballot names no sender by construction.
+    // ADR-0092 section 3.6 — a ballot names no sender by construction.
     is IncomingChatEvent.PollBallotRow,
     is IncomingChatEvent.ServiceEnvelope,
     is IncomingChatEvent.ExternalJoinRequest,

@@ -35,4 +35,4 @@ An MLS application message any member can craft. Fuzz target `lakko-contacts/pol
 
 ## References
 
-ADR-0090 section 3.9.
+ADR-0092 section 3.9.

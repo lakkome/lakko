@@ -13,6 +13,7 @@ import {
   rowsToAdmit,
   subscriberVia,
   ticketKeyAdmits,
+  letInVerdict,
   type ChannelInviteLinkRecord,
 } from "./channel-access-record";
 
@@ -113,6 +114,23 @@ describe("subscriber row label (UX 15.1)", () => {
     expect(subscriberVia("cd".repeat(32), links)).toEqual({ kind: "invitation" });
     expect(subscriberVia("ef".repeat(32), links)).toBeNull();
     expect(subscriberVia(null, links)).toBeNull();
+  });
+
+  it("lets in a live ticket, never removes the own key, and removes only where the mark is this device's", () => {
+    expect(letInVerdict(true, false, false)).toBe("admit");
+    expect(letInVerdict(true, true, false)).toBe("admit");
+    expect(letInVerdict(false, true, false)).toBe("remove");
+    // No mark of its own (a co-publisher, another device of the owner): it
+    // cannot tell a reader from before going private, so it removes nobody.
+    expect(letInVerdict(false, false, false)).toBe("leave");
+    // This device's own card key is never removed.
+    expect(letInVerdict(false, true, true)).toBe("leave");
+  });
+
+  it("reads a link with no label, from any device, as an invitation", () => {
+    const links = [link({ label: "  ", invitePkHex: "cd".repeat(32) }), link({ invitePkHex: "EF".repeat(32), label: "Work" })];
+    expect(subscriberVia("cd".repeat(32), links)).toEqual({ kind: "invitation" });
+    expect(subscriberVia("ef".repeat(32), links)).toEqual({ kind: "link", label: "Work" });
   });
 });
 

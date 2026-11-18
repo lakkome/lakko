@@ -12,7 +12,7 @@
 //! whether a link is safe, and Lakko never fetches one.
 //!
 //! The rule lives in this crate (not in `lakko-ui-rules`, which re-exports
-//! it) so the ADR-0090 article codec checks a link URL with the same rule a
+//! it) so the ADR-0092 article codec checks a link URL with the same rule a
 //! message link is drawn with, without pulling `lakko-ui-rules` and its ICU
 //! tables into every crate that depends on this one (the iOS notification
 //! extension among them). One definition.

@@ -72,7 +72,7 @@ public enum PhotoVideoPrep {
               CGImageSourceGetCount(source) > 0 else { return nil }
         var payload = bytes
         var mime = sniffInlineImageMime(bytes)
-        // ADR-0090 section 9 / UX section 3 — every photo but an animated GIF
+        // ADR-0092 section 9 / UX section 3 — every photo but an animated GIF
         // is re-encoded as JPEG with its longest side at most the core's
         // target (2560 px), which drops its metadata (EXIF location, camera,
         // time): the re-encode writes the pixels only.
@@ -205,7 +205,7 @@ public enum PhotoVideoPrep {
             let copy = dir.appendingPathComponent("video.mp4")
             if (try? FileManager.default.copyItem(at: source, to: copy)) != nil { return copy }
         }
-        // ADR-0090 / attachments UX section 3 — the send preview sends a
+        // ADR-0092 / attachments UX section 3 — the send preview sends a
         // video as picked (no re-encode in v1): only the copy above.
         // Without re-encoding only the passthrough remux (an H.264 QuickTime
         // file into an MP4 container) is tried.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The paperclip menu (`docs/ux/attachments.md` section 2, ADR-0090
+//! The paperclip menu (`docs/ux/attachments.md` section 2, ADR-0092
 //! section 9): which rows a composer offers, in which order, and which are
 //! shown disabled with a reason. Plus the poll editor's anonymity switch
 //! (UX section 7.1), the other rule of that screen the clients would
@@ -20,7 +20,7 @@ use crate::conversation::ConversationKind;
 use crate::info::ConversationRole;
 
 /// A sent photo is re-encoded as JPEG with its longest side at most this
-/// many pixels (UX section 3, ADR-0090 section 9; chosen, not measured).
+/// many pixels (UX section 3, ADR-0092 section 9; chosen, not measured).
 pub const PHOTO_MAX_LONGEST_SIDE_PX: u32 = 2_560;
 
 /// One row of the menu, in UX order.
@@ -163,7 +163,7 @@ pub fn attachment_menu(
         .collect()
 }
 
-/// What the poll editor shows for anonymity (UX section 7.1, ADR-0090
+/// What the poll editor shows for anonymity (UX section 7.1, ADR-0092
 /// section 3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PollAnonymity {

@@ -427,7 +427,7 @@ export function ArticleEditor(props: {
           title={t("common.close")}
           onClick={() => void cancel()}
         >
-          <Icon name="close" />
+          <Icon name="xmark" />
         </button>
         <h2 id="lk-article-editor-title" class="lk-article-bar-meta" style={{ margin: 0, "font-size": "17px" }}>
           {t(props.editing === true ? "article.editor.edit_title" : "article.editor.title")}

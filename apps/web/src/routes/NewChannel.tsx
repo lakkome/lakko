@@ -20,6 +20,7 @@ import { useChats } from "../chat/ChatContext";
 import { sessionAccountOf } from "../chat/persist-hooks";
 import { handleRandom, handleWellFormed } from "../chat/group-handle";
 import { createChannelFull, type ChannelVisibility } from "../channels/channel-access";
+import { isClaimedHandle } from "../channels/claimed-handles";
 import { channelErrorCode, channelErrorPlace, channelErrorText } from "../channels/channel-error-copy";
 import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken as askHandleTaken } from "../discovery/handle-check";
 import { appLanguage, languageLabel, languageOptions } from "../discover/languages";
@@ -105,6 +106,10 @@ export default function NewChannel(): JSX.Element {
     setHandleTaken(false);
     if (takenTimer !== null) clearTimeout(takenTimer);
     if (!pub || h.length < 3 || !handleWell()) return;
+    // A name a failed create of this account claimed is this account's (a
+    // retry takes it back): the lookup answering it is not "taken".
+    const account = sessionAccountOf(auth.state());
+    if (account !== null && isClaimedHandle(account, h)) return;
     takenTimer = setTimeout(() => {
       void askHandleTaken(h).then((taken) => {
         if (handle() === h && isPublic() && taken !== null) setHandleTaken(taken);
@@ -138,7 +143,10 @@ export default function NewChannel(): JSX.Element {
     setPhotoError(null);
     const identity = chats.conversationAccountIdentity();
     const current = chats.accountIdentity();
-    if (auth.identitySecrets() === null || identity === null || current === null) {
+    // The bound account keeps the channel id the @name is claimed with, so a
+    // retry after a lost answer claims with the same key; no create without it.
+    const account = sessionAccountOf(auth.state());
+    if (auth.identitySecrets() === null || identity === null || current === null || account === null) {
       setError(() => t("channels.new.error.sign_in"));
       return;
     }
@@ -147,7 +155,7 @@ export default function NewChannel(): JSX.Element {
     // a person still on this screen (`ui/screen-anchor.ts`).
     const here = screenAnchor(location);
     try {
-      const id = await createChannelFull(identity, current, sessionAccountOf(auth.state()), {
+      const id = await createChannelFull(identity, current, account, {
         name: name().trim(),
         description: description().trim(),
         handle: handle(),
@@ -185,7 +193,7 @@ export default function NewChannel(): JSX.Element {
           style={{ "align-self": "flex-start" }}
           onClick={() => navigate(paths.home)}
         >
-          <Icon name="back" size={16} />
+          <Icon name="chevron-back" size={20} />
           {t("nav.chats")}
         </button>
         <div class="lk-page-head">
@@ -211,7 +219,7 @@ export default function NewChannel(): JSX.Element {
               disabled={busy()}
               onClick={() => setPhotoMenu((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
             <Show when={photoMenu()}>
               <AvatarMenu

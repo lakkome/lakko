@@ -180,33 +180,47 @@ final class RestoredListNoticeTests: XCTestCase {
         RestoredDeviceStore.Record(knownConversations: known, awaitingFirstConversation: awaiting)
     }
 
-    func testNoOtherDeviceAndAKnownConversationShowsTheCard() {
+    // The section 7.2 table: the card only when this device founded the
+    // DeviceGroup, it is restored-marked, the backup named a conversation and
+    // the list is empty; the ordinary list in every other case, including
+    // when another device answered (there is no banner).
+
+    func testNobodyAnsweredAndAKnownConversationShowsTheCard() {
         XCTAssertEqual(
-            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, otherDeviceSignedIn: false),
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, rejoinAnswer: .founded),
             .card)
     }
 
-    func testAnotherDeviceShowsTheBanner() {
+    func testAnAnswerShowsTheOrdinaryList() {
         XCTAssertEqual(
-            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, otherDeviceSignedIn: true),
-            .banner)
-    }
-
-    func testARestoredDeviceThatKnewNoConversationShowsTheOrdinaryList() {
-        XCTAssertEqual(
-            RestoredListNotice.decide(record: record(known: 0), listEmpty: true, otherDeviceSignedIn: false),
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, rejoinAnswer: .answered),
             .none)
     }
 
-    func testNothingShowsOverAConversationOrWhileNothingIsKnown() {
+    func testARestoredDeviceThatKnewNoConversationShowsTheOrdinaryListEitherWay() {
         XCTAssertEqual(
-            RestoredListNotice.decide(record: record(known: 2), listEmpty: false, otherDeviceSignedIn: false),
+            RestoredListNotice.decide(record: record(known: 0), listEmpty: true, rejoinAnswer: .founded),
             .none)
         XCTAssertEqual(
-            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, otherDeviceSignedIn: nil),
+            RestoredListNotice.decide(record: record(known: 0), listEmpty: true, rejoinAnswer: .answered),
             .none)
+    }
+
+    func testNothingShowsOverAConversationOrWhileTheRejoinHasNotDecided() {
+        for answer in [RestoredRejoinAnswerStore.Answer.answered, .founded] {
+            XCTAssertEqual(
+                RestoredListNotice.decide(record: record(known: 2), listEmpty: false, rejoinAnswer: answer),
+                .none)
+            XCTAssertEqual(
+                RestoredListNotice.decide(record: nil, listEmpty: true, rejoinAnswer: answer), .none)
+            XCTAssertEqual(
+                RestoredListNotice.decide(
+                    record: record(known: 2, awaiting: false), listEmpty: true, rejoinAnswer: answer),
+                .none)
+        }
         XCTAssertEqual(
-            RestoredListNotice.decide(record: nil, listEmpty: true, otherDeviceSignedIn: false), .none)
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, rejoinAnswer: nil),
+            .none)
     }
 
     func testTheFirstConversationEndsItForGood() throws {
@@ -219,15 +233,34 @@ final class RestoredListNoticeTests: XCTestCase {
         XCTAssertEqual(
             RestoredListNotice.decide(
                 record: RestoredDeviceStore.load(accountIdB64: account, defaults: defaults),
-                listEmpty: true, otherDeviceSignedIn: false),
+                listEmpty: true, rejoinAnswer: .founded),
             .card)
 
         RestoredDeviceStore.noteConversationArrived(accountIdB64: account, defaults: defaults)
         XCTAssertEqual(
             RestoredListNotice.decide(
                 record: RestoredDeviceStore.load(accountIdB64: account, defaults: defaults),
-                listEmpty: true, otherDeviceSignedIn: false),
+                listEmpty: true, rejoinAnswer: .founded),
             .none, "the list emptying later does not bring it back")
+    }
+
+    func testTheRejoinAnswerIsKeptPerAccountAndTheLatestWins() throws {
+        let suite = "rejoin-answer-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let account = "acct-\(UUID().uuidString)"
+        let other = "acct-\(UUID().uuidString)"
+
+        XCTAssertNil(RestoredRejoinAnswerStore.load(accountIdB64: account, defaults: defaults))
+        RestoredRejoinAnswerStore.record(.answered, accountIdB64: account, defaults: defaults)
+        XCTAssertEqual(RestoredRejoinAnswerStore.load(accountIdB64: account, defaults: defaults), .answered)
+        XCTAssertNil(RestoredRejoinAnswerStore.load(accountIdB64: other, defaults: defaults))
+
+        RestoredRejoinAnswerStore.record(.founded, accountIdB64: account, defaults: defaults)
+        XCTAssertEqual(RestoredRejoinAnswerStore.load(accountIdB64: account, defaults: defaults), .founded)
+
+        RestoredRejoinAnswerStore.clear(accountIdB64: account, defaults: defaults)
+        XCTAssertNil(RestoredRejoinAnswerStore.load(accountIdB64: account, defaults: defaults))
     }
 
     func testTheProfileRepublishIsOwedOnce() throws {
@@ -345,7 +378,7 @@ final class BackupApplyTests: XCTestCase {
             contacts: [contactRecord(0x01, "Alice")],
             groupIds: [g1],
             syncedState: try syncedStateBytes(pinning: g1))
-        XCTAssertEqual(parsed.syncedState.first, 0x0E)
+        XCTAssertEqual(parsed.syncedState.first, 0x10)
         parsed.syncedState[parsed.syncedState.startIndex] = 0x01
 
         let announced = expectation(forNotification: .lakkoSyncedStateRestored, object: nil)
@@ -592,7 +625,8 @@ final class PhraseRouteBackupTests: XCTestCase {
             pushBinding: PushAccountBindingStore(defaults: defaults),
             removeDeliveredNotifications: {},
             backupRestoreSource: source,
-            backupDefaults: defaults
+            backupDefaults: defaults,
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 
@@ -1345,7 +1379,8 @@ final class RestoredKnownGroupsLifecycleTests: XCTestCase {
             pushBinding: PushAccountBindingStore(defaults: defaults),
             removeDeliveredNotifications: {},
             backupRestoreSource: ScriptedBackupSource(),
-            backupDefaults: defaults
+            backupDefaults: defaults,
+            earlierKeysInputs: skipEarlierKeysGate
         )
         XCTAssertNotNil(repo.identitySecrets, "the fixture restores a session")
         repo.logout()

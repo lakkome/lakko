@@ -6,7 +6,6 @@ package me.lakko.app.ui.translation
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -21,8 +20,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,6 +62,9 @@ import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 import java.util.Locale
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The conversation (the hex id of the group a message is stored in) whose
@@ -153,6 +153,13 @@ public fun TranslateQuietLine(
                 label(langName(line.source))
                 Dot(quiet)
                 LineButton(t("translate.line.translate"), quiet, onTranslate)
+            }
+            is TranslateLine.Detected -> {
+                label(langName(line.source))
+                if (line.canTranslate) {
+                    Dot(quiet)
+                    LineButton(t("translate.line.translate"), quiet, onTranslate)
+                }
             }
             is TranslateLine.Failed -> {
                 label(t("translate.line.failed"))
@@ -250,6 +257,7 @@ public fun TranslationDialogs(hub: me.lakko.app.media.ChatMediaHub?) {
             options = p.options,
             onPick = { TranslationCenter.choosePicked(it, hub) },
             onDismiss = TranslationCenter::dismissPicker,
+            selected = p.marked,
         )
     }
 }
@@ -298,11 +306,11 @@ internal fun LanguageSheet(
                 ) {
                     Text(ownLanguageName(tag), fontSize = 15.sp, modifier = Modifier.weight(1f))
                     if (isCurrent) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Filled.Check,
+                        LkIcon(
+                            R.drawable.ic_lk_checkmark,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp),
+                            size = LkIconSize.Row,
                         )
                     }
                 }
@@ -343,7 +351,7 @@ public fun ConversationTranslateBar(conversation: String, recentIncomingKeys: Li
                 Text(t("translate.bar.not_now"))
             }
             IconButton(onClick = { TranslationCenter.dismissBar(conversation, language) }) {
-                Icon(Icons.Filled.Close, contentDescription = t("translate.bar.close"))
+                LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("translate.bar.close"), size = LkIconSize.Row)
             }
         }
     }

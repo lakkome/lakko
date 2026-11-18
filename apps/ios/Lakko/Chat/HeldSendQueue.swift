@@ -52,7 +52,7 @@ public final class HeldSendQueue {
         public let replyGroupIdB64: String?
         /// ADR-0052: set for a forward INTO the held conversation.
         public let forward: Data?
-        /// ADR-0090: a location, contact card or article (a forwarded one
+        /// ADR-0092: a location, contact card or article (a forwarded one
         /// above all) held with its content, as the content envelope the core
         /// composes (no forward line: that is `forward`). `nil` for an
         /// ordinary message and for every row stored before the field.

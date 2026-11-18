@@ -7,6 +7,7 @@
  * destructive ones last and behind the in-page confirmation (ADR-0045 UX §14).
  */
 import { revokeAllMintedLinks } from "../contacts/own-links";
+import { deleteOwnedChannelVaults } from "../channels/channel-vault-head";
 import { base64Encode } from "./account-id";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
@@ -89,7 +90,7 @@ export function ExportDataCard(): JSX.Element {
       <p class="lk-card-desc">{t("settings.data.lede")}</p>
       <div class="lk-actions">
         <button type="button" disabled={busy()} onClick={() => void onExport()}>
-          <Icon name="db" size={18} />
+          <Icon name="database" size={20} />
           {busy() ? t("common.preparing") : t("settings.data.export")}
         </button>
       </div>
@@ -127,7 +128,7 @@ export function AccountCard(): JSX.Element {
       <h2>{t("settings.section.account")}</h2>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="logout" size={18} />
+          <Icon name="logout" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.account.log_out")}</span>
@@ -139,7 +140,7 @@ export function AccountCard(): JSX.Element {
       </div>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="devices" size={18} />
+          <Icon name="devices" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.account.forget_device.label")}</span>
@@ -156,7 +157,7 @@ export function AccountCard(): JSX.Element {
       </div>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="trash" size={18} />
+          <Icon name="person-circle-xmark" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.account.delete.confirm")}</span>
@@ -274,6 +275,9 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       } catch {
         /* best-effort: the deletion does not wait on a link */
       }
+      // ADR-0064 section 1: the saved copies of the channels this account
+      // owns, while the account still exists. Bounded; never throws.
+      await deleteOwnedChannelVaults();
       try {
         await c.deleteAccount(grant);
       } catch (err) {

@@ -34,11 +34,17 @@ public struct MintedBackupHead {
 }
 
 /// Error vocabulary for the mint round-trip.
-public enum BackupHeadMintError: Error, LocalizedError {
+public enum BackupHeadMintError: Error, LocalizedError, Equatable {
     case noSessionToken
     case badUrl
     case http(Int)
     case malformedResponse
+    /// Auth answered `key-generation-superseded` or `device-revoked` (or the
+    /// session provider already knows it): this device is being signed out.
+    /// NOT soft: the upload stops, no legacy envelope is written, since
+    /// storage checks the token without auth and would accept a stale
+    /// device's blob over the account's backup.
+    case signedOut
 
     public var errorDescription: String? {
         switch self {
@@ -46,6 +52,7 @@ public enum BackupHeadMintError: Error, LocalizedError {
         case .badUrl: return "mintBackupHead: invalid base URL"
         case .http(let s): return "mintBackupHead: /auth/backup/head -> \(s)"
         case .malformedResponse: return "mintBackupHead: malformed response"
+        case .signedOut: return "mintBackupHead: this device's session was superseded or revoked"
         }
     }
 }
@@ -105,13 +112,21 @@ public func mintBackupHead(
     // ADR-0026 — route through the obfuscated tunnel when armed (an auth
     // surface, like the DeviceAttestKey JWKS fetch); disarmed = the direct
     // URLSession path.
-    let (data, response) = try await AntiCensorshipTransport.perform(
-        request, session: session, config: .current)
+    let data: Data
+    let response: URLResponse
+    do {
+        (data, response) = try await AntiCensorshipTransport.perform(
+            request, session: session, config: .current)
+    } catch is SessionSupersededError {
+        throw BackupHeadMintError.signedOut
+    } catch is SessionDeviceRevokedError {
+        throw BackupHeadMintError.signedOut
+    }
     guard let http = response as? HTTPURLResponse else {
         throw BackupHeadMintError.http(0)
     }
     guard (200..<300).contains(http.statusCode) else {
-        throw BackupHeadMintError.http(http.statusCode)
+        throw backupHeadMintRefusal(status: http.statusCode, body: data)
     }
     let wire: BackupHeadResponse
     do {
@@ -123,4 +138,16 @@ public func mintBackupHead(
         throw BackupHeadMintError.malformedResponse
     }
     return MintedBackupHead(head: head, version: wire.backupVersion)
+}
+
+/// The error a non-2xx mint answer is read as: a sign-out signal
+/// (``BackupHeadMintError/signedOut``) or the plain status.
+func backupHeadMintRefusal(status: Int, body: Data) -> BackupHeadMintError {
+    if status == 401 {
+        switch SessionTokenRule.classify401(body: body) {
+        case .keyGenerationSuperseded, .deviceRevoked: return .signedOut
+        case .refreshInvalid, .other: break
+        }
+    }
+    return .http(status)
 }

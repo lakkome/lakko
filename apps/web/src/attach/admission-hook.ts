@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 3.9 — the one place a commit THIS device merged reaches
+ * ADR-0092 section 3.9 — the one place a commit THIS device merged reaches
  * the attachment kinds: the rings of open anonymous polls grow (our own
  * commit never comes back through the receive path), and when the commit
  * added a leaf (a newcomer, or a new device of a member, ADR-0050 included)

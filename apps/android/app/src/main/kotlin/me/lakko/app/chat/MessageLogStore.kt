@@ -408,7 +408,7 @@ public data class PersistedMessage(
      */
     val membershipJoined: List<String> = emptyList(),
     val membershipLeft: List<String> = emptyList(),
-    /** ADR-0090 — a content message's body and the ops it collected. */
+    /** ADR-0092 — a content message's body and the ops it collected. */
     val content: PersistedContent? = null,
 ) {
     /** Explicit companion so the conversion helpers below can

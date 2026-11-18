@@ -24,7 +24,7 @@ pub const MASTER_SECRET_LEN: usize = 32;
 /// Length of an encoded issuer public key (`C_x0 || X1 || X2`).
 pub const PUBLIC_KEY_LEN: usize = 96;
 
-/// One credential period: 30 days. Chosen, not measured (ADR-0090 4.2).
+/// One credential period: 30 days. Chosen, not measured (ADR-0092 4.2).
 ///
 /// Every issuer and verifier must use the same value: the period number is
 /// `floor(unix_secs / PERIOD_SECS)`, so a mismatch makes every presentation
@@ -41,7 +41,7 @@ pub const fn period_at(unix_secs: u64) -> u64 {
 }
 
 /// Whether a credential for `presented` is accepted in `current`: its own
-/// period and the next one (ADR-0090 4.2, the grace at a boundary). A
+/// period and the next one (ADR-0092 4.2, the grace at a boundary). A
 /// credential for a future period is refused.
 #[must_use]
 pub const fn period_accepted(presented: u64, current: u64) -> bool {

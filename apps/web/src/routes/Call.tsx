@@ -359,7 +359,7 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
       // Not armed. Says so rather than claiming protection, and is not a
       // button: there is nothing to show behind it.
       <span class="lk-call-chip negotiating" role="status">
-        <Icon name="lock" size={13} />
+        <Icon name="lock" size={14} />
         <span>{t("call.encryption.setting_up")}</span>
       </span>
     }
@@ -374,7 +374,7 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
         props.onOpen();
       }}
     >
-      <Icon name="lock" size={13} />
+      <Icon name="lock-fill" size={14} />
       <span>{t("call.encryption.chip")}</span>
     </button>
   </Show>
@@ -439,6 +439,9 @@ const EncryptionSheet: Component<{
       }}
     >
       <div class="lk-call-modal lk-encryption-sheet">
+        <span class="lk-encryption-sheet-lock" aria-hidden="true">
+          <Icon name="lock-fill" size={26} />
+        </span>
         <h2 id="lk-encryption-sheet-title">{t("call.encryption.title")}</h2>
         <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props)}</p>
 
@@ -459,7 +462,7 @@ const EncryptionSheet: Component<{
 
         <div class="lk-encryption-sheet-actions">
           <button type="button" class="ghost" onClick={copy}>
-            <Icon name="copy" size={16} />
+            <Icon name="copy" size={20} />
             {copied() ? t("common.copied") : t("common.copy")}
           </button>
           <button
@@ -673,7 +676,7 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
                         >
                           <span class="lk-ellipsis">{option.label}</span>
                           <Show when={option.selected}>
-                            <Icon name="check" size={18} />
+                            <Icon name="checkmark" size={20} />
                           </Show>
                         </button>
                       )}
@@ -772,7 +775,7 @@ const ControlButton: Component<{
           props.onPress();
         }}
       >
-        <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={26} />}>
+        <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={28} />}>
           <Spinner size={26} />
         </Show>
         <Show when={props.spec.badge}>
@@ -1018,7 +1021,7 @@ const SelfView: Component<{
         when={props.stream}
         fallback={
           <div class="lk-call-self-blank" aria-hidden="true">
-            <Icon name="video" size={20} strokeWidth={1.4} />
+            <Icon name="video" size={20} />
           </div>
         }
       >
@@ -1054,7 +1057,7 @@ const SelfView: Component<{
             props.onFlip();
           }}
         >
-          <Icon name="cameraFlip" size={16} />
+          <Icon name="camera-flip" size={20} />
         </button>
       </Show>
     </div>
@@ -1753,7 +1756,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
           when={tileStream() !== undefined}
           fallback={
             <div class="lk-call-tile-blank" aria-hidden="true">
-              <Icon name="video" size={props.large ? 36 : 24} strokeWidth={1.4} />
+              <Icon name="video" size={props.large ? 40 : 24} />
             </div>
           }
         >
@@ -1809,7 +1812,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             aria-label={t("call.participant.muted_a11y")}
             title={t("call.participant.muted")}
           >
-            <Icon name="micOff" size={14} />
+            <Icon name="mic-slash-fill" size={14} />
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
@@ -1821,7 +1824,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
         </Show>
         <Show when={isPinned()}>
           <span class="lk-call-tile-pin" title={t("call.participant.pinned")}>
-            <Icon name="pin" size={14} />
+            <Icon name="pin-fill" size={14} />
           </span>
         </Show>
       </div>
@@ -1842,7 +1845,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             props.onPin?.(participantId);
           }}
         >
-          <Icon name="pin" size={props.compact === true ? 14 : 16} />
+          <Icon name={isPinned() ? "pin-fill" : "pin"} size={props.compact === true ? 14 : 20} />
         </button>
       </Show>
     </div>
@@ -1919,7 +1922,7 @@ const ScreenShareView: Component<{
       when={!props.share.isOwn}
       fallback={
         <div class={`lk-call-share own ${props.class ?? ""}`} role="img" aria-label={t("call.screen_share.own_tile")}>
-          <Icon name="monitor" size={props.large ? 36 : 22} strokeWidth={1.4} />
+          <Icon name="display" size={props.large ? 33 : 20} />
           <span class="lk-call-share-own-text">{t("call.screen_share.own_tile")}</span>
         </div>
       }
@@ -1990,14 +1993,14 @@ const ScreenShareView: Component<{
         />
         <Show when={!hasFrame()}>
           <div class="lk-call-share-waiting" role="status">
-            <Icon name="monitor" size={props.large ? 36 : 22} strokeWidth={1.4} />
+            <Icon name="display" size={props.large ? 33 : 20} />
             <Spinner size={props.large ? 24 : 18} />
             <span>{t("call.screen_share.waiting", { name: nameOrUnnamed(props.share.name) })}</span>
           </div>
         </Show>
         <div class="lk-call-tile-strip">
           <span class="lk-call-share-glyph" aria-hidden="true">
-            <Icon name="monitor" size={14} />
+            <Icon name="display" size={14} />
           </span>
           <span class="lk-call-tile-name">{label()}</span>
         </div>
@@ -2027,7 +2030,7 @@ const ScreenShareView: Component<{
                 zoomReset();
               }}
             >
-              <Icon name="monitor" size={14} />
+              <Icon name="display" size={14} />
             </button>
             <button
               type="button"
@@ -2286,7 +2289,7 @@ const GroupArea: Component<{
             disabled={shown().page === 0}
             onClick={(): void => void setPage(Math.max(0, shown().page - 1))}
           >
-            <Icon name="chevron" size={20} />
+            <Icon name="chevron-forward" size={20} />
           </button>
           <button
             type="button"
@@ -2295,7 +2298,7 @@ const GroupArea: Component<{
             disabled={shown().page >= shown().pages - 1}
             onClick={(): void => void setPage(Math.min(shown().pages - 1, shown().page + 1))}
           >
-            <Icon name="chevron" size={20} />
+            <Icon name="chevron-forward" size={20} />
           </button>
           <div class="lk-call-pages" role="tablist">
             <For each={Array.from({ length: shown().pages }, (_, i) => i)}>
@@ -2335,7 +2338,7 @@ const GroupArea: Component<{
             by a chip, never moved onto the stage over the pin. */}
         <Show when={callState.pinnedId() !== null && isRemoteShare(screenShareState.current())}>
           <div class="lk-call-share-chip" role="status">
-            <Icon name="monitor" size={16} />
+            <Icon name="display" size={14} />
             <span>
               {t("call.screen_share.pinned_chip", {
                 name: nameOrUnnamed(screenShareState.current()?.name ?? ""),
@@ -2398,7 +2401,7 @@ const LayoutSwitch: Component = () => {
         }
       }}
     >
-      <Icon name={kind() === "grid" ? "layoutFocus" : "layoutGrid"} size={20} />
+      <Icon name={kind() === "grid" ? "layout-focus" : "layout-grid"} size={20} />
     </button>
   );
 };
@@ -2418,7 +2421,7 @@ const ParticipantList: Component = () => (
           aria-label={t("call.participants.close_a11y")}
           onClick={(): void => callActions.setParticipantListOpen(false)}
         >
-          <Icon name="close" size={18} />
+          <Icon name="xmark" size={20} />
         </button>
       </div>
       <ul class="lk-call-people">
@@ -2436,7 +2439,7 @@ const ParticipantList: Component = () => (
                   title={t("call.participant.muted")}
                   aria-label={t("call.participant.muted")}
                 >
-                  <Icon name="micOff" size={14} />
+                  <Icon name="mic-slash-fill" size={14} />
                 </span>
               </Show>
             </li>
@@ -3121,7 +3124,7 @@ const Call: Component<{
               collapse()();
             }}
           >
-            <Icon name="chevron" size={22} />
+            <Icon name="chevron-down" size={24} />
           </button>
         )}
       </Show>
@@ -3264,7 +3267,7 @@ const Call: Component<{
       <Show when={share()?.isOwn === true ? share() : null}>
         {(s) => (
           <div class="lk-call-share-strip" role="status" aria-live="polite">
-            <Icon name="monitor" size={18} />
+            <Icon name="display" size={20} />
             <span>
               {s().withSound ? t("call.screen_share.own_strip_sound") : t("call.screen_share.own_strip")}
             </span>
@@ -3342,7 +3345,7 @@ const Call: Component<{
                 callActions.setParticipantListOpen(true);
               }}
             >
-              <Icon name="groups" size={20} />
+              <Icon name="person-2" size={20} />
               <span>{t("call.control.participants")}</span>
             </button>
           </Show>
@@ -3369,7 +3372,7 @@ const Call: Component<{
                   invite()();
                 }}
               >
-                <Icon name="user" size={20} />
+                <Icon name="person-plus" size={20} />
                 <span>{t("call.invite.menu_contact")}</span>
               </button>
             )}
@@ -3416,7 +3419,7 @@ const Call: Component<{
               props.onEndForEveryone?.();
             }}
           >
-            <Icon name="phoneEnd" size={20} />
+            <Icon name="phone-down-fill" size={20} />
             <span>{t("call.end_menu.end_for_all")}</span>
           </button>
         </div>

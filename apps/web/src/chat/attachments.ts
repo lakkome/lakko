@@ -112,7 +112,7 @@ export interface AttachmentRefBytes {
   readonly height?: number | undefined;
   /** ADR-0047 — a video note's poster frame, its own encrypted blob. */
   readonly thumb?: ThumbRefBytes | undefined;
-  /** ADR-0090 section 2 — an `audio` attachment's title and artist tags,
+  /** ADR-0092 section 2 — an `audio` attachment's title and artist tags,
    *  read on the sender's device. */
   readonly title?: string | undefined;
   readonly artist?: string | undefined;
@@ -705,6 +705,12 @@ export type ParsedBodyResult =
        *  one-to-one: where it was originally sent. Never drawn
        *  (`resend-marker.ts`). */
       resendOrigin?: ForwardOrigin;
+      /** ADR-0087 section 14 — the channel invitation card the envelope
+       *  carries beside its text (the `/g/` link): opened on this device
+       *  (`openChannelInviteCard`) and kept with the message, so the bubble
+       *  and the Chats row read the invitation even once the link is used
+       *  up. Never drawn as bytes. */
+      channelInvite?: Uint8Array;
     }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
@@ -737,7 +743,7 @@ export type ParsedBodyResult =
   // (`chat.message.unsupported`), never from the core: the core's legacy
   // "[unsupported vN message]" text is English and must not reach a screen.
   | { kind: "unsupported"; version: number }
-  // ADR-0090 — a poll, checklist, location, contact card or article. A bubble
+  // ADR-0092 — a poll, checklist, location, contact card or article. A bubble
   // of its own; an article's images are its attachments.
   | {
       kind: "content";
@@ -746,10 +752,10 @@ export type ParsedBodyResult =
       reply?: ReplyRef;
       forward?: ForwardRef;
     }
-  // ADR-0090 — an op on a poll or checklist; never a bubble.
+  // ADR-0092 — an op on a poll or checklist; never a bubble.
   | { kind: "content-op"; op: ContentOp };
 
-/** ADR-0090 — the ops a poll or checklist message receives, by DS `messageId`
+/** ADR-0092 — the ops a poll or checklist message receives, by DS `messageId`
  *  of the target. */
 export type ContentOp =
   | { readonly op: "poll-vote"; readonly target: number; readonly choices: readonly number[] }
@@ -774,11 +780,11 @@ export type ContentOp =
       readonly attachments: readonly AttachmentRefBytes[];
     };
 
-/** ADR-0090 — the content kinds `parseBodyEnvelope` names. */
+/** ADR-0092 — the content kinds `parseBodyEnvelope` names. */
 const CONTENT_KINDS = new Set(["poll", "checklist", "location", "contact-card", "article"]);
 
 /**
- * ADR-0090 — compose a content message (poll, checklist, location, contact
+ * ADR-0092 — compose a content message (poll, checklist, location, contact
  * card, article). `refs` are the article's images; empty for the others.
  */
 export async function composeContentEnvelope(
@@ -806,7 +812,7 @@ export function contentPartsOfForward(forward: ForwardRef): ContentEnvelopeParts
   };
 }
 
-/** ADR-0090 — compose an article edit: the whole article replaced. */
+/** ADR-0092 — compose an article edit: the whole article replaced. */
 export async function composeArticleEditEnvelope(
   target: number,
   article: Article,
@@ -938,7 +944,7 @@ export function parseBodyEnvelopeWith(
     if (kind === "unsupported") {
       return { kind: "unsupported", version: unsupportedVersionOf(parsed) };
     }
-    // ADR-0090 — the ops on a poll or checklist.
+    // ADR-0092 — the ops on a poll or checklist.
     if (kind === "poll-vote") {
       return {
         kind: "content-op",
@@ -1060,6 +1066,8 @@ export function parseBodyEnvelopeWith(
       resendGroup === undefined || resendMessage === undefined
         ? undefined
         : { groupIdB64: resendGroup, messageId: Number(resendMessage) };
+    // ADR-0087 section 14 — the invitation card, when the envelope has one.
+    const card = parsed.channelInvite;
     return {
       kind: "chat",
       text: parsed.text,
@@ -1067,6 +1075,7 @@ export function parseBodyEnvelopeWith(
       ...(reply === undefined ? {} : { reply }),
       ...(forward === undefined ? {} : { forward }),
       ...(resendOrigin === undefined ? {} : { resendOrigin }),
+      ...(card === undefined || card.length === 0 ? {} : { channelInvite: card }),
     };
   } finally {
     parsed.free();

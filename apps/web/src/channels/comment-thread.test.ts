@@ -2,7 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /** UX `group-and-channel-privacy.md` 13.2: the comment thread's page model. */
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 
 import {
   collapsedView,
@@ -17,6 +21,18 @@ import {
   withPage,
   type CommentView,
 } from "./comment-thread";
+import type { CollapsedCommentsRule } from "./comment-thread";
+
+// The rule is the shared one (`lakko_ui_rules::comments`), driven here across
+// the real wasm boundary.
+let rules: CollapsedCommentsRule;
+
+beforeAll(async () => {
+  const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await initWasm({ module_or_path: readFileSync(path) });
+  rules = wasm;
+});
+
 
 function comment(cursor: number, author = "a"): CommentView {
   return {
@@ -35,12 +51,12 @@ const none = (): boolean => false;
 describe("collapsed", () => {
   it("offers the quiet Comment link when a known thread is empty", () => {
     const st = withPage(EMPTY_THREAD, [], 0, "page");
-    expect(collapsedView(st, none)).toEqual({ shown: [], more: { kind: "comment" } });
+    expect(collapsedView(st, none, undefined, rules)).toEqual({ shown: [], more: { kind: "comment" } });
   });
 
   it("shows the first 2 and a counted rest when the thread is known whole", () => {
     const st = withPage(EMPTY_THREAD, [comment(1), comment(2), comment(3), comment(4)], 4, "page");
-    const v = collapsedView(st, none);
+    const v = collapsedView(st, none, undefined, rules);
     expect(v.shown.map((c) => c.cursor)).toEqual([1, 2]);
     expect(v.more).toEqual({ kind: "count", n: 2 });
   });
@@ -48,7 +64,7 @@ describe("collapsed", () => {
   it("does not count when a page is still unread", () => {
     const page = Array.from({ length: COMMENT_PAGE }, (_, i) => comment(i + 1));
     const st = withPage(EMPTY_THREAD, page, COMMENT_PAGE, "page");
-    expect(collapsedView(st, none).more).toEqual({ kind: "unknown" });
+    expect(collapsedView(st, none, undefined, rules).more).toEqual({ kind: "unknown" });
   });
 
   it("counts a full page as a page even when some rows did not open", () => {
@@ -58,7 +74,7 @@ describe("collapsed", () => {
 
   it("hides a banned author", () => {
     const st = withPage(EMPTY_THREAD, [comment(1, "x"), comment(2), comment(3)], 3, "page");
-    const v = collapsedView(st, (a) => a === "x");
+    const v = collapsedView(st, (a) => a === "x", undefined, rules);
     expect(v.shown.map((c) => c.cursor)).toEqual([2, 3]);
     expect(v.more).toBeNull();
   });
@@ -104,36 +120,58 @@ describe("collapsed with the service's comment count (ADR-0087 phase B)", () => 
     expect(needsFirstRead(0)).toBe(false);
     expect(needsFirstRead(undefined)).toBe(true);
     expect(needsFirstRead(3)).toBe(true);
-    expect(collapsedView(EMPTY_THREAD, none, 0)).toEqual({ shown: [], more: { kind: "comment" } });
+    expect(collapsedView(EMPTY_THREAD, none, 0, rules)).toEqual({ shown: [], more: { kind: "comment" } });
   });
 
-  it("counts the unread rest from the service, not from the rows read", () => {
+  it("takes only the rows not read yet from the service", () => {
+    // A full page of 20 rows read, 3 of them opened; the service says 40.
     const st = withPage(EMPTY_THREAD, [comment(1), comment(2), comment(3)], 3, "page", COMMENT_PAGE);
-    // A full page read, the service says 40.
     expect(st.done).toBe(false);
-    const v = collapsedView(st, none, 40);
+    expect(st.rowsRead).toBe(COMMENT_PAGE);
+    const v = collapsedView(st, none, 40, rules);
     expect(v.shown.map((c) => c.cursor)).toEqual([1, 2]);
-    expect(v.more).toEqual({ kind: "count", n: 38 });
+    // 1 opened and not shown, plus the 20 rows still unread.
+    expect(v.more).toEqual({ kind: "count", n: 21 });
   });
 
-  it("knows the count before any row is read", () => {
-    expect(collapsedView(EMPTY_THREAD, none, 5).more).toEqual({ kind: "count", n: 5 });
+  it("says nothing before the shared rule has loaded", () => {
+    const st = withPage(EMPTY_THREAD, [], 0, "page");
+    expect(collapsedView(st, none, 3, null).more).toBeNull();
+  });
+
+  it("says no count before the first page is read", () => {
+    // The service's count includes comments this reader may hide.
+    expect(collapsedView(EMPTY_THREAD, none, 5, rules).more).toBeNull();
   });
 
   it("leaves banned rows out of the count once they are read", () => {
     const st = withPage(EMPTY_THREAD, [comment(1, "x"), comment(2), comment(3)], 3, "page", COMMENT_PAGE);
-    expect(collapsedView(st, (a) => a === "x", 10).more).toEqual({ kind: "count", n: 7 });
+    expect(collapsedView(st, (a) => a === "x", 30, rules).more).toEqual({ kind: "count", n: 10 });
+  });
+
+  it("never counts a banned author's comments the service still holds", () => {
+    // Base scenario 28: two stored comments, both by a banned author. The
+    // service says 2; the reader shows none and offers `Comment`.
+    const st = withPage(EMPTY_THREAD, [comment(1, "x"), comment(2, "x")], 2, "page");
+    expect(st.done).toBe(true);
+    expect(collapsedView(st, (a) => a === "x", 2, rules)).toEqual({ shown: [], more: { kind: "comment" } });
+  });
+
+  it("never counts a comment that did not open", () => {
+    // One row read, it did not open; the service says 1.
+    const st = withPage(EMPTY_THREAD, [], 1, "page", 1);
+    expect(collapsedView(st, none, 1, rules)).toEqual({ shown: [], more: { kind: "comment" } });
   });
 
   it("lets the rows decide once every row is read", () => {
     const st = withPage(EMPTY_THREAD, [comment(1), comment(2), comment(3)], 3, "page", 3);
     expect(st.done).toBe(true);
     // A stale count of 1 does not hide the third comment.
-    expect(collapsedView(st, none, 1).more).toEqual({ kind: "count", n: 1 });
+    expect(collapsedView(st, none, 1, rules).more).toEqual({ kind: "count", n: 1 });
   });
 
   it("never goes below zero on a stale count", () => {
     const st = withPage(EMPTY_THREAD, [comment(1), comment(2)], 2, "page", COMMENT_PAGE);
-    expect(collapsedView(st, none, 1).more).toBeNull();
+    expect(collapsedView(st, none, 1, rules).more).toBeNull();
   });
 });

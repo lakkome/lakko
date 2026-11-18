@@ -269,8 +269,7 @@ struct RecalledNoticeBanner: View {
         if authRepository.keysRotatedNotice {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "key")
-                        .font(.subheadline)
+                    LkIconView(.key, size: 20, relativeTo: .subheadline)
                         .foregroundStyle(Color.lakkoAccent)
                         .accessibilityHidden(true)
                     Text(l10n.t(KeysRotatedCopy.notice))
@@ -296,8 +295,7 @@ struct RecalledNoticeBanner: View {
         }
         if authRepository.accountRecalledThisSession {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "checkmark.shield")
-                    .font(.subheadline)
+                LkIconView(.shieldCheck, size: 20, relativeTo: .subheadline)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 Text(l10n.t(RecallCopy.done))

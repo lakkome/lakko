@@ -2844,6 +2844,29 @@ it. Pinned by the `delete_after_ended_elsewhere` tests in `tests/group_rejoin.rs
 the proptest `a_register_takes_the_ended_group_and_never_a_later_one` among them.
 Host-tested; no client calls it yet.
 
+## Amendment (2026-11-11): a settled join request does not come back
+
+**What was found.** On the test stack an iPhone owner approved a join request
+from a `/g/` link, the joiner landed, and later left the group. On the Pixel, an
+admin of the same group, the request was listed again with Approve and Reject;
+approving it would have put the person back. The retained queue
+(`pending_external_joins`) was reaped only when the next external-join proposal
+or join request arrived, and `pending_external_joins()` hid a request only while
+the joiner WAS a member: "an approved joiner retires itself from every admin's
+list" (above) held until the joiner left.
+
+**What changed.** `lakko-mls` reaps the retained queue at the moment a commit
+merges (`Group::reap_joined_external_joins_after_merge`): after a commit received
+through `process_incoming_verifying_roles`, after `merge_staged_sweep`, and after
+an eager direct merge. A request whose joiner the commit made a member is
+dropped, and the persisted row (`lakko/pending-external-joins/v1`) is written when
+anything was dropped, so a restart does not bring it back. No wire change, no
+OpenMLS state change: the queue is Lakko's own bookkeeping beside the group.
+Pinned by `a_joiner_who_left_does_not_return_to_an_admins_queue` in
+`tests/group_proposals.rs` (fails without the reap at the received commit;
+checked by removing it). A request already left over on a device from before
+this change stays until rejected there.
+
 ## Blast radius, per sprint
 
 | Sprint | Surface | What changes |

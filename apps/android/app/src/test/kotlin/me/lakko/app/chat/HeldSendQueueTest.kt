@@ -86,7 +86,7 @@ class HeldSendQueueTest {
         assertEquals(7L, replyTargetForSend(7, "same", "same"))
     }
 
-    // ADR-0090 / docs/ux/attachments.md section 11a — a forwarded location,
+    // ADR-0092 / docs/ux/attachments.md section 11a — a forwarded location,
     // contact card or article held for a one-to-one's successor.
 
     @Test

@@ -37,3 +37,4 @@ export async function copyMessageText(text: string): Promise<boolean> {
     return false;
   }
 }
+

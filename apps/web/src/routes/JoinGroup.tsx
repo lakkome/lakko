@@ -49,24 +49,27 @@
  * this side does not read the group at all, and silence is byte-for-byte what
  * *no admin has approved yet* looks like, which is the ordinary state.
  *
- * So the wait copy states the truth about the wait, and the page offers the one
- * repair this side has: `Request again`, user-driven, which mints a fresh
- * KeyPackage. It never claims that is why.
+ * So the wait copy states the truth about the wait ("Request sent. An admin
+ * will see it when they next open Lakko.", no control), and after a day the
+ * page offers the one repair this side has: `Ask again`, user-driven, which
+ * mints a fresh KeyPackage. It never claims that is why. A device asks once per
+ * group per day (`docs/ux/group-and-channel-privacy.md` 6.2, amended
+ * 2026-11-12): the request is recorded under `Requests sent`, and the page
+ * opened again within the day shows the waiting line, not `Request to join`.
  */
-import { Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
+import { Show, createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { base64Encode } from "../auth/account-id";
-// ADR-0045 S7 residual 1, the joiner's half. The copy and the one repair live
-// in a plain module because `vitest.config.ts` cannot test a `.tsx` file.
-import {
-  JOIN_REQUEST_AGAIN,
-  JOIN_WAIT_PRIMARY,
-  JOIN_WAIT_SECONDARY,
-} from "../chat/unapplied-requests";
+import { base64Decode, base64Encode } from "../auth/account-id";
+// ADR-0045 S7 residual 1, the joiner's half. The copy and the page's states
+// live in plain modules because `vitest.config.ts` cannot test a `.tsx` file.
+import { JOIN_WAIT_PRIMARY } from "../chat/unapplied-requests";
+import { recordRequestSent, sentRequestFor, type SentRequest } from "../chat/requests-sent";
+import { sendRequestAgain } from "../chat/ask-again";
+import { joinPageView, waitForGroup, type JoinPhase } from "./join-group-wait";
 import { t } from "../l10n";
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
@@ -104,14 +107,18 @@ import { groupInviteRouteLink } from "../contacts/group-invite";
 import { channelErrorCode } from "../channels/channel-error-copy";
 import { ChannelLinkPage } from "./ChannelLinkPage";
 
-type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
-
 interface DecodedTicket {
   /** The plaintext capability wire the sealed link opened to (the blob
    *  fetched from the ledger). */
   wire: Uint8Array;
   /** The ledger id; drives the consume gate (ADR-0028 OQ1). */
   blobId: Uint8Array;
+  /** The group the link names, base64 (the `Requests sent` key). */
+  groupIdB64: string;
+  /** The group's knock key, base64, and its version; empty and 0 when the
+   *  link carries none. */
+  knockKeyB64: string;
+  knockVersion: number;
   valid: boolean;
   /** The ledger says no uses are left. Read only with no session: a signed-in
    *  person may be the one who used it, and the consume tells them apart. */
@@ -164,9 +171,14 @@ function JoinGroupFlow() {
           // damaged as well: no preview-less join is offered.
           const outcome = resolveInvitePreview(cap, opened.linkSecret);
           if (outcome.kind === "damaged") return "damaged";
+          const knockKey = cap.knockPublicKey;
+          const knockVersion = cap.knockVersion;
           return {
             wire: opened.capabilityWire,
             blobId: opened.blobId,
+            groupIdB64: base64Encode(cap.groupId),
+            knockKeyB64: knockKey !== undefined && knockVersion !== undefined ? base64Encode(knockKey) : "",
+            knockVersion: knockKey !== undefined && knockVersion !== undefined ? knockVersion : 0,
             valid: cap.isValidNow(BigInt(Date.now())),
             usedUp: opened.usedUp,
             preview: outcome.kind === "preview" ? outcome.preview : null,
@@ -205,27 +217,75 @@ function JoinGroupFlow() {
   /** The failure sentence and whether `Try again` is offered — never the raw
    *  error, which is logged instead. */
   const [error, setError] = createSignal<JoinFailureNotice | null>(null);
-  /** In flight, so `Request again` cannot be double-tapped into two journal
-   *  rows. Separate from `phase`, which stays `waiting` across a re-request —
-   *  going back through `requesting` would hide the wait copy and read as a
-   *  restart of something that never stopped. */
+  /** A failed `Ask again`: the line under the button, which stays. */
+  const [askError, setAskError] = createSignal<JoinFailureNotice | null>(null);
+  /** In flight, so `Request to join` or `Ask again` cannot be double-tapped
+   *  into two requests. */
   const [requesting, setRequesting] = createSignal(false);
-  let pollTimer: number | undefined;
+  // The day is crossed while the page is on screen too.
+  const [now, setNow] = createSignal(Date.now());
+  const clock = window.setInterval(() => setNow(Date.now()), 60_000);
+  let stopWait: (() => void) | undefined;
   let unmounted = false;
   onCleanup(() => {
     unmounted = true;
-    if (pollTimer !== undefined) clearInterval(pollTimer);
+    clearInterval(clock);
+    stopWait?.();
+  });
+
+  /** This device's recorded request to the link's group, if any. Reactive. */
+  const sent = (): SentRequest | undefined => {
+    const d = ticket();
+    return d === null ? undefined : sentRequestFor(d.groupIdB64);
+  };
+  const view = () => joinPageView({ phase: phase(), sentAtMs: sent()?.sentAtMs ?? null, nowMs: now() });
+
+  /** Wait for the group to appear, then open its chat straight away. The
+   *  Welcome arrives in this device's own mailbox (the committer's sweep
+   *  delivers it there like any other added member's), and the mailbox
+   *  receive loop (`MailboxContext`) joins it and registers the group.
+   *  ADR-0045 S7: an admin's approve publishes a proposal and the Welcome
+   *  exists only once a committer sweeps it, so this wait spans both stages
+   *  and keeps running until the group lands or the page unmounts. */
+  function startWait(groupIdB64: string): void {
+    // The page was left while the request was on its way. `onCleanup` has
+    // already run, so a timer armed now would never be cleared: it would tick
+    // until the group landed and then open the chat over whatever the person
+    // is doing. The request stands, and the mailbox loop joins the group when
+    // the Welcome arrives; the chat appears in the list.
+    if (unmounted) return;
+    stopWait?.();
+    stopWait = waitForGroup({
+      landed: () => chats.get(groupIdB64) !== undefined,
+      onLanded: () => {
+        setPhase("joined");
+        const groupId = base64Decode(groupIdB64);
+        // ADR-0060 section 6: the Welcome landed, so the single-use reply key
+        // registered for this request goes.
+        void reachSession()?.closeRepliesTo(journalHex(groupId));
+        navigate(paths.chat(base64UrlEncodeNoPad(groupId)));
+      },
+      timers: {
+        setInterval: (fn, ms) => window.setInterval(fn, ms),
+        clearInterval: (id) => window.clearInterval(id),
+      },
+    });
+  }
+
+  // Opened again for a group this device already asked to join: the waiting
+  // line (or, after a day, `Ask again`) stands in for `Request to join`, and
+  // the page still opens the chat the moment the join lands.
+  createEffect(() => {
+    const d = ticket();
+    if (d === null || stopWait !== undefined) return;
+    if (sent() !== undefined) startWait(d.groupIdB64);
   });
 
   async function onRequest(ticket: DecodedTicket): Promise<void> {
     if (requesting()) return;
     setError(null);
     setRequesting(true);
-    // A re-request keeps the `waiting` copy on screen; the first request and
-    // a `Try again` after a failure pass through `requesting`.
-    if (phase() === "idle" || phase() === "error") setPhase("requesting");
-    // A re-request replaces the poll rather than adding a second one.
-    if (pollTimer !== undefined) clearInterval(pollTimer);
+    setPhase("requesting");
     try {
       const { groupId } = await client.requestToJoinFromLink(
         auth.identitySecrets(),
@@ -236,44 +296,54 @@ function JoinGroupFlow() {
           joinerAccountId: auth.identitySecrets()?.accountId,
         },
       );
-      setPhase("waiting");
-      // ADR-0053 contract point 6 — wait for the group to APPEAR. The Welcome
-      // arrives in this device's own mailbox (the committer's sweep delivers
-      // it there like any other added member's), and the mailbox receive loop
-      // (`MailboxContext`) joins it and registers the group. A claimed journal
-      // answers only its members, so there is nothing to read on the group
-      // side. ADR-0045 S7: an admin's approve publishes a proposal and the
-      // Welcome exists only once a committer sweeps it, so this wait spans
-      // both stages and keeps running until the group lands or the page
-      // unmounts.
       const groupIdB64 = base64Encode(groupId);
-      const finish = (_active: { groupIdB64: string }): void => {
-        if (pollTimer !== undefined) clearInterval(pollTimer);
-        setPhase("joined");
-        // ADR-0060 section 6: the Welcome landed, so the single-use reply key
-        // registered for this request goes.
-        void reachSession()?.closeRepliesTo(journalHex(groupId));
-        navigate(paths.chat(base64UrlEncodeNoPad(groupId)));
-      };
-      // The page was left while the request was on its way. `onCleanup` has
-      // already run, so a timer armed now would never be cleared: it would
-      // tick until the group landed and then open the chat over whatever the
-      // person is doing. The request stands, and the mailbox loop joins the
-      // group when the Welcome arrives; the chat appears in the list.
-      if (unmounted) return;
-      pollTimer = window.setInterval(() => {
-        const landed = chats.get(groupIdB64);
-        if (landed === undefined) return;
-        // ADR-0048 §2 — the mailbox loop already announced this device's
-        // profile into the group it joined; recording the kind and opening
-        // the chat is what is left.
-        finish(landed);
-      }, 1000);
+      // Section 6.2 — the request shows under `Requests sent` until the group
+      // appears, and the day before `Ask again` starts now. What an earlier
+      // request from search knew of the group (its `@name`, its avatar) stays.
+      const earlier = sentRequestFor(groupIdB64);
+      const sentAtMs = Date.now();
+      recordRequestSent({
+        idB64: groupIdB64,
+        name: earlier?.name !== undefined && earlier.name.length > 0 ? earlier.name : (ticket.preview?.groupName ?? ""),
+        handle: earlier?.handle ?? "",
+        avatar: earlier?.avatar ?? null,
+        sentAtMs,
+        knockKeyB64: ticket.knockKeyB64,
+        knockVersion: ticket.knockVersion,
+        capabilityWireB64: base64Encode(ticket.wire),
+        blobIdB64: base64Encode(ticket.blobId),
+      });
+      setNow(sentAtMs);
+      setPhase("waiting");
+      startWait(groupIdB64);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("group-join: request failed", err);
       setError(joinFailureNotice(err));
       setPhase("error");
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  /** `Ask again`, a day or more after the last request: the same request the
+   *  `Requests sent` list's `Ask again` sends (`chat/ask-again.ts`), and the
+   *  day starts again. A failure keeps the button. */
+  async function onAskAgain(): Promise<void> {
+    const r = sent();
+    if (r === undefined || requesting()) return;
+    setAskError(null);
+    setRequesting(true);
+    try {
+      await sendRequestAgain(client, auth.identitySecrets(), r, Date.now(), auth.identitySecrets()?.accountId);
+      const sentAtMs = Date.now();
+      recordRequestSent({ ...r, sentAtMs });
+      setNow(sentAtMs);
+      startWait(r.idB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("group-join: ask again failed", err);
+      setAskError(joinFailureNotice(err));
     } finally {
       setRequesting(false);
     }
@@ -348,31 +418,35 @@ function JoinGroupFlow() {
             </>
           }
         >
-          <Show when={phase() === "idle"}>
-            <button type="button" class="primary" onClick={() => void onRequest(ticket()!)}>
-              {t("group.join.request")}
-            </button>
-          </Show>
-          <Show when={phase() === "requesting"}>
-            <p>{t("group.join.sending")}</p>
-          </Show>
-          <Show when={phase() === "waiting"}>
-            <p>{JOIN_WAIT_PRIMARY()}</p>
-            <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-              {JOIN_WAIT_SECONDARY()}
-            </p>
+          <Show when={view() === "request"}>
             <button
               type="button"
+              class="primary"
               disabled={requesting()}
               onClick={() => void onRequest(ticket()!)}
             >
-              {JOIN_REQUEST_AGAIN()}
+              {t("group.join.request")}
             </button>
           </Show>
-          <Show when={phase() === "joined"}>
+          <Show when={view() === "sending"}>
+            <p>{t("group.join.sending")}</p>
+          </Show>
+          <Show when={view() === "waiting"}>
+            <p>{JOIN_WAIT_PRIMARY()}</p>
+          </Show>
+          <Show when={view() === "no-answer"}>
+            <p>{t("requests_sent.no_answer")}</p>
+            <button type="button" class="primary" disabled={requesting()} onClick={() => void onAskAgain()}>
+              {t("requests_sent.ask_again")}
+            </button>
+            <Show when={askError()}>
+              {(e) => <p style={{ color: "var(--error)" }}>{e().render()}</p>}
+            </Show>
+          </Show>
+          <Show when={view() === "joined"}>
             <p>{JOIN_SUCCEEDED_OPENING()}</p>
           </Show>
-          <Show when={phase() === "error"}>
+          <Show when={view() === "error"}>
             <p style={{ color: "var(--error)" }}>{error()?.render() ?? JOIN_REQUEST_FAILED()}</p>
             <Show when={error()?.offerRetry !== false}>
               <button

@@ -28,9 +28,6 @@ import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,6 +53,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -76,8 +74,10 @@ import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CollapsedMore
 import me.lakko.app.channels.channelHeaderLineKey
 import me.lakko.app.channels.channelIsOrphaned
+import me.lakko.app.channels.collapsedMore
 import me.lakko.app.channels.fullRecord
 import me.lakko.app.channels.sharedMeta
 import me.lakko.app.channels.subscriberBand
@@ -103,6 +103,9 @@ import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 import uniffi.lakko_ffi_uniffi.AttachmentRef
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 private const val TAG = "ChannelConversation"
 
@@ -142,7 +145,7 @@ public fun ChannelConversationScreen(
     onForwardPost: ((me.lakko.app.chat.ForwardRequest) -> Unit)? = null,
     /** Section 9 — the membership ended while open: after OK, Chats. */
     onEnded: () -> Unit = onBack,
-    /** ADR-0090 — the Contact item of the attachment menu lists these. */
+    /** ADR-0092 — the Contact item of the attachment menu lists these. */
     contactsRepository: me.lakko.app.contacts.ContactsRepository? = null,
 ) {
     val context = LocalContext.current
@@ -155,20 +158,52 @@ public fun ChannelConversationScreen(
     val channel = channels.firstOrNull { it.id == channelId }
     val isOrphaned = channelIsOrphaned(channelId, orphaned)
     val isPublisher = keysByChannel.containsKey(channelId) && !isOrphaned
+    // docs/ux/second-device.md section 4a — the account owns or co-publishes
+    // this channel from another device: read it here, with one line in
+    // place of the composer.
+    val publisherKeysReady by state.publisherKeysReady.collectAsState()
+    val readerRole = me.lakko.app.channels.readerDeviceRole(
+        role = remember(channels, keysByChannel, channelId) { state.accountRoleOf(channelId) },
+        publishesHere = isPublisher,
+        orphaned = isOrphaned,
+        keysReady = publisherKeysReady,
+    )
     val followed = channel != null && subscriberKeys.containsKey(channelId)
     var pressed by rememberSaveable(channelId) { mutableStateOf(subscribeOnOpen) }
     val reading = isPublisher || followed || pressed
     val record = remember(channel) { channel?.sharedMeta()?.fullRecord() }
-    val public = record?.listed ?: channel?.sharedListed ?: false
+    // Section 12 — unknown visibility shows no line, never "Private channel".
+    val knownPublic = remember(channel, channelId) {
+        me.lakko.app.channels.channelVisibilityOf(context, state.boundAccount, channel, channelId)
+    }
+    val public = knownPublic ?: false
     val counts by (ChannelPublisherLoop.peek(state)?.subscriberCounts
         ?: kotlinx.coroutines.flow.MutableStateFlow(emptyMap())).collectAsState()
     val band = counts[channelId]?.let(::subscriberBand)
-    val (lineKey, lineArgs) = channelHeaderLineKey(public, band)
+    val headerLine = channelHeaderLineKey(knownPublic, band)?.let { (key, args) -> strings.format(key, args) }
     val title = channel?.let { channelTitle(it, strings) }
         ?: name?.trim()?.takeIf { it.isNotEmpty() }
         ?: handle?.trim()?.removePrefix("@")?.takeIf { it.isNotEmpty() }?.let { "@$it" }
         ?: t("channels.fallback_name")
     val avatar = record?.avatar?.let { me.lakko.app.profile.avatarRefsOf(it) }
+
+    // docs/ux/channel-notifications.md section 2 — while this screen is in
+    // front, a post of this channel does not notify.
+    val visibilityOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(channelId, visibilityOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> me.lakko.app.feed.VisibleChannel.shown(channelId)
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> me.lakko.app.feed.VisibleChannel.hidden(channelId)
+                else -> Unit
+            }
+        }
+        visibilityOwner.lifecycle.addObserver(observer)
+        onDispose {
+            visibilityOwner.lifecycle.removeObserver(observer)
+            me.lakko.app.feed.VisibleChannel.hidden(channelId)
+        }
+    }
 
     // A channel this device reads belongs in the one Chats list.
     LaunchedEffect(channelId, reading) {
@@ -208,7 +243,7 @@ public fun ChannelConversationScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("chat.header.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("chat.header.back"))
                     }
                 },
                 title = {
@@ -224,13 +259,15 @@ public fun ChannelConversationScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(
-                                strings.format(lineKey, lineArgs),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            headerLine?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 },
@@ -240,13 +277,13 @@ public fun ChannelConversationScreen(
         Box(Modifier.fillMaxSize().padding(inner)) {
             when {
                 isOrphaned -> OrphanedNotice(onRemove = {
-                    state.removeChannel(channelId)
+                    state.removeOrphanedFromDevice(channelId)
                     onBack()
                 })
                 !reading -> SubscribeCard(
                     title = title,
                     handle = record?.handle?.handle ?: channel?.handle?.takeIf { it.isNotBlank() } ?: handle,
-                    line = strings.format(lineKey, lineArgs),
+                    line = headerLine,
                     description = channel?.let { channelDescription(it) },
                     avatar = avatar,
                     seed = channelId,
@@ -258,6 +295,7 @@ public fun ChannelConversationScreen(
                     state = state,
                     client = client,
                     isPublisher = isPublisher,
+                    readerRole = readerRole,
                     publicChannel = public,
                     register = !isPublisher && !followed,
                     onRegistered = {
@@ -278,7 +316,7 @@ public fun ChannelConversationScreen(
 private fun SubscribeCard(
     title: String,
     handle: String?,
-    line: String,
+    line: String?,
     description: String?,
     avatar: me.lakko.app.profile.AvatarRefs?,
     seed: String,
@@ -294,7 +332,7 @@ private fun SubscribeCard(
         handle?.trim()?.removePrefix("@")?.takeIf { it.isNotEmpty() }?.let {
             Text("@$it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        line?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         description?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
         Spacer(Modifier.height(8.dp))
         Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
@@ -327,6 +365,9 @@ private fun ChannelTimelineView(
     state: ChannelsUiState,
     client: ChannelsClient,
     isPublisher: Boolean,
+    /** docs/ux/second-device.md section 4a — the account's role when this
+     *  device reads a channel it owns or co-publishes elsewhere, else `null`. */
+    readerRole: me.lakko.app.channels.ChannelAccountRole?,
     publicChannel: Boolean,
     /** A subscriber's first read: register this device's key first. */
     register: Boolean,
@@ -401,8 +442,9 @@ private fun ChannelTimelineView(
         failure = null
         if (!isPublisher) {
             try {
-                val kp = state.subscriberKeysByChannel.value[channelId]
-                    ?: ChannelsComposer.freshSubscriberKeys().also { state.setSubscriberKeys(channelId, it) }
+                // docs/ux/second-device.md section 4a — the account's one key
+                // for the channel when another device subscribed it.
+                val kp = me.lakko.app.channels.ChannelSubscriptionSync.keyForSubscribing(state, channelId)
                 val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
                 if (register || attempt > 0) {
                     phase = ReaderPhase.Registering
@@ -422,8 +464,19 @@ private fun ChannelTimelineView(
             }
         }
         readNow()
+        // ADR-0060 section 3 — the reader's card is uploaded once a seed of
+        // the current epoch is held: a private channel's subscriber holds
+        // none until the owner's device lets it in, so the card goes when the
+        // seed arrives and again after each rotation (base walk 2026-11-13).
+        var cardEpoch: UInt? = null
+        suspend fun refreshReaderCardIfDue() {
+            val epoch = state.epochByChannel.value[channelId]
+            val held = epoch?.takeIf { state.subscribedSeeds(channelId)[it] != null }
+            if (!me.lakko.app.channels.ChannelSubscriberListView.readerCardDue(cardEpoch, held)) return
+            if (me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)) cardEpoch = held
+        }
         if (!isPublisher) {
-            me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)
+            refreshReaderCardIfDue()
         } else {
             me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
         }
@@ -435,6 +488,7 @@ private fun ChannelTimelineView(
                 state.subscriberKeysByChannel.value[channelId]?.let {
                     catchUpEnvelopes(state, client, channelId, ChannelsComposer.bytesToHex(it.publicKey))
                 }
+                refreshReaderCardIfDue()
             }
             readNow()
         }
@@ -541,7 +595,7 @@ private fun ChannelTimelineView(
                         resolver.openInputStream(uri)?.use { it.readBytes() }
                     } ?: throw java.io.IOException("unreadable")
                     val ref = if (audio) {
-                        // ADR-0090 / UX 6 — the file's own tags, read here.
+                        // ADR-0092 / UX 6 — the file's own tags, read here.
                         val tags = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                             me.lakko.app.media.readAudioTags(context, uri)
                         }
@@ -558,7 +612,7 @@ private fun ChannelTimelineView(
                             idleDays = CHANNEL_FILE_IDLE_DAYS,
                         ).copy(title = tags.title ?: fileName.substringBeforeLast('.'), artist = tags.artist)
                     } else if (visual && mime?.startsWith("image/") == true && mime != "image/gif") {
-                        // ADR-0090 / UX 3 — a photo re-encoded, its metadata dropped.
+                        // ADR-0092 / UX 3 — a photo re-encoded, its metadata dropped.
                         val max = runCatching { uniffi.lakko_ffi_uniffi.photoMaxLongestSidePx().toInt() }.getOrDefault(2560)
                         val jpeg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                             me.lakko.app.media.reencodePhoto(bytes, max)
@@ -579,7 +633,7 @@ private fun ChannelTimelineView(
             }
         }
     }
-    // ADR-0090 / attachments UX 3-4 — the same send preview as a chat: each
+    // ADR-0092 / attachments UX 3-4 — the same send preview as a chat: each
     // item its own post, the caption on the first, `Send as file`, the
     // video rule; a channel file lives CHANNEL_FILE_IDLE_DAYS idle days.
     var channelPreview by remember { mutableStateOf<me.lakko.app.ui.chat.SendPreview?>(null) }
@@ -631,7 +685,7 @@ private fun ChannelTimelineView(
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         openPreview(uris, filesOnly = true)
     }
-    // ADR-0090 / attachments UX section 2 — the publisher's one menu.
+    // ADR-0092 / attachments UX section 2 — the publisher's one menu.
     var attachMenuOpen by remember { mutableStateOf(false) }
     var channelContent by remember { mutableStateOf<ChannelContentScreen?>(null) }
     fun publishContent(content: uniffi.lakko_ffi_uniffi.MessageContent, refs: List<AttachmentRef> = emptyList()) {
@@ -672,7 +726,7 @@ private fun ChannelTimelineView(
         draftKey = channelId,
     )
 
-    // ADR-0090 section 4 — a channel poll's card: counts from the channels
+    // ADR-0092 section 4 — a channel poll's card: counts from the channels
     // service, one vote per account through the anonymous credential; a
     // publisher closes it by editing the post with the frozen tally.
     var failedVotes by remember { mutableStateOf<Map<Long, ByteArray>>(emptyMap()) }
@@ -756,8 +810,30 @@ private fun ChannelTimelineView(
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val width = maxWidth - 24.dp
             val items = timeline?.posts.orEmpty().asReversed()
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            // docs/ux/feed.md section 5 — the list at its newest end, in the
+            // foreground: the newest post shown is read and the channel's
+            // count in Chats clears (as a group chat does, and as web and iOS).
+            val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+            val newestCursor = timeline?.let { me.lakko.app.channels.channelReadThroughOnScreen(it) }
+            LaunchedEffect(channelId, newestCursor, pendingMedia.size) {
+                val cursor = newestCursor ?: return@LaunchedEffect
+                val account = state.boundAccount ?: return@LaunchedEffect
+                lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+                    androidx.compose.runtime.snapshotFlow {
+                        me.lakko.app.channels.channelListAtNewestEnd(listState.firstVisibleItemIndex, pendingMedia.size)
+                    }.collect { atEnd ->
+                        if (atEnd) {
+                            me.lakko.app.feed.FeedReadingStore.update(context, account) {
+                                me.lakko.app.feed.advanceChannelRead(it, channelId, cursor)
+                            }
+                        }
+                    }
+                }
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
+                state = listState,
                 reverseLayout = true,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -988,6 +1064,18 @@ private fun ChannelTimelineView(
                     },
                 )
             }
+        } else {
+            // docs/ux/second-device.md section 4a — one line in secondary
+            // text where the composer would be: no button, no link.
+            readerRole?.let { me.lakko.app.channels.readerDeviceLineKey(it) }?.let { key ->
+                Text(
+                    t(key),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
         }
     }
     if (isPublisher) VideoNoteOverlay(recorder)
@@ -1132,7 +1220,7 @@ private fun PostBlock(
     canSave: Boolean = false,
     onToggleSaved: (ChatMessage) -> Unit = {},
     onForward: ((ChatMessage) -> Unit)? = null,
-    /** ADR-0090 — what a content post's card answers to. */
+    /** ADR-0092 — what a content post's card answers to. */
     contentCtx: me.lakko.app.ui.chat.ContentBubbleContext? = null,
 ) {
     val context = LocalContext.current
@@ -1226,6 +1314,10 @@ private fun CommentsBlock(
     var loaded by remember(post.cursor) { mutableStateOf<List<ChannelFeedback.Comment>>(emptyList()) }
     var nextAfter by remember(post.cursor) { mutableStateOf(0L) }
     var more by remember(post.cursor) { mutableStateOf(false) }
+    // Rows the service returned, opened or not, and whether the first page
+    // was read: what the collapsed count is judged by (section 13.2).
+    var rowsRead by remember(post.cursor) { mutableIntStateOf(0) }
+    var firstRead by remember(post.cursor) { mutableStateOf(false) }
     var open by remember(post.cursor) { mutableStateOf(false) }
     var loading by remember(post.cursor) { mutableStateOf(false) }
     var failed by remember(post.cursor) { mutableStateOf(false) }
@@ -1273,7 +1365,9 @@ private fun CommentsBlock(
                 arrived = (page.comments.size - loaded.size).coerceAtLeast(0)
             } else {
                 loaded = page.comments
+                rowsRead = page.rowsRead
             }
+            firstRead = true
             nextAfter = page.nextAfter
             more = page.more
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1357,15 +1451,17 @@ private fun CommentsBlock(
                 }
             }
         }
-        // Section 13a (phase B) — the count the service keeps, when read.
-        val total = count?.toInt()?.coerceAtLeast(loaded.size) ?: loaded.size
-        val hidden = (if (open) loaded.size else total) - shown.size
-        when {
-            !open && (hidden > 0 || more) -> TextButton(onClick = { open = true }) {
-                Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to hidden.coerceAtLeast(1).toULong())))
+        // Section 13.2 — never a count of comments this reader hides: the
+        // service's count (13a, phase B) stands only for rows not read yet.
+        if (!open) {
+            when (val m = collapsedMore(loaded.size, rowsRead, firstRead, more, count)) {
+                is CollapsedMore.Count -> TextButton(onClick = { open = true }) {
+                    Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to m.n.toULong())))
+                }
+                CollapsedMore.Unknown -> TextButton(onClick = { open = true }) { Text(t("channels.comments.show_more_unknown")) }
+                CollapsedMore.Comment -> TextButton(onClick = { open = true }) { Text(t("channels.comments.comment")) }
+                CollapsedMore.None -> TextButton(onClick = { open = true }) { Text(t("channels.comments.write")) }
             }
-            !open && loaded.isEmpty() && (count ?: 0L) == 0L -> TextButton(onClick = { open = true }) { Text(t("channels.comments.comment")) }
-            !open -> TextButton(onClick = { open = true }) { Text(t("channels.comments.write")) }
         }
         if (open) {
             if (more) {
@@ -1374,6 +1470,7 @@ private fun CommentsBlock(
                         try {
                             val page = feedback.comments(post.cursor, nextAfter)
                             loaded = loaded + page.comments
+                            rowsRead += page.rowsRead
                             loadChips(page.comments)
                             nextAfter = page.nextAfter
                             more = page.more
@@ -1383,7 +1480,7 @@ private fun CommentsBlock(
                             failed = true
                         }
                     }
-                }) { Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to 20uL))) }
+                }) { Text(t("channels.comments.more")) }
             }
             if (arrived > 0) {
                 TextButton(onClick = {
@@ -1423,7 +1520,14 @@ private fun CommentsBlock(
                             }
                         }
                     },
-                ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = t("chat.composer.send")) }
+                ) {
+                    LkIcon(
+                        R.drawable.ic_lk_arrow_up_circle_fill,
+                        contentDescription = t("chat.composer.send"),
+                        tint = if (field.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        size = 31.dp,
+                    )
+                }
             }
             if (sendFailed) Text(t("channels.publish.error.generic"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { open = false }) { Text(t("channels.comments.hide")) }

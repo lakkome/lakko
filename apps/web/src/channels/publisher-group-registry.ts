@@ -21,11 +21,14 @@ import { withGroupMlsLock } from "../mls/group-lock";
 import { awaitChannelsHydration } from "../state/channels-state";
 import { openPublisherGroup, registerPublisherGroupAccess } from "./copublisher";
 import type { WasmIdentity } from "./composer";
+import { publisherDevice } from "./publisher-device";
 
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
 
 interface Held {
   readonly identity: WasmIdentity;
+  /** ADR-0090: the bound device identity the group lives in. */
+  readonly device: WasmIdentity;
   readonly group: PublisherGroup;
   readonly unregister: () => void;
 }
@@ -35,7 +38,8 @@ const opening = new Map<string, Promise<Held>>();
 
 async function open(identity: WasmIdentity, idHex: string): Promise<Held> {
   const have = held.get(idHex);
-  if (have !== undefined && have.identity === identity) return have;
+  const device = publisherDevice();
+  if (have !== undefined && have.identity === identity && have.device === device) return have;
   if (have !== undefined) release(idHex);
   const pending = opening.get(idHex);
   if (pending !== undefined) return pending;
@@ -44,8 +48,8 @@ async function open(identity: WasmIdentity, idHex: string): Promise<Held> {
     // found a second, forked group.
     await awaitChannelsHydration();
     const group = await openPublisherGroup(identity, idHex);
-    const unregister = registerPublisherGroupAccess(identity, group);
-    const h: Held = { identity, group, unregister };
+    const unregister = registerPublisherGroupAccess(device, group);
+    const h: Held = { identity, device, group, unregister };
     held.set(idHex, h);
     return h;
   })();
@@ -57,21 +61,30 @@ async function open(identity: WasmIdentity, idHex: string): Promise<Held> {
   }
 }
 
-/** Run `fn` with the channel's shared PublisherGroup handle, under the
- *  per-group MLS lock. Never free the handle in `fn`. */
+/** Run `fn` with the channel's shared PublisherGroup handle and the device
+ *  identity it lives in (ADR-0090: every group call takes the DEVICE), under
+ *  the per-group MLS lock. Never free the handle in `fn`. `identity` is the
+ *  account (lineage) identity. Throws `PublisherGroupNotHeldError` when this
+ *  device holds no group for the channel (a reader). */
 export async function withPublisherGroup<T>(
   identity: WasmIdentity,
   idHex: string,
-  fn: (group: PublisherGroup) => Promise<T>,
+  fn: (group: PublisherGroup, device: WasmIdentity) => Promise<T>,
 ): Promise<T> {
   const h = await open(identity, idHex);
-  return withGroupMlsLock(base64Encode(h.group.groupId()), () => fn(h.group));
+  return withGroupMlsLock(base64Encode(h.group.groupId()), () => fn(h.group, h.device));
 }
 
 /** The shared handle without the lock (for a caller that takes it itself,
  *  such as the approve, which locks inside). */
 export async function sharedPublisherGroup(identity: WasmIdentity, idHex: string): Promise<PublisherGroup> {
   return (await open(identity, idHex)).group;
+}
+
+/** The device identity the shared handle of `idHex` lives in (the caller
+ *  holds the handle from {@link sharedPublisherGroup}). */
+export async function sharedPublisherDevice(identity: WasmIdentity, idHex: string): Promise<WasmIdentity> {
+  return (await open(identity, idHex)).device;
 }
 
 function release(idHex: string): void {

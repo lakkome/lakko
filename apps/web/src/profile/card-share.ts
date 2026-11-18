@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 7 / UX `attachments.md` sections 10.1 and 11a - whether a
+ * ADR-0092 section 7 / UX `attachments.md` sections 10.1 and 11a - whether a
  * person's contact card may be shared, and what may be forwarded.
  *
  * Outgoing: every profile this account sends carries the flag "my card may

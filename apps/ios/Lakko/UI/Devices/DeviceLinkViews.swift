@@ -62,7 +62,7 @@ struct DeviceLinkCodeEntry: View {
 
     private func hint(_ text: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(text, systemImage: "exclamationmark.triangle.fill")
+            Label(text, icon: .warningFill)
                 .foregroundStyle(.red)
                 .font(.footnote)
             Button(l10n.t("device_link.code.start_again"), action: onStartAgain)

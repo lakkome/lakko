@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Property tests of ADR-0090 section 10 for `lakko-ballot`.
+//! Property tests of ADR-0092 section 10 for `lakko-ballot`.
 
 use lakko_ballot::ballot::{cast_with_set, is_ballot_row, open_row, verify_ballot, MAX_ROW_LEN};
 use lakko_ballot::proof::Proof;

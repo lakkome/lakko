@@ -115,7 +115,7 @@ impl ReactionKey {
 
     /// `BLAKE3-keyed(reaction_key, input)[..16]`: the one keyed hash every
     /// label under this key is. Shared with the channel poll option labels
-    /// ([`crate::poll`], ADR-0090 section 4.3). The reaction rule is a byte
+    /// ([`crate::poll`], ADR-0092 section 4.3). The reaction rule is a byte
     /// length only, so a crafted "emoji" can equal an option label's input;
     /// that buys nothing, since votes and reactions are counted in separate
     /// tables at the service and resolved against separate candidate lists.

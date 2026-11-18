@@ -25,7 +25,7 @@ const groupId = new Uint8Array(32).fill(4);
 const authorSeed = new Uint8Array(32).fill(7);
 const authorKeyB64 = (): string => base64Encode(wasm.PollVoterKey.fromEd25519Seed(authorSeed).publicKey);
 
-describe("the open-items hand-over planner (ADR-0090 section 3.9)", () => {
+describe("the open-items hand-over planner (ADR-0092 section 3.9)", () => {
   it("keeps each voter's latest vote and drops retracts", () => {
     const v = latestVotes([
       { messageId: 1, createdAtMs: 1, voter: "B", choices: [0] },

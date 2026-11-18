@@ -117,7 +117,8 @@ B is taken to the Contacts screen and nothing else is shown (amended
 
 **Network failure while opening the link** (added 2026-10-23: the ledger could
 not be asked, the network failed or the server answered with an error other
-than "no such link" or 429): "Invite not accepted" and **Try again**, which
+than "no such link" or 429): "Could not open the invite. Check your connection
+and try again." and **Try again**, which
 fetches the link again. Never taken for a link that no longer works; anything
 after the ledger answered is.
 

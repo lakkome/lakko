@@ -48,7 +48,8 @@ final class PublisherCommitOutboxTests: XCTestCase {
     }
 
     private func ports(
-        _ r: Recorder, failAt: String? = nil, serverEpoch: UInt32 = 7, lost: Bool = false
+        _ r: Recorder, failAt: String? = nil, serverEpoch: UInt32 = 7, lost: Bool = false,
+        merged: Bool = false
     ) -> PublisherCommitPorts {
         func step(_ name: String) throws {
             r.calls.append(name)
@@ -60,6 +61,8 @@ final class PublisherCommitOutboxTests: XCTestCase {
                 try step("commit:\(String(decoding: commit, as: UTF8.self))")
             },
             isLost: { _ in lost },
+            alreadyMerged: { merged },
+            adjudicate: { accepted in try step(accepted ? "merge" : "abandon") },
             deliverWelcome: { welcome, _ in try step("welcome:\(String(decoding: welcome, as: UTF8.self))") },
             serverEpoch: {
                 try step("server-epoch")
@@ -75,21 +78,21 @@ final class PublisherCommitOutboxTests: XCTestCase {
         let r = Recorder()
         try await PublisherCommitRunner.run(approve, ports: ports(r))
         XCTAssertEqual(r.calls, [
-            "commit:commit", "welcome:welcome", "server-epoch", "reseal:8", "appoint",
+            "commit:commit", "merge", "server-epoch", "reseal:8", "welcome:welcome", "appoint",
         ])
         XCTAssertEqual(r.saved.map(\.done), [
-            [.journal], [.journal, .welcome], [.journal, .welcome, .reseal],
-            [.journal, .welcome, .reseal, .appoint],
+            [.journal], [.journal, .reseal], [.journal, .reseal, .welcome],
+            [.journal, .reseal, .welcome, .appoint],
         ])
         XCTAssertEqual(r.finished?.id, approve.id)
     }
 
-    /// ADR-0081 — a rotation's epoch reaches the DS with its commit (best
-    /// effort), then the reseal.
-    func testARotationCommitsAndReseals() async throws {
+    /// ADR-0090 section 3 — a rotation's staged commit goes to the DS, is
+    /// merged once taken, and only then the reseal.
+    func testARotationCommitsMergesThenReseals() async throws {
         let r = Recorder()
         try await PublisherCommitRunner.run(rotation, ports: ports(r))
-        XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
+        XCTAssertEqual(r.calls, ["commit:rotation", "merge", "server-epoch", "reseal:8"])
     }
 
     /// ADR-0087 phase B — a removal commits, revokes the appointment, then
@@ -111,7 +114,7 @@ final class PublisherCommitOutboxTests: XCTestCase {
             throw Failure()
         }
         try await PublisherCommitRunner.run(removal, ports: p)
-        XCTAssertEqual(r.calls, ["commit:removal", "server-epoch", "reseal:8"])
+        XCTAssertEqual(r.calls, ["commit:removal", "merge", "server-epoch", "reseal:8"])
         XCTAssertEqual(revoked, [Data(repeating: 0x6B, count: 32)])
         XCTAssertEqual(r.saved.last?.done, [.journal, .unappoint, .reseal])
         XCTAssertEqual(r.finished?.id, removal.id)
@@ -125,11 +128,11 @@ final class PublisherCommitOutboxTests: XCTestCase {
         } catch {}
         XCTAssertNil(first.finished)
         let recorded = try XCTUnwrap(first.saved.last)
-        XCTAssertEqual(recorded.remainingSteps, [.reseal, .appoint])
+        XCTAssertEqual(recorded.remainingSteps, [.reseal, .welcome, .appoint])
         let second = Recorder()
         try await PublisherCommitRunner.run(recorded, ports: ports(second))
-        XCTAssertEqual(second.calls, ["server-epoch", "reseal:8", "appoint"])
-        XCTAssertEqual(second.finished?.done, [.journal, .welcome, .reseal, .appoint])
+        XCTAssertEqual(second.calls, ["server-epoch", "reseal:8", "welcome:welcome", "appoint"])
+        XCTAssertEqual(second.finished?.done, [.journal, .reseal, .welcome, .appoint])
     }
 
     func testAResealTheServiceAlreadyHoldsIsNotSentAgain() async throws {
@@ -150,33 +153,47 @@ final class PublisherCommitOutboxTests: XCTestCase {
         XCTAssertEqual(r.proofs, [4])
     }
 
-    func testARotationCommitTheDsDidNotAnswerDefersOnlyItsJournalStep() async throws {
+    /// ADR-0090 — a replay after the merge whose `done` mark did not land
+    /// sends nothing again and goes on with the steps.
+    func testAnAlreadyMergedCommitIsNotSentAgain() async throws {
         let r = Recorder()
-        try await PublisherCommitRunner.run(rotation, ports: ports(r, failAt: "commit:rotation"))
-        XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
-        XCTAssertNil(r.finished, "kept for the journal step")
-        let kept = try XCTUnwrap(r.saved.last)
-        XCTAssertEqual(kept.remainingSteps, [.journal])
-        let again = Recorder()
-        try await PublisherCommitRunner.run(kept, ports: ports(again, serverEpoch: 8))
-        XCTAssertEqual(again.calls, ["commit:rotation"])
-        XCTAssertEqual(again.finished?.done, [.reseal, .journal])
+        try await PublisherCommitRunner.run(rotation, ports: ports(r, merged: true))
+        XCTAssertEqual(r.calls, ["server-epoch", "reseal:8"])
+        XCTAssertEqual(r.finished?.done, [.journal, .reseal])
     }
 
-    func testALostRotationCommitDoesNotHoldTheRotation() async throws {
+    /// ADR-0090 — an unanswered rotation commit stays staged and owed: no
+    /// merge, no reseal; the next run sends it again (C-90 proposed: no seed
+    /// reaches subscribers from a commit the journal did not take).
+    func testAnUnansweredRotationCommitResealsNothingAndStaysOwed() async throws {
+        let r = Recorder()
+        do {
+            try await PublisherCommitRunner.run(rotation, ports: ports(r, failAt: "commit:rotation"))
+            XCTFail("the unanswered commit must surface")
+        } catch {}
+        XCTAssertEqual(r.calls, ["commit:rotation"])
+        XCTAssertNil(r.finished, "kept, owed")
+        let again = Recorder()
+        try await PublisherCommitRunner.run(rotation, ports: ports(again, serverEpoch: 7))
+        XCTAssertEqual(again.calls, ["commit:rotation", "merge", "server-epoch", "reseal:8"])
+    }
+
+    /// ADR-0090 — a rotation lost to another owner device's commit (`409`)
+    /// is abandoned and reseals nothing.
+    func testALostRotationIsAbandonedAndResealsNothing() async throws {
         let r = Recorder()
         try await PublisherCommitRunner.run(
             rotation, ports: ports(r, failAt: "commit:rotation", lost: true))
-        XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
-        XCTAssertEqual(r.finished?.done, [.journal, .reseal])
+        XCTAssertEqual(r.calls, ["commit:rotation", "abandon"])
         XCTAssertEqual(r.finished?.journalLost, true)
+        XCTAssertEqual(r.finished?.done, [])
     }
 
-    func testALostApproveDeliversNoWelcomeAndAppointsNobodyButReseals() async throws {
+    func testALostApproveIsAbandonedWithNoWelcomeNoAppointmentNoReseal() async throws {
         let r = Recorder()
         try await PublisherCommitRunner.run(
             approve, ports: ports(r, failAt: "commit:commit", lost: true))
-        XCTAssertEqual(r.calls, ["commit:commit", "server-epoch", "reseal:8"])
+        XCTAssertEqual(r.calls, ["commit:commit", "abandon"])
         XCTAssertEqual(r.finished?.journalLost, true)
     }
 
@@ -194,7 +211,7 @@ final class PublisherCommitOutboxTests: XCTestCase {
     func testAFailedAppointmentNeverHoldsTheEntry() async throws {
         let r = Recorder()
         var entry = approve
-        entry.done = [.journal, .welcome, .reseal]
+        entry.done = [.journal, .reseal, .welcome]
         try await PublisherCommitRunner.run(entry, ports: ports(r, failAt: "appoint"))
         XCTAssertNotNil(r.finished)
     }
@@ -204,6 +221,33 @@ final class PublisherCommitOutboxTests: XCTestCase {
         XCTAssertEqual(PublisherCommitEntry.replayVerdict(approve, restoredEpoch: nil), .discard)
         XCTAssertEqual(PublisherCommitEntry.replayVerdict(approve, restoredEpoch: 5), .replay)
         XCTAssertEqual(PublisherCommitEntry.replayVerdict(approve, restoredEpoch: 6), .replay)
+    }
+
+    /// ADR-0090 — a group still holding the staged commit at N: the owed
+    /// verdict, replayed (the journal step first); an abandoned entry is
+    /// dropped.
+    func testAStagedCommitIsReplayedAndALostOneDropped() {
+        XCTAssertEqual(PublisherCommitEntry.replayVerdict(approve, restoredEpoch: 4, staged: true), .replay)
+        XCTAssertEqual(PublisherCommitEntry.replayVerdict(approve, restoredEpoch: 4, staged: false), .discard)
+        var lost = approve
+        lost.journalLost = true
+        XCTAssertEqual(PublisherCommitEntry.replayVerdict(lost, restoredEpoch: 5), .discard)
+    }
+
+    /// ADR-0090 — an admission entry runs the journal, the Welcome to the
+    /// account, then the reseal.
+    func testADevicesEntryCommitsWelcomesAndReseals() async throws {
+        let devices = PublisherCommitEntry(
+            id: String(repeating: "0d", count: 16), kind: .devices,
+            channelIdHex: approve.channelIdHex, groupIdHex: approve.groupIdHex,
+            targetEpoch: 5, serverTargetEpoch: 8,
+            commitB64: Data("devices".utf8).base64EncodedString(),
+            welcomeB64: Data("welcome".utf8).base64EncodedString(),
+            joinerKeyB64: Data(repeating: 0x6B, count: 32).base64EncodedString())
+        XCTAssertTrue(devices.isWellFormed)
+        let r = Recorder()
+        try await PublisherCommitRunner.run(devices, ports: ports(r))
+        XCTAssertEqual(r.calls, ["commit:devices", "merge", "server-epoch", "reseal:8", "welcome:welcome"])
     }
 
     func testAPersistedEntryRoundTripsAndAMalformedOneIsRefused() throws {

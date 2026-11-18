@@ -660,7 +660,7 @@ public struct JoinCallLandingScreen: View {
                     // ADR-0084 — the host's photo beside their name.
                     InitialsAvatar(
                         name: host, identity: base64Encode(decoded.ownerSignatureKey), size: 56,
-                        placeholderSymbol: "person.fill", photo: .person(decoded.ownerSignatureKey))
+                        placeholderIcon: .personFill, photo: .person(decoded.ownerSignatureKey))
                     Text(l10n.t("call.link.host", texts: ["name": host]))
                         .font(.footnote)
                         .foregroundStyle(.secondary)

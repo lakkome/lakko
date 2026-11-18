@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! End-to-end and property tests of the credential (ADR-0090 4.7).
+//! End-to-end and property tests of the credential (ADR-0092 4.7).
 
 use lakko_anon_cred::{
     verify_registration, AnonCredError, Commitment, CommitmentRegistration, Credential,

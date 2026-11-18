@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The MariaDB blob index (`storage_blobs`, migrations `0001` and `0003`).
+//! The MariaDB blob index (`storage_blobs`, migrations `0001` and `0003`) and,
+//! in [`vault`], the vault index (migration `0004`).
 
 use async_trait::async_trait;
 use sqlx::{MySqlPool, QueryBuilder, Row as _};
 
 use super::{BlobId, BlobIndex, BlobRow, IndexError, UploadOutcome};
+
+mod vault;
 
 /// Rows per multi-row `INSERT IGNORE` of the import.
 const IMPORT_BATCH: usize = 500;

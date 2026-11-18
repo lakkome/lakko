@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The account's own poll choices, and their envelope ([ADR-0090] section
+//! The account's own poll choices, and their envelope ([ADR-0092] section
 //! 3.6, "Own choice").
 //!
 //! An anonymous ballot names nobody, so the voter's other devices cannot learn
@@ -69,7 +69,7 @@
 //! (it could cast that vote anyway). The register never reaches a tally. The
 //! decoder is bounded and total.
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 
 use thiserror::Error;
 
@@ -79,7 +79,7 @@ use super::entry::{
 };
 
 /// The most options a poll has, and so the most choices and the bound on an
-/// index (ADR-0090 section 3.1).
+/// index (ADR-0092 section 3.1).
 pub const POLL_CHOICE_MAX_OPTIONS: usize = 10;
 
 /// The most registers a client writes (an update of a held one is always

@@ -113,7 +113,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
     }()
 
     /// Stand-in for the slim FFI's `profileEnvelopeMinLen()...profileEnvelopeMaxLen()`
-    /// (33...927 — profile v5 (ADR-0090 section 7) with ADR-0078's 134-byte reach grants:
+    /// (33...927 — profile v5 (ADR-0092 section 7) with ADR-0078's 134-byte reach grants:
     /// domain 17 + version 1 + stamp 8 + six length / count bytes + the flags byte at the least;
     /// at most a 255-byte name, a 32-byte username, a 16-byte account id, a
     /// 153-byte username certificate, two grants and a 170-byte avatar). Restated for the same reason as

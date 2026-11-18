@@ -25,7 +25,7 @@ struct TranslatableMessageText: View {
     @Environment(\.translationConversation) private var conversation
 
     var body: some View {
-        let phase = conversation.flatMap { center.phase(conversation: $0, messageId: message.messageId) }
+        let phase = conversation.flatMap { center.quietLine(conversation: $0, message: message) }
         VStack(alignment: .leading, spacing: 3) {
             if case .translated(let text, _) = phase {
                 MessageText(text: text, linkColor: linkColor, onOwnLink: onOwnLink).chatFont(.body)
@@ -84,6 +84,12 @@ struct TranslationQuietLine: View {
                 Text(LanguageNames.inInterface(source))
                 dot
                 link(l10n.t("translate.line.translate"), actions.translate)
+            case .detected(let source, let canTranslate):
+                Text(LanguageNames.inInterface(source))
+                if canTranslate {
+                    dot
+                    link(l10n.t("translate.line.translate"), actions.translate)
+                }
             case .failed:
                 Text(l10n.t("translate.line.failed"))
                 dot
@@ -136,7 +142,7 @@ struct TranslationBar: View {
     var body: some View {
         if let language = center.bars[conversation] {
             HStack(spacing: 10) {
-                Image(systemName: "character.bubble")
+                LkIconView(.translate, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 Text(l10n.t("translate.bar.body", texts: ["language": LanguageNames.inInterface(language)]))
@@ -152,7 +158,7 @@ struct TranslationBar: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.lakkoTextMuted)
                 Button { center.dismissBar(conversation: conversation) } label: {
-                    Image(systemName: "xmark").font(.caption.weight(.semibold))
+                    LkIconView(.xmark, size: 14, relativeTo: .caption)
                 }
                 .foregroundStyle(Color.lakkoTextMuted)
                 .accessibilityLabel(l10n.t("translate.bar.close"))
@@ -182,7 +188,7 @@ struct AutoTranslateToggle: View {
                 get: { center.autoTranslate(conversation: conversation) },
                 set: { center.setAutoTranslate(conversation: conversation, on: $0) }
             )) {
-                Label(l10n.t("translate.auto"), systemImage: "character.bubble")
+                Label(l10n.t("translate.auto"), icon: .translate)
                     .foregroundStyle(Color.lakkoText)
             }
             .tint(Color.lakkoAccent)
@@ -223,7 +229,9 @@ struct TranslationOverlays: ViewModifier {
                 title: l10n.t("translate.picker.title")
             ) {
                 guard let request = center.pickerRequest else { return [] }
-                return TranslationLanguageChoices.rows(request.languages, checked: nil) { tag in
+                return TranslationLanguageChoices.rows(
+                    request.languages, checked: request.marked, candidates: request.candidates
+                ) { tag in
                     request.choose(tag)
                 }
             }
@@ -266,18 +274,31 @@ enum PackDialog {
 enum TranslationLanguageChoices {
     @MainActor
     static func rows(
-        _ languages: [String], checked: String?, choose: @escaping (String) -> Void
+        _ languages: [String], checked: String?, candidates: [String] = [],
+        choose: @escaping (String) -> Void
     ) -> [LakkoMenuItem] {
         let locale = Localization.currentLocale
         let sorted = languages.sorted {
             LanguageNames.inInterface($0).compare(LanguageNames.inInterface($1), locale: locale) == .orderedAscending
         }
-        return sorted.map { tag in
+        return ordered(sorted, candidates: candidates).map { tag in
             LakkoMenuItem.choice(
                 LanguageNames.own(tag),
                 checked: checked.map { sameLanguage(a: $0, b: tag) } ?? false
             ) { choose(tag) }
         }
+    }
+}
+
+extension TranslationLanguageChoices {
+    /// `Not Spanish?`: the message's close candidates first, then the rest in
+    /// their order (shared rule `orderPickerLanguages`).
+    static func ordered(_ languages: [String], candidates: [String]) -> [String] {
+        guard let first = candidates.first else { return languages }
+        let set = LanguageCandidates(
+            detected: DetectedLanguage(tag: first, confidencePermille: 0),
+            alternatives: Array(candidates.dropFirst()))
+        return orderPickerLanguages(languages: languages, candidates: set)
     }
 }
 

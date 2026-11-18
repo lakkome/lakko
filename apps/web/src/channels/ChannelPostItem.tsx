@@ -64,15 +64,15 @@ export interface ChannelPostItemProps {
   /** ADR-0065 — whether this account saved the post. */
   readonly saved: boolean;
   readonly onToggleSaved: () => void;
-  /** ADR-0090 — `Close poll` on a publisher's open poll post. */
+  /** ADR-0092 — `Close poll` on a publisher's open poll post. */
   readonly onClosePoll?: (cursor: number) => void;
-  /** ADR-0090 — publish one post (a checklist op from a publisher). */
+  /** ADR-0092 — publish one post (a checklist op from a publisher). */
   readonly publish?: (plaintext: Uint8Array) => Promise<void>;
-  /** ADR-0090 — `Edit checklist` / `Edit` on an article post. */
+  /** ADR-0092 — `Edit checklist` / `Edit` on an article post. */
   readonly onEditContent?: (cursor: number, content: MessageContent, attachments: readonly AttachmentRefBytes[]) => void;
-  /** ADR-0090 — `Close checklist`. */
+  /** ADR-0092 — `Close checklist`. */
   readonly onCloseChecklist?: (cursor: number) => void;
-  /** ADR-0090 — an article post's reader. */
+  /** ADR-0092 — an article post's reader. */
   readonly onOpenArticle?: (article: Article, attachments: readonly AttachmentRefBytes[]) => void;
 }
 
@@ -84,7 +84,7 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
   let pressAt: { x: number; y: number } | null = null;
 
-  // ADR-0090 — a content post's attachments are its own (an article's images).
+  // ADR-0092 — a content post's attachments are its own (an article's images).
   const plainRefs = (): readonly AttachmentRefBytes[] => (props.post.content !== undefined ? [] : props.post.attachments);
   const mediaRefs = (): AttachmentRefBytes[] =>
     plainRefs().filter((a) => props.hub.decision(a).bubble !== "file");
@@ -107,7 +107,7 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
     setMenu({ bubble: { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, x, y });
   };
 
-  /** ADR-0090 — the content's own menu rows in a channel. */
+  /** ADR-0092 — the content's own menu rows in a channel. */
   const contentActions = (): { label: string; icon: "lock" | "globe" | "copy" | "pencil"; onClick: () => void }[] => {
     const c = props.post.content;
     if (c === undefined) return [];
@@ -264,7 +264,7 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
                 {(ref) => (
                   <li class="lk-channel-file">
                     <button type="button" class="ghost small" onClick={() => void download(ref)}>
-                      <Icon name="clip" size={14} />
+                      <Icon name="doc" size={14} />
                       <span>{ref.name ?? t("chat.attachment.unnamed")}</span>
                       <span class="lk-meta">{formatAttachmentSize(ref.size)}</span>
                     </button>

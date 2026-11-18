@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0090 section 7 / UX `attachments.md` sections 10.1 and 11a / UX
+ * ADR-0092 section 7 / UX `attachments.md` sections 10.1 and 11a / UX
  * `who-can-find-me.md` section 6.2 — the card flag, the picker, the forward
  * rules and the group username.
  *
@@ -179,9 +179,9 @@ describe("forwarding content (UX section 11a)", () => {
   it("bulk Forward is off when any selected message may not be forwarded", () => {
     const kinds = new Map<number, MessageContent | undefined>([[1, undefined], [2, location], [3, poll]]);
     const forwardable = (id: number): boolean => canForwardContent(kinds.get(id), shareable);
-    expect(forwardEnabled(new Set([1, 2]), forwardable)).toBe(true);
-    expect(forwardEnabled(new Set([1, 3]), forwardable)).toBe(false);
-    expect(forwardEnabled(new Set(), forwardable)).toBe(false);
+    expect(forwardEnabled(new Set([1, 2]), false, forwardable)).toBe(true);
+    expect(forwardEnabled(new Set([1, 3]), false, forwardable)).toBe(false);
+    expect(forwardEnabled(new Set(), false, forwardable)).toBe(false);
   });
 
   it("the feed follows the same rules, for a group message and a channel post alike", () => {

@@ -16,12 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.CallMade
-import androidx.compose.material.icons.automirrored.filled.CallMissed
-import androidx.compose.material.icons.automirrored.filled.CallReceived
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -61,6 +55,9 @@ import me.lakko.app.ui.chat.formatClockTime
 import me.lakko.app.ui.components.LakkoAvatar
 import java.time.ZoneId
 import java.util.Locale
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Calls: recent calls across every conversation, newest first.
@@ -146,7 +143,7 @@ public fun CallsScreen(
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = onNewCall,
-                icon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
+                icon = { LkIcon(R.drawable.ic_lk_video, contentDescription = null) },
                 text = { Text(me.lakko.app.l10n.t("call.history.new_call")) },
             )
         },
@@ -164,11 +161,20 @@ public fun CallsScreen(
                         .padding(24.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = me.lakko.app.l10n.t("call.history.empty"),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        LkIcon(
+                            R.drawable.ic_lk_phone,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            size = LkIconSize.Empty,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            text = me.lakko.app.l10n.t("call.history.empty"),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
@@ -327,15 +333,15 @@ private fun CallHistoryRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Section 8 of docs/ux/calls.md — the glyph is never the
                     // only signal; the words next to it say the same thing.
-                    Icon(
-                        imageVector = when (callDirectionGlyph(entry.outcome)) {
-                            CallDirectionGlyph.OUTGOING -> Icons.AutoMirrored.Filled.CallMade
-                            CallDirectionGlyph.INCOMING -> Icons.AutoMirrored.Filled.CallReceived
-                            CallDirectionGlyph.MISSED -> Icons.AutoMirrored.Filled.CallMissed
+                    LkIcon(
+                        icon = when (callDirectionGlyph(entry.outcome)) {
+                            CallDirectionGlyph.OUTGOING -> R.drawable.ic_lk_phone_outgoing
+                            CallDirectionGlyph.INCOMING -> R.drawable.ic_lk_phone_incoming
+                            CallDirectionGlyph.MISSED -> R.drawable.ic_lk_phone_down
                         },
                         contentDescription = null,
                         tint = lineColor,
-                        modifier = Modifier.size(14.dp),
+                        size = LkIconSize.Mark,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -361,8 +367,8 @@ private fun CallHistoryRow(
                 onClick = onCallBack,
                 modifier = Modifier.padding(end = 8.dp),
             ) {
-                Icon(
-                    imageVector = if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call,
+                LkIcon(
+                    icon = if (entry.video) R.drawable.ic_lk_video else R.drawable.ic_lk_phone,
                     contentDescription = me.lakko.app.l10n.t(if (entry.video) "chat.call.video" else "chat.call.voice"),
                 )
             }

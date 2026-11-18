@@ -164,7 +164,7 @@ export function SendPreview(props: {
                     title={t("attach.preview.remove", { name: it.file.name })}
                     onClick={() => remove(it.id)}
                   >
-                    <Icon name="close" size={14} />
+                    <Icon name="xmark-circle-fill" size={14} />
                   </button>
                 </div>
               )}
@@ -189,7 +189,7 @@ export function SendPreview(props: {
                     remove(it.id);
                   }}
                 >
-                  <Icon name="close" size={16} />
+                  <Icon name="xmark-circle-fill" size={16} />
                 </button>
               </div>
             )}

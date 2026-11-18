@@ -446,7 +446,7 @@ final class ProfileNamesTests: XCTestCase {
         XCTAssertFalse(membershipGrew(previousMemberKeys: ["a"], currentMemberKeys: nil))
     }
 
-    // MARK: - ADR-0090 section 7 — "my card may be shared"
+    // MARK: - ADR-0092 section 7 — "my card may be shared"
 
     func testTheOwnFlagIsOffExactlyOnNobody() {
         let base = defaultVisibilitySetting()

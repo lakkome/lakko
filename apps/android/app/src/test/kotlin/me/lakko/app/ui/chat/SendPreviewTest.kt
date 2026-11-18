@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.ArticleRun
 
-/** ADR-0090 / attachments UX 3, 6, 11 — the preview rules, the audio clock, selection styles. */
+/** ADR-0092 / attachments UX 3, 6, 11 — the preview rules, the audio clock, selection styles. */
 class SendPreviewTest {
 
     @Test

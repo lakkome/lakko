@@ -10,8 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowCircleDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +23,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * ADR-0038 S4 — the dismissible "update available" notice (Android). The Kotlin
@@ -66,10 +67,10 @@ public fun UpdateAvailableBanner(
             // Leading glyph so the meaning survives color-blindness / greyscale
             // (UX §10 — icon + label, never color alone). Decorative; the text
             // carries the accessible content (contentDescription = null).
-            Icon(
-                imageVector = Icons.Filled.ArrowCircleDown,
+            LkIcon(
+                icon = R.drawable.ic_lk_arrow_down_circle_fill,
                 contentDescription = null,
-                modifier = Modifier.size(24.dp),
+                size = LkIconSize.Toolbar,
             )
             Text(
                 text = t("update.available.message"),

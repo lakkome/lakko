@@ -88,7 +88,7 @@ services:
       # Dev fixture only; never a production value. Unset: every route that
       # names an account by login handle answers 503.
       LAKKO_AUTH_HANDLE_PEPPER: ${LAKKO_AUTH_HANDLE_PEPPER:-6c616b6b6f2d6c6f63616c2d6465762d6c6f67696e2d68616e646c652d706570}
-      # ADR-0090 section 4.4 - the channel-poll credential master (64 hex
+      # ADR-0092 section 4.4 - the channel-poll credential master (64 hex
       # chars); channels MUST hold the same value. Unset: the credential
       # routes and the vote routes answer 503.
       LAKKO_ANON_CRED_MASTER_SECRET: ${LAKKO_ANON_CRED_MASTER_SECRET:-}
@@ -274,7 +274,7 @@ services:
       LAKKO_CHANNELS_BIND: 0.0.0.0:8086
       LAKKO_CHANNELS_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_channels
       DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_channels
-      # ADR-0090 section 4.4 - the channel-poll credential master auth issues
+      # ADR-0092 section 4.4 - the channel-poll credential master auth issues
       # under (the same value). Unset: the vote routes answer 503.
       LAKKO_ANON_CRED_MASTER_SECRET: ${LAKKO_ANON_CRED_MASTER_SECRET:-}
     ports:

@@ -126,7 +126,7 @@ struct RecoverySettingsScreen: View {
                 if let session = DeviceSession.current(authRepository) {
                     card(titleKey: nil) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Label(l10n.t("settings.recovery.totp.title"), systemImage: "lock.rotation")
+                            Label(l10n.t("settings.recovery.totp.title"), icon: .lockRotation)
                                 .font(.headline)
                             TotpEnrollView(sessionToken: session.sessionToken)
                         }
@@ -157,13 +157,13 @@ struct RecoverySettingsScreen: View {
     @ViewBuilder
     private var phraseRow: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(l10n.t("recovery.method.phrase.title"), systemImage: "key")
+            Label(l10n.t("recovery.method.phrase.title"), icon: .key)
                 .font(.headline)
             Text(l10n.t("settings.recovery.phrase.sub"))
                 .font(.footnote)
                 .foregroundStyle(Color.lakkoTextMuted)
             HStack(spacing: 8) {
-                Image(systemName: phraseStoredHere ? "checkmark.circle.fill" : "exclamationmark.circle")
+                LkIconView(phraseStoredHere ? .checkmarkCircleFill : .exclamationCircle, size: 20)
                     .foregroundStyle(phraseStoredHere ? Color.lakkoSuccess : Color.lakkoWarning)
                 Text(l10n.t(phraseStoredHere
                      ? "settings.recovery.phrase.saved_here"
@@ -172,17 +172,13 @@ struct RecoverySettingsScreen: View {
             }
             if reveal == .withheldCredentialPending {
                 // The new keys are not published yet (UX 15.4): withheld
-                // until the owed publish lands.
-                AuthHint(text: l10n.t("recovery_phrase.fresh.publish_owed"), isError: true)
-                if let retryError {
-                    AuthHint(text: retryError.text, isError: true)
+                // until the owed publish lands. While the directory's
+                // cool-down runs, the minutes left and no Try again; the
+                // publish runs by itself when it is over.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    withheldPhrase(publishDisplay(at: context.date))
                 }
-                WaitNotice(countdown: retryWait)
-                AuthSecondaryButton(
-                    title: l10n.t(retryBusy ? "common.checking" : "common.try_again"),
-                    disabled: retryBusy || retryWait.waiting,
-                    action: retryCredential
-                )
+                .task(id: authRepository.keyResetPublishWait) { await retryWhenTheWaitIsOver() }
             } else if let shownPhrase {
                 AuthHint(text: l10n.t("settings.recovery.phrase.confirm_show"))
                 PhraseGrid(words: PhraseWords.words(of: shownPhrase))
@@ -196,7 +192,7 @@ struct RecoverySettingsScreen: View {
                 }
                 AuthSecondaryButton(
                     title: l10n.t(checking ? "common.checking" : "settings.recovery.phrase.show"),
-                    systemImage: "eye",
+                    icon: .eye,
                     disabled: checking,
                     action: showPhrase
                 )
@@ -208,7 +204,7 @@ struct RecoverySettingsScreen: View {
         Button { onOpen(.passkeys) } label: {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key")
+                    Label(l10n.t("settings.passkeys.title"), icon: .passkey)
                         .font(.headline)
                         .foregroundStyle(Color.lakkoText)
                     Text(l10n.t("settings.recovery.passkeys.sub"))
@@ -222,8 +218,7 @@ struct RecoverySettingsScreen: View {
                     }
                 }
                 Spacer()
-                Image(systemName: "chevron.forward")
-                    .font(.footnote.weight(.semibold))
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             .contentShape(Rectangle())
@@ -242,7 +237,7 @@ struct RecoverySettingsScreen: View {
         Button { onOpen(.devices) } label: {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label(l10n.t("settings.recovery.devices.title"), systemImage: "laptopcomputer.and.iphone")
+                    Label(l10n.t("settings.recovery.devices.title"), icon: .devices)
                         .font(.headline)
                         .foregroundStyle(Color.lakkoText)
                     Text(l10n.t("settings.security.devices.sub"))
@@ -251,8 +246,7 @@ struct RecoverySettingsScreen: View {
                         .multilineTextAlignment(.leading)
                 }
                 Spacer()
-                Image(systemName: "chevron.forward")
-                    .font(.footnote.weight(.semibold))
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             .contentShape(Rectangle())
@@ -263,7 +257,7 @@ struct RecoverySettingsScreen: View {
     /// Informational: the three-word check needs no setup and has no switch.
     private var wordsRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(l10n.t("recovery.method.words.title"), systemImage: "text.word.spacing")
+            Label(l10n.t("recovery.method.words.title"), icon: .words)
                 .font(.headline)
             Text(l10n.t(wordsLineKey))
                 .font(.footnote)
@@ -297,6 +291,49 @@ struct RecoverySettingsScreen: View {
                     .stroke(Color.lakkoBorder, lineWidth: 1)
             )
         }
+    }
+
+    private func publishDisplay(at date: Date) -> PublishOwedDisplay {
+        let wait = authRepository.keyResetPublishWait
+        return PublishOwedDisplay.decide(
+            copyKey: "recovery_phrase.fresh.publish_owed",
+            showsWords: true,
+            waitUntilMs: wait != nil && wait?.accountIdB64 == account?.accountIdB64 ? wait?.untilMs : nil,
+            needsSignIn: false,
+            nowMs: Int64(date.timeIntervalSince1970 * 1000))
+    }
+
+    @ViewBuilder
+    private func withheldPhrase(_ display: PublishOwedDisplay) -> some View {
+        switch display.message {
+        case .copy(let key):
+            AuthHint(text: l10n.t(key), isError: true)
+            if let retryError {
+                AuthHint(text: retryError.text, isError: true)
+            }
+            WaitNotice(countdown: retryWait)
+        case .waiting(let key, let minutes):
+            AuthHint(text: l10n.t(key, counts: ["minutes": UInt64(minutes)]))
+        }
+        if display.showsTryAgain {
+            AuthSecondaryButton(
+                title: l10n.t(retryBusy ? "common.checking" : "common.try_again"),
+                disabled: retryBusy || retryWait.waiting,
+                action: retryCredential
+            )
+        }
+    }
+
+    /// Sleep until the directory's cool-down is over, then publish once.
+    private func retryWhenTheWaitIsOver() async {
+        guard let pending = authRepository.keyResetPublishWait,
+              pending.accountIdB64 == account?.accountIdB64 else { return }
+        let delayMs = pending.untilMs + PublishOwedDisplay.retryMarginMs - Int64(Date().timeIntervalSince1970 * 1000)
+        if delayMs > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+        }
+        guard !Task.isCancelled, authRepository.keyResetPublishWait == pending else { return }
+        retryCredential()
     }
 
     // MARK: - Actions
@@ -349,7 +386,10 @@ struct RecoverySettingsScreen: View {
             do {
                 try await authRepository.retrySessionKeyResetPublish()
             } catch {
-                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                if authRepository.keyResetPublishWait != nil {
+                    // The directory's cool-down: the waiting copy says it.
+                    retryError = nil
+                } else if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
                     retryWait.start(forSecs: secs)
                 } else if case .network = error as? AuthClientError {
                     retryError = .key("common.error.offline")

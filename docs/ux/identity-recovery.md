@@ -23,8 +23,8 @@ decisions and with what was built on web. The model:
   holds the account's keys and phrase. They sign the person in there and
   nothing more. There is nothing to set up and nothing about them on a
   server.
-- **A passkey can restore keys** when the person turned that on for the
-  passkey and the platform supports it.
+- **A passkey restores keys** wherever the platform supports it, with no
+  choice to make (amended 2026-11-11, section 10.2).
 - **Another device is the first route** everywhere.
 - **Every device that has the keys also has the phrase**, so it can show it,
   check three words and hand the keys to a further device.
@@ -71,8 +71,8 @@ Choose how.
   [devices]  Another device                 >
              If you have one that is still signed in.
   [passkey]  Passkey                        >
-             Signs you in. Brings back your chats too if you
-             turned that on for this passkey.
+             Signs you in. Brings back your chats too when the
+             passkey can carry your keys.
   [key]      Recovery phrase                >
              Type your 12 words and choose a new password.
 
@@ -350,8 +350,24 @@ Confirm new password   [ ............ ]
 | Route | Chat list |
 |---|---|
 | Another device | Fills as the other device adds this one to each chat; banner "Catching up with your other device..." until done. |
-| Recovery phrase or passkey, another device of the account is still signed in | Fills as that device notices this one and adds it (this can take until that device is next open); banner "Your other devices are adding this one to your chats." |
-| Recovery phrase or passkey, no other device left | Fills as contacts open Lakko and their devices add this one. Until the first chat arrives the empty list carries a card: "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored." with a button to Contacts. Not a loading state; no spinner. A restored device that knew no conversation shows the ordinary empty list. |
+| Recovery phrase or passkey, another device of the account answered | Fills as that device adds this one. No banner: what happens in the background is not the person's to act on (amended 2026-11-11, maintainer). |
+| Recovery phrase or passkey, no other device answered | Fills as contacts open Lakko and their devices add this one. Until the first chat arrives the empty list carries a card: "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored." with a button to Contacts. Not a loading state; no spinner. |
+
+Amended 2026-11-11 (maintainer). "Answered" is the ADR-0081 third
+amendment's answer: after a restore the device knocks on the account's
+DeviceGroup, and a running device answers at once (a presence note or a
+Welcome). Whether another device is merely listed in the directory says
+nothing: a lost device stays listed, which put the banner on exactly the
+restores where no other device existed. A device that founded the
+DeviceGroup because nobody answered (or because no other device was
+listed) shows the card; one that was answered shows the ordinary list (the
+banner "Your other devices are adding this one to your chats." is removed
+on every client). The card needs a restored device that knew at least one
+conversation (the backup's list of
+conversations); one that knew none shows the ordinary empty list, since
+there is nothing to add it to. Both go away when the first conversation
+arrives, as before. The answer is kept per account on the device, so a
+restart shows the same state.
 
 ## 8. Restore your keys (signed in, no keys on this device)
 
@@ -370,7 +386,7 @@ messages here.
   [devices]  Another device                 >
              If you have one that is still signed in.
   [passkey]  Passkey                        >
-             If you turned on "restore keys" for a passkey.
+             A passkey that restores your keys.
   [key]      Recovery phrase                >
              Type your 12 words.
 
@@ -404,6 +420,138 @@ Log out
   12-word recovery phrase to save. Only do this if ...", is replaced by it).
 - **Log out** leaves the screen without changing anything.
 - States per route: the shared table of section 2.
+
+## 8a. Restore your keys: the earlier keys are missing (2026-11-15)
+
+ADR-0074, "Joining after a rotation". After the account's keys were changed,
+its chats keep using the keys from before the change. A device that signs in
+or is restored after that, and does not yet hold those earlier keys, does
+not open the app: it would join chats under the wrong keys and never reach
+the account's existing ones. It shows a variant of the section-8 screen
+instead, on every route (sign-in, the phrase, an email code, a passkey,
+another device).
+
+```
+Restore your keys
+
+You are logged in as @name, but this device does not have the
+keys your chats use yet. Bring them from another device that is
+still logged in.
+
+  [devices]  Another device                 >
+             Open Lakko on a device that is still logged in.
+
+  I have none of these  v
+
+Log out
+```
+
+- **Another device** is the section-3 flow without the username field, as
+  on the section-8 screen. The keys come with it; when it succeeds the app
+  opens.
+- **Passkey and Recovery phrase are not on this screen.** Both bring the
+  keys this device already has.
+- **No progress, no counter, no time limit.** The device also looks for the
+  earlier keys by itself (its saved copy, at start and every few minutes
+  while the screen is open); when it finds them the screen gives way to the
+  app with no message. A failed look is not shown.
+- **I have none of these** expands to the same **Reset account keys** panel
+  as section 8 (warning of section 15.1, typed confirmation, then 9.1).
+- **Log out** as in section 8.
+- Relaunching the app on this device returns to this screen until the keys
+  arrive.
+
+Copy (new catalog keys; `security_critical` like the section-8 lede):
+
+| Key | English |
+|---|---|
+| `restore_identity.earlier_keys.lede` | "You are logged in as {username}, but this device does not have the keys your chats use yet. Bring them from another device that is still logged in." |
+| `restore_identity.earlier_keys.another_device.sub` | "Open Lakko on a device that is still logged in." |
+
+The title, the row title, "I have none of these" and "Log out" reuse the
+section-8 keys.
+
+Data the UI needs: the parked reason (earlier keys missing, as opposed to no
+keys at all), the username. Nothing about the keys themselves is shown.
+
+Cross-platform shape: one parked state on all three, rendered by the existing
+restore-prompt screen (web `auth/RestoreIdentityPrompt.tsx`, iOS
+`UI/Auth/RestoreIdentityPromptScreen.swift`, Android
+`ui/auth/RestoreIdentityPrompt.kt`) with the rows of this section.
+
+## 8b. The username after a passkey sign-in (2026-11-15)
+
+A passkey sign-in on a new device needs no name typed, so the session lands
+with no username. Without it the device has no login handle: it cannot ask
+the account's other devices to let it in (ADR-0081, it waits and retries)
+and Settings shows no name. Seen live on an iPhone the same day: it waited
+forever. The device learns the name like this, the same on every client.
+
+1. **From the backup first.** The username the backup's own profile names,
+   then the account's username as the restored synced state holds it. Each
+   is checked (step 3); the first the account holds is taken with no screen.
+2. **Else ask**, once the session has landed. The prompt is a sheet over the
+   app, which stays usable behind it; it is never a step of the sign-in.
+
+```
+What is your username?
+
+This device does not know your account's username yet. Enter it
+to sync with your other devices.
+
+  Username
+  [                    ]
+
+  [ Continue ]   I don't remember
+```
+
+3. **Continue** first applies the username rule (a name it refuses shows the
+   rule's usual line and sends nothing), then asks auth whether this account
+   holds that name. Auth compares with this account only and never says
+   whether the name belongs to someone else.
+   - **It is this account's name:** the name is kept as after a sign-in by
+     name (shown in Settings, used to sync); the sheet closes; the device
+     asks its other devices to let it in at once, not at its next retry.
+   - **Another name:** "That is not the username of this account." The
+     field keeps what was typed.
+   - **The account has no username:** the sheet closes; nothing else.
+   - **Too many tries:** "Too many tries. Try again later."
+   - **No answer:** "Couldn't check the username. Check your connection and
+     try again."
+4. **I don't remember** shows "You can see it in Settings on your other
+   device. Until then this device does not sync with them." with OK, then
+   closes. The next start of the app asks again while the name is still
+   unknown. Closing the sheet (Esc, the close button, the backdrop) is the
+   same, without the note.
+
+States: hidden; asking (idle, checking with the button disabled, each error
+line); the forgot note. A guest account (ADR-0032) has no username by
+design and is never asked. Neither the name nor its handle is logged.
+
+Copy (catalog keys, not security-critical):
+
+| Key | English |
+|---|---|
+| `auth.username_prompt.title` | "What is your username?" |
+| `auth.username_prompt.lede` | "This device does not know your account's username yet. Enter it to sync with your other devices." |
+| `auth.username_prompt.field` | "Username" |
+| `auth.username_prompt.continue` | "Continue" |
+| `auth.username_prompt.forgot` | "I don't remember" |
+| `auth.username_prompt.forgot_note` | "You can see it in Settings on your other device. Until then this device does not sync with them." |
+| `auth.username_prompt.error.not_this` | "That is not the username of this account." |
+| `auth.username_prompt.error.too_many` | "Too many tries. Try again later." |
+| `auth.username_prompt.error.network` | "Couldn't check the username. Check your connection and try again." |
+
+Data the UI needs: the session's username; the username the restored own
+profile names; the stored own-username register (ADR-0076); whether the
+landing's backup step has finished; the answer of `POST
+/auth/login-handle/check` (`same` / `other` / `none`, `429`).
+
+Cross-platform shape: one rule and one sheet on all three. Web: the rules in
+`auth/username-prompt.ts`, the sheet `auth/UsernamePrompt.tsx` (a
+`ModalLayer`, mounted in `App.tsx`), the rejoin wait cut short in
+`DeviceGroupSyncContext`. iOS and Android: the platform's existing sheet
+style.
 
 ## 9. The phrase at signup
 
@@ -511,64 +659,73 @@ Authenticator app
 - **Authenticator app** is the existing setup, unchanged.
 - There is no email, phone or guardian row, and no three-word switch.
 
-### 10.2 Passkeys, and letting a passkey restore keys
+### 10.2 Passkeys restore keys
+
+**Amended 2026-11-11 (maintainer):** there is no choice any more between a
+passkey that only signs in and one that also restores keys. Every passkey
+restores keys wherever the device and the passkey provider can carry them;
+the choice screen, its warning and **Stop restoring keys** are gone. The
+cost is stated in ADR-0072 (decision 6, amended): whoever can use the
+person's synced passkeys can read their future messages and act as them.
 
 The list shows each passkey with its name, when it was added and last used,
-and one of two labels: **Signs in and restores keys** or **Signs in only**.
+and one of two labels, which are a state and not a setting: **Logs in and
+restores keys** or **Logs in only**.
 
 Adding a passkey:
 
-1. **Add passkey** > name it > the system sheet creates it. **Nothing about
-   the keys is stored by adding a passkey.**
-2. If the platform returned what is needed to protect keys with this passkey,
-   the choice screen follows. Otherwise the result reads: "Passkey added. It
-   signs you in. On this device and passkey provider it cannot restore your
-   keys, so keep your recovery phrase." and the row is **Signs in only**.
+1. **Add passkey** > name it > the system sheet creates it.
+2. The keys are then stored for it, with nothing to choose: from what the
+   creation returned, else from one more system sheet for that passkey (some
+   platforms give what is needed only when a passkey is used). Result:
+   "Passkey added. It logs you in and restores your keys." and the row is
+   **Logs in and restores keys**.
+3. When the platform cannot protect keys with this passkey: "Passkey added.
+   It logs you in. On this device and passkey provider it cannot restore your
+   keys, so keep your recovery phrase." and the row is **Logs in only**.
+4. Storing the keys needs the recovery phrase on this device (every device
+   with the keys holds it, ADR-0072). If it is missing, the passkey is added
+   as **Logs in only** and its row offers **Restore keys with this passkey**
+   (below), which asks for the phrase.
 
-The choice screen:
+When the system sheet refuses because this device's passkey provider
+already holds a passkey for this account (WebAuthn `InvalidStateError`, the
+excluded-credential case), the line is "This device already has a passkey
+for this account." and nothing changes; it is never shown as the browser or
+device being unable to create passkeys (amended 2026-11-11).
 
-```
-Let this passkey restore your keys?
+States while storing: working; cancelled at the second sheet ("The passkey
+was added. It logs you in only; restore keys with it from its row."); a
+different passkey answered ("A different passkey answered. Try again and
+choose the passkey you just added."); `503` ("Restoring keys with a passkey
+is not available on this server."); offline or another failure after the
+passkey was created ("The passkey was added. It logs you in only for now;
+restore keys with it from its row."). The second sheet is skipped only when
+the platform said at creation that the passkey cannot carry keys; when it
+said nothing, the sheet runs. A passkey this device found cannot carry keys
+is remembered on the device, so its row does not offer the repair again.
 
-If you turn this on, this passkey alone can bring your account's
-keys to a new device. Passkeys are usually synced by Apple,
-Google or your password manager. Whoever can use that account's
-passkeys can then read your future messages and act as you.
+A passkey that can carry keys but holds none (created before this change,
+on another client, or after the account keys changed) shows **Logs in only**
+with one action on its row, **Restore keys with this passkey**: one system
+sheet, the twelve-slot input first when this device does not hold the phrase
+("Type your recovery phrase to restore keys with this passkey."; the phrase
+must be this account's: "That recovery phrase does not belong to this
+account. Nothing was changed."), then "This passkey now restores your keys."
+A different passkey answering here reads "A different passkey answered. Try
+again and choose this passkey."; dismissing the sheet changes nothing and
+shows nothing.
+This is a repair, not a choice: there is nothing to turn off.
 
-If you leave it off, the passkey only signs you in. You restore
-keys with your recovery phrase or another device.
-
-You can change this later for each passkey.
-
-[ Turn on ]        [ Sign-in only ]
-```
-
-- Neither button is pre-selected or styled as the default; both are the same
-  weight. The person must pick one.
-- **Turn on** needs the recovery phrase on this device. If the device does
-  not hold it, a twelve-slot input follows ("Type your recovery phrase to
-  turn this on."); the typed phrase must be this account's ("That recovery
-  phrase does not belong to this account. Nothing was changed.").
-- Some platforms can only produce what is needed when the passkey is used,
-  not when it is created. Then **Turn on** triggers one more system sheet
-  for that passkey. If a different passkey answers: "A different passkey
-  answered. Try again and choose the passkey you are turning this on for."
-- States: working; cancelled ("Cancelled. This passkey still only signs you
-  in."); the passkey cannot carry keys here ("This passkey can sign you in,
-  but on this device and passkey provider it cannot carry your keys. Keep
-  your recovery phrase."); `503` ("Restoring keys with a passkey is not
-  available on this server."); offline; success ("This passkey now restores
-  your keys.").
-
-Per passkey, later: **Turn on restoring keys** (the same choice screen) or
-**Stop restoring keys** (confirmation "Stop restoring keys with this
-passkey?" / "This passkey will only sign you in. Keys already restored on
-other devices stay there."; then "This passkey now only signs you in.").
 Removing a passkey also removes what it stored for restoring keys; the
 existing passkey-confirmation step for removal is unchanged.
 
-A passkey created before this feature, or on another client, shows **Signs in
-only** until the person turns it on.
+The passkey offer at the end of signup follows step 2 and 3: the passkey
+restores keys when it can, with no choice.
+
+Every passkey is registered as discoverable (the server asks for a resident
+key), so a device that holds no account yet finds it with **Use passkey** and
+no username.
 
 ### 10.3 Password
 
@@ -581,10 +738,10 @@ not edit it. The groups that carry this spec: `recovery.*`,
 `recovery.words.*`, `recovery.passkey.*`, `recovery.new_password.*`,
 `recovery_phrase.*` (including `recovery_phrase.fresh.*`),
 `restore_identity.*`, `settings.recovery.*`, `settings.passkeys.*` (including
-`keys_choice.*`, `stop_restoring.*`, `label.*`), `settings.password.*`,
+`keys.*`, `keys_choice.*`, `label.*`), `settings.password.*`,
 `auth.signup.passkey.*`, `device_link.keys_not_sent`.
 
-Every string in the passkey choice screen, the three-word lines, the
+Every passkey add and repair line, the three-word lines, the
 start-over warning and the "could not finish" state is security-critical in
 the ADR-0061 sense (shown translated only when reviewed).
 
@@ -927,6 +1084,26 @@ new keys."); signing in changes nothing else.
 The Ready state's second sentence is unchanged ("Your contacts will see
 that your safety number changed ..."); a third is added: "Your other
 devices were signed out. Add them again from Settings > Devices."
+
+**Waiting for the directory (amended 2026-11-12, seen on an iPhone).** The
+directory accepts a reset's new keys only once an hour after the
+account's keys last changed (the cool-down of ADR-0073 section 4.1); a
+second reset inside that hour was answered "Try again", which could not
+succeed for up to an hour and did not say so. The refusal now carries how
+long is left, and the screen says it instead of the "could not finish"
+copy:
+
+> Your account keys were reset less than an hour after the last change,
+> so they can be published in 40 minutes. Lakko will finish by itself and
+> then show the new words.
+
+For an account with no saved phrase (ADR-0075) the line names no words:
+"Your account has new keys. The change finishes in 40 minutes, by
+itself." There is no Try again button in this state. The app retries by itself
+when the time is up (while the screen is open) and whenever it opens
+signed in; the minutes count down while the screen is open. Any other
+refusal or a network failure keeps the "could not finish" copy and Try
+again.
 
 ### 15.5 Data the UI needs
 
@@ -1794,8 +1971,8 @@ what it holds useless.
 - Your other devices keep their chats and get the new keys by
   themselves.
 - You get a new recovery phrase. The old one stops working.
-- Your passkeys still sign you in. "Restore keys with this passkey"
-  is turned off until you turn it on again.
+- Your passkeys still sign you in. To restore keys with one again,
+  choose "Restore keys with this passkey" on its row.
 - The people you talk to do not have to do anything.
 
 [proof block]
@@ -2002,7 +2179,7 @@ in a translation until a native reviewer has passed it).
 | `devices.rotate.lede` | A lost device still holds your account keys. Changing them makes what it holds useless. | sc |
 | `devices.rotate.effect_devices` | Your other devices keep their chats and get the new keys by themselves. | sc |
 | `devices.rotate.effect_phrase` | You get a new recovery phrase. The old one stops working. | sc |
-| `devices.rotate.effect_passkeys` | Your passkeys still sign you in. "Restore keys with this passkey" is turned off until you turn it on again. | sc |
+| `devices.rotate.effect_passkeys` | Your passkeys still sign you in. To restore keys with one again, choose "Restore keys with this passkey" on its row. | sc |
 | `devices.rotate.effect_contacts` | The people you talk to do not have to do anything. | sc |
 | `devices.rotate.confirm` | Remove and change keys | |
 | `devices.rotate.step_remove` | Removing the device | |

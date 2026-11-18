@@ -165,7 +165,7 @@ final class InlineMediaTests: XCTestCase {
         return out as Data
     }
 
-    /// ADR-0090 / attachments UX section 3 — every photo but a GIF is
+    /// ADR-0092 / attachments UX section 3 — every photo but a GIF is
     /// re-encoded as JPEG (longest side at most 2560 px), which drops its
     /// metadata; a PNG is no longer sent as picked.
     func testPreparePngIsReencodedAsJpegWithSizeAndThumb() throws {

@@ -69,7 +69,7 @@ type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts" | "tran
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
 const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
-  { id: "profile", labelKey: "settings.section.profile", icon: "user" },
+  { id: "profile", labelKey: "settings.section.profile", icon: "person-square" },
   { id: "privacy", labelKey: "settings.section.privacy", icon: "eye" },
   { id: "security", labelKey: "settings.section.security", icon: "shield" },
   // docs/ux/desktop.md section 3.1; the browser build's has the reactions
@@ -77,10 +77,10 @@ const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconNam
   { id: "notifications", labelKey: "settings.section.notifications", icon: "bell" },
   // docs/ux/chat-folders.md section 4 - between Notifications and Appearance.
   { id: "folders", labelKey: "settings.section.folders", icon: "folder" },
-  { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
+  { id: "appearance", labelKey: "settings.section.appearance", icon: "appearance" },
   { id: "language", labelKey: "settings.language.title", icon: "globe" },
   { id: "media", labelKey: "settings.section.media", icon: "video" },
-  { id: "about", labelKey: "settings.section.about", icon: "info" },
+  { id: "about", labelKey: "settings.section.about", icon: "info-circle" },
   { id: "account", labelKey: "settings.section.account", icon: "logout" },
 ];
 
@@ -186,7 +186,7 @@ export default function Settings(): JSX.Element {
       <div class="lk-settings-body">
         <div class="lk-page lk-stack">
           <A href={paths.settings} class="ghost small lk-narrow-only" style={{ "align-self": "flex-start" }}>
-            <Icon name="back" size={16} />
+            <Icon name="chevron-back" size={20} />
             {t("nav.settings")}
           </A>
           <Show when={shown() === "profile"}>
@@ -319,7 +319,7 @@ function SecuritySection(): JSX.Element {
         <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="devices" size={18} />
+            <Icon name="devices" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">
@@ -338,7 +338,7 @@ function SecuritySection(): JSX.Element {
         </div>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="lock" size={18} />
+            <Icon name="lifepreserver" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.recovery.title")}</span>
@@ -350,7 +350,7 @@ function SecuritySection(): JSX.Element {
         </div>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="shield" size={18} />
+            <Icon name="shield-check" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.security.safety_numbers.title")}</span>
@@ -364,7 +364,7 @@ function SecuritySection(): JSX.Element {
 
 function AppearanceSection(): JSX.Element {
   const options: ReadonlyArray<{ value: Theme; labelKey: string; icon: IconName }> = [
-    { value: "system", labelKey: "settings.appearance.theme.system", icon: "monitor" },
+    { value: "system", labelKey: "settings.appearance.theme.system", icon: "display" },
     { value: "light", labelKey: "settings.appearance.theme.light", icon: "sun" },
     { value: "dark", labelKey: "settings.appearance.theme.dark", icon: "moon" },
   ];
@@ -386,7 +386,7 @@ function AppearanceSection(): JSX.Element {
                 checked={useTheme() === o.value}
                 onChange={() => setTheme(o.value)}
               />
-              <Icon name={o.icon} size={16} />
+              <Icon name={o.icon} size={20} />
               {t(o.labelKey)}
             </label>
           ))}
@@ -396,7 +396,7 @@ function AppearanceSection(): JSX.Element {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="lines" size={18} />
+            <Icon name="text-size" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.text_size.title")}</span>
@@ -455,7 +455,7 @@ function TextSizeSection(): JSX.Element {
                 </span>
                 <span class="lk-lang-mark" aria-hidden="true">
                   <Show when={useTextSize() === size}>
-                    <Icon name="check" size={20} />
+                    <Icon name="checkmark" size={20} />
                   </Show>
                 </span>
               </button>
@@ -481,7 +481,7 @@ function QuickReactionCard(): JSX.Element {
     <section class="lk-card" style={{ position: "relative" }}>
       <div class="lk-card-row">
         <span class="lk-card-row-icon" aria-hidden="true">
-          {quickReactionOf(account())}
+          <Icon name="thumbsup" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.appearance.quick_reaction")}</span>
@@ -526,7 +526,7 @@ function LanguageSection(): JSX.Element {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="globe" size={18} />
+            <Icon name="translate" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.translation.title")}</span>
@@ -550,7 +550,7 @@ function AboutSection(): JSX.Element {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="info" size={18} />
+            <Icon name="info-circle" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.about.version")}</span>
@@ -559,7 +559,18 @@ function AboutSection(): JSX.Element {
         </div>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="db" size={18} />
+            <Icon name="heart" size={20} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">{t("settings.about.support")}</span>
+          </div>
+          <A href={paths.donations} class="lk-card-row-action">
+            {t("common.open")}
+          </A>
+        </div>
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="doc-text" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.about.licence")}</span>
@@ -568,7 +579,7 @@ function AboutSection(): JSX.Element {
         </div>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="lock" size={18} />
+            <Icon name="lock-shield" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.about.protection.title")}</span>
@@ -577,7 +588,7 @@ function AboutSection(): JSX.Element {
         </div>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="globe" size={18} />
+            <Icon name="globe" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-sub">{t("settings.about.city_data")}</span>
@@ -598,7 +609,7 @@ function ShowCitySection(): JSX.Element {
     <section class="lk-card">
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="devices" size={18} />
+          <Icon name="location" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.privacy.show_city")}</span>
@@ -629,7 +640,7 @@ function MediaSection(): JSX.Element {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="video" size={18} />
+            <Icon name="play-circle" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("settings.media.autoplay_video_notes.title")}</span>

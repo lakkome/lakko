@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Anonymous group-poll ballots ([ADR-0090] section 3).
+//! Anonymous group-poll ballots ([ADR-0092] section 3).
 //!
 //! A ballot proves, without saying which, that its voter holds the secret of
 //! one key in an anonymity set of at most 256 keys of the poll's ring, and
@@ -24,7 +24,7 @@
 //! This is new cryptographic code and part of the G-39 external review
 //! scope ([ADR-0046]). Sizes and timings are in `src/proof.sc.md`.
 //!
-//! [ADR-0090]: ../../../docs/adr/0090-attachment-kinds.md
+//! [ADR-0092]: ../../../docs/adr/0092-attachment-kinds.md
 //! [ADR-0046]: ../../../docs/adr/0046-external-crypto-review.md
 
 #![forbid(unsafe_code)]

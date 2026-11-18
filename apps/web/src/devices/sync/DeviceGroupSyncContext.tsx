@@ -61,6 +61,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
 import { loadSyncState, saveSyncState, syncStateGeneration } from "./sync-state-idb";
+import { storedOwnUsername } from "./stored-own-username";
 import { SyncStatePersister, type CapturedSyncState, type SyncStateCapture } from "./sync-state-persister";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
 import { dsAccess, takeSigner } from "../../ds/access";
@@ -91,34 +92,43 @@ import {
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
 import { BindingEpoch, StaleBindingError } from "../../auth/binding-epoch";
 import {
-  KNOCK_CHECK_INTERVAL_MS,
-  REKNOCK_AFTER_MS,
   admissionVerdict,
   decodeAdmissionRecord,
   decodeRejoinState,
   encodeAdmissionRecord,
   encodeRejoinState,
   isBehind,
+  journalResetUnder,
+  knockScreen,
   newAdmissionRecord,
+  NO_HANDLE_RETRY_MS,
+  createNoHandleWaker,
   noteAdded,
   noteHandled,
+  rejoinFailureCode,
   rejoinOnce,
   type AdmissionRecord,
   type RejoinPorts,
 } from "../device-group-rejoin";
+import { openRejoinWatch } from "../rejoin-watch";
+import { answerForRejoinOutcome, recordRestoreAnswer } from "../../backup/restored-marker";
+import { markFoundedAlone } from "../../channels/founded-alone-marker";
+import { runKnockListener } from "../knock-listener";
+import { createReplacementQueue } from "./handle-replacements";
+import { isRecoveryPayloadRow } from "../recovery-payload";
+import { isStateRow } from "../state-bundle";
 import {
   commitDeviceGroupChange,
   resendOwedDeviceGroupCommitFor,
 } from "../device-group-commit-runtime";
 import { DiscoveryClient } from "../../discovery/client";
 import {
-  buildPairingQrPayload,
   buildRejoinKnockPayload,
   generateRendezvousPseudonym,
+  isMissingUsername,
+  openRejoinKnockPayload,
   ownPairingHandle,
-  parsePairingQrPayload,
 } from "../pairing";
-import { pollForWelcome } from "../welcome-courier";
 import { base64Decode } from "../../auth/account-id";
 import {
   isDeviceRemoved,
@@ -142,6 +152,22 @@ import {
   ownFeedbackChanged,
   splitNonces,
 } from "../../channels/own-feedback-register";
+import {
+  channelSubscriptionsChanged,
+  installChannelSubscriptionRegister,
+  type ChannelSubscriptionPort,
+} from "../../channels/channel-subscription-register";
+import {
+  channelAdmissionSeedsChanged,
+  installChannelAdmissionSeedRegister,
+  type ChannelAdmissionSeedPort,
+} from "../../channels/channel-admission-seed-register";
+import {
+  allChannelSubscriptionViews,
+  channelSubscriptionView,
+  writeChannelLeave,
+  writeChannelSubscription,
+} from "../../channels/channel-subscription-wasm";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import {
   bindDeviceCards,
@@ -529,6 +555,9 @@ export function DeviceGroupSyncProvider(props: {
   let uninstallQuickReactionRegister: (() => void) | null = null;
   /** ADR-0087 section 13a: the own channel reactions and comments. */
   let uninstallOwnFeedbackRegister: (() => void) | null = null;
+  /** 2026-11-13: the account's channel subscriptions. */
+  let uninstallChannelSubscriptionRegister: (() => void) | null = null;
+  let uninstallChannelAdmissionSeedRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -614,6 +643,13 @@ export function DeviceGroupSyncProvider(props: {
   }
   /** ADR-0081 decision 4 - the rejoin in progress, if any. */
   let rejoinAbort: AbortController | null = null;
+  /** Cuts a rejoin's `"no-handle"` wait short once the session has a name
+   *  (`docs/ux/identity-recovery.md` section 8b). */
+  const noHandleWaker = createNoHandleWaker();
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind === "session" && s.account.username.trim().length > 0) noHandleWaker.wake();
+  });
   /** The sibling's admission record (`device-group-rejoin.ts`), loaded with
    *  the handle. */
   let admissions: AdmissionRecord | null = null;
@@ -702,6 +738,9 @@ export function DeviceGroupSyncProvider(props: {
     }
     // ADR-0087 section 13a: the own channel reactions and comments.
     ownFeedbackChanged();
+    // 2026-11-13: the account's channel subscriptions.
+    channelSubscriptionsChanged();
+    channelAdmissionSeedsChanged();
     setStateVersion((v) => v + 1);
   }
 
@@ -856,6 +895,13 @@ export function DeviceGroupSyncProvider(props: {
     identity = ensured.identity;
     group = ensured.group;
     handleGeneration = ensured.generation;
+    // docs/ux/identity-recovery.md 7.2: founded here because no other device
+    // of the account was listed, so no device will add this one to its chats.
+    if (ensured.bootstrapped) {
+      recordRestoreAnswer(accountIdB64, "founded");
+      // ADR-0090 decision A: kept until every owned channel is re-founded.
+      markFoundedAlone(accountIdB64);
+    }
 
     // Removed while the app was closed: the persisted snapshot already
     // carries the commit that removed this device. Nothing is polled, folded
@@ -939,7 +985,17 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentOwnFeedback();
     uninstallOwnFeedbackRegister?.();
     uninstallOwnFeedbackRegister = installOwnFeedbackRegister(ownFeedbackPortFor(accountIdB64));
-    // ADR-0090 section 3.6 - the own poll-choice register, the same way.
+    void flushUnsentChannelSubscriptions();
+    uninstallChannelSubscriptionRegister?.();
+    uninstallChannelSubscriptionRegister = installChannelSubscriptionRegister(
+      channelSubscriptionPortFor(wasm, accountIdB64),
+    );
+    void flushUnsentChannelAdmissionSeeds();
+    uninstallChannelAdmissionSeedRegister?.();
+    uninstallChannelAdmissionSeedRegister = installChannelAdmissionSeedRegister(
+      channelAdmissionSeedPortFor(accountIdB64),
+    );
+    // ADR-0092 section 3.6 - the own poll-choice register, the same way.
     void flushUnsentPollChoices();
     uninstallPollChoicePort?.();
     uninstallPollChoicePort = installPollChoicePort(pollChoicePortFor(accountIdB64));
@@ -948,7 +1004,16 @@ export function DeviceGroupSyncProvider(props: {
   function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
     if (group === null || identity === null || deviceRemoved()) return;
     pollAbort = new AbortController();
-    pollDone = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
+    // ADR-0081 third amendment: the knocks are long-polled beside the journal
+    // from the start. A device that answers before its journal is read to the
+    // head can only build a commit the DS refuses (409), never a wrong one.
+    const journal = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup poll loop stopped on an error", rejoinFailureCode(err));
+    });
+    const knocks = runKnockLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
+    // Never rejects: a reload awaits it before it replaces the handle.
+    pollDone = Promise.all([journal, knocks]).then(() => undefined);
   }
 
   /**
@@ -984,7 +1049,15 @@ export function DeviceGroupSyncProvider(props: {
    * another handle on this device (the pairing flow) committed: the one held
    * here is an epoch behind and anything it sent or persisted would be wrong.
    */
-  async function reloadHandle(): Promise<void> {
+  /** Handle replacements (reload, rejoin) run one at a time
+   *  (`handle-replacements.ts`). */
+  const serialiseHandleReplacement = createReplacementQueue();
+
+  function reloadHandle(): Promise<void> {
+    return serialiseHandleReplacement(reloadHandleNow);
+  }
+
+  async function reloadHandleNow(): Promise<void> {
     const account = activeAccountIdB64;
     const accountBytes = accountIdBytesActive;
     if (account === null || accountBytes === null || group === null) return;
@@ -1076,6 +1149,7 @@ export function DeviceGroupSyncProvider(props: {
     rejoinAbort = null;
     handleGeneration = null;
     admissions = null;
+    knockCursor = 0;
     unbindDeviceCards();
     unregisterServiceSender?.();
     unregisterServiceSender = null;
@@ -1122,6 +1196,10 @@ export function DeviceGroupSyncProvider(props: {
     uninstallQuickReactionRegister = null;
     uninstallOwnFeedbackRegister?.();
     uninstallOwnFeedbackRegister = null;
+    uninstallChannelSubscriptionRegister?.();
+    uninstallChannelSubscriptionRegister = null;
+    uninstallChannelAdmissionSeedRegister?.();
+    uninstallChannelAdmissionSeedRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -1249,7 +1327,14 @@ export function DeviceGroupSyncProvider(props: {
       if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
-      // ADR-0090 section 3.6 - and every own poll choice, the same way.
+      // 2026-11-13 - and every channel-subscription register, leaves
+      // included, each with its original stamp: how a new device learns the
+      // account's channels.
+      await sendLineageEnvelopes(synced.channelSubscriptionEnvelopes());
+      // ADR-0090 open question 4 - and every channel admission seed, the
+      // same way (never in the snapshot parts).
+      await sendLineageEnvelopes(synced.channelAdmissionSeedEnvelopes());
+      // ADR-0092 section 3.6 - and every own poll choice, the same way.
       await sendLineageEnvelopes(synced.pollChoiceEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
@@ -1484,7 +1569,7 @@ export function DeviceGroupSyncProvider(props: {
     await sendOwnFeedbackEnvelopes(account, envelopes);
   }
 
-  // ----- ADR-0090 section 3.6: the own poll-choice register ---------
+  // ----- ADR-0092 section 3.6: the own poll-choice register ---------
 
   const pollChoiceUnsentKey = (account: string): string => `lakko.poll-choice.unsent.v1.${account}`;
 
@@ -1649,6 +1734,148 @@ export function DeviceGroupSyncProvider(props: {
             BigInt(Math.max(0, Math.floor(postAtMs))),
           ),
         );
+      },
+    };
+  }
+
+  // ----- 2026-11-13: the channel-subscription register ------------------
+
+  /** `localStorage` marker: a channel-subscription register written here has
+   *  not been confirmed sent. Re-sending every held register is idempotent
+   *  (the fold keeps the newer stamp). */
+  const channelSubscriptionsUnsentKey = (account: string): string =>
+    `lakko.channel-subscriptions.unsent.v1.${account}`;
+
+  async function sendChannelSubscriptionEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      localStorage.setItem(channelSubscriptionsUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: this send is the only attempt */
+    }
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(channelSubscriptionsUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "channel subscription register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentChannelSubscriptions(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(channelSubscriptionsUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.channelSubscriptionEnvelopes();
+    } catch {
+      return;
+    }
+    await sendChannelSubscriptionEnvelopes(account, envelopes);
+  }
+
+  /** The port the channel runtime reads and writes the account's channel
+   *  subscriptions through. Each write folds here at once and goes to the
+   *  account's other devices. */
+  function channelSubscriptionPortFor(wasm: Awaited<ReturnType<typeof loadWasm>>, accountIdB64: string): ChannelSubscriptionPort {
+    const sent = async (envelope: Uint8Array | null): Promise<boolean> => {
+      if (envelope === null) return false;
+      refresh();
+      if (activeAccountIdB64 === accountIdB64) await sendChannelSubscriptionEnvelopes(accountIdB64, [envelope]);
+      return true;
+    };
+    return {
+      accountIdB64,
+      all: () => (synced === null ? [] : allChannelSubscriptionViews(synced, wasm)),
+      get: (channelIdHex) => (synced === null ? undefined : channelSubscriptionView(synced, wasm, channelIdHex)),
+      set: async (channelIdHex, value) => {
+        if (synced === null || activeAccountIdB64 !== accountIdB64) throw new Error("synced state not loaded");
+        return sent(writeChannelSubscription(synced, wasm, mintHlc(), channelIdHex, value));
+      },
+      leave: async (channelIdHex) => {
+        if (synced === null || activeAccountIdB64 !== accountIdB64) return false;
+        return sent(writeChannelLeave(synced, mintHlc(), channelIdHex));
+      },
+    };
+  }
+
+  // ----- ADR-0090 open question 4: the channel admission-seed register -----
+
+  const channelAdmissionSeedsUnsentKey = (account: string): string =>
+    `lakko.channel-admission-seeds.unsent.v1.${account}`;
+
+  async function sendChannelAdmissionSeedEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      localStorage.setItem(channelAdmissionSeedsUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: this send is the only attempt */
+    }
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(channelAdmissionSeedsUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "channel admission seed send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentChannelAdmissionSeeds(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(channelAdmissionSeedsUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.channelAdmissionSeedEnvelopes();
+    } catch {
+      return;
+    }
+    await sendChannelAdmissionSeedEnvelopes(account, envelopes);
+  }
+
+  /** The port the channel runtime reads and writes the account's channel
+   *  admission seeds through (write-once per seed; two seeds of one version
+   *  are both kept). */
+  function channelAdmissionSeedPortFor(accountIdB64: string): ChannelAdmissionSeedPort {
+    const idBytes = (hex: string): Uint8Array => {
+      const out = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      return out;
+    };
+    return {
+      accountIdB64,
+      versions: (channelIdHex) => (synced === null ? [] : Array.from(synced.channelAdmissionVersions(idBytes(channelIdHex)))),
+      seedsFor: (channelIdHex, version) => {
+        if (synced === null) return [];
+        const flat = synced.channelAdmissionSeedsFor(idBytes(channelIdHex), version);
+        const out: Uint8Array[] = [];
+        for (let i = 0; i + 32 <= flat.length; i += 32) out.push(flat.slice(i, i + 32));
+        flat.fill(0);
+        return out;
+      },
+      set: async (channelIdHex, version, seed) => {
+        if (synced === null || activeAccountIdB64 !== accountIdB64) throw new Error("synced state not loaded");
+        const id = idBytes(channelIdHex);
+        if (!synced.setChannelAdmissionSeed(mintHlc(), id, version, seed)) return false;
+        const envelope = synced.channelAdmissionSeedEnvelopeFor(id, version, seed);
+        refresh();
+        if (envelope !== undefined && activeAccountIdB64 === accountIdB64) {
+          await sendChannelAdmissionSeedEnvelopes(accountIdB64, [envelope]);
+        }
+        return true;
       },
     };
   }
@@ -1936,7 +2163,12 @@ export function DeviceGroupSyncProvider(props: {
     }
   }
   function catchUp(): Promise<JournalCatchUp> {
-    if (group === null || pollAbort === null || deviceRemoved()) return Promise.resolve("offline");
+    // No handle (no session in this page): there is nothing to read with, and
+    // nothing will load one until a session lands. Never "offline", which a
+    // superseded device would wait out forever (base scenario 4b).
+    if (group === null || pollAbort === null) return Promise.resolve("not-loaded");
+    // Removed from the DeviceGroup: the journal does not answer this device.
+    if (deviceRemoved()) return Promise.resolve("unreadable");
     return new Promise((resolve) => {
       const waiter = {
         after: passCounter,
@@ -2002,6 +2234,7 @@ export function DeviceGroupSyncProvider(props: {
       epoch: () => (group === null || identity === null ? null : deviceGroupEpoch(group, identity)),
       post: postKeyRotation,
       catchUp,
+      loaded: () => group !== null && pollAbort !== null,
     }),
   );
 
@@ -2013,6 +2246,9 @@ export function DeviceGroupSyncProvider(props: {
     signal: AbortSignal,
   ): Promise<void> {
     const ds = new DsClient();
+    /** Signed reads refused in a row while the clock was right (ADR-0081
+     *  third amendment, point 5). */
+    let refusedReads = 0;
     const groupId = g.groupId();
     // Resume where the last persisted batch left off, instead of re-reading
     // the whole journal on every page load. The cursor is stored in the same
@@ -2057,6 +2293,17 @@ export function DeviceGroupSyncProvider(props: {
         if (err instanceof DsHttpError && (err.status === 401 || err.status === 403)) {
           // The journal does not answer this device any more.
           settleCatchUps("unreadable");
+          // ADR-0081 third amendment, point 5: a journal that keeps refusing
+          // this device's signed reads at a right clock was reset under it
+          // (another device founded the DeviceGroup again): this device is
+          // lost and rejoins by knocking.
+          refusedReads = err.status === 401 && !err.clockSkewed ? refusedReads + 1 : 0;
+          if (journalResetUnder(refusedReads) && rejoinAllowed(readDeviceGroupActive(g))) {
+            // eslint-disable-next-line no-console
+            console.warn(`DeviceGroup journal refuses this device (${refusedReads} reads); rejoining`);
+            void enterRejoin(accountIdB64);
+            return;
+          }
         } else {
           settleCatchUps("offline");
         }
@@ -2070,6 +2317,7 @@ export function DeviceGroupSyncProvider(props: {
       // Stopped while the long poll was out (the handle is being replaced):
       // apply nothing and persist nothing with this one.
       if (signal.aborted) return;
+      refusedReads = 0;
 
       // The journal answered, so this device is online: send what waited.
       if (outbox().length > 0) void drainFolderOutbox();
@@ -2439,20 +2687,52 @@ export function DeviceGroupSyncProvider(props: {
         void enterRejoin(accountIdB64);
         return;
       }
-      // At the head: a sibling reads the knocks (ADR-0081 decision 4).
-      if (drained && !commitPending && Date.now() - lastKnockCheckAt >= KNOCK_CHECK_INTERVAL_MS) {
-        lastKnockCheckAt = Date.now();
-        await checkKnocks(g, id, accountIdB64, deviceKey, signal).catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("DeviceGroup knock check failed", err instanceof Error ? err.name : "");
-        });
-        if (signal.aborted) return;
-      }
     }
   }
 
-  /** When the knocks were last read. */
-  let lastKnockCheckAt = 0;
+  /**
+   * ADR-0081 third amendment, point 1: while this page is in the foreground,
+   * a long poll on the DeviceGroup's knocks, so a knock is answered as soon
+   * as it is posted. A hidden page does not answer (it counts as offline).
+   * Ends with the poll loop's signal.
+   */
+  function runKnockLoop(
+    g: WasmDeviceGroup,
+    id: WasmIdentity,
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const ds = new DsClient();
+    const groupId = g.groupId();
+    return runKnockListener(
+      {
+        visible: pageVisible,
+        untilVisible,
+        async read(s) {
+          const page = await ds.fetchKnocks(groupId, { after: knockCursor, waitSecs: 25, signal: s });
+          return page.messages;
+        },
+        classify: (err) =>
+          err instanceof DsHttpError && err.status === 404
+            ? "empty"
+            : err instanceof DsNetworkError
+              ? "network"
+              : "other",
+        async answer(rows, listeningSinceMs, s) {
+          // An admission reloads the long-lived handle; this loop keeps
+          // listening on the old one until that reload aborts it.
+          await handleKnocks(g, id, accountIdB64, deviceKey, rows, listeningSinceMs, s);
+        },
+        sleep: sleepCancellable,
+        now: () => Date.now(),
+        // eslint-disable-next-line no-console
+        log: (line) => console.info(line),
+      },
+      signal,
+    );
+  }
+
   /** DS id of the last knock row read this session. */
   let knockCursor = 0;
 
@@ -2503,21 +2783,36 @@ export function DeviceGroupSyncProvider(props: {
    * the KeyPackage; one commit through the outbox, the Welcome to the knock's
    * rendezvous.
    */
-  async function checkKnocks(
+  async function handleKnocks(
     g: WasmDeviceGroup,
     id: WasmIdentity,
     accountIdB64: string,
     deviceKey: DeviceCipher,
+    messages: readonly { readonly id: number; readonly payload: Uint8Array; readonly createdAt: string }[],
+    listeningSinceMs: number,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const accountBytes = accountIdBytesActive;
-    const session = auth.state();
-    const username = session.kind === "session" ? session.account.username : "";
-    if (accountBytes === null || admissions === null || username.trim().length === 0) return;
+    // The session's name, else the synced state's (a device that just founded
+    // after a restore answers before the session has adopted the name).
+    const username = await knownUsername(accountIdB64, deviceKey);
+    const last = messages[messages.length - 1]?.id ?? knockCursor;
+    // No name: no knock can name this account's login handle.
+    if (accountBytes === null || admissions === null || username.trim().length === 0) {
+      knockCursor = Math.max(knockCursor, last);
+      return false;
+    }
+    // G-55: a knock is sealed under the seed the DeviceGroup id derives from.
+    const lineageSeed = await deviceGroupLineageSeed(
+      accountIdB64,
+      deviceKey,
+      auth.identitySecrets()?.accountIdentitySeed,
+    );
+    if (lineageSeed === null) {
+      knockCursor = Math.max(knockCursor, last);
+      return false;
+    }
     const ds = new DsClient();
-    const knocks = await ds.fetchKnocks(g.groupId(), { after: knockCursor });
-    if (signal.aborted || knocks.messages.length === 0) return;
-    knockCursor = knocks.messages[knocks.messages.length - 1]?.id ?? knockCursor;
     const wasm = await loadWasm();
     const loginHandle = await ownPairingHandle(username);
     const roster = (membersOf(g) ?? []).map((m) => ({ leaf: m.leaf, keyHex: m.key }));
@@ -2529,19 +2824,40 @@ export function DeviceGroupSyncProvider(props: {
       policy = false;
     }
     let directory: Map<string, Uint8Array> | null = null;
-    for (const knock of knocks.messages) {
-      if (signal.aborted) return;
+    for (const knock of messages) {
+      if (signal.aborted || admissions === null) return false;
+      knockCursor = Math.max(knockCursor, knock.id);
       let decoded;
       try {
-        decoded = await parsePairingQrPayload(knock.payload, loginHandle);
+        decoded = await openRejoinKnockPayload(lineageSeed, knock.payload, loginHandle);
       } catch {
-        continue; // not a payload for this account (or not a pairing payload)
+        continue; // not a sealed knock of this account (or not a pairing payload)
       }
       const keyBytes = wasm.keyPackageSignatureKey(decoded.keyPackage);
       const keyHex = bytesToHex(keyBytes);
+      const knockAtMs = Date.parse(knock.createdAt);
+      const screened = knockScreen({
+        knockId: knock.id,
+        knockAtMs: Number.isFinite(knockAtMs) ? knockAtMs : 0,
+        keyHex,
+        ownKeyHex,
+        handled: new Set(admissions.handled),
+        watchingSinceMs: admissions.watchingSinceMs,
+        lastAddedAtMs: admissions.lastAddedAtMs[keyHex],
+        keyPackageAlreadyIn: g.containsLeafOfKeyPackage(id, decoded.keyPackage),
+        listeningSinceMs,
+      });
+      if (screened !== null) continue;
+      // ADR-0081 third amendment, point 2: say "a device is online" at once,
+      // before any directory lookup, so the knocking device does not found.
+      try {
+        await ds.publishRendezvous(decoded.rendezvousPseudonym, wasm.composeRejoinPresent());
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("DeviceGroup presence note not posted", rejoinFailureCode(err));
+      }
       if (directory === null) directory = await ownDirectory(accountBytes, accountIdB64, deviceKey);
       const listedKp = directory.get(keyHex);
-      const knockAtMs = Date.parse(knock.createdAt);
       // Checked BEFORE a commit is built: a commit the DS takes but every
       // peer refuses would leave this device ahead of them.
       const proof = decoded.selfRemovalProof;
@@ -2561,9 +2877,14 @@ export function DeviceGroupSyncProvider(props: {
         policyRequiresAttestation: policy,
         selfRemovalProofCovers: proofCovers,
         keyPackageAlreadyIn: g.containsLeafOfKeyPackage(id, decoded.keyPackage),
+        listeningSinceMs,
         nowMs: Date.now(),
       });
-      if (verdict !== "admit") continue;
+      if (verdict !== "admit") {
+        // eslint-disable-next-line no-console
+        console.info(`DeviceGroup knock not admitted: ${verdict}`);
+        continue;
+      }
       const account = { accountIdBytes: accountBytes, accountIdB64, deviceKey };
       const added = await commitDeviceGroupChange(
         account,
@@ -2613,10 +2934,16 @@ export function DeviceGroupSyncProvider(props: {
         await saveAdmissions(accountIdB64, deviceKey);
         // eslint-disable-next-line no-console
         console.info("DeviceGroup: a device of this account was admitted again");
+        // The commit reloads the long-lived handle; the loop restarts on it.
+        return true;
       }
-      // The commits reloaded the long-lived handle; the next pass re-reads.
-      return;
+      // Another device's commit took the epoch first (409) and this one was
+      // dropped, or another device answered it meanwhile: nothing changed
+      // here, so the loop goes on (the journal brings the winner's commit).
+      // eslint-disable-next-line no-console
+      console.info(`DeviceGroup admission not landed here: ${added === null ? "nothing to commit" : added.outcome.kind}`);
     }
+    return false;
   }
 
   function membersOfEnsured(e: EnsuredDeviceGroup): LeafMember[] | null {
@@ -2658,8 +2985,32 @@ export function DeviceGroupSyncProvider(props: {
     return out;
   }
 
+  /** The account's username as this device knows it: the session's, else
+   *  the own-username register of the stored synced state (a restore writes
+   *  the backup's there before any DeviceGroup runs). `""` when neither. */
+  async function knownUsername(account: string, deviceKey: DeviceCipher): Promise<string> {
+    const s = auth.state();
+    const fromSession = s.kind === "session" && s.account.accountId === account ? s.account.username : "";
+    if (fromSession.trim().length > 0) return fromSession;
+    if (synced !== null && activeAccountIdB64 === account) {
+      const held = synced.ownUsername();
+      if (held !== undefined && held.trim().length > 0) return held;
+    }
+    try {
+      return await storedOwnUsername(account, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("stored synced state unreadable for the rejoin knock", rejoinFailureCode(err));
+      return "";
+    }
+  }
+
   /** Stop following the DeviceGroup, drop its local state, and rejoin. */
-  async function enterRejoin(account: string): Promise<void> {
+  function enterRejoin(account: string): Promise<void> {
+    return serialiseHandleReplacement(() => enterRejoinNow(account));
+  }
+
+  async function enterRejoinNow(account: string): Promise<void> {
     const accountBytes = accountIdBytesActive;
     if (activeAccountIdB64 !== account || accountBytes === null || group === null) return;
     if (deviceRemoved()) return;
@@ -2715,10 +3066,34 @@ export function DeviceGroupSyncProvider(props: {
         try {
           const outcome = await rejoinOnce(ports, first);
           first = false;
-          if (outcome === "joined") break;
+          if (outcome === "no-handle") {
+            // Another device of the account is listed: never found here.
+            // Look for the login handle again after a while.
+            // eslint-disable-next-line no-console
+            console.info("DeviceGroup rejoin: no login handle to knock with; waiting, not founding");
+            await noHandleWaker.sleep(NO_HANDLE_RETRY_MS, abort.signal);
+            continue;
+          }
+          // docs/ux/identity-recovery.md 7.2: whether another device answered
+          // the knock decides whether the restored chat list shows its card.
+          const answer = answerForRejoinOutcome(outcome);
+          if (answer !== null) recordRestoreAnswer(account, answer);
+          if (outcome === "founded") markFoundedAlone(account);
+          if (outcome === "joined" || outcome === "founded") {
+            // eslint-disable-next-line no-console
+            console.info(`DeviceGroup rejoin: ${outcome}`);
+            // The journal id is the same, its epoch chain may be new (another
+            // device founded again, or this one did): no signer of the old
+            // chain is kept for it.
+            const journalId =
+              ownDeviceGroupId ??
+              (await deviceGroupIdOf(account, deviceKey, auth.identitySecrets()?.accountIdentitySeed).catch(() => null));
+            if (journalId !== null) dsAccess.forgetGroup(journalId);
+            break;
+          }
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.warn("DeviceGroup rejoin attempt failed; trying again", err instanceof Error ? err.name : "");
+          console.warn("DeviceGroup rejoin attempt failed; trying again", rejoinFailureCode(err));
           await sleepCancellable(BOOTSTRAP_RETRY_MS, abort.signal);
         }
       }
@@ -2744,13 +3119,28 @@ export function DeviceGroupSyncProvider(props: {
         return bytes === null ? null : decodeRejoinState(bytes);
       },
       saveState: (state) => putDeviceGroupPending(account, "rejoin", encodeRejoinState(state), deviceKey),
-      async knock(nowMs) {
+      async prepareKnock(nowMs) {
         const wasm = await loadWasm();
-        const s = auth.state();
-        const username = s.kind === "session" ? s.account.username : "";
-        const loginHandle = await ownPairingHandle(username);
+        // The session's name, else the own-username register a restore put
+        // in the stored synced state: on a device restored with a passkey the
+        // session has no name until the sync runtime runs, and the knock is
+        // what starts it (ADR-0081 third amendment, found live).
+        const username = await knownUsername(account, deviceKey);
+        let loginHandle: Uint8Array;
+        try {
+          loginHandle = await ownPairingHandle(username);
+        } catch (err) {
+          // No name a sibling could match the knock with: nobody can answer.
+          if (isMissingUsername(err)) return null;
+          throw err;
+        }
+        const lineageSeed = await deviceGroupLineageSeed(
+          account,
+          deviceKey,
+          auth.identitySecrets()?.accountIdentitySeed,
+        );
         const groupId = await deviceGroupIdOf(account, deviceKey, auth.identitySecrets()?.accountIdentitySeed);
-        if (groupId === null) throw new Error("the DeviceGroup id cannot be derived yet");
+        if (groupId === null || lineageSeed === null) throw new Error("the DeviceGroup id cannot be derived yet");
         const seed = await ensureDeviceIdentitySeed(account, deviceKey);
         const joiner = wasm.Identity.fromSeed(seed);
         seed.fill(0);
@@ -2763,39 +3153,88 @@ export function DeviceGroupSyncProvider(props: {
           // epoch (an empty knock is a probe that names it), which lets a
           // sibling readmit it under the attested-removal policy without a
           // passkey. An unclaimed journal names no epoch: no proof.
-          const ds = new DsClient();
-          const probe = await ds.knock(groupId, []);
-          const payload =
+          const probe = await new DsClient().knock(groupId, []);
+          // G-55: sealed under the lineage seed either way; an unclaimed
+          // journal gets the knock with no proof.
+          const payload = await buildRejoinKnockPayload(
+            lineageSeed,
+            loginHandle,
+            keyPackage,
+            rendezvous,
             probe.epoch === null
-              ? await buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
-              : await buildRejoinKnockPayload(
-                  loginHandle,
-                  keyPackage,
-                  rendezvous,
-                  wasm.signDeviceGroupSelfRemoval(joiner, groupId, BigInt(probe.epoch), keyPackage),
-                );
+              ? new Uint8Array(0)
+              : wasm.signDeviceGroupSelfRemoval(joiner, groupId, BigInt(probe.epoch), keyPackage),
+          );
+          // Kept BEFORE the knock (the caller saves it): the joiner's
+          // provider is the only thing that can open the Welcome a sibling
+          // sends.
           const state = {
             v: 1 as const,
             rendezvousB64: base64Encode(rendezvous),
             joinerSnapshotB64: base64Encode(joiner.snapshotStorage()),
             knockedAtMs: nowMs,
           };
-          // Kept BEFORE the knock: the joiner's provider is the only thing
-          // that can open the Welcome a sibling sends.
-          await putDeviceGroupPending(account, "rejoin", encodeRejoinState(state), deviceKey);
-          await ds.knock(groupId, [payload]);
-          return state;
+          return { state, payload };
         } finally {
           joiner.free();
         }
       },
-      async awaitWelcome(state, deadlineMs) {
-        const remaining = Math.max(0, Math.min(deadlineMs - Date.now(), REKNOCK_AFTER_MS));
-        const outcome = await pollForWelcome(base64Decode(state.rendezvousB64), {
-          signal,
-          timeoutMs: remaining,
+      watch(state) {
+        const ds = new DsClient();
+        const rendezvous = base64Decode(state.rendezvousB64);
+        let isPresent: (row: Uint8Array) => boolean = () => false;
+        const ready = loadWasm().then((wasm) => {
+          isPresent = (row) => wasm.isRejoinPresent(row);
         });
-        return outcome.kind === "received" ? outcome.welcome : null;
+        return openRejoinWatch(
+          {
+            async fetchPage(after, waitSecs, s) {
+              await ready;
+              return ds.fetchRendezvous(rendezvous, { after, limit: 16, waitSecs, signal: s });
+            },
+            isEmptyRendezvous: (err) => err instanceof DsHttpError && err.status === 404,
+            isPresent: (row) => isPresent(row),
+            isOtherRow: (row) => isRecoveryPayloadRow(row) || isStateRow(row),
+            now: () => Date.now(),
+            sleep: sleepCancellable,
+          },
+          signal,
+        );
+      },
+      async postKnock(knock) {
+        const groupId = await deviceGroupIdOf(account, deviceKey, auth.identitySecrets()?.accountIdentitySeed);
+        if (groupId === null) throw new Error("the DeviceGroup id cannot be derived yet");
+        await new DsClient().knock(groupId, [knock.payload]);
+      },
+      async found() {
+        // ADR-0081 third amendment, point 4: nobody answered, so every listed
+        // device is gone or not running. Founding resets the journal under
+        // the account's root (`claimOrReset`); a device that comes back
+        // rejoins this DeviceGroup by knocking (point 5).
+        const seed = await ensureDeviceIdentitySeed(account, deviceKey);
+        try {
+          const ensured = await ensureDeviceGroup(
+            accountBytes,
+            account,
+            seed,
+            deviceKey,
+            auth.identitySecrets()?.accountIdentitySeed,
+            { mayFound: () => Promise.resolve(true) },
+          );
+          freeHandles(ensured.group, ensured.identity);
+        } finally {
+          seed.fill(0);
+        }
+      },
+      noteAnswer(ms, kind) {
+        // A presence note or a Welcome: a device of the account is running.
+        if (kind !== null) recordRestoreAnswer(account, "answered");
+        // eslint-disable-next-line no-console
+        console.info(
+          ms === null
+            ? "DeviceGroup rejoin: no answer to the knock; founding"
+            : `DeviceGroup rejoin: knock answered (${kind ?? "?"}) after ${ms} ms`,
+        );
       },
       async join(state, welcome) {
         const wasm = await loadWasm();
@@ -2866,7 +3305,7 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
-      // ADR-0090 section 3.6 - the own poll-choice register, the same way.
+      // ADR-0092 section 3.6 - the own poll-choice register, the same way.
       if (wasmSync !== null && wasmSync.isPollChoiceEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyPollChoiceEnvelope(parsed.serviceEnvelope) === true) {
@@ -2895,6 +3334,31 @@ export function DeviceGroupSyncProvider(props: {
       if (wasmSync !== null && wasmSync.isChannelCommentEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyChannelCommentEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // 2026-11-13 - the channel-subscription register, the same way. The
+      // channel runtime reconciles the channel list from the fold.
+      if (wasmSync !== null && wasmSync.isChannelSubscriptionEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyChannelSubscriptionEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // ADR-0090 open question 4 - a channel admission seed, the same way.
+      if (wasmSync !== null && wasmSync.isChannelAdmissionSeedEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyChannelAdmissionSeedEnvelope(parsed.serviceEnvelope) === true) {
             observeHlc(synced.maxHlc());
             refresh();
           }
@@ -3377,6 +3841,31 @@ function freeHandles(g: WasmDeviceGroup, id: WasmIdentity): void {
   } catch {
     // best-effort
   }
+}
+
+/** Is this page in the foreground? (No `document`, as in a test: yes.) */
+function pageVisible(): boolean {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
+/** Resolves when the page is back in the foreground or `signal` aborts. */
+function untilVisible(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (pageVisible() || signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      document.removeEventListener("visibilitychange", onChange);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const onChange = (): void => {
+      if (pageVisible()) done();
+    };
+    document.addEventListener("visibilitychange", onChange);
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 function sleepCancellable(ms: number, signal: AbortSignal): Promise<void> {

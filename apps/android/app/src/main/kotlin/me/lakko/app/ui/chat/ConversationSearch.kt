@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -45,6 +43,8 @@ import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /*
  * group-and-channel-privacy.md sections 5, 5.1 and 6.1 — public groups and
@@ -184,7 +184,7 @@ private fun ConversationCard(f: FoundConversation, port: ConversationSearchPort,
                     title = {},
                     navigationIcon = {
                         IconButton(onClick = onClose) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     },
                 )
@@ -247,7 +247,7 @@ internal fun knockFailure(cause: Throwable): UiText {
 /**
  * Section 6.2 — the `Requests sent` row at the top of Chats, with a count,
  * opening the list: avatar, name, `@name`, and "Waiting for an admin." or,
- * after 7 days, "No answer yet." with `Ask again`. No Cancel.
+ * after a day, "No answer yet." with `Ask again`. No Cancel.
  */
 @Composable
 internal fun RequestsSentRow(
@@ -263,6 +263,13 @@ internal fun RequestsSentRow(
             .clickable { open = true }
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
+        me.lakko.app.ui.components.LkIcon(
+            me.lakko.app.R.drawable.ic_lk_send,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = me.lakko.app.ui.components.LkIconSize.Row,
+        )
+        Spacer(Modifier.width(16.dp))
         Text(t("requests_sent.title"), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
         Text(requests.size.toString(), color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -286,7 +293,7 @@ private fun RequestsSentScreen(
                     title = { Text(t("requests_sent.title")) },
                     navigationIcon = {
                         IconButton(onClick = onClose) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     },
                 )
@@ -302,11 +309,14 @@ private fun RequestsSentScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                     ) {
-                        LakkoAvatar(name = r.name, seed = r.idHex, size = 40.dp, group = true, avatar = r.avatar)
+                        // A link request may carry no name (a link minted
+                        // without a preview) and has no @name.
+                        val name = r.name.ifBlank { t("chat.group.fallback_name") }
+                        LakkoAvatar(name = name, seed = r.idHex, size = 40.dp, group = true, avatar = r.avatar)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(r.name, style = MaterialTheme.typography.titleMedium)
-                            Text("@" + r.handle, style = MaterialTheme.typography.bodySmall)
+                            Text(name, style = MaterialTheme.typography.titleMedium)
+                            if (r.handle.isNotBlank()) Text("@" + r.handle, style = MaterialTheme.typography.bodySmall)
                             Text(
                                 t(if (me.lakko.app.chat.sentRequestWaiting(r, now)) "requests_sent.waiting" else "requests_sent.no_answer"),
                                 style = MaterialTheme.typography.bodySmall,

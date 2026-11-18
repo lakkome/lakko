@@ -16,10 +16,11 @@ import Foundation
 /// full 12-word phrase and hands it to the ordinary phrase path, which
 /// checks it against the account's published identity (fail-closed).
 ///
-/// Storing the blob is OPT-IN per passkey: key safety then also rests on
-/// whoever syncs the passkey (Apple, Google, a password manager), so the
-/// person decides on the informed-trust screen. Nothing here enrolls on its
-/// own. The PRF output never leaves this device: it is read from the
+/// Every passkey stores the blob wherever the platform can carry it, with
+/// no choice (ADR-0072 decision 6, amended 2026-11-11; UX
+/// `docs/ux/identity-recovery.md` 10.2): key safety then also rests on
+/// whoever syncs the passkey (Apple, Google, a password manager), a cost the
+/// ADR states. The PRF output never leaves this device: it is read from the
 /// platform's result and is not part of the credential JSON the server
 /// receives.
 ///
@@ -65,21 +66,22 @@ enum PasskeyVault {
         return opened && matched ? .restored : .unusable
     }
 
-    /// What follows creating a passkey.
-    enum AddOutcome: Equatable {
-        /// The platform can protect keys with this passkey: show the choice.
-        case offerKeysChoice
-        /// It cannot: the passkey signs in only, and the result line says so.
-        case signInOnly
-    }
-
-    /// Whether the choice screen follows a registration. `prfOutput` is
+    /// Whether storing the keys follows a registration. `prfOutput` is
     /// whether the registration already yielded the PRF output;
     /// `prfSupported` is what the platform reported for the new credential
     /// (`true`: supported, the output comes when the passkey is next used;
-    /// `false` or `nil`: not supported, or the platform said nothing).
-    static func addOutcome(prfOutput: Bool, prfSupported: Bool?) -> AddOutcome {
-        prfOutput || prfSupported == true ? .offerKeysChoice : .signInOnly
+    /// `false`: it cannot carry PRF; `nil`: the platform said nothing). The
+    /// second passkey sheet is skipped ONLY on an explicit `false` (UX 10.2);
+    /// when the platform said nothing, the sheet runs.
+    static func canCarryKeys(prfOutput: Bool, prfSupported: Bool?) -> Bool {
+        prfOutput || prfSupported != false
+    }
+
+    /// What creation tells about PRF on this platform: a system without the
+    /// PRF API (older than iOS 18) cannot carry keys, which is an explicit
+    /// answer, not silence; from iOS 18 it is what the registration reported.
+    static func reportedPrfSupport(registrationReported: Bool?, prfApiAvailable: Bool) -> Bool? {
+        prfApiAvailable ? registrationReported : false
     }
 
     /// What a passkey row says in Settings.
@@ -109,5 +111,38 @@ enum PasskeyVault {
     /// `nil` while it is not known, which keeps the row).
     static func restoreOffersPasskey(passkeysSupported: Bool, passkeysWithKeys: Int?) -> Bool {
         passkeysSupported && (passkeysWithKeys == nil || (passkeysWithKeys ?? 0) > 0)
+    }
+}
+
+/// The passkeys this device found cannot carry keys, per account (UX 10.2):
+/// their rows stop offering "Restore keys with this passkey". Survives a
+/// restart; removed by the account wipe (``AccountLocalDataWipe``).
+struct PasskeyNoPrfStore {
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    static func key(accountIdB64: String) -> String {
+        "lakko.passkeys-no-prf.v1.\(accountIdB64)"
+    }
+
+    /// The credential ids (base64url) found to carry no keys.
+    func load(accountIdB64: String) -> Set<String> {
+        Set(defaults.stringArray(forKey: Self.key(accountIdB64: accountIdB64)) ?? [])
+    }
+
+    /// Remember one more. Refused once the account is wiped.
+    func insert(_ credentialIdB64: String, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
+        var ids = load(accountIdB64: accountIdB64)
+        guard ids.insert(credentialIdB64).inserted else { return }
+        defaults.set(ids.sorted(), forKey: Self.key(accountIdB64: accountIdB64))
+    }
+
+    func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: Self.key(accountIdB64: accountIdB64))
     }
 }

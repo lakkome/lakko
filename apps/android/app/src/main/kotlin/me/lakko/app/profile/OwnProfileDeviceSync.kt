@@ -36,7 +36,7 @@ public fun ownProfileForDevices(profile: OwnProfile?, accountId: ByteArray): Ffi
         grants = emptyList(),
         // ADR-0084 — the photo travels with the name, under the same stamp.
         avatar = profile.avatar?.toFfi(),
-        // ADR-0090 section 7 — the receiving device keeps its own flag (it
+        // ADR-0092 section 7 — the receiving device keeps its own flag (it
         // follows the synced setting); stated truthfully all the same.
         cardShareable = profile.cardShareable,
     )

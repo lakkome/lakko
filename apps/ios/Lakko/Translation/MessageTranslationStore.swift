@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 import os
 
 /// ADR-0082 section 5 — the translations, transcripts and per-conversation
@@ -51,8 +52,9 @@ public final class MessageTranslationStore {
     /// What one conversation's person chose on this device.
     public struct ConversationPrefs: Codable, Equatable, Sendable {
         public var autoTranslate = false
-        /// The source chosen in the picker for translation (UX 3.4), canonical.
-        public var translationSource: String?
+        /// The languages picked and confidently detected here (ADR-0082 note
+        /// of 2026-11-15), in the shared rule's canonical bounded form.
+        public var languages = StoredLanguages()
         /// The source chosen in the picker for transcription (UX 4.4).
         public var transcriptSource: String?
         /// Languages whose bar was dismissed here (UX 3.6), canonical.
@@ -61,6 +63,36 @@ public final class MessageTranslationStore {
         public var messageSources: [String: String] = [:]
 
         public init() {}
+    }
+
+    /// A conversation's languages as stored: the shared rule's
+    /// `ConversationLanguages`, changed only through it.
+    public struct StoredLanguages: Codable, Equatable, Sendable {
+        public struct Pick: Codable, Equatable, Sendable {
+            public var tag: String
+            public var atMs: UInt64
+        }
+
+        public struct Detection: Codable, Equatable, Sendable {
+            public var messageId: Int64
+            public var tag: String
+        }
+
+        public var picks: [Pick] = []
+        public var detections: [Detection] = []
+
+        public init() {}
+
+        public init(_ languages: ConversationLanguages) {
+            picks = languages.picks.map { Pick(tag: $0.tag, atMs: $0.atMs) }
+            detections = languages.detections.map { Detection(messageId: $0.messageId, tag: $0.tag) }
+        }
+
+        public var ffi: ConversationLanguages {
+            ConversationLanguages(
+                picks: picks.map { LanguagePick(tag: $0.tag, atMs: $0.atMs) },
+                detections: detections.map { MessageLanguage(messageId: $0.messageId, tag: $0.tag) })
+        }
     }
 
     struct Payload: Codable {

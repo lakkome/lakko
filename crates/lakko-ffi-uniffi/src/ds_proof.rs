@@ -334,6 +334,23 @@ pub(crate) fn group_access_seed(
     Ok(secret.to_vec())
 }
 
+/// The 32-byte access seed of the epoch a staged commit (or a held external
+/// entry) moves to, `None` when nothing is staged (ADR-0064 section 7: what an
+/// owner device saves in the channel's vault head with the staged GroupInfo).
+///
+/// # Errors
+///
+/// The MLS exporter's own failures.
+pub(crate) fn staged_group_access_seed(
+    group: &MlsGroup,
+    identity: &MlsIdentity,
+) -> Result<Option<Vec<u8>>, FfiError> {
+    let group_id = group.group_id();
+    Ok(group
+        .staged_export_secret(identity, ACCESS_KEY_LABEL, &group_id, 32)?
+        .map(|secret| secret.to_vec()))
+}
+
 /// The access signer for the epoch a staged sweep moves to (N+1) while the
 /// group still sits at N, or `None` when nothing is staged. The committer
 /// registers this key, proven under N, BEFORE publishing the sweep.
@@ -375,6 +392,20 @@ mod tests {
         assert_eq!(rebuilt.epoch(), live.epoch());
         assert_eq!(rebuilt.verifying_key(), live.verifying_key());
         assert!(DsProofSigner::for_group(0, vec![0u8; 31]).is_err());
+    }
+
+    /// G-55: `lakko-mls` derives the access seed itself (the entry wrap key
+    /// input); it must be the value this surface hands out.
+    #[test]
+    fn the_core_derives_the_same_access_seed() {
+        assert_eq!(lakko_mls::DS_ACCESS_EXPORTER_LABEL, ACCESS_KEY_LABEL);
+        let identity = MlsIdentity::generate("g55").unwrap();
+        let group = MlsGroup::create(&identity, lakko_mls::GroupKind::Group).unwrap();
+        let seed = group_access_seed(&group, &identity).unwrap();
+        assert_eq!(
+            group.ds_access_seed(&identity).unwrap().as_slice(),
+            seed.as_slice()
+        );
     }
 
     #[test]

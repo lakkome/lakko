@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Anonymous group-poll ballots (ADR-0090 section 3): a log-size linkable one-out-of-many proof, the per-poll tag, ring versions, the sealed ballot row and the tally fold"
+description = "Anonymous group-poll ballots (ADR-0092 section 3): a log-size linkable one-out-of-many proof, the per-poll tag, ring versions, the sealed ballot row and the tally fold"
 
 [lints]
 workspace = true
@@ -37,7 +37,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 # tree through lakko-crypto, used directly for its streaming and XOF modes.
 blake3 = "1"
 
-# XChaCha20-Poly1305 for the ballot row (ADR-0090 section 3.6). Already in the
+# XChaCha20-Poly1305 for the ballot row (ADR-0092 section 3.6). Already in the
 # tree through lakko-crypto, which exposes only the 12-byte-nonce variant.
 chacha20poly1305 = "0.10"
 

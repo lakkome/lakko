@@ -60,9 +60,13 @@ export type TimelineRow =
       /** ADR-0052 decision 2 — the forward attribution this row was sent
        *  with, so the sender's own bubble draws the line it sent. */
       forward?: ForwardRef;
-      /** ADR-0090 — a poll, checklist, location, contact card or article. */
+      /** ADR-0087 section 14 — the channel invitation card this row was
+       *  sent with (standard base64), so the sender's own bubble and Chats
+       *  row read the invitation, never the link. */
+      channelInviteB64?: string;
+      /** ADR-0092 — a poll, checklist, location, contact card or article. */
       content?: MessageContent;
-      /** ADR-0090 section 3.11 — a restored poll's or checklist's state. */
+      /** ADR-0092 section 3.11 — a restored poll's or checklist's state. */
       contentState?: ContentState;
     };
 

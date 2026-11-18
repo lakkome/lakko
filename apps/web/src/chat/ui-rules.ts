@@ -80,6 +80,10 @@ export type UiRules = Pick<
   | "orderConversationsInFolder"
   | "isValidFolderName"
   | "mintFolderId"
+  // What follows the first comments under a collapsed channel post
+  // (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of
+  // comments this reader hides; `channels/comment-thread.ts` asks it.
+  | "collapsedComments"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);

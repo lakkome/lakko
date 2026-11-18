@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! The newcomer's side: check an assembled item and turn it into the
-//! records the device stores (ADR-0090 section 3.9, "What the newcomer
+//! records the device stores (ADR-0092 section 3.9, "What the newcomer
 //! trusts").
 //!
 //! Checked here, so that the sender cannot invent or alter an item in the

@@ -24,15 +24,15 @@ export const ITEM_LABEL_KEY: Readonly<Record<AttachItem, string>> = {
 
 /** The icon of each row (UX 2.2's meanings). */
 export const ITEM_ICON: Readonly<Record<AttachItem, IconName>> = {
-  "photo-or-video": "image",
+  "photo-or-video": "photo-stack",
   camera: "camera",
-  file: "document",
-  audio: "music",
-  poll: "chart",
+  file: "doc",
+  audio: "music-note",
+  poll: "chart-bar",
   checklist: "checklist",
-  location: "pin",
-  contact: "user",
-  article: "page",
+  location: "location",
+  contact: "person",
+  article: "doc-text",
 };
 
 /** The catalog key of a disabled row's reason (UX 2.4, 5). */

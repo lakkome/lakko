@@ -5,7 +5,7 @@
 # `article` — closed block format for long posts (spec)
 
 **Module:** `crates/lakko-attachments/src/article.rs`
-**One line:** Decode, encode and excerpt the ADR-0090 section 8 article: a bounded, canonical tree of paragraphs, headings, quotes, lists, images and dividers with bold, italic and https links.
+**One line:** Decode, encode and excerpt the ADR-0092 section 8 article: a bounded, canonical tree of paragraphs, headings, quotes, lists, images and dividers with bold, italic and https links.
 
 ## Why this module exists
 
@@ -43,4 +43,4 @@ The article rides base64 in a chat envelope any member or publisher writes. Fuzz
 
 ## References
 
-ADR-0090 section 8; UX `docs/ux/attachments.md` section 11; tests in `article.rs`.
+ADR-0092 section 8; UX `docs/ux/attachments.md` section 11; tests in `article.rs`.

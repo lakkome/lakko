@@ -687,6 +687,35 @@ export function supersededStep(input: {
   return { kind: "reset" };
 }
 
+/** What a superseded device does with its one journal read. */
+export type JournalReadVerdict =
+  /** The read answered: go on with `supersededStep`, this as `journal`. */
+  | { readonly kind: "journal"; readonly journal: "read" | "unreadable" }
+  /** No verdict yet (offline, or the handle is still loading in a session):
+   *  ask again later. Never a wipe. */
+  | { readonly kind: "later" }
+  /** Nothing can be read: outside a session the device opened its own
+   *  persisted DeviceGroup and holds none, so the change is treated as a
+   *  reset (ADR-0074 section 3.3, "cannot be read"). */
+  | { readonly kind: "reset" };
+
+/**
+ * The rule for the journal read's outcome. `not-loaded` inside a session is
+ * the page's handle still loading; outside one it is a device that holds no
+ * DeviceGroup state (`standalone-journal-read.ts`). Base scenario 4b: a
+ * device on its new-phrase screen, or on a page load, whose keys were reset
+ * on another device was told "offline" here and retried every 20 seconds,
+ * never signing out.
+ */
+export function journalReadVerdict(
+  read: "read" | "unreadable" | "offline" | "not-loaded",
+  inSession: boolean,
+): JournalReadVerdict {
+  if (read === "read" || read === "unreadable") return { kind: "journal", journal: read };
+  if (read === "offline") return { kind: "later" };
+  return inSession ? { kind: "later" } : { kind: "reset" };
+}
+
 /** What the session upgrade's answer means for the key it was signed with. */
 export type UpgradeVerdict =
   /** A pair at the current generation: this key is the account's. */

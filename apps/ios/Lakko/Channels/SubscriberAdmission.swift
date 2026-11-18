@@ -191,53 +191,164 @@ final class SubscriberAdmission: ObservableObject {
     /// co-published). The channel state is bound at construction, so the
     /// keys are already loaded. Returns when the calling task is cancelled
     /// (sign-out, account switch).
+    /// What the let-in pass does with one row (ADR-0087 section 7).
+    enum LetIn: Equatable { case admit, remove, leave }
+
+    /// The let-in verdict of one row, the web rule (`subscriber-admission.ts`)
+    /// with this device's mark (``ChannelExtras/admittedThroughSeq``):
+    /// - a row at or below the mark came in before the channel went private
+    ///   or was let in by an earlier pass: a reader, let in (UX 4.1:
+    ///   "Everyone subscribed stays");
+    /// - a row whose ticket names a live invite key: let in;
+    /// - this device's own key: left alone (a publisher's own card key);
+    /// - any other row, on a device that set the mark itself: removed;
+    /// - on a device that did not (a co-publisher, another device of the
+    ///   owner), left alone: it cannot tell a reader from before from a row
+    ///   with no ticket. No ticket alone never lets a row in.
+    nonisolated static func letInVerdict(
+        seq: UInt64, ticketLive: Bool, mark: UInt64, markSet: Bool, isOwnKey: Bool
+    ) -> LetIn {
+        if seq <= mark { return .admit }
+        if ticketLive { return .admit }
+        if isOwnKey { return .leave }
+        return markSet ? .remove : .leave
+    }
+
+    /// A row this device never removes: its own subscriber key, or the
+    /// account's reader key it registered (2026-11-13).
+    nonisolated static func isOwnRow(_ pubkeyHex: String, ownKeyHex: String?, accountReaderHex: String?) -> Bool {
+        let row = pubkeyHex.lowercased()
+        return row == ownKeyHex || row == accountReaderHex
+    }
+
+    /// The mark after a pass judged rows (in row order, each with its
+    /// verdict): on a device that set the mark, past every row judged; on
+    /// any other, only past the rows let in before the first one left alone,
+    /// so a row it left is never read as a reader, and never resealed to.
+    nonisolated static func advancedMark(
+        _ mark: UInt64, markSet: Bool, judged: [(seq: UInt64, verdict: LetIn)]
+    ) -> UInt64 {
+        var through = mark
+        for row in judged.sorted(by: { $0.seq < $1.seq }) {
+            if !markSet, row.verdict != .admit { break }
+            through = max(through, row.seq)
+        }
+        return through
+    }
+
+    /// Section 4.1 / ADR-0087 section 7 — the channel goes private (or its
+    /// owner mints its first admission seed): the rows of today stay readers.
+    /// Raise this device's mark to the newest row, the web
+    /// `repairPrivateChannelAccess` and type-change step.
+    static func markCurrentRowsAsReaders(
+        channelId: String, state: ChannelsUiState, client: ChannelsClient, accountIdentity: Identity
+    ) async throws {
+        var through = state.extras(channelId).admittedThroughSeq ?? 0
+        var after = through
+        for _ in 0..<10_000 {
+            let page = try await client.subscriberPage(channelIdHex: channelId, after: after, accountIdentity: accountIdentity)
+            guard let last = page.rows.last else { break }
+            through = max(through, last.seq)
+            guard page.nextAfter > after else { break }
+            after = page.nextAfter
+        }
+        let raised = through
+        state.updateExtras(channelId) {
+            $0.admittedThroughSeq = max($0.admittedThroughSeq ?? 0, raised)
+            $0.admissionMarkSet = true
+            $0.subscriberRowsReadSeq = max($0.subscriberRowsReadSeq ?? 0, raised)
+        }
+    }
+
     /// Section 7 — read the rows a page at a time, open each ticket with the
-    /// channel's admission seed, check the invite key it names is live, seal
-    /// only then; a row with no valid ticket is removed.
+    /// channel's admission seed, check the invite key it names is live, and
+    /// apply ``letInVerdict(seq:ticketLive:mark:isOwnKey:)``: seal to the rows
+    /// let in, remove the rest on a device holding the mark, then move the
+    /// mark past the rows judged.
     private func admitPrivate(
         channelId: String, state: ChannelsUiState, identity: Identity, admissionSeeds: [Data]
     ) async throws {
         guard let channelIdBytes = ChannelsClient.hexToData(channelId) else { return }
         let live = Set(try await client.inviteKeys(channelIdHex: channelId, accountIdentity: identity))
         let epoch = try await currentEpoch(channelId: channelId, state: state)
+        let ownKeyHex = state.subscriberKeysByChannel[channelId]
+            .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }
+            .map { ChannelsComposer.bytesToHex($0).lowercased() }
+        // 2026-11-13: the account's reader key this device registered is its
+        // own too (its other devices read with it): never removed here.
+        let accountReaderHex = state.extras(channelId).readerKeyRegisteredHex?.lowercased()
+        let mark = state.extras(channelId).admittedThroughSeq ?? 0
+        let markSet = state.extras(channelId).admissionMarkSet == true
+        var judged: [(seq: UInt64, verdict: LetIn)] = []
+        var stopped = false
         var after: UInt64 = 0
         var all: [String] = []
-        for _ in 0..<200 {
+        // ADR-0090 security pass — the newest row this device read itself:
+        // an owner's mark counts only up to it.
+        var readThrough: UInt64 = 0
+        pages: for _ in 0..<200 {
             let page = try await client.subscriberPage(channelIdHex: channelId, after: after, accountIdentity: identity)
             for row in page.rows {
                 if Task.isCancelled { return }
                 all.append(row.pubkeyHex)
+                readThrough = max(readThrough, row.seq)
                 if let entry = byChannel[channelId]?.status[row.pubkeyHex], entry.status == .ready, entry.epoch == epoch {
+                    judged.append((row.seq, .admit))
                     continue
                 }
                 // Every held version, newest first: a ticket sealed to an
                 // older version (an older link) still opens.
-                guard let pk = Data(channelHex: row.pubkeyHex), let ticket = row.sealedTicket,
-                      let inviteKey = admissionSeeds.reversed().lazy.compactMap({ seed in
-                          try? openChannelAdmissionTicket(
-                              admissionSeed: seed, channelId: channelIdBytes, subscriberPk: pk, ticket: ticket)
-                      }).first,
-                      live.contains(inviteKey)
-                else {
-                    // A row already let in under an earlier epoch stays: a
-                    // revoked link removes nobody (section 7).
-                    if byChannel[channelId]?.status[row.pubkeyHex]?.status == .ready { continue }
-                    try? await client.removeSubscriber(
-                        channelIdHex: channelId, pubkeyHex: row.pubkeyHex, accountIdentity: identity)
-                    continue
+                var ticketLive = false
+                if let pk = Data(channelHex: row.pubkeyHex), let ticket = row.sealedTicket,
+                   let inviteKey = admissionSeeds.reversed().lazy.compactMap({ seed in
+                       try? openChannelAdmissionTicket(
+                           admissionSeed: seed, channelId: channelIdBytes, subscriberPk: pk, ticket: ticket)
+                   }).first {
+                    ticketLive = live.contains(inviteKey)
                 }
-                do {
-                    try await admit(channelId: channelId, pubkeyHex: row.pubkeyHex, state: state, accountIdentity: identity)
-                } catch {
-                    NSLog("[channels] letting a subscriber in failed")
+                let verdict = Self.letInVerdict(
+                    seq: row.seq, ticketLive: ticketLive, mark: mark, markSet: markSet,
+                    isOwnKey: Self.isOwnRow(
+                        row.pubkeyHex, ownKeyHex: ownKeyHex, accountReaderHex: accountReaderHex))
+                switch verdict {
+                case .admit:
+                    do {
+                        try await admit(channelId: channelId, pubkeyHex: row.pubkeyHex, state: state, accountIdentity: identity)
+                    } catch {
+                        NSLog("[channels] letting a subscriber in failed")
+                    }
+                case .leave:
+                    break
+                case .remove:
+                    do {
+                        try await client.removeSubscriber(
+                            channelIdHex: channelId, pubkeyHex: row.pubkeyHex, accountIdentity: identity)
+                    } catch {
+                        // The mark stops before this row: a row not removed
+                        // is judged again, never read as a reader.
+                        NSLog("[channels] a row with no valid ticket was not removed yet")
+                        stopped = true
+                        break pages
+                    }
                 }
+                judged.append((row.seq, verdict))
             }
             guard !page.rows.isEmpty, page.nextAfter > after else { break }
             after = page.nextAfter
         }
-        var a = byChannel[channelId] ?? ChannelAdmission()
-        a.subscribers = all
-        byChannel[channelId] = a
+        let raised = Self.advancedMark(mark, markSet: markSet, judged: judged)
+        if raised != mark {
+            state.updateExtras(channelId) { $0.admittedThroughSeq = max($0.admittedThroughSeq ?? 0, raised) }
+        }
+        if readThrough > (state.extras(channelId).subscriberRowsReadSeq ?? 0) {
+            state.updateExtras(channelId) { $0.subscriberRowsReadSeq = readThrough }
+        }
+        ChannelDeviceAdmission.applyReceivedMark(channelId: channelId, state: state)
+        if !stopped {
+            var a = byChannel[channelId] ?? ChannelAdmission()
+            a.subscribers = all
+            byChannel[channelId] = a
+        }
     }
 
     func runLoop(channels: ChannelsUiState, accountIdentitySeed: () -> Data?) async {

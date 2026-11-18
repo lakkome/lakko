@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Channel poll votes (ADR-0090 section 4.3), driven over HTTP against the
+//! Channel poll votes (ADR-0092 section 4.3), driven over HTTP against the
 //! in-memory store with a real credential: registered, issued and presented
 //! with `lakko-anon-cred` the way a client does, under the master the
 //! service holds.

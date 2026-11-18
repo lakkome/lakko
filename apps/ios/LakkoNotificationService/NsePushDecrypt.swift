@@ -158,21 +158,21 @@ public enum NseProcessedKind: Equatable {
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
     case callEnd
-    /// ADR-0090 — a poll, checklist, location, contact card or article. `text`
+    /// ADR-0092 — a poll, checklist, location, contact card or article. `text`
     /// is the finished preview line (`Poll: {question}`, ...), built by
     /// ``nseContentPreviewLine(kind:text:)``; never JSON.
     case content
-    /// ADR-0090 — a vote, close, tick, added item or edit of a poll,
+    /// ADR-0092 — a vote, close, tick, added item or edit of a poll,
     /// checklist or article. Never a notification, like a reaction.
     case contentOp
 }
 
-/// ADR-0090 — which content kind a ``NseProcessedKind/content`` row carried.
+/// ADR-0092 — which content kind a ``NseProcessedKind/content`` row carried.
 public enum NseContentKind: Equatable {
     case poll, checklist, location, contactCard, article
 }
 
-/// ADR-0090 section 1 — the notification line of a content message:
+/// ADR-0092 section 1 — the notification line of a content message:
 /// `Poll: {question}`, `Checklist: {title}`, `Location`, `Contact: {name}`,
 /// `Article: {title}`. The words come from the app's mirror of the catalog
 /// (English fallback per word); the item's own text is substituted, never
@@ -190,7 +190,7 @@ public func nseContentPreviewLine(kind: NseContentKind, text: String) -> String 
         return line("chat.content.preview.checklist", "Checklist: {text}", "attach.menu.checklist", "Checklist")
     case .location:
         // The catalog word only: a place name is the sender's text, and the
-        // spec previews a location by its kind (ADR-0090 section 1).
+        // spec previews a location by its kind (ADR-0092 section 1).
         return nseWord("attach.menu.location", english: "Location")
     case .contactCard:
         return line("chat.content.preview.contact", "Contact: {text}", "attach.menu.contact", "Contact")
@@ -1146,6 +1146,45 @@ public func nseAttachmentsLine(count: Int) -> String {
     return count == 1 ? "Sent an attachment" : "Sent \(count) attachments"
 }
 
+/// The marker the stored channel-invitation lines carry where the channel's
+/// name goes (the app renders the template with it,
+/// ``ChannelInviteNotificationMirror/channelMark``).
+let nseChannelNameMark = "\u{E002}"
+
+/// ADR-0087 section 14, UX 15.2 — what a notification says for a message
+/// carrying a channel invitation card: the card's line ("Invitation to
+/// {channel}" / "Invitation to publish in {channel}"), never the message text,
+/// which is the `/g/` link with its secret (seen live 2026-11-12). A card that
+/// does not open says only that a message came.
+public func nseChannelInviteLine(opened: Bool, channelName: String?, publisher: Bool) -> String {
+    guard opened else { return nseWord("notification.message.new", english: "New message") }
+    let named = channelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let name = named.isEmpty ? nseWord("channels.fallback_name", english: "Channel") : named
+    let key = publisher ? "chats.preview.publisher_invite" : "chats.preview.channel_invite"
+    let english = publisher ? "Invitation to publish in \(nseChannelNameMark)" : "Invitation to \(nseChannelNameMark)"
+    var template = nseNotificationWordLookup(key) ?? english
+    if !template.contains(nseChannelNameMark) { template = english }
+    return template.replacingOccurrences(of: nseChannelNameMark, with: name)
+}
+
+/// A message whose whole text is one `/g/` link and that carries no card (an
+/// older message, a link pasted as text): the link WITHOUT its secret, what
+/// follows `#` (seen live 2026-11-13 on a Chats row; the app's row and the
+/// web say the same while the link is not opened). The extension opens no
+/// ledger, so it never says more. Any other text is returned unchanged. Any
+/// origin: a `/g/` link of another deployment carries a secret too.
+public func nseWithoutGroupLinkSecret(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isWhitespace }),
+          let schemeEnd = trimmed.range(of: "://"),
+          let hash = trimmed.firstIndex(of: "#"), hash > schemeEnd.upperBound else { return text }
+    let afterScheme = trimmed[schemeEnd.upperBound..<hash]
+    guard !afterScheme.contains("?"), let pathStart = afterScheme.firstIndex(of: "/") else { return text }
+    let parts = afterScheme[pathStart...].split(separator: "/", omittingEmptySubsequences: false)
+    guard parts.count == 3, parts[1] == "g", !parts[2].isEmpty else { return text }
+    return String(trimmed[..<hash])
+}
+
 /// The body the server put on a wake, in the interface language when it is
 /// one of the two generic placeholders `push-gw` sends (`New message`,
 /// `Incoming call`); any other body is returned unchanged.
@@ -1282,7 +1321,7 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // caller before this function is reached.
     case .callOffer, .callEnd:
         return nil
-    // ADR-0090 — a content message previews by its finished line; an op on
+    // ADR-0092 — a content message previews by its finished line; an op on
     // one (vote, close, tick, add, edit) is never a notification.
     case .content:
         return row.text.isEmpty ? nil : truncate(row.text)

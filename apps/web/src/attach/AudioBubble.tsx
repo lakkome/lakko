@@ -111,7 +111,7 @@ export function AudioBubble(props: {
       fallback={
         <div class="lk-audio-bubble">
           <span class="lk-location-pin" aria-hidden="true">
-            <Icon name="music" size={20} />
+            <Icon name="music-note" size={20} />
           </span>
           <div class="lk-audio-main">{titleLine()}</div>
           <button type="button" class="lk-ak-secondary-button" onClick={() => props.onSave()}>

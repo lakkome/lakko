@@ -72,7 +72,7 @@ public fun bodyOf(ref: FeedCandidateRef, strings: Strings): String =
         else -> attachmentLine(ref.message)?.renderWith(strings).orEmpty()
     }
 
-/** ADR-0090 — the one line a poll, checklist, location, contact card or
+/** ADR-0092 — the one line a poll, checklist, location, contact card or
  *  article shows in the feed (the chat list's summary, `contentSummary`). */
 public fun contentLine(content: uniffi.lakko_ffi_uniffi.MessageContent, strings: Strings): String {
     val (key, args) = me.lakko.app.chat.contentSummary(content)

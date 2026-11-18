@@ -91,6 +91,18 @@ public class ChatClient(
     private val ds: DsClient = DsClient(),
 ) : AutoCloseable {
 
+    /** ADR-0091 phase 1 — the process-wide record of held registered commits. */
+    internal val holds: RegisteredCommitHoldTracker = RegisteredCommitHoldTracker.shared
+
+    /** Where the identifier-free failed-row lines go. */
+    private val failedRowLog: (FailedRowLogLevel, String) -> Unit = { level, line ->
+        if (level == FailedRowLogLevel.ERROR) {
+            android.util.Log.e(FAILED_ROW_LOG_TAG, line)
+        } else {
+            android.util.Log.w(FAILED_ROW_LOG_TAG, line)
+        }
+    }
+
     /**
      * Rows this device published itself, so the next poll drops the echo.
      *
@@ -118,6 +130,9 @@ public class ChatClient(
      */
     public fun forgetOwnEchoes() {
         ownPublished = OwnEchoRegistry()
+        // ADR-0091 phase 1 — held rows and behind marks belong to the session
+        // that left too.
+        holds.clear()
     }
 
     /** [forgetOwnEchoes] for one journal (ADR-0087 section 9). */
@@ -309,7 +324,7 @@ public class ChatClient(
      * silence an unrelated chat's next row of that number.
      */
     /**
-     * ADR-0090 section 3.6 — post an anonymous ballot row to the group journal.
+     * ADR-0092 section 3.6 — post an anonymous ballot row to the group journal.
      * It is not an MLS message: the DS proof is the epoch access key every
      * member holds, so the row names no member. The id is remembered as own.
      */
@@ -424,64 +439,60 @@ public class ChatClient(
         groupIdHex: String,
     ): PollMessagesResult {
         val events = mutableListOf<IncomingChatEvent>()
-        var cursor = after
-        var touchedMlsState = false
-        for (message in raw.messages) {
-            cursor = message.id
-
-            // Drop our own echoes — the DS doesn't dedupe and
-            // OpenMLS can't decrypt them on the sender side at
-            // the same epoch.
+        // ADR-0091 phase 1 — a failed row is classified before it is skipped:
+        // the commit the DS registered as this device's next epoch is HELD
+        // (the batch stops at it, the cursor stays before it, it is retried
+        // later), every other failed row is skipped as before. See
+        // [applyJournalRowsHolding].
+        val applied = applyJournalRowsHolding(
+            groupIdHex = groupIdHex,
+            rows = raw.messages,
+            after = after,
+            latestEpoch = raw.latestEpoch,
+            holds = holds,
+            // Drop our own echoes — the DS doesn't dedupe and OpenMLS can't
+            // decrypt them on the sender side at the same epoch.
             //
-            // Matched on THIS journal's id, never on the id alone. Ids are
-            // per journal and every chat starts at 1, so an id-only match
-            // dropped another chat's row of the same number — a fetched row,
-            // silently discarded with the cursor advanced past it, which is
-            // what kept incoming calls from ringing outside the open chat.
-            if (ownPublished.consume(groupIdHex, message.id)) {
-                continue
-            }
-
-            // ADR-0090 section 3.6 — an anonymous ballot is a journal row
+            // Matched on THIS journal's id, never on the id alone. Ids are per
+            // journal and every chat starts at 1, so an id-only match dropped
+            // another chat's row of the same number — a fetched row, silently
+            // discarded with the cursor advanced past it, which is what kept
+            // incoming calls from ringing outside the open chat.
+            isOwnEchoRow = { id -> ownPublished.consume(groupIdHex, id) },
+            // ADR-0092 section 3.6 — an anonymous ballot is a journal row
             // that is NOT an MLS message; it never reaches the MLS group.
-            if (isPollBallotRowSafe(message.payload)) {
-                events.add(IncomingChatEvent.PollBallotRow(message.id, message.payload, message.createdAt))
-                continue
-            }
-
-            // Marked BEFORE the call, not after — see
-            // [PollMessagesResult.touchedMlsState].
-            touchedMlsState = true
-            val processed = try {
-                // ADR-0022 — the CHAT receive loop enforces the group-admin
-                // role policy: an add / remove / role-change commit whose
-                // committer's role does not authorise it is REFUSED (throws)
-                // and skipped, never merged (fail-closed). A group with no role
-                // table (legacy) behaves like the open `processIncoming`. This
-                // is the chat group, not the SFU call group (the call path
-                // reuses the chat exporter, not a separate Group), so the
-                // call-path caveat does not apply here.
-                group.processIncomingVerifyingRoles(identity, message.payload)
-            } catch (_: Throwable) {
-                // Bad frame, wrong epoch, malformed wire, a role-unauthorized commit
-                // refused by the gate, OR a re-fetched own commit
-                // (`CannotDecryptOwnMessage`, ADR-0040 §5 benign drop). Drop + advance
-                // the cursor. ADR-0040 F3 (lakko-security) — this INNER per-message
-                // catch is `Throwable`, not `FfiException`: `CannotDecryptOwnMessage`
-                // surfaces as an `FfiException` today, but were a binding ever to
-                // surface an own-commit re-fetch as a different `Throwable`, a narrow
-                // catch would let it escape to the OUTER poll-loop catch (which does
-                // NOT commit the batch cursor) and re-fetch the orphan row forever.
-                // Mirrors the blanket iOS / web per-message drop posture. (Only the
-                // per-message drop is widened — the outer poll-loop catch is unchanged.)
-                //
-                // The cursor still advances past it, deliberately: a row that can
-                // never apply must not be able to wedge the poll, and only a
-                // PERSIST failure holds the cursor (see [DurableCursorGate]). The
-                // two are distinguishable because they are different operations at
-                // different points in the batch.
-                continue
-            }
+            takeSideRow = { row ->
+                if (isPollBallotRowSafe(row.payload)) {
+                    events.add(IncomingChatEvent.PollBallotRow(row.id, row.payload, row.createdAt))
+                    true
+                } else {
+                    false
+                }
+            },
+            localEpoch = { group.epoch() },
+            // ADR-0022 — the CHAT receive loop enforces the group-admin role
+            // policy: an add / remove / role-change commit whose committer's
+            // role does not authorise it is REFUSED (throws), never merged
+            // (fail-closed). A group with no role table (legacy) behaves like
+            // the open `processIncoming`. This is the chat group, not the SFU
+            // call group (the call path reuses the chat exporter, not a
+            // separate Group), so the call-path caveat does not apply here.
+            //
+            // A throw (bad frame, wrong epoch, malformed wire, a refused
+            // commit, a re-fetched own commit) is caught as `Throwable`, not
+            // `FfiException` (ADR-0040 F3): a narrow catch would let another
+            // throwable escape to the outer poll-loop catch, which does not
+            // commit the batch cursor, and re-fetch the row forever.
+            process = { payload -> group.processIncomingVerifyingRoles(identity, payload) },
+            framedEpochs = { payload ->
+                Pair(
+                    runCatching { uniffi.lakko_ffi_uniffi.epochOfMessage(payload) }.getOrNull(),
+                    runCatching { uniffi.lakko_ffi_uniffi.epochAfterMessage(payload) }.getOrNull(),
+                )
+            },
+            isOwnEchoFailure = { cause -> me.lakko.app.push.isOwnMessageEcho(cause) },
+            log = failedRowLog,
+        ) { message, processed ->
             // The roster is read HERE, one line after the apply, because that
             // is the epoch this row decrypted at — a leaf resolved any later
             // can name whoever was added into a vacated slot since. Read PER
@@ -495,7 +506,7 @@ public class ChatClient(
                 resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
                 resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(rosterOf(group), leaf) },
             )
-            // ADR-0090 section 3.4 — an anonymous poll's ring version 0 is the
+            // ADR-0092 section 3.4 — an anonymous poll's ring version 0 is the
             // roster at the epoch the poll was sealed, which is this row's.
             events.add(
                 if (event is IncomingChatEvent.Application && event.content.isAnonymousPoll()) {
@@ -515,9 +526,11 @@ public class ChatClient(
 
         return PollMessagesResult(
             events = events,
-            cursor = cursor,
-            hasMore = raw.hasMore,
-            touchedMlsState = touchedMlsState,
+            cursor = applied.cursor,
+            // A held batch is not followed straight away: the hold decides
+            // when the row is read again.
+            hasMore = raw.hasMore && !applied.held,
+            touchedMlsState = applied.touchedMlsState,
         )
     }
 }
@@ -1084,7 +1097,7 @@ internal fun toEvent(
                     createdAt = createdAt,
                 )
             } else if (isOpenItemsOrBallotsEnvelope(processed.data)) {
-                // ADR-0090 section 3.9 — the open-items hand-over (or its old
+                // ADR-0092 section 3.9 — the open-items hand-over (or its old
                 // ballot rows) a committer posts for a newcomer. Never a
                 // bubble; the repository assembles, checks and adopts it.
                 IncomingChatEvent.OpenItems(
@@ -1221,7 +1234,7 @@ internal fun toEvent(
                     // version. A real message the person should know exists,
                     // so it IS a timeline row; its words are the client's own
                     // catalog sentence, never text from the core.
-                    // ADR-0090 — a content message: a bubble of its own kind.
+                    // ADR-0092 — a content message: a bubble of its own kind.
                     MessageBodyKind.POLL,
                     MessageBodyKind.CHECKLIST,
                     MessageBodyKind.LOCATION,
@@ -1245,7 +1258,7 @@ internal fun toEvent(
                         ),
                         content = body.content,
                     )
-                    // ADR-0090 — ops on a poll or checklist; never a bubble.
+                    // ADR-0092 — ops on a poll or checklist; never a bubble.
                     MessageBodyKind.POLL_VOTE,
                     MessageBodyKind.POLL_CLOSE,
                     MessageBodyKind.CHECKLIST_TICK,
@@ -1399,17 +1412,17 @@ public sealed interface IncomingChatEvent {
          *  (`chat.message.unsupported`), never core prose. `null` for every
          *  readable message. */
         val unsupportedVersion: Long? = null,
-        /** ADR-0090 — the poll, checklist, location, contact card or article
+        /** ADR-0092 — the poll, checklist, location, contact card or article
          *  this message carries, as the core parsed it; `null` for an
          *  ordinary message. A poll or checklist's author signature is checked
          *  by the repository against [senderKey] before it is kept. */
         val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
-        /** ADR-0090 section 3.4 — the distinct account keys of the roster at
+        /** ADR-0092 section 3.4 — the distinct account keys of the roster at
          *  receipt, set only for an anonymous poll (its ring version 0). */
         val rosterAccountKeys: List<ByteArray>? = null,
     ) : IncomingChatEvent
 
-    /** ADR-0090 — an op on a poll or checklist (vote, close, tick, add, an
+    /** ADR-0092 — an op on a poll or checklist (vote, close, tick, add, an
      *  edit of a checklist or article). Folded into the target row by the
      *  repository, never a bubble. */
     public data class ContentOp(
@@ -1426,7 +1439,7 @@ public sealed interface IncomingChatEvent {
         val attachments: List<AttachmentRef> = emptyList(),
     ) : IncomingChatEvent
 
-    /** ADR-0090 section 3.9 — an open-items or poll-ballots hand-over row. */
+    /** ADR-0092 section 3.9 — an open-items or poll-ballots hand-over row. */
     public data class OpenItems(
         val messageId: Long,
         val envelope: ByteArray,
@@ -1434,7 +1447,7 @@ public sealed interface IncomingChatEvent {
         val createdAt: String,
     ) : IncomingChatEvent
 
-    /** ADR-0090 section 3.6 — an anonymous ballot row (not MLS). */
+    /** ADR-0092 section 3.6 — an anonymous ballot row (not MLS). */
     public data class PollBallotRow(
         val messageId: Long,
         val row: ByteArray,
@@ -1542,7 +1555,7 @@ public sealed interface IncomingChatEvent {
         val messageId: Long,
         val systemKind: SystemKind,
         val createdAt: String,
-        /** ADR-0090 section 3.4 — for a merged commit, the distinct account
+        /** ADR-0092 section 3.4 — for a merged commit, the distinct account
          *  keys of the roster it produced: open anonymous polls extend their
          *  rings with the accounts it added. */
         val rosterAccountKeys: List<ByteArray>? = null,

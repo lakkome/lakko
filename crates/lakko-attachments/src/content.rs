@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Pieces shared by the ADR-0090 content codecs: the error vocabulary, the
+//! Pieces shared by the ADR-0092 content codecs: the error vocabulary, the
 //! bounded byte reader, the display-text rule and the author signature.
 //!
 //! Every content codec in this crate is strict and canonical: a decoder
@@ -13,7 +13,7 @@ use lakko_contacts::{check_display_name, is_format_char};
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};
 
 /// Length of a conversation's MLS group id. Every author signature in
-/// ADR-0090 binds the group id, and a fixed width keeps
+/// ADR-0092 binds the group id, and a fixed width keeps
 /// `domain || group_id || body` unambiguous.
 pub const GROUP_ID_LEN: usize = 32;
 
@@ -62,7 +62,7 @@ impl TextError {
     }
 }
 
-/// Why an ADR-0090 content payload (poll, checklist, location, contact card,
+/// Why an ADR-0092 content payload (poll, checklist, location, contact card,
 /// article) or op was refused. The whole payload is dropped on any of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ContentError {
@@ -249,7 +249,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The ADR-0090 display-text rule: `min..=max` bytes of UTF-8 with no control
+/// The ADR-0092 display-text rule: `min..=max` bytes of UTF-8 with no control
 /// character (`Cc`, so no line break) and no format character from the
 /// profile table (`lakko_contacts::FORMAT_CHAR_RANGES`).
 ///

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A shared location (ADR-0090 section 6): a point in fixed point at 1e-7
+//! A shared location (ADR-0092 section 6): a point in fixed point at 1e-7
 //! degree, its accuracy, the fix time and an optional place name. No
 //! floating point on the wire, no tiles, no geocoding.
 //!

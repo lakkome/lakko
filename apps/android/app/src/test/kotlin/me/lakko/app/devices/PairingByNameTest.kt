@@ -239,8 +239,9 @@ class PairingByNameTest {
         private val groupInStorage: Boolean = true,
     ) : JoinByNameSteps {
         val calls = mutableListOf<String>()
-        val grant = ByteArray(RecoveryPayload.RECOVERY_GRANT_TOKEN_LENGTH) { 6 }
-        val seed = ByteArray(RecoveryPayload.RECOVERY_PHRASE_ENTROPY_LENGTH) { 8 }
+        val grant = ByteArray(32) { 6 }
+        val seed = ByteArray(16) { 8 }
+        val predecessors = listOf(StateBundle.OwnPredecessorSeed(ByteArray(64) { 4 }, 1_700_000_000_000L))
         var persistedAs: ByteArray? = null
 
         override suspend fun pollRecoveryRow(): ByteArray? {
@@ -248,9 +249,9 @@ class PairingByNameTest {
             return if (row) ByteArray(4) else null
         }
 
-        override fun openRecoveryRow(sealed: ByteArray): RecoveryPayload.ParsedRecoveryPayload {
+        override fun openRecoveryRow(sealed: ByteArray): RecoveryRow.Parsed {
             calls += "open"
-            return RecoveryPayload.ParsedRecoveryPayload(grant, seed)
+            return RecoveryRow.Parsed(grant, seed, predecessors)
         }
 
         override fun joinedGroupId(): ByteArray = groupIdOf(joinedAccount)
@@ -290,6 +291,11 @@ class PairingByNameTest {
         assertArrayEquals(account, outcome.accountId)
         assertEquals("tok", outcome.sessionToken)
         assertTrue(outcome.phraseEntropy.any { it != 0.toByte() })
+        // G-56 (recovery payload v3): the account's earlier keys travel with
+        // the keys, intact, for the restore to store first.
+        assertEquals(1, outcome.predecessors.size)
+        assertTrue(outcome.predecessors.single().seed.all { it == 4.toByte() })
+        assertEquals(1_700_000_000_000L, outcome.predecessors.single().adoptedAtMs)
     }
 
     @Test
@@ -307,6 +313,7 @@ class PairingByNameTest {
         assertTrue(steps.calls.any { it.startsWith("redeem:") })
         assertTrue(steps.seed.all { it == 0.toByte() })
         assertTrue(steps.grant.all { it == 0.toByte() })
+        assertTrue(steps.predecessors.single().seed.all { it == 0.toByte() })
     }
 
     @Test
@@ -317,6 +324,10 @@ class PairingByNameTest {
         assertNull(outcome.persistJoin)
         assertNull(outcome.accountId)
         assertNull(outcome.sessionToken)
+        // Nothing can be stored for a keys-only outcome: the earlier keys
+        // are zeroed and not handed on.
+        assertTrue(outcome.predecessors.isEmpty())
+        assertTrue(steps.predecessors.single().seed.all { it == 0.toByte() })
     }
 
     @Test

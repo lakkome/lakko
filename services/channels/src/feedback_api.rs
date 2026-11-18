@@ -7,7 +7,7 @@
 //! |---|---|---|---|
 //! | `POST` | `/v1/channels/:id/posts/:cursor/reactions` | write proof by the reaction's key, then one `channel-react` token | Add the row `{writer_key_hex, label_hex}`. `201 {"added": true}`, or `200 {"added": false}` when the row was there. |
 //! | `DELETE` | `/v1/channels/:id/posts/:cursor/reactions/:writer_key_hex/:label_hex` | write proof by that key | Take the reaction off. `204` whether or not it was there. |
-//! | `GET` | `/v1/channels/:id/reactions?posts=<c1>,<c2>,...` | none | Label counts and the comment count of up to 50 posts, `{"posts": [{"cursor", "labels": [{"label_hex", "count"}], "comments"}]}`, at most 64 labels a post, the most counted first; `comments` is the post's maintained comment count (2026-11-05); `votes: {"voters", "labels": [{"label_hex", "count"}]}` the channel poll votes (ADR-0090 section 4.3). `Cache-Control: public, max-age=15`. |
+//! | `GET` | `/v1/channels/:id/reactions?posts=<c1>,<c2>,...` | none | Label counts and the comment count of up to 50 posts, `{"posts": [{"cursor", "labels": [{"label_hex", "count"}], "comments"}]}`, at most 64 labels a post, the most counted first; `comments` is the post's maintained comment count (2026-11-05); `votes: {"voters", "labels": [{"label_hex", "count"}]}` the channel poll votes (ADR-0092 section 4.3). `Cache-Control: public, max-age=15`. |
 //! | `POST` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions` | write proof by the reaction's key (op `0x05`), then one `channel-react` token | Add a reaction on the comment `{writer_key_hex, label_hex}` (a `CommentReactionKey` label). `201 {"added": true}` / `200 {"added": false}`; `404 unknown-comment`. |
 //! | `DELETE` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions/:writer_key_hex/:label_hex` | write proof by that key (op `0x06`) | Take it off. `204`. |
 //! | `GET` | `/v1/channels/:id/posts/:cursor/comment-reactions?comments=<c1>,...` | none | Label counts of up to 50 comments under the post, `{"comments": [{"cursor", "labels": [{"label_hex", "count"}]}]}`. `Cache-Control: public, max-age=15`. |
@@ -138,7 +138,7 @@ pub struct PostCountsView {
     pub labels: Vec<LabelCountView>,
     /// How many comments the post has (the maintained count).
     pub comments: u64,
-    /// Channel poll votes under the post (ADR-0090 section 4.3).
+    /// Channel poll votes under the post (ADR-0092 section 4.3).
     pub votes: VoteCountsView,
 }
 

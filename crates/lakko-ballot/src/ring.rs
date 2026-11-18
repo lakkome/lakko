@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The electorate of an anonymous poll and its versions (ADR-0090 section 3.4).
+//! The electorate of an anonymous poll and its versions (ADR-0092 section 3.4).
 //!
 //! Version 0 is the distinct account keys of the roster at the poll's epoch,
 //! sorted bytewise. Each later version appends the accounts a merged commit
@@ -28,14 +28,14 @@ use crate::point::{decode_nonidentity_point, POINT_LEN};
 /// The largest ring: 262,144 accounts. Chosen, not measured. Prover and
 /// verifier cost no longer depend on it (a proof covers at most 256 keys);
 /// what it bounds is what each member stores per poll (32 bytes a key,
-/// 8 MiB at the cap) and the open-items hand-over of ADR-0090 section 3.9,
+/// 8 MiB at the cap) and the open-items hand-over of ADR-0092 section 3.9,
 /// which at the cap spans about nine 1 MiB DS rows.
 pub const MAX_RING_LEN: usize = 1 << 18;
 
 /// The largest number of versions.
 pub const MAX_VERSIONS: usize = u16::MAX as usize;
 
-/// Domain of the ring hash (ADR-0090 section 3.4).
+/// Domain of the ring hash (ADR-0092 section 3.4).
 pub const RING_HASH_DOMAIN: &str = "lakko/poll/ring/v1";
 
 /// `BLAKE3-derive-key("lakko/poll/ring/v1", keys)` over the concatenated keys.
@@ -181,7 +181,7 @@ impl Ring {
 
     /// Encode as `ring_count(u32 BE) || ring_count x key(32) ||
     /// version_count(u16 BE) || version_count x length(u32 BE)`, the layout the
-    /// open-items hand-over of ADR-0090 section 3.9 carries.
+    /// open-items hand-over of ADR-0092 section 3.9 carries.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(6 + self.keys.len() * POINT_LEN + self.lengths.len() * 4);

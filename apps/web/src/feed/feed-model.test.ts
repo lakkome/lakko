@@ -218,6 +218,55 @@ describe("channels", () => {
     expect(post?.mentionsMe).toBe(false);
   });
 
+  it("a channel's media posts carry their attachments as a group's media message does (base scenario 32)", () => {
+    const ref = (mime: string, kind: string | null, fill: string) => ({
+      blobIdB64: fill.repeat(43),
+      keyB64: "B".repeat(43),
+      nonceB64: "C".repeat(16),
+      mime,
+      sizeStr: "1234",
+      name: null,
+      ...(kind === null ? {} : { kind }),
+    });
+    const photo = ref("image/jpeg", null, "A");
+    const voice = ref("audio/mp4", "voice", "D");
+    const note = ref("video/mp4", "video_note", "E");
+    const file = ref("text/plain", null, "F");
+    const gif = ref("image/gif", "gif", "G");
+    const media = (r: typeof photo) => [{ mime: r.mime, kind: r.kind ?? null, ref: r }];
+    const input = buildFeedInput(
+      ctx([], {
+        sources: [GROUP, CHANNEL],
+        channelPosts: {
+          [CHANNEL.idHex]: {
+            cursor: 7,
+            posts: [
+              { cursor: 1, serverTsMs: NOW - HOUR, text: "", media: media(photo) },
+              { cursor: 2, serverTsMs: NOW - HOUR, text: "", media: media(voice) },
+              { cursor: 3, serverTsMs: NOW - HOUR, text: "", media: media(note) },
+              { cursor: 4, serverTsMs: NOW - HOUR, text: "", media: media(file) },
+              { cursor: 5, serverTsMs: NOW - HOUR, text: "", media: media(gif) },
+              { cursor: 6, serverTsMs: NOW - HOUR, text: "caption", media: media(photo) },
+              // Nothing to show: left out.
+              { cursor: 7, serverTsMs: NOW - HOUR, text: "  " },
+            ],
+          },
+        },
+      }),
+    );
+    const posts = input.candidates.filter((c) => c.conversation === 1);
+    expect(posts.map((c) => c.messageId)).toEqual([1n, 2n, 3n, 4n, 5n, 6n]);
+    expect(posts.every((c) => c.hasMedia)).toBe(true);
+    const byId = new Map(input.refs.filter((r) => r.source.kind === "channel").map((r) => [r.message.messageId, r]));
+    expect(byId.get("1")?.message.attachments).toEqual([photo]);
+    expect(byId.get("2")?.message.attachments).toEqual([voice]);
+    expect(byId.get("3")?.message.attachments).toEqual([note]);
+    expect(byId.get("4")?.message.attachments).toEqual([file]);
+    expect(byId.get("5")?.message.attachments).toEqual([gif]);
+    expect(byId.get("6")?.message.text).toBe("caption");
+    expect(byId.get("6")?.message.attachments).toEqual([photo]);
+  });
+
   it("Latest ranks a newer post above an older group message", () => {
     const input = buildFeedInput(channelCtx(false));
     const rule = wasm.FeedRule.preset(wasm.FeedPreset.Latest);

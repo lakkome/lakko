@@ -123,8 +123,9 @@ public struct SignupScreen: View {
 /// keys and new words. The email and the passkey return to the step with
 /// their row marked done and `Continue` under the rows; saving a phrase
 /// lands in the app directly. The passkey row runs the existing passkey
-/// creation (with its "restore keys with this passkey" choice) under
-/// sign-up's fresh grant.
+/// creation under sign-up's fresh grant; the keys are then stored for the
+/// passkey with nothing to choose, wherever the platform can carry them
+/// (UX `docs/ux/identity-recovery.md` 10.2).
 struct SignupProtectScreen: View {
     @ObservedObject var authRepository: AuthRepository
     @ObservedObject var center: AccountProtectionCenter
@@ -136,9 +137,8 @@ struct SignupProtectScreen: View {
         case email
         case phrase
         case passkey
-        case keysChoice(AddedPasskey)
         /// The result line of the passkey step, then back to the step.
-        case result(String)
+        case result(UiText)
     }
 
     @State private var step: Step = .protect
@@ -237,26 +237,10 @@ struct SignupProtectScreen: View {
             }
             .task { await proof.opened() }
             .onDisappear { proof.closed() }
-        case .keysChoice(let added):
-            AuthScreen {
-                PasskeyKeysChoiceView(
-                    credentialIdB64: added.credentialIdB64,
-                    nickname: added.nickname,
-                    prfOutput: added.prfOutput,
-                    enrollment: .live(authRepository: authRepository, client: WebauthnClient()),
-                    onDone: { result in
-                        if let key = result.messageKey {
-                            step = .result(key)
-                        } else {
-                            passkeyDone()
-                        }
-                    }
-                )
-            }
-        case .result(let messageKey):
+        case .result(let line):
             AuthScreen {
                 AuthTitle(title: l10n.t("protect.passkey.title"))
-                AuthHint(text: l10n.t(messageKey))
+                AuthHint(text: line.text)
                 AuthPrimaryButton(title: l10n.t("protect.continue"), action: passkeyDone)
             }
         }
@@ -293,10 +277,12 @@ struct SignupProtectScreen: View {
                     freshGrant: freshGrant,
                     presentationAnchor: currentPresentationAnchor()
                 )
-                switch added.outcome {
-                case .offerKeysChoice: step = .keysChoice(added)
-                case .signInOnly: step = .result("settings.passkeys.added_no_keys")
-                }
+                // The passkey is added; its keys are stored with nothing to
+                // choose (UX 10.2 steps 2 and 3).
+                let outcome = await PasskeyKeysEnrollment
+                    .live(authRepository: authRepository, client: client)
+                    .storeAfterAdd(added)
+                step = .result(outcome.message(nickname: added.nickname))
             } catch {
                 switch SignupPasskeyStep.failure(error) {
                 case .stay:
@@ -306,6 +292,8 @@ struct SignupProtectScreen: View {
                     // appears, with no error styling. Nothing was added.
                     authRepository.dropFreshAuth()
                     proof.proofExpired()
+                case .alreadyExists:
+                    self.error = .key("settings.passkeys.error.already_exists")
                 case .error:
                     NSLog("[signup] WARN adding a passkey failed")
                     self.error = .key("auth.signup.passkey.error")
@@ -323,12 +311,16 @@ enum SignupPasskeyStep {
         case stay
         /// `403 fresh-auth-required`: the proof block appears.
         case proofNeeded
+        /// The device's passkey provider already holds a passkey for this
+        /// account: nothing was created, and it is not a device failure.
+        case alreadyExists
         case error
     }
 
     /// What a failed add leaves on the step.
     static func failure(_ error: Error) -> Failure {
         if AuthErrorCopy.isPasskeyCancelled(error) { return .stay }
+        if case .alreadyExists = error as? WebauthnRegistration.RegistrationError { return .alreadyExists }
         if FreshAuthRefusal.isRequired(error) { return .proofNeeded }
         return .error
     }

@@ -19,10 +19,10 @@ export const FEED_ICONS: ReadonlyArray<{ readonly name: IconName; readonly label
   { name: "feed", labelKey: "feed.icon.feed" },
   { name: "star", labelKey: "feed.icon.star" },
   { name: "heart", labelKey: "feed.icon.heart" },
-  { name: "lightning", labelKey: "feed.icon.lightning" },
+  { name: "bolt", labelKey: "feed.icon.lightning" },
   { name: "book", labelKey: "feed.icon.book" },
   { name: "code", labelKey: "feed.icon.code" },
-  { name: "music", labelKey: "feed.icon.music" },
+  { name: "music-note", labelKey: "feed.icon.music" },
   { name: "camera", labelKey: "feed.icon.camera" },
   { name: "globe", labelKey: "feed.icon.globe" },
   { name: "chat", labelKey: "feed.icon.speech_bubble" },
@@ -43,7 +43,7 @@ export function feedIconName(index: number): IconName {
  *  not which). */
 export const PRESET_ICONS: Readonly<Record<FeedPresetKey | "discover", IconName>> = {
   latest: "feed",
-  popular: "lightning",
-  "for-me": "user",
+  popular: "bolt",
+  "for-me": "person",
   discover: "globe",
 };

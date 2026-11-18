@@ -169,7 +169,7 @@ struct PasswordSettingsScreen: View {
                     )
                 }
                 if saved {
-                    Label(l10n.t("recovery.new_password.saved"), systemImage: "checkmark.circle.fill")
+                    Label(l10n.t("recovery.new_password.saved"), icon: .checkmarkCircleFill, size: 14, relativeTo: .footnote)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoSuccess)
                 }
