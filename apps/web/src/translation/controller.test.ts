@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { TranslationController, type MessageRef } from "./controller";
@@ -789,5 +789,136 @@ describe("transcripts (UX section 4)", () => {
       source: "es",
       text: "hello friends",
     });
+  });
+});
+
+describe("packs the system fetches, and anti-censorship (ADR-0082 note of 2026-11-18)", () => {
+  const audioBlob = (): Promise<Blob | null> => Promise.resolve(new Blob([new Uint8Array(4)]));
+
+  it("opens the system's settings instead of downloading, and translates nothing", async () => {
+    f.translationState.set("es>en", "needs-pack");
+    let opened = 0;
+    f.engines = {
+      ...f.engines,
+      translation: {
+        ...f.engines.translation,
+        packFetch: () => "system-settings",
+        openPackSettings: () => {
+          opened += 1;
+          return Promise.resolve();
+        },
+      },
+    };
+    const c = controller();
+    c.detected(ref(1), "hola amigos");
+    await flush();
+    c.translate("text", ref(1), "hola amigos");
+    await flush();
+    const request = c.packRequest();
+    expect(request?.systemSettings).toBe(true);
+    expect(request?.language).toBe("es");
+    request?.download();
+    await flush();
+    expect(opened).toBe(1);
+    expect(f.translateCalls).toEqual([]);
+    expect(packs).toEqual([]);
+    expect(c.packRequest()).toBeNull();
+    // Nothing waits: the line is back to the language, and the next
+    // Translate asks the system again (here the pack arrived).
+    expect(c.textView("text", ref(1)).phase).not.toBe("downloading");
+    f.translationState.set("es>en", "ready");
+    c.translate("text", ref(1), "hola amigos");
+    await flush();
+    expect(c.textView("text", ref(1)).phase).toBe("translated");
+  });
+
+  it("an engine pack still asks with the ordinary dialog", async () => {
+    f.translationState.set("es>en", "needs-pack");
+    const c = controller();
+    c.detected(ref(1), "hola amigos");
+    await flush();
+    c.translate("text", ref(1), "hola amigos");
+    await flush();
+    expect(c.packRequest()?.systemSettings).toBe(false);
+  });
+
+  it("says packs are blocked while anti-censorship is on, and asks nothing", async () => {
+    f.translationState.set("es>en", "needs-pack");
+    f.transcriptionState.set("en", "needs-pack");
+    f.engines = { ...f.engines, packsBlocked: () => Promise.resolve(true) };
+    const c = controller();
+    c.detected(ref(1), "hola amigos");
+    await flush();
+    c.translate("text", ref(1), "hola amigos");
+    await flush();
+    expect(c.packRequest()).toBeNull();
+    expect(c.textView("text", ref(1))).toEqual({ phase: "packs-blocked", language: "es" });
+    c.toggleTranscript(ref(7), audioBlob);
+    await flush();
+    expect(c.packRequest()).toBeNull();
+    expect(c.transcriptView(ref(7)).phase).toBe("packs-blocked");
+    expect(f.installed).toEqual([]);
+  });
+
+  it("a ready language is not affected by the block", async () => {
+    f.translationState.set("es>en", "ready");
+    f.engines = { ...f.engines, packsBlocked: () => Promise.resolve(true) };
+    const c = controller();
+    c.detected(ref(1), "hola amigos");
+    await flush();
+    c.translate("text", ref(1), "hola amigos");
+    await flush();
+    expect(c.textView("text", ref(1)).phase).toBe("translated");
+  });
+
+  it("a failing block check counts as blocked", async () => {
+    f.translationState.set("es>en", "needs-pack");
+    f.engines = { ...f.engines, packsBlocked: () => Promise.reject(new Error("host")) };
+    const c = controller();
+    c.detected(ref(1), "hola amigos");
+    await flush();
+    c.translate("text", ref(1), "hola amigos");
+    await flush();
+    expect(c.textView("text", ref(1)).phase).toBe("packs-blocked");
+  });
+});
+
+describe("the mobile-data setting", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const onLink = (type: string | undefined): void => {
+    vi.stubGlobal("navigator", type === undefined ? {} : { connection: { type } });
+  };
+
+  it("governs something only where a connection type is reported and Lakko fetches a pack", () => {
+    onLink("wifi");
+    expect(controller().mobileDataMatters()).toBe(true);
+    onLink("unknown");
+    expect(controller().mobileDataMatters()).toBe(false);
+    onLink(undefined);
+    expect(controller().mobileDataMatters()).toBe(false);
+  });
+
+  it("governs nothing when every pack comes from the system's settings and nothing is transcribed", () => {
+    onLink("cellular");
+    f.engines = {
+      ...f.engines,
+      translation: { ...f.engines.translation, fetchesPacks: false },
+      transcription: { ...f.engines.transcription, present: false },
+    };
+    expect(controller().mobileDataMatters()).toBe(false);
+    f.engines = { ...f.engines, transcription: { ...f.engines.transcription, present: true } };
+    expect(controller().mobileDataMatters()).toBe(true);
+  });
+
+  it("lists the system's packs only where the engines can", async () => {
+    expect(await controller().systemPacks("en")).toBeNull();
+    f.engines = {
+      ...f.engines,
+      systemPacks: (target) => Promise.resolve({ translation: [`es>${target}`], transcription: [] }),
+    };
+    expect(await controller().systemPacks("en")).toEqual({ translation: ["es>en"], transcription: [] });
   });
 });

@@ -150,6 +150,9 @@ describe("the translation code reaches no network", () => {
     /^\.\.\/wasm$/,
     /^\.\.\/ui\/(icons|ModalLayer|confirm-dialog|LakkoPicker)$/,
     /^\.\.\/auth\/(account-store-gate|account-memory|key-store|AuthContext)$/,
+    // The desktop host's engine routes: this app's own process, never a
+    // server (checked below, "the host engines ask only the host").
+    /^\.\.\/platform\/host-engines$/,
   ];
 
   it("scans every translation module", () => {
@@ -171,6 +174,20 @@ describe("the translation code reaches no network", () => {
       }
     }
     expect(bad).toEqual([]);
+  });
+});
+
+describe("the host engines ask only the host (ADR-0082 note of 2026-11-18)", () => {
+  const HOST_ENGINES = join(SRC_ROOT, "platform", "host-engines.ts");
+
+  it("sends every request to the host's own engine routes", () => {
+    const src = readFileSync(HOST_ENGINES, "utf8");
+    const calls = [...src.matchAll(/\bfetchImpl\s*\(\s*([^,)]+)/g)].map((m) => (m[1] ?? "").trim());
+    expect(calls.length).toBeGreaterThan(0);
+    for (const target of calls) expect(target).toMatch(/^`\$\{HOST_ENGINES_PATH\}\//);
+    expect(src).toMatch(/export const HOST_ENGINES_PATH = "\/__host\/engines";/);
+    // No other network API, and no request to a page-chosen address.
+    expect(/\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b/.test(src)).toBe(false);
   });
 });
 

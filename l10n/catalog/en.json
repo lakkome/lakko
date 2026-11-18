@@ -135,6 +135,10 @@
       "text": "This browser doesn't support passkeys.",
       "comment": "Passkeys are not available in this browser."
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "This device doesn't support passkeys.",
+      "comment": "Desktop app variant of auth.passkey.error.unsupported: passkeys are not available on this device."
+    },
     "auth.passkey.error.wrong_account": {
       "text": "This passkey belongs to a different account than the one on this device. Log in with your password first.",
       "comment": "Passkey sign-in refused: the passkey chosen is for another account than the one saved on this device."
@@ -786,6 +790,11 @@
       "comment": "A group call or a call from a link was refused because this browser cannot end-to-end encrypt call audio and video; Lakko never falls back to an unencrypted call.",
       "security_critical": true
     },
+    "call.error.no_media_encryption_desktop": {
+      "text": "This device cannot encrypt call media, so the call did not start.",
+      "comment": "Desktop app variant of call.error.no_media_encryption: a group call or a call from a link was refused because this device cannot end-to-end encrypt call audio and video; Lakko never falls back to an unencrypted call.",
+      "security_critical": true
+    },
     "call.error.not_accepting": {
       "text": "This call is not accepting new participants right now.",
       "comment": "Joining a call was refused because too many new accounts joined it in a short time."
@@ -1346,9 +1355,17 @@
       "text": "Can't share your screen. Allow screen sharing for this site in your browser settings.",
       "comment": "Shown when the browser refused screen sharing."
     },
+    "call.screen_share.refused_desktop": {
+      "text": "Can't share your screen. Allow screen recording for Lakko in your system's privacy settings.",
+      "comment": "Desktop app (not macOS): the system refused screen recording for Lakko."
+    },
     "call.screen_share.refused_macos": {
       "text": "Can't share your screen. Allow screen recording for your browser in System Settings.",
       "comment": "Shown on macOS when the system refused screen recording for the browser."
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Can't share your screen. Allow screen recording for Lakko in System Settings.",
+      "comment": "Desktop app on macOS: the system refused screen recording for Lakko. \"System Settings\" is the name of the macOS app."
     },
     "call.screen_share.started": {
       "text": "{name} started sharing their screen",
@@ -3631,6 +3648,10 @@
       "text": "Lakko needs camera access to record video messages. Allow camera access in your browser's site settings.",
       "comment": "Card shown when the browser refused the camera."
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko needs camera access to record video messages. Allow it in your system's privacy settings.",
+      "comment": "Desktop app: card shown when the system refused the camera."
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko needs camera access to record video messages",
       "comment": "Card shown when camera access is denied for this app; an Open Settings button follows."
@@ -3638,6 +3659,10 @@
     "chat.record.denied_microphone": {
       "text": "Lakko needs microphone access to record voice messages. Allow microphone access in your browser's site settings.",
       "comment": "Card shown when the browser refused the microphone."
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko needs microphone access to record voice messages. Allow it in your system's privacy settings.",
+      "comment": "Desktop app: card shown when the system refused the microphone."
     },
     "chat.record.denied_microphone_app": {
       "text": "Lakko needs microphone access to record voice messages",
@@ -3750,6 +3775,10 @@
     "chat.record.unsupported_voice": {
       "text": "Voice messages can't be recorded in this browser",
       "comment": "Why the record button is disabled: this browser cannot record voice messages."
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "Voice messages can't be recorded on this device",
+      "comment": "Desktop app: why the record button is disabled: this device cannot record voice messages."
     },
     "chat.record.video": {
       "text": "Record video message",
@@ -5571,6 +5600,10 @@
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko cannot use the camera. Allow camera access in your browser's site settings, then try again.",
       "comment": "Web: camera access for scanning a pairing code was refused by the browser or failed."
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko cannot use the camera. Allow camera access in your system's privacy settings, then try again.",
+      "comment": "Desktop app: camera access for scanning a pairing code was refused by the system."
     },
     "devices.scan.error.camera_failed": {
       "text": "The camera could not start. Try again.",
@@ -8494,6 +8527,10 @@
       "text": "This device or browser does not support passkeys. Choose another way.",
       "comment": "Shown in place of the passkey form where passkeys are not available."
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "This device does not support passkeys. Choose another way.",
+      "comment": "Desktop app: shown in place of the passkey form where passkeys are not available."
+    },
     "recovery.passkey.waiting": {
       "text": "Waiting for your passkey...",
       "comment": "Busy label of the passkey button while the system or browser passkey prompt is open."
@@ -9317,6 +9354,11 @@
       "comment": "What forgetting this device removes and how to come back.",
       "security_critical": true
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Removes your account data from this device. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase.",
+      "comment": "Desktop app: what forgetting this device removes and how to come back.",
+      "security_critical": true
+    },
     "settings.account.forget_device.title": {
       "text": "Forget this device?",
       "comment": "Confirmation dialog title.",
@@ -9506,6 +9548,10 @@
     "settings.devices.error.no_device_key": {
       "text": "This browser is not set up for your account. Sign in again.",
       "comment": "Web: this browser holds no device key for the account."
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "This device is not set up for your account. Sign in again.",
+      "comment": "Desktop app: this device holds no device key for the account; signing in again fixes it."
     },
     "settings.devices.error.remove": {
       "text": "Could not remove the device. Try again.",
@@ -9731,6 +9777,10 @@
       "text": "This browser / device can't create passkeys right now.",
       "comment": "The platform refused to create a passkey."
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "This device can't create passkeys right now.",
+      "comment": "Desktop app: the system refused to create a passkey."
+    },
     "settings.passkeys.keys.error.other_passkey": {
       "text": "A different passkey answered. Try again and choose this passkey.",
       "comment": "Row action Restore keys with this passkey: the person picked another passkey in the system sheet.",
@@ -9851,6 +9901,10 @@
     "settings.passkeys.unsupported_browser": {
       "text": "This browser cannot manage passkeys. Use a recent Safari, Chrome, Firefox or Edge.",
       "comment": "Web only: the browser has no WebAuthn support."
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "This device cannot manage passkeys.",
+      "comment": "Desktop app: passkeys are not available on this device, so the passkey list cannot be shown."
     },
     "settings.password.change": {
       "text": "Change password",
@@ -10184,6 +10238,10 @@
       "text": "Managed by your browser",
       "comment": "Shown instead of Remove for a pack the browser manages."
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Managed by your system",
+      "comment": "Desktop app: shown instead of Remove for a pack the operating system manages."
+    },
     "settings.translation.pack.remove": {
       "text": "Remove",
       "comment": "Button that deletes a pack Lakko downloaded."
@@ -10377,6 +10435,11 @@
       "comment": "Dialog body with the pack size, e.g. '30 MB'. {language} is a language name in the interface language, e.g. 'Spanish'.",
       "security_critical": true
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Translation happens on this device. macOS downloads the {language} pack in System Settings: Language & Region, then Translation Languages. Messages are never sent anywhere to be translated.",
+      "comment": "Desktop app on macOS: dialog body when a translation pack is needed; macOS downloads it in its own settings, which the button opens. 'System Settings', 'Language & Region' and 'Translation Languages' are the names macOS shows; use the names macOS shows in this language. {language} is a language name in the interface language, e.g. 'Spanish'.",
+      "security_critical": true
+    },
     "translate.pack.cancel": {
       "text": "Cancel",
       "comment": "Cancels a pack download in progress."
@@ -10405,6 +10468,10 @@
       "text": "Not now",
       "comment": "Pack dialog: close without downloading."
     },
+    "translate.pack.open_system_settings": {
+      "text": "Open System Settings",
+      "comment": "Desktop app on macOS: pack dialog button that opens System Settings at Language & Region. 'System Settings' is the name of the macOS app, as macOS shows it in this language."
+    },
     "translate.pack.source.android": {
       "text": "The pack comes from Google.",
       "comment": "Second paragraph of the pack dialog on Android: who serves the download.",
@@ -10418,6 +10485,11 @@
     "translate.pack.source.web": {
       "text": "The pack comes from your browser's maker.",
       "comment": "Second paragraph of the pack dialog on the web: who serves the download.",
+      "security_critical": true
+    },
+    "translate.pack.source.desktop": {
+      "text": "The pack comes from your system's maker.",
+      "comment": "Second paragraph of the pack dialog in the desktop app: who serves the download (the company that makes the operating system).",
       "security_critical": true
     },
     "translate.pack.title.transcription": {

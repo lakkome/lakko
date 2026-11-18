@@ -13,7 +13,9 @@
   (section 13, 2026-10-30); S4 is built and the tunnel runs on the test stack (section 14, 2026-10-30), with
   no call placed through it; S5 is built in part on macOS (2026-10-31): files and
   `lakko://` links, not yet walked by hand; the TUF repository, install and
-  packaging are not started.
+  packaging are not started. Translation and transcription on macOS through
+  a host helper, `lakko-engines`, built 2026-11-18 (section 16), not walked
+  on screen.
 - **Date:** 2026-10-16
 - **Amends:** [ADR-0002](0002-rust-core.md) (the desktop row of the
   per-platform UI table, and its open question "is Tauri 2.x mature enough").
@@ -643,6 +645,45 @@ browser and the Windows build are unchanged. Unverified: anything on screen
 in the Lakko window itself; the test app with Lakko's stylesheet showed the
 call tile, the self view, a video note, a GIF, an avatar and a video with
 native controls through their canvases.
+
+### 16. Translation and transcription through a helper on macOS (2026-11-18)
+
+The webview has no on-device translation, detection or speech recognition
+(ADR-0082 section 1, web row), so the desktop app offered neither. The host
+gains a component for it, macOS only (ADR-0082 note of 2026-11-18 is the
+decision and the details):
+
+- **`lakko-engines`**, a Swift program (`apps/desktop/macos-engines/
+  main.swift`) that `just dev-desktop` builds with `swiftc` for macOS 26.4
+  and arm64, copies into `Lakko.app/Contents/MacOS` next to the host and
+  signs before the bundle. It runs Apple's `TranslationSession`,
+  `SpeechAnalyzer` + `SpeechTranscriber` and `NLLanguageRecognizer`, and
+  speaks one JSON object per line on its standard input and output. A child
+  process rather than FFI, because the host crate forbids `unsafe`.
+- **`engines.rs`** in the host: runs `lakko-engines --probe` while Tauri
+  starts and gives the page a read-only `__LAKKO_SYSTEM_ENGINES__` global
+  through an initialization script; starts the helper on the first request
+  and keeps it; serves `/__host/engines/*` on the app scheme (capabilities,
+  detect, translation state, translate, speech state, speech install,
+  transcribe with 16 kHz mono PCM as the body, `packs-blocked`, and opening
+  System Settings > Language & Region for a translation pack). Only the
+  fields of the operation reach the helper; text and audio stay in memory;
+  the log names the operation and its outcome only.
+- **`packs-blocked`** is true whenever anti-censorship is switched on (the
+  tunnel's route is not direct); the speech-pack install route then refuses.
+- The bundle's `Info.plist` gains `NSSpeechRecognitionUsageDescription`.
+  On this Mac (macOS 27.2) transcription through `SpeechAnalyzer` ran
+  without a permission prompt; the key is there for the system that asks.
+- Windows and Linux: no helper; the probe reports nothing and the page says
+  the features are not available on this device.
+
+Built and host-tested (2026-11-18): the helper answered over its pipe from a
+`cargo test` against the binary `just dev-desktop` built (detection,
+translation state, a refused malformed recording, an unknown operation), and
+by hand in a terminal (translation and speech states, an English recording
+transcribed word for word); the running app logged both engines present. Not
+seen on screen: the walk through the app's settings and a message menu
+needed full-screen control, which was not approved during the session.
 
 ## Alternatives
 

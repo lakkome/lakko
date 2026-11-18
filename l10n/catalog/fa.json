@@ -125,6 +125,10 @@
       "text": "این مرورگر از کلید عبور پشتیبانی نمی‌کند.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "این دستگاه از کلید عبور پشتیبانی نمی‌کند.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "این کلید عبور متعلق به حسابی غیر از حساب ذخیره‌شده روی این دستگاه است. ابتدا با رمز عبور وارد شوید.",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "این مرورگر نمی‌تواند صدا و تصویر تماس را رمزگذاری کند، برای همین تماس شروع نشد.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "این دستگاه نمی‌تواند صدا و تصویر تماس را رمزگذاری کند، برای همین تماس شروع نشد.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد. در تنظیمات سایت مرورگر خود اجازه دسترسی به دوربین را بدهید.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد. آن را در تنظیمات حریم خصوصی سیستم مجاز کنید.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko برای ضبط پیام صوتی به میکروفون دسترسی نیاز دارد. در تنظیمات سایت مرورگر خود اجازه دسترسی به میکروفون را بدهید.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko برای ضبط پیام صوتی به میکروفون دسترسی نیاز دارد. آن را در تنظیمات حریم خصوصی سیستم مجاز کنید.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "در این مرورگر نمی‌توان پیام صوتی ضبط کرد",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "در این دستگاه نمی‌توان پیام صوتی ضبط کرد",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات سایت مرورگرتان دسترسی به دوربین را مجاز کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات حریم خصوصی سیستم اجازه دسترسی به دوربین را بدهید و دوباره تلاش کنید.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "این دستگاه یا مرورگر از کلیدهای عبور پشتیبانی نمی‌کند. راه دیگری انتخاب کنید.",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "این دستگاه از کلیدهای عبور پشتیبانی نمی‌کند. راه دیگری انتخاب کنید.",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "در انتظار کلید عبور شما...",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "داده‌های حساب شما را از این مرورگر حذف می‌کند. پیام‌هایتان روی دستگاه‌های دیگرتان می‌مانند؛ برای بازگشت به اینجا به دستگاه دیگر، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی نیاز دارید.",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "داده‌های حساب شما را از این دستگاه حذف می‌کند. پیام‌هایتان روی دستگاه‌های دیگرتان می‌مانند؛ برای بازگشت به اینجا به دستگاه دیگر، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی نیاز دارید.",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "این دستگاه فراموش شود؟",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "این مرورگر برای حساب شما تنظیم نشده است. دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "این دستگاه برای حساب شما تنظیم نشده است. دوباره وارد شوید.",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "این مرورگر یا دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "این دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "این کلید عبور اکنون کلیدهای حساب شما را بازیابی می‌کند.",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "این مرورگر نمی‌تواند کلیدهای عبور را مدیریت کند. از نسخه جدید Safari، Chrome، Firefox یا Edge استفاده کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "این دستگاه نمی‌تواند کلیدهای عبور را مدیریت کند.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "مدیریت‌شده توسط مرورگر شما",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "مدیریت‌شده توسط سیستم شما",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "حذف",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "ترجمه در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد ({size}). پیام‌ها هرگز برای ترجمه به جایی فرستاده نمی‌شوند.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "ترجمه در همین دستگاه انجام می‌شود. macOS بسته {language} را در System Settings دانلود می‌کند: Language & Region، سپس Translation Languages. پیام‌ها هرگز برای ترجمه به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "لغو",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "الان نه",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "باز کردن System Settings",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "این بسته از Google می‌آید.",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "این بسته از سازنده مرورگر شما می‌آید.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "این بسته از سازنده سیستم شما می‌آید.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "چه کسی می‌تواند مرا پیدا کند",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "صفحه‌تان به اشتراک گذاشته نشد. در تنظیمات حریم خصوصی سیستم به Lakko اجازه ضبط صفحه بدهید.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "صفحه‌تان به اشتراک گذاشته نشد. در تنظیمات سیستم به Lakko اجازه ضبط صفحه بدهید.",
       "status": "machine"
     }
   },

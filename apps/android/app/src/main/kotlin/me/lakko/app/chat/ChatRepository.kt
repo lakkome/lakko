@@ -10361,6 +10361,17 @@ public class ChatRepository(
         // guards the shared OpenMLS provider (against every OTHER group's MLS
         // work). Deliberately NOT held across the fetch, so a 30 s long poll
         // still blocks neither.
+        // ADR-0091 phase 1 — a held registered commit is read again only when
+        // its next attempt is due. Until then this poll does not fetch: it
+        // waits out its long-poll time or the attempt time, whichever is
+        // first (cancellable like the long poll), and returns with the cursor
+        // unchanged, so a hold never spins.
+        chatClient.holds.msUntilDue(groupIdHex)?.takeIf { it > 0L }?.let { untilDue ->
+            val waitMs = minOf(waitSecs.coerceAtLeast(0).toLong() * 1_000L, untilDue)
+            if (waitMs > 0L) kotlinx.coroutines.delay(waitMs)
+            return GroupPollOutcome.APPLIED
+        }
+
         // ADR-0057 — the epoch before this batch applied: an owner whose batch
         // advanced it (a member joined or a role changed under someone else's
         // commit) reconciles its registrar appointments at the tail. Plain
@@ -12175,6 +12186,12 @@ public class ChatRepository(
                         if (outcome == GroupPollOutcome.APPLIED && record.cursor == before) return
                     }
                 }
+
+                // ADR-0091 phase 1 — a held registered commit, or a behind
+                // mark at or above the noted epoch, means the epochs above
+                // are real: no Replace.
+                override fun registeredCommitKnownAbove(groupIdHex: String, epoch: ULong): Boolean =
+                    chatClient.holds.repairBlocked(groupIdHex, epoch)
 
                 override fun currentEpochKey(groupIdHex: String): me.lakko.app.ds.EpochKey? =
                     currentJournalSigner(groupIdHex)?.let { me.lakko.app.ds.EpochKey(it.epoch, it.verifyingKey) }
@@ -15614,6 +15631,22 @@ public class ChatRepository(
                     null
                 }
                 sweepBackoff.mayStage(groupIdHex, epoch)
+            },
+            // ADR-0091 phase 1 — the same identifier-free line the poll writes.
+            // The sweep's fetch carries no `latest_epoch`.
+            logSkippedRow = { row, failure, localEpoch ->
+                android.util.Log.w(
+                    FAILED_ROW_LOG_TAG,
+                    failedRowLine(
+                        kind = failedRowKind(failure),
+                        sealedEpoch = runCatching { uniffi.lakko_ffi_uniffi.epochOfMessage(row.payload) }.getOrNull(),
+                        epochAfter = runCatching { uniffi.lakko_ffi_uniffi.epochAfterMessage(row.payload) }.getOrNull(),
+                        localEpoch = localEpoch,
+                        latestEpoch = null,
+                        verdict = RegisteredCommitVerdict.SKIP,
+                        attempt = null,
+                    ),
+                )
             },
         )
     }

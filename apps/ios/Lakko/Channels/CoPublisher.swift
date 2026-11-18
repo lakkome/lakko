@@ -432,6 +432,7 @@ public enum CoPublisher {
                 auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
             for m in raw.messages {
                 cursor = max(cursor, m.id)
+                let localEpoch = try? publisherGroup.epoch()
                 do {
                     let processed = try publisherGroup.processIncomingVerifyingRoles(
                         identity: identity, bytes: m.payload)
@@ -444,6 +445,10 @@ public enum CoPublisher {
                     }
                 } catch {
                     // A commit we have already merged (epoch mismatch) — skip.
+                    // ADR-0091 phase 1 — logged, no identifier; not held.
+                    RegisteredCommitLog.skipped(
+                        error: error, payload: m.payload, localEpoch: localEpoch,
+                        latestEpoch: raw.latestEpoch)
                 }
             }
             if !raw.hasMore || raw.messages.isEmpty { break }

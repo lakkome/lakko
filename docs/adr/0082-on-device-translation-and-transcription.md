@@ -17,6 +17,10 @@
   Rust core where the platform has none Lakko can use (Android always; the web
   when the browser's `LanguageDetector` is absent or its model is not on the
   device); iOS keeps `NLLanguageRecognizer` (note of 2026-11-15).
+  **Amended 2026-11-18 (maintainer):** where the platform has an on-device
+  engine for a language it is used, otherwise an on-device engine Lakko
+  ships (unbuilt); the macOS desktop app runs Apple's engines through a host
+  helper (note of 2026-11-18).
 - **Date:** 2026-10-25
 - **Context:** media messages (ADR-0047), message actions (ADR-0052), interface
   localization (ADR-0061), store gate (ADR-0077), anti-censorship transport
@@ -56,6 +60,7 @@ Nothing in the wire format changes.**
 | Android | `SpeechRecognizer.createOnDeviceSpeechRecognizer` (API 31+), only after `isOnDeviceRecognitionAvailable` returns true. `createSpeechRecognizer` is never used: its documentation says the implementation is likely to stream audio to remote servers | The system `android.view.translation.TranslationManager` (API 31+), only `createOnDeviceTranslator` and `getOnDeviceTranslationCapabilities`, never the deprecated `createTranslator`; on a device whose system reports no on-device translation capability (or below API 31), ML Kit Translate, whose data disclosure says it reports the configured source and target languages to Google (amended 2026-10-27; never while anti-censorship is on). Since 2026-11-15 the choice is per language pair: the system service for a pair whose pack it already has, ML Kit for every other pair, its pack download included, because Lakko has no documented way to make the system download one | No platform detector: `TextClassifier` may run in an OEM process and ML Kit Language Identification reports the identified languages. Since 2026-11-15 the core detector `detectTextLanguage` (note of that date) |
 | Web | `SpeechRecognition` only with `processLocally = true`, which the draft specification defines as "must be done locally"; with it absent or unsupported, the feature is absent. Experimental; which browsers honour it is not established | `Translator` API (Chrome 138+, desktop only per Chrome's documentation; Firefox and Safari not supported) | `LanguageDetector` API (same availability), only with its model already on the device; otherwise, since 2026-11-15, the core detector `detectTextLanguage` (note of that date) |
 | watchOS | none in v1 | none in v1 | none |
+| Desktop app (ADR-0085) | macOS 26.4+: Apple's `SpeechAnalyzer` + `SpeechTranscriber` through the host's helper (note of 2026-11-18); Windows, Linux: none yet | macOS 26.4+: `TranslationSession` through the helper; Windows, Linux: none yet | macOS: `NLLanguageRecognizer` through the helper, then the core detector; elsewhere the core detector |
 
 A platform capability probe on each client answers, per language, `ready`,
 `needs-pack` or `unavailable`; the UI offers controls from that answer alone
@@ -446,6 +451,88 @@ which it rarely was. iOS uses `NLLanguageRecognizer` and is unchanged.
   ML Kit, the real ML Kit engine with anti-censorship on); not run on a
   device.
 
+## Note of 2026-11-18: the system engine where there is one, Lakko's own where there is none; the desktop app on macOS
+
+**Decision (maintainer, 2026-11-18).** On every client, a language is
+translated and transcribed by the platform's own on-device engine when it has
+one for that language; where it has none, by an on-device engine Lakko ships
+itself (alternative 3 below: Lakko-served packs, the ADR-0061 approach). That
+covers Windows and Linux, browsers without `Translator` or local
+`SpeechRecognition`, and languages Apple or Google do not cover. Nothing about
+section 2 changes: every engine in the order runs on the device, and with
+none for a language the control is still not offered. **Lakko's own engine is
+not built**; the order exists in code so that it joins without touching a
+screen.
+
+**The order, as built on the web client.** `apps/web/src/translation/
+engine-order.ts` takes a list of engines; per language (per pair for
+translation) the first one that does not answer `unavailable` owns it, and its
+state, its pack and its result are the ones used. A system pack not yet on the
+device (`needs-pack`) still belongs to the system. `device-engines.ts` builds
+the list: the desktop host's system engines, then the browser's; Lakko's own
+engine is meant to go last. The controller and the screens read one engine set
+and do not know there is a list.
+
+**The desktop app on macOS.** WKWebView has no `Translator`, no
+`LanguageDetector` and no local `SpeechRecognition`, so until now the desktop
+app said both features were not available. The host now runs Apple's engines
+in a helper next to it, `lakko-engines` (`apps/desktop/macos-engines/
+main.swift`, built and placed in `Lakko.app/Contents/MacOS` by
+`just dev-desktop`), spoken to over its standard input and output, one JSON
+object per line (`apps/desktop/src-tauri/src/engines.rs`, routes
+`/__host/engines/*`). A helper rather than FFI because the host crate forbids
+`unsafe`. The engines are the iOS client's:
+
+| | Engine on macOS | Local guarantee |
+|---|---|---|
+| Detection | `NLLanguageRecognizer`, its ranked list through `languageCandidatesFromHypotheses` (the shared rule), then the core detector | runs in process |
+| Translation | `TranslationSession(installedSource:target:preferredStrategy: .lowLatency)`, state from `LanguageAvailability(preferredStrategy: .lowLatency)` | an `installedSource` session uses packs already on the Mac and never starts a download; `lowLatency` is never Apple Intelligence |
+| Transcription | `SpeechAnalyzer` + `SpeechTranscriber`, installed state from `SpeechTranscriber.installedLocales`, packs through `AssetInventory` | on-device by Apple's documentation |
+
+- **Requires macOS 26.4** (the `lowLatency` strategy); the helper is built for
+  it and does not load on anything older, which the host reports as no
+  engines. The host runs `lakko-engines --probe` at start (about 0.16 s,
+  measured on this Mac, macOS 27.2) and hands the page a read-only global,
+  `__LAKKO_SYSTEM_ENGINES__`, before any page script runs.
+- **What crosses, and where it stays.** The page sends the host the text of a
+  message to detect or translate, and the audio of a voice or video message,
+  decoded in the page by Web Audio and resampled to 16 kHz mono 16-bit PCM;
+  the host relays them to the helper over a pipe. Nothing is written to disk
+  (the iOS client exports an M4A to a temporary file; the helper takes PCM
+  buffers instead) and nothing is logged: the host logs the operation and
+  whether it worked, the helper writes nothing but its answers. Results are
+  stored by the web client as before (section 5, behind the ADR-0077 gate).
+- **Translation packs: managed by macOS.** Apple offers no way for a program
+  without a SwiftUI window to download a translation language
+  (`translationTask` / `prepareTranslation` are SwiftUI-only). So the pack
+  dialog (UX 3.5) says that macOS downloads it in System Settings, Language
+  & Region, Translation Languages, and its button opens that pane
+  (`x-apple.systempreferences:com.apple.Localization-Settings.extension`).
+  Lakko downloads nothing and waits for nothing: the line returns to
+  `Spanish · Translate` and the next tap asks macOS again.
+- **Transcription packs** download through `AssetInventory` from the helper,
+  after the person agreed, as on iOS.
+- **Anti-censorship.** The desktop app is the first web-based client with
+  anti-censorship (ADR-0085). While it is switched on, no pack is offered: the
+  host answers `packs-blocked`, and the line says `Language packs can't be
+  downloaded while anti-censorship is on` (the web client gained this state;
+  the browser has no anti-censorship and never shows it).
+- **Measured on this Mac (macOS 27.2.1, 2026-11-18), with unbundled test
+  programs:** no translation pack was installed, and es, ru, de, fr to en
+  and en to ru all answered `needs-pack`; an English recording, fed to the
+  transcriber as an in-memory buffer, came back word for word with no
+  speech-recognition permission prompt (the authorization status stayed
+  not determined); `AssetInventory.status` answered `supported` for an
+  English model that was on the Mac and transcribed, so installed is read
+  from `installedLocales` (the iOS client reads `status`; whether iOS has the
+  same discrepancy is not checked); Russian has no `SpeechTranscriber` locale;
+  with standard input read on the main thread `LanguageAvailability` never
+  answered, so the helper reads on a thread of its own.
+- **Not built:** Windows and Linux (the host reports no engines there, and
+  the page says translation and transcription are not available on this
+  device); an Intel build of the helper (arm64 only); partial transcripts
+  while the helper works (the line says `Transcribing…` until the end).
+
 ## Alternatives
 
 1. **A Lakko server endpoint that translates or transcribes.** Gives every
@@ -497,8 +584,9 @@ would look at section 2 and section 5.
    revisited after v1.
 2. Sender-attached transcripts (UX open question 2). Decided for v1
    (2026-10-25): none; may be revisited after v1.
-3. Own bundled engines (alternative 3): when, and which models, measured on
-   which devices.
+3. Own bundled engines (alternative 3): decided 2026-11-18 as the engine for
+   every language the platform has none for (note of that date); which
+   models, measured on which devices, is open.
 4. Whether Chrome falls back to its server engine when `processLocally = true`
    cannot be honoured, or refuses: the draft says it must be local; behaviour in
    shipping Chrome is to be checked before the web client relies on it.

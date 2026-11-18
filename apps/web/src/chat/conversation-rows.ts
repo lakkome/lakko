@@ -26,7 +26,7 @@ import { createChannelRowFeed } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
 import { groupTitle } from "./group-title";
-import { previewLine } from "./list-preview";
+import { emptyPreviewLine, previewLine } from "./list-preview";
 import { channelInviteRowPreview } from "./channel-invite-preview";
 import { publicOrigin } from "../platform";
 import { memberNameOf } from "../profile/member-label";
@@ -140,6 +140,12 @@ export function createConversationRows() {
     {},
   );
 
+  // The account whose log has been read at least once on this mount. Until
+  // then a row's last message is not known, and the row must not say there
+  // is none: on a cold start every row read `No messages yet` for a second
+  // or two before the previews arrived (seen on the desktop app, 2026-11-18).
+  const [logReadFor, setLogReadFor] = createSignal<string | null>(null);
+
   async function reloadLog(): Promise<void> {
     const s = auth.state();
     if (s.kind !== "session") return;
@@ -147,9 +153,18 @@ export function createConversationRows() {
     const deviceKey = await getDeviceKey(accountIdB64);
     if (deviceKey === null) return;
     const log = await loadMessageLog(accountIdB64, deviceKey);
-    if (log === null) return;
-    setLogSlots(log.groups);
+    // No log stored is an answer too: nothing was said in any conversation
+    // (and nothing of another account's log may stay on the rows).
+    setLogSlots(log?.groups ?? {});
+    setLogReadFor(accountIdB64);
   }
+
+  /** Whether the message log of the signed-in account has been read, so an
+   *  empty slot means "no messages" rather than "not read yet". */
+  const logKnown = (): boolean => {
+    const account = accountId();
+    return account !== null && logReadFor() === account;
+  };
 
   // Read again when the account lands and when the groups arrive: on a cold
   // load the list mounts before either, the read then finds nothing, and with
@@ -264,8 +279,9 @@ export function createConversationRows() {
     });
     if (line.length > 0) return line;
     // Nothing said yet (as Android shows): never the @name, which read as a
-    // contact rather than a conversation.
-    return t("chats.row.no_messages");
+    // contact rather than a conversation; and nothing at all while the log
+    // is still being read (the row keeps its height, `ChatList.tsx`).
+    return emptyPreviewLine(logKnown());
   };
 
   /**

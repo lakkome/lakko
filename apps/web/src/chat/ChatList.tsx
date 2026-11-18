@@ -744,7 +744,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     </div>
                     <div class="lk-row-line">
                       <span class="lk-row-sub" data-testid="chat-preview">
-                        {sub()}
+                        {/* An empty line while the previews are read still
+                            takes a line's height, so no row moves. */}
+                        {sub().length > 0 ? sub() : "\u00a0"}
                       </span>
                       <span class="lk-row-trail">
                         <Show when={flags().muted}>

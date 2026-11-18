@@ -25,9 +25,10 @@
 
 import { createSignal } from "solid-js";
 
-import type { Detection, EngineState, Engines } from "./engines";
+import type { Detection, EngineState, Engines, SystemPacks } from "./engines";
 import {
   CANDIDATE_LANGUAGES,
+  connectionTypeKnown,
   messageKey,
   onCellular,
   SAME_LANGUAGE_LINE_MS,
@@ -85,7 +86,9 @@ export type TextView =
   /** `percent` is `null` until the browser reports progress, if ever. */
   | { readonly phase: "downloading"; readonly language: string; readonly percent: number | null }
   | { readonly phase: "waiting-wifi"; readonly language: string }
-  | { readonly phase: "pack-failed"; readonly language: string };
+  | { readonly phase: "pack-failed"; readonly language: string }
+  /** A pack is needed and anti-censorship is on (ADR-0082 section 4). */
+  | { readonly phase: "packs-blocked"; readonly language: string };
 
 /** The transcript block of a voice or video message (UX 4.3). */
 export type TranscriptView =
@@ -104,7 +107,9 @@ export type TranscriptView =
   | { readonly phase: "no-speech"; readonly language: string }
   | { readonly phase: "failed" }
   | { readonly phase: "unsupported"; readonly language: string }
-  | { readonly phase: "unavailable-file" };
+  | { readonly phase: "unavailable-file" }
+  /** A pack is needed and anti-censorship is on (ADR-0082 section 4). */
+  | { readonly phase: "packs-blocked" };
 
 /** The UX 3.5 dialog. */
 export interface PackRequest {
@@ -112,6 +117,9 @@ export interface PackRequest {
   readonly language: string;
   /** On a cellular link without permission: the button reads `Download on Wi-Fi`. */
   readonly wifiOnly: boolean;
+  /** The system downloads this pack in its own settings (macOS translation):
+   *  the button opens them and nothing is downloaded by Lakko. */
+  readonly systemSettings: boolean;
   /** `Download` - called from the person's press, which the browser needs. */
   readonly download: () => void;
   readonly dismiss: () => void;
@@ -178,6 +186,27 @@ export class TranslationController {
   }
   get transcriptionPresent(): boolean {
     return this.deps.engines.transcription.present && !this.deps.settings().transcriptionBlocked;
+  }
+
+  /**
+   * Whether `Download packs on mobile data` governs anything here (UX
+   * section 6): some engine downloads a pack itself, and this device can tell
+   * a mobile connection from another. In the desktop app on macOS a
+   * translation pack comes from System Settings and the webview reports no
+   * connection type, so the row is not shown.
+   */
+  mobileDataMatters(): boolean {
+    if (!connectionTypeKnown()) return false;
+    const translation = this.translationPresent && this.deps.engines.translation.fetchesPacks !== false;
+    return translation || this.transcriptionPresent;
+  }
+
+  /** The packs the operating system holds for these engines, where it can
+   *  list them (`Engines.systemPacks`); `null` where it cannot. */
+  async systemPacks(target: string = this.target()): Promise<SystemPacks | null> {
+    const list = this.deps.engines.systemPacks;
+    if (list === undefined) return null;
+    return list.call(this.deps.engines, target).catch(() => null);
   }
 
   /** The language translations are made into. */
@@ -551,6 +580,14 @@ export class TranslationController {
     }
     if (state === "needs-pack") {
       this.setView(key, { phase: "none" });
+      if (await this.packsBlocked()) {
+        this.setView(key, { phase: "packs-blocked", language: source });
+        return;
+      }
+      if (this.packFetch(source, target) === "system-settings") {
+        this.askForSystemPack(source, () => this.forgetState(`t:${source}>${target}`));
+        return;
+      }
       this.askForPack(
         "translation",
         source,
@@ -661,6 +698,7 @@ export class TranslationController {
       use,
       language,
       wifiOnly,
+      systemSettings: false,
       download: () => {
         this.packSignal[1](null);
         if (wifiOnly) {
@@ -674,6 +712,43 @@ export class TranslationController {
         this.packSignal[1](null);
         onDismiss();
       },
+    });
+  }
+
+  /** Whether a pack may not be downloaded now (anti-censorship on). */
+  private async packsBlocked(): Promise<boolean> {
+    const check = this.deps.engines.packsBlocked;
+    if (check === undefined) return false;
+    return check.call(this.deps.engines).catch(() => true);
+  }
+
+  /** Who fetches the pack of a pair (`engines.ts`, `PackFetch`). */
+  private packFetch(source: string, target: string): "engine" | "system-settings" {
+    return this.deps.engines.translation.packFetch?.(source, target) ?? "engine";
+  }
+
+  /**
+   * UX 3.5 where the system downloads translation packs in its own settings
+   * (macOS): the dialog's button opens them. Lakko downloads nothing and
+   * waits for nothing: the line goes back to `Spanish · Translate`, and the
+   * next `Translate` asks the system again (the rule of ADR-0082 note of
+   * 2026-11-15 for a pack the device fetches later).
+   */
+  private askForSystemPack(language: string, onOpened: () => void): void {
+    this.packSignal[1]({
+      use: "translation",
+      language,
+      wifiOnly: false,
+      systemSettings: true,
+      download: () => {
+        this.packSignal[1](null);
+        onOpened();
+        this.bump();
+        void this.deps.engines.translation.openPackSettings?.().catch((err: unknown) => {
+          console.warn("[translation] opening the system settings failed", err instanceof Error ? err.name : "unknown");
+        });
+      },
+      dismiss: () => this.packSignal[1](null),
     });
   }
 
@@ -783,6 +858,16 @@ export class TranslationController {
     this.setAutoTranslate(conversation, true);
     if (this.translationState(language) !== "needs-pack") return;
     const target = this.target();
+    if (this.packFetch(language, target) === "system-settings") {
+      void this.packsBlocked().then((blocked) => {
+        if (blocked) return;
+        this.askForSystemPack(language, () => {
+          this.forgetState(`t:${language}>${target}`);
+          for (const k of [...this.autoTried]) if (k.startsWith(`text|${conversation}|`)) this.autoTried.delete(k);
+        });
+      });
+      return;
+    }
     this.askForPack(
       "translation",
       language,
@@ -930,6 +1015,10 @@ export class TranslationController {
       return;
     }
     if (state === "needs-pack") {
+      if (await this.packsBlocked()) {
+        this.setTranscript(key, { phase: "packs-blocked" });
+        return;
+      }
       this.askForPack(
         "transcription",
         language,

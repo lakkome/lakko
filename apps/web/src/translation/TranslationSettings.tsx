@@ -9,7 +9,7 @@
  * no action and no suggestion to go elsewhere (UX section 7).
  */
 
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createResource, createSignal, For, Show, type JSX } from "solid-js";
 
 import { currentLanguage, t } from "../l10n";
 import { requestConfirm } from "../ui/confirm-dialog";
@@ -17,7 +17,7 @@ import { Icon } from "../ui/icons";
 import { LakkoPicker } from "../ui/LakkoPicker";
 import { CANDIDATE_LANGUAGES, languageName } from "./model";
 import { translationRules } from "./rules";
-import { translationSettings, updateTranslationSettings, type PackRecord } from "./settings";
+import { packList, translationSettings, updateTranslationSettings, type PackRecord } from "./settings";
 import { useTranslation } from "./context";
 
 function SwitchRow(props: { title: string; on: boolean; onToggle: () => void }): JSX.Element {
@@ -65,6 +65,22 @@ export function TranslationSettingsSection(): JSX.Element {
   const translationPresent = (): boolean => controller?.translationPresent === true;
   const transcriptionPresent = (): boolean => controller?.transcriptionPresent === true;
   const ui = (): string => currentLanguage();
+  // The packs the operating system reports holding (the desktop app on
+  // macOS); asked again when the target changes, as iOS does.
+  const [systemPacks] = createResource(
+    () => (controller === undefined ? null : (s().target ?? ui())),
+    (target) => controller?.systemPacks(target) ?? Promise.resolve(null),
+  );
+  const packs = (): PackRecord[] => {
+    const r = translationRules();
+    return packList(
+      s().packs,
+      systemPacks.latest ?? null,
+      (a, b) => (r === null ? a === b : r.sameLanguage(a, b)),
+      (tag) => r?.canonicalLanguageTag(tag) ?? tag,
+      (tag) => languageName(tag, ui()),
+    );
+  };
 
   async function deleteAll(): Promise<void> {
     if (controller === undefined) return;
@@ -178,20 +194,24 @@ export function TranslationSettingsSection(): JSX.Element {
         </Show>
       </section>
       <Show when={translationPresent() || transcriptionPresent()}>
-        <section class="lk-card">
-          <SwitchRow
-            title={t("settings.translation.mobile_data")}
-            on={s().mobileData}
-            onToggle={() => updateTranslationSettings((x) => ({ ...x, mobileData: !x.mobileData }))}
-          />
-        </section>
+        {/* Only where Lakko itself downloads a pack and can tell a mobile
+            connection (UX section 6); in the desktop app it governs nothing. */}
+        <Show when={controller?.mobileDataMatters() === true}>
+          <section class="lk-card">
+            <SwitchRow
+              title={t("settings.translation.mobile_data")}
+              on={s().mobileData}
+              onToggle={() => updateTranslationSettings((x) => ({ ...x, mobileData: !x.mobileData }))}
+            />
+          </section>
+        </Show>
         <section class="lk-card">
           <h2>{t("settings.translation.packs")}</h2>
           <Show
-            when={s().packs.length > 0}
+            when={packs().length > 0}
             fallback={<p class="lk-card-desc">{t("settings.translation.packs.empty")}</p>}
           >
-            <For each={s().packs}>
+            <For each={packs()}>
               {(p) => (
                 <div class="lk-card-row">
                   <div class="lk-card-row-body">

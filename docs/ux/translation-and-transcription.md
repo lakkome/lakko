@@ -210,6 +210,23 @@ asks the device again and translates once the pack is there (ADR-0082 note of
 2026-11-15). On Android the pack of a pair the system service cannot supply
 comes from ML Kit, so the dialog there says `The pack comes from Google.`
 
+In the desktop app on macOS a translation pack is downloaded by macOS in its
+own settings, never by Lakko (ADR-0082 note of 2026-11-18). The dialog keeps
+its title and says where:
+
+> **Download Spanish for translation?**
+> Translation happens on this device. macOS downloads the Spanish pack in
+> System Settings: Language & Region, then Translation Languages. Messages
+> are never sent anywhere to be translated.
+> `Not now` · `Open System Settings`
+
+`Open System Settings` opens Language & Region. Nothing waits on it: the line
+goes back to `Spanish · Translate`, and the next `Translate` asks macOS again.
+The names are the ones macOS shows in the interface language. A transcription
+pack on macOS downloads in the app, as on iOS. The desktop app can arm
+anti-censorship, so the line `Language packs can't be downloaded while
+anti-censorship is on` applies there too, for both kinds of pack.
+
 ### 3.6 The conversation bar
 
 When most of the recent incoming messages in a conversation are in a language
@@ -318,11 +335,20 @@ A sub-screen of Settings > Language (the IA of the design system, section 4):
   Never offered for translation, never trigger the bar.
 - **Translate into**: the interface language by default.
 - **Show transcript button** (on by default).
-- **Download packs on mobile data** (off by default).
+- **Download packs on mobile data** (off by default). Shown only where Lakko
+  itself starts a pack download and the device can tell a mobile connection
+  from another: iOS, Android, and a browser that reports its connection type
+  (Chrome on Android). Not shown in the desktop app (macOS fetches a
+  translation pack in System Settings, and the app cannot tell a mobile
+  connection) nor in a browser that reports no connection type: there the
+  switch would govern nothing (amended 2026-11-18).
 - **Language packs on this device**: each pack with its size, for translation,
   transcription or both, with `Remove`. Only packs Lakko itself downloaded are
   listed; packs the operating system manages are listed with `Managed by
-  iOS` / `Managed by Android` and no Remove.
+  iOS` / `Managed by Android` and no Remove. In the desktop app on macOS the
+  list also holds the languages macOS reports ready on this Mac (translation
+  into the target, and the installed speech models), each `Managed by your
+  system` with no Remove, as iOS lists Apple's packs (amended 2026-11-18).
 - **Delete all translations and transcripts**: removes every one stored on this
   device. A confirmation dialog says how many.
 - One paragraph at the bottom: "Translation and transcription happen on this
@@ -330,8 +356,13 @@ A sub-screen of Settings > Language (the IA of the design system, section 4):
   translated or transcribed."
 
 When this device cannot do one of the two at all, its rows are replaced by one
-line, e.g. `Transcription isn't available on this device` (web: `in this
-browser`), with no action.
+line, e.g. `Transcription isn't available on this device` (web in a
+browser: `in this browser`; the desktop app uses the device wording), with no
+action. A pack the system manages reads `Managed by your browser` in a browser
+and `Managed by your system` in the desktop app. The desktop app on macOS 26.4 and
+later translates and transcribes with Apple's on-device engines (section 7,
+case 1 or 2); on Windows and Linux, and on older macOS, it shows the
+`isn't available on this device` lines until Lakko's own engine exists.
 
 These settings are per device and never reach a server, like the interface
 language ([`localization.md`](localization.md) section 4).

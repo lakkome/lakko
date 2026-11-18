@@ -88,3 +88,4 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0085](0085-desktop-client.md) | Proposed | The desktop client is a Tauri host that keeps the keys and talks to the network; the web client's code runs inside it |
 | [0089](0089-camera-background.md) | Accepted | Camera background in calls: one segmentation model run by Lakko's own code on every client, the raw camera never sent while a background is selected |
 | [0090](0090-publisher-group-device-leaves.md) | Accepted | An owner or a publisher posts from any of their devices: per-device PublisherGroup leaves, staged commits, any owner device rotates |
+| [0091](0091-conversation-rejoin.md) | Proposed | A device that fell behind a conversation notices it and comes back: one commit replaces its leaf with a fresh KeyPackage under the same device key |

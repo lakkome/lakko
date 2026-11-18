@@ -644,6 +644,9 @@ internal fun rememberConversationRows(
             locale = locale,
             strings = strings,
             bareLinkOpenings = bareLinkOpenings,
+            // The message log is seeded before the repository says it is
+            // bootstrapped; until then an empty thread is not known to be empty.
+            messagesKnown = state.bootstrapped,
         )
     }
 
@@ -1019,6 +1022,9 @@ internal fun threadConversationRows(
     /** Ledger openings of bare `/g/` links (`BareGroupLinks`), for a row
      *  whose last message is one. */
     bareLinkOpenings: Map<String, me.lakko.app.ui.channels.BareLinkOpening> = emptyMap(),
+    /** Whether this device's message log has been read into the threads; see
+     *  [rowPreview]. */
+    messagesKnown: Boolean = true,
 ): List<ConversationListRow> = threads.map { thread ->
     val kind = conversationKind(repository, thread.groupIdHex)
     val last = previewSourceRow(thread.messages)
@@ -1045,6 +1051,7 @@ internal fun threadConversationRows(
             senderName = senderName,
             strings = strings,
             bareLinkOpenings = bareLinkOpenings,
+            messagesKnown = messagesKnown,
         ),
         time = activityMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         lastActivityMs = activityMs,
@@ -1105,6 +1112,12 @@ internal fun rowPreview(
     strings: Strings = Localization.strings.value,
     bareLinkOpenings: Map<String, me.lakko.app.ui.channels.BareLinkOpening> = emptyMap(),
     ownOrigin: String = me.lakko.app.config.ApiEndpoints.webOrigin,
+    /** Whether the message log has been read into [thread]. Until it has, a
+     *  thread with no message is not known to be empty: the line stays blank
+     *  rather than saying `No messages yet` (on a cold start every row said it
+     *  for a moment before the previews arrived; seen on desktop 2026-11-18,
+     *  the same order here: threads are published before the log is seeded). */
+    messagesKnown: Boolean = true,
 ): String {
     val endedLine = me.lakko.app.chat.chatListLine(
         me.lakko.app.chat.membershipState(
@@ -1116,7 +1129,7 @@ internal fun rowPreview(
     // ADR-0087 UX 9.4 — the row stays until the leave lands, and says so.
     if (thread.leaveWaiting) return strings["chat.members.pending.waiting_leave"]
     val noMessages = strings["chats.row.no_messages"]
-    if (last == null) return noMessages
+    if (last == null) return if (messagesKnown) noMessages else ""
     if (last.direction == Direction.System) {
         // Only a row this build can render: an unreadable bookkeeping row is
         // never shown raw.

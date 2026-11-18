@@ -504,7 +504,10 @@ public final class ChatRepository: ObservableObject {
             return (epoch: signer.epoch(), key: signer.verifyingKey())
         },
         journalId: { [weak self] groupIdHex in self?.groups[groupIdHex]?.groupId },
-        ds: dsClient))
+        ds: dsClient,
+        registeredCommitKnown: { [weak self] groupIdHex, epoch in
+            self?.chatClient.registeredCommitHold.blocksRepair(groupIdHex: groupIdHex, notedEpoch: epoch) ?? false
+        }))
     /// ADR-0053 point 7 — the per-group floor on knock reads.
     private let knockThrottle = KnockPollThrottle(floorSeconds: KnockPollThrottle.backgroundFloorSeconds)
     /// ADR-0053 — the same floor for the attribution read, which reads the
@@ -1165,6 +1168,9 @@ public final class ChatRepository: ObservableObject {
         rootProbeNotBefore.removeAll()
         registrarSetsSent.removeAll()
         journalRepair.reset()
+        // ADR-0091 phase 1 — holds and behind marks belong to the closing
+        // session's groups.
+        chatClient.registeredCommitHold.reset()
         claimedGroupsThisSession.removeAll()
         claimOnOpen.reset()
         sweepRegistrationBackoff.removeAll()
@@ -5484,6 +5490,17 @@ public final class ChatRepository: ObservableObject {
         // journal.
         if knockThrottle.take(groupIdHex) {
             Task { @MainActor [weak self] in await self?.pollKnocks(groupIdHex: groupIdHex) }
+        }
+        // ADR-0091 phase 1 — while a held registered commit waits for its next
+        // attempt, the poll does not fetch: it waits out its long-poll time or
+        // the attempt time, whichever is first (cancellable like the long
+        // poll), and returns with nothing applied and the cursor unchanged, so
+        // a hold never spins.
+        if case .wait(let ms) = chatClient.registeredCommitHold.pollGate(
+            groupIdHex: groupIdHex, waitSecs: waitSecs
+        ) {
+            if ms > 0 { try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000) }
+            return
         }
         // ADR-0053 point 1 — the read is signed with the group's access key.
         let raw = try await chatClient.fetchGroupJournal(

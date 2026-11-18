@@ -59,6 +59,11 @@ public final class ChatClient {
     /// that rang only while its own chat was the visible screen.
     private let ownPublished = OwnEchoRegistry()
 
+    /// ADR-0091 phase 1 — the hold tracker the apply loop consults when a row
+    /// fails: process-wide by default, replaceable by tests. The repository
+    /// reads the same instance for its poll gate and journal repair guard.
+    var registeredCommitHold: RegisteredCommitHold = .shared
+
     /// Fail-closed MLS-ratchet persister wired by ``ChatRepository``.
     ///
     /// ``sendMessage(identity:group:plaintext:)`` invokes it AFTER
@@ -455,7 +460,11 @@ public final class ChatClient {
         var touchedMlsState = false
         var resendOrigins: [Int64: ResendMarker.Origin] = [:]
         var eventSenders: [MemberIdentity?] = []
+        var held = false
         for message in raw.messages {
+            // ADR-0091 phase 1 — where the cursor goes back to when this row
+            // is held: the last row before it, or the fetch's `after`.
+            let cursorBeforeRow = cursor
             cursor = message.id
 
             // Drop our own echoes — the DS doesn't dedupe and
@@ -474,6 +483,9 @@ public final class ChatClient {
             // Marked BEFORE the call, not after — see
             // ``PollMessagesResult/touchedMlsState``.
             touchedMlsState = true
+            // ADR-0091 phase 1 — the group's epoch just before this row, for
+            // the verdict on a failure.
+            let localEpoch = try? group.epoch()
             let processed: ProcessedMessage
             do {
                 // ADR-0022 — the CHAT receive loop enforces the group-admin
@@ -492,11 +504,23 @@ public final class ChatClient {
                 // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
                 // commit refused by the gate. Drop + advance the cursor —
                 // deliberately: a row that can never apply must not be able to
-                // wedge the poll, and only a PERSIST failure holds the cursor.
-                // The two are distinguishable because they are different
-                // operations at different points in the batch.
+                // wedge the poll.
+                //
+                // ADR-0091 phase 1 — except the registered commit for this
+                // device's next epoch: it is HELD (the batch stops here, the
+                // cursor stays before it) and retried with a bounded backoff,
+                // because skipping it strands the device below the group.
+                if failedRowIsHeld(
+                    groupIdHex: groupIdHex, rowId: message.id, payload: message.payload,
+                    localEpoch: localEpoch, latestEpoch: raw.latestEpoch, error: error
+                ) {
+                    cursor = cursorBeforeRow
+                    held = true
+                    break
+                }
                 continue
             }
+            registeredCommitHold.recordApplied(groupIdHex: groupIdHex, rowId: message.id)
             if let origin = Self.resendOrigin(of: processed) {
                 resendOrigins[message.id] = origin
             }
@@ -517,14 +541,71 @@ public final class ChatClient {
             )
         }
 
+        // ADR-0091 phase 1 — an epoch that moved answers a hold framed below
+        // it and lifts a behind mark below it.
+        if let epoch = try? group.epoch() {
+            registeredCommitHold.observeEpoch(groupIdHex: groupIdHex, epoch: epoch)
+        }
+
         return PollMessagesResult(
             events: events,
             cursor: cursor,
-            hasMore: raw.hasMore,
+            // A held batch stopped early: the rows after the held one are read
+            // again with it, at its next attempt, not at once.
+            hasMore: held ? false : raw.hasMore,
             touchedMlsState: touchedMlsState,
             resendOrigins: resendOrigins,
             eventSenders: eventSenders
         )
+    }
+
+    /// ADR-0091 phase 1 — classify a conversation row that failed to apply,
+    /// log it, and tell the loop whether to hold it (`true`: stop the batch at
+    /// this row) or skip it (`false`, as before).
+    ///
+    /// The log line names no group, row, key, account, name or text.
+    func failedRowIsHeld(
+        groupIdHex: String,
+        rowId: Int64,
+        payload: Data,
+        localEpoch: UInt64?,
+        latestEpoch: UInt64?,
+        error: Error
+    ) -> Bool {
+        let kind = FailedApplyKind.of(error)
+        let sealed = epochOfMessage(bytes: payload)
+        let after = epochAfterMessage(bytes: payload)
+        let verdict = RegisteredCommitVerdict.of(
+            isOwnEcho: kind == FailedApplyKind.ownMessage,
+            sealedEpoch: sealed, epochAfter: after,
+            localEpoch: localEpoch, latestEpoch: latestEpoch)
+        guard verdict == .hold, let sealed, let localEpoch else {
+            // Read again but no longer the registered commit (another path
+            // moved the epoch): the hold on it goes.
+            registeredCommitHold.recordSkipped(groupIdHex: groupIdHex, rowId: rowId)
+            RegisteredCommitLog.emit(.notice, RegisteredCommitLog.failedRow(
+                kind: kind, sealed: sealed, after: after, local: localEpoch,
+                latest: latestEpoch, verdict: .skip, attempt: nil))
+            return false
+        }
+        let outcome = registeredCommitHold.recordFailure(
+            groupIdHex: groupIdHex, rowId: rowId, sealedEpoch: sealed, localEpoch: localEpoch)
+        let attempt: Int
+        switch outcome {
+        case .held(let k, _): attempt = k
+        case .exhausted(let k): attempt = k
+        }
+        RegisteredCommitLog.emit(.notice, RegisteredCommitLog.failedRow(
+            kind: kind, sealed: sealed, after: after, local: localEpoch,
+            latest: latestEpoch, verdict: .hold, attempt: attempt))
+        if kind.hasPrefix(FailedApplyKind.refusedPrefix) {
+            RegisteredCommitLog.emit(.error, RegisteredCommitLog.divergence(kind: kind))
+        }
+        if case .exhausted = outcome {
+            RegisteredCommitLog.emit(.error, RegisteredCommitLog.exhausted(local: localEpoch, latest: latestEpoch))
+            return false
+        }
+        return true
     }
 
     // MARK: - ProcessedMessage → IncomingChatEvent

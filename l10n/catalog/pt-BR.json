@@ -125,6 +125,10 @@
       "text": "Este navegador não é compatível com chaves de acesso.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Este dispositivo não é compatível com chaves de acesso.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Esta chave de acesso pertence a uma conta diferente da que está neste dispositivo. Entre primeiro com sua senha.",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "Este navegador não consegue criptografar a mídia da chamada, então a chamada não começou.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Este dispositivo não consegue criptografar a mídia da chamada, então a chamada não começou.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo. Permita o acesso à câmera nas configurações do site no navegador.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo. Permita nas configurações de privacidade do sistema.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "O Lakko precisa de acesso ao microfone para gravar mensagens de voz. Permita o acesso ao microfone nas configurações do site no navegador.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "O Lakko precisa de acesso ao microfone para gravar mensagens de voz. Permita nas configurações de privacidade do sistema.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "Não é possível gravar mensagens de voz neste navegador",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "Não é possível gravar mensagens de voz neste dispositivo",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "O Lakko não consegue usar a câmera. Permita o acesso à câmera nas configurações do site no seu navegador e tente de novo.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "O Lakko não pode usar a câmera. Permita o acesso à câmera nas configurações de privacidade do sistema e tente novamente.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "Este dispositivo ou navegador não é compatível com chaves de acesso. Escolha outra forma.",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Este dispositivo não é compatível com chaves de acesso. Escolha outra forma.",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "Aguardando sua chave de acesso...",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Remove os dados da sua conta deste dispositivo. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "Esquecer este dispositivo?",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "Este navegador não está configurado para sua conta. Entre novamente.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Este dispositivo não está configurado para sua conta. Entre novamente.",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "Este navegador ou dispositivo não consegue criar chaves de acesso agora.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Este dispositivo não consegue criar chaves de acesso agora.",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "Esta chave de acesso agora restaura as chaves da sua conta.",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Este navegador não consegue gerenciar chaves de acesso. Use uma versão recente do Safari, Chrome, Firefox ou Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Este dispositivo não consegue gerenciar chaves de acesso.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "Gerenciado pelo navegador",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Gerenciado pelo sistema",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Remover",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "A tradução acontece neste dispositivo. O Lakko precisa do pacote de {language} para fazê-la ({size}). Mensagens nunca são enviadas a lugar nenhum para serem traduzidas.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "A tradução acontece neste dispositivo. O macOS baixa o pacote de {language} em Ajustes: Idioma e Região, depois Idiomas de Tradução. Mensagens nunca são enviadas a lugar nenhum para serem traduzidas.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "Cancelar",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "Agora não",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Abrir Ajustes",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "O pacote vem do Google.",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "O pacote vem da empresa que faz o seu navegador.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "O pacote vem da empresa que faz o seu sistema.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "Quem pode me encontrar",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "Não foi possível compartilhar sua tela. Permita a gravação de tela para o Lakko nas configurações de privacidade do sistema.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Não foi possível compartilhar sua tela. Permita a gravação de tela para o Lakko nos Ajustes do Sistema.",
       "status": "machine"
     }
   },

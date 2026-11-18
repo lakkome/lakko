@@ -87,6 +87,19 @@ above every other program's windows ([`calls.md`](calls.md) section 4.5.4a,
 added 2026-11-10); the web's in-app floating window is not drawn in the desktop
 app.
 
+### 2.2 Copy never names a browser
+
+The desktop app is the web client in a system webview, but the person never
+opened a browser, so no sentence in it says "browser". Every web string that
+names the browser ("isn't available in this browser", "your browser's site
+settings", "your browser's maker") has a desktop wording that names the device
+or the system instead: "on this device", "your system's privacy settings",
+"your system's maker", and for screen recording on macOS "System Settings".
+Where the native clients already have the right sentence, the desktop app uses
+it. The web client keeps the pairs in one table
+(`apps/web/src/l10n/desktop-copy.ts`), and a test fails when a catalog string
+that says "browser" has no desktop wording.
+
 ## 3. Closing is not quitting
 
 - Closing the window (the red button, the X, `Ctrl+W` / `Cmd+W`) hides it.

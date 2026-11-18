@@ -514,8 +514,19 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     random: () => Math.random(),
     publish: publishInto,
     onError: (_groupIdB64, err) => {
+      // The DS answer (status and error code) explains a failure; the
+      // endpoint is left out because it names the conversation.
+      const cause = (err as { cause?: unknown }).cause as
+        | { name?: unknown; status?: unknown; body?: unknown; message?: unknown }
+        | undefined;
+      const detail =
+        cause === undefined || cause === null
+          ? ""
+          : ` (${String(cause.name ?? "")}${
+              typeof cause.status === "number" ? ` ${cause.status} ${String(cause.body ?? "").slice(0, 80)}` : ""
+            })`;
       // eslint-disable-next-line no-console
-      console.warn("[profile] publish failed", err);
+      console.warn(`[profile] publish failed${detail}`, err);
     },
   });
 

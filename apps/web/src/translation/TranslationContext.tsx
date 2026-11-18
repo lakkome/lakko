@@ -18,7 +18,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { currentLanguage, t } from "../l10n";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { ModalLayer } from "../ui/ModalLayer";
-import { browserEngines } from "./browser-engines";
+import { deviceEngines } from "./device-engines";
 import { watchCaptures } from "./capture-watch";
 import { TranslationContext } from "./context";
 import { TranslationController } from "./controller";
@@ -38,7 +38,7 @@ export function TranslationProvider(props: { children: JSX.Element }): JSX.Eleme
   };
   const store = new ResultStore(new IdbResultBackend(getDeviceKey));
   const controller = new TranslationController({
-    engines: browserEngines(),
+    engines: deviceEngines(),
     store,
     rules: translationRules,
     accountId,
@@ -80,19 +80,26 @@ function PackDialog(props: { controller: TranslationController }): JSX.Element {
       (r) => {
         if (r === null) return;
         const name = languageName(r.language, currentLanguage());
-        const body =
-          (r.use === "transcription"
-            ? t("translate.pack.body.transcription", { language: name })
-            : t("translate.pack.body.translation", { language: name })) +
-          " " +
-          t("translate.pack.source.web");
+        // macOS downloads its translation languages in System Settings: the
+        // dialog says where and opens it (ADR-0082 note of 2026-11-18).
+        const body = r.systemSettings
+          ? t("translate.pack.body.translation_system_settings", { language: name })
+          : (r.use === "transcription"
+              ? t("translate.pack.body.transcription", { language: name })
+              : t("translate.pack.body.translation", { language: name })) +
+            " " +
+            t("translate.pack.source.web");
         void requestConfirm({
           title:
             r.use === "transcription"
               ? t("translate.pack.title.transcription", { language: name })
               : t("translate.pack.title.translation", { language: name }),
           body,
-          confirmLabel: r.wifiOnly ? t("translate.pack.download_wifi") : t("translate.pack.download"),
+          confirmLabel: r.systemSettings
+            ? t("translate.pack.open_system_settings")
+            : r.wifiOnly
+              ? t("translate.pack.download_wifi")
+              : t("translate.pack.download"),
           cancelLabel: t("translate.pack.not_now"),
           tone: "neutral",
         }).then((ok) => {

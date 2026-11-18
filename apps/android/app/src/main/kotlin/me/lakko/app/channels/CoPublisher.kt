@@ -316,9 +316,11 @@ public object CoPublisher {
             val raw = ds.fetchGroup(groupId, after = cursor, waitSecs = 0, signer = signerOf(publisherGroup, ids))
             raw.latestEpoch?.let { latestEpoch = it }
             for (m in raw.messages) {
+                var localBeforeRow: ULong? = null
                 try {
                     val (processed, moved) = ids.mls { device ->
                         val before = publisherGroup.epoch()
+                        localBeforeRow = before
                         val p = publisherGroup.processIncomingVerifyingRoles(device, m.payload)
                         p to (publisherGroup.epoch() != before)
                     }
@@ -332,9 +334,12 @@ public object CoPublisher {
                         lastCommitAtMs = isoMillis(m.createdAt) ?: lastCommitAtMs
                     }
                     applied += 1
-                } catch (_: Throwable) {
+                } catch (failure: Throwable) {
                     // A commit we have already merged (epoch mismatch), a commit
-                    // the ADR-0090 gate refused, or a non-MLS row — skip.
+                    // the ADR-0090 gate refused, or a non-MLS row — skip. ADR-0091
+                    // phase 1: logged with the identifier-free line, behaviour
+                    // unchanged.
+                    logSkippedPublisherRow(m.payload, failure, localBeforeRow, latestEpoch)
                 }
                 cursor = maxOf(cursor, m.id)
             }
@@ -1812,4 +1817,25 @@ public object CoPublisher {
     /** Bytes of a channel id. */
     private const val CHANNEL_ID_LEN: Int = 16
 
+}
+
+/** ADR-0091 phase 1 — the identifier-free failed-row line for a PublisherGroup
+ *  journal row this device skipped. Never throws. */
+private fun logSkippedPublisherRow(payload: ByteArray, failure: Throwable, localEpoch: ULong?, latestEpoch: ULong?) {
+    try {
+        android.util.Log.w(
+            me.lakko.app.chat.FAILED_ROW_LOG_TAG,
+            me.lakko.app.chat.failedRowLine(
+                kind = me.lakko.app.chat.failedRowKind(failure),
+                sealedEpoch = runCatching { uniffi.lakko_ffi_uniffi.epochOfMessage(payload) }.getOrNull(),
+                epochAfter = runCatching { uniffi.lakko_ffi_uniffi.epochAfterMessage(payload) }.getOrNull(),
+                localEpoch = localEpoch,
+                latestEpoch = latestEpoch,
+                verdict = me.lakko.app.chat.RegisteredCommitVerdict.SKIP,
+                attempt = null,
+            ),
+        )
+    } catch (_: Throwable) {
+        // A log line never changes what the loop does.
+    }
 }

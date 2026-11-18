@@ -125,6 +125,10 @@
       "text": "यह ब्राउज़र पासकी सपोर्ट नहीं करता।",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "यह डिवाइस पासकी सपोर्ट नहीं करता।",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "यह पासकी इस डिवाइस पर सेव अकाउंट की नहीं, किसी दूसरे अकाउंट की है। पहले अपने पासवर्ड से लॉग इन करें।",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "यह ब्राउज़र कॉल की आवाज़ और वीडियो एन्क्रिप्ट नहीं कर सकता, इसलिए कॉल शुरू नहीं हुई।",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "यह डिवाइस कॉल की आवाज़ और वीडियो एन्क्रिप्ट नहीं कर सकता, इसलिए कॉल शुरू नहीं हुई।",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए। अपने ब्राउज़र की साइट सेटिंग में कैमरे की अनुमति दें।",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए। अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें।",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "वॉइस मैसेज रिकॉर्ड करने के लिए Lakko को माइक्रोफ़ोन की अनुमति चाहिए। अपने ब्राउज़र की साइट सेटिंग में माइक्रोफ़ोन की अनुमति दें।",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "वॉइस मैसेज रिकॉर्ड करने के लिए Lakko को माइक्रोफ़ोन की अनुमति चाहिए। अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें।",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "इस ब्राउज़र में वॉइस मैसेज रिकॉर्ड नहीं किए जा सकते",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "इस डिवाइस पर वॉइस मैसेज रिकॉर्ड नहीं किए जा सकते",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko कैमरा इस्तेमाल नहीं कर सकता। अपने ब्राउज़र की साइट सेटिंग में कैमरा ऐक्सेस की अनुमति दें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko कैमरा इस्तेमाल नहीं कर पा रहा। अपने सिस्टम की निजता सेटिंग में कैमरा एक्सेस की अनुमति दें, फिर से कोशिश करें।",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "यह डिवाइस या ब्राउज़र पासकी सपोर्ट नहीं करता। कोई दूसरा तरीका चुनें।",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "यह डिवाइस पासकी सपोर्ट नहीं करता। कोई दूसरा तरीका चुनें।",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "आपकी पासकी का इंतज़ार है...",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "इस ब्राउज़र से आपके खाते का डेटा हटा देता है। आपके मैसेज आपके दूसरे डिवाइस पर रहते हैं; यहाँ वापस आने के लिए आपको दूसरे डिवाइस, कुंजियाँ रिस्टोर करने वाली पासकी, या रिकवरी फ़्रेज़ की ज़रूरत होगी।",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "इस डिवाइस से आपके खाते का डेटा हटा देता है। आपके मैसेज आपके दूसरे डिवाइस पर रहते हैं; यहाँ वापस आने के लिए आपको दूसरे डिवाइस, कुंजियाँ रिस्टोर करने वाली पासकी, या रिकवरी फ़्रेज़ की ज़रूरत होगी।",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "इस डिवाइस को भूल जाएँ?",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "यह ब्राउज़र आपके खाते के लिए सेट अप नहीं है। फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "यह डिवाइस आपके खाते के लिए सेट अप नहीं है। फिर से साइन इन करें।",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "यह ब्राउज़र / डिवाइस अभी पासकी नहीं बना सकता।",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "यह डिवाइस अभी पासकी नहीं बना सकता।",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "यह पासकी अब आपकी कुंजियाँ रिस्टोर करती है।",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "यह ब्राउज़र पासकी प्रबंधित नहीं कर सकता। Safari, Chrome, Firefox या Edge का नया वर्शन इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "यह डिवाइस पासकी प्रबंधित नहीं कर सकता।",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "आपका ब्राउज़र इसे मैनेज करता है",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "आपका सिस्टम इसे मैनेज करता है",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "हटाएँ",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "अनुवाद इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए ({size})। मैसेज अनुवाद के लिए कभी कहीं नहीं भेजे जाते।",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "अनुवाद इसी डिवाइस पर होता है। macOS {language} पैक सिस्टम सेटिंग में डाउनलोड करता है: भाषा और क्षेत्र, फिर अनुवाद भाषाएँ। मैसेज अनुवाद के लिए कभी कहीं नहीं भेजे जाते।",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "रद्द करें",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "अभी नहीं",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "सिस्टम सेटिंग खोलें",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "यह पैक Google से आता है।",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "यह पैक आपके ब्राउज़र बनाने वाली कंपनी से आता है।",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "यह पैक आपके सिस्टम बनाने वाली कंपनी से आता है।",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "मुझे कौन ढूँढ सकता है",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "आपकी स्क्रीन शेयर नहीं हो सकी। अपने सिस्टम की निजता सेटिंग में Lakko को स्क्रीन रिकॉर्डिंग की अनुमति दें।",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "आपकी स्क्रीन शेयर नहीं हो सकी। सिस्टम सेटिंग्स में Lakko को स्क्रीन रिकॉर्डिंग की अनुमति दें।",
       "status": "machine"
     }
   },

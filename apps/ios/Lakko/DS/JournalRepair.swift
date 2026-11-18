@@ -66,6 +66,10 @@ public final class JournalRepair {
         case noKey
         /// The Replace failed for any other reason.
         case failed
+        /// ADR-0091 phase 1 — this device holds a registered commit for the
+        /// group, or fell behind at or above the noted epoch: the epochs above
+        /// are real, so nothing is replaced.
+        case registeredCommitKnown
     }
 
     /// What the check needs from the session.
@@ -84,6 +88,9 @@ public final class JournalRepair {
         /// Run `work` after `seconds`; returns a canceller. Injectable for
         /// tests.
         public var schedule: (_ seconds: TimeInterval, _ work: @escaping @MainActor () -> Void) -> () -> Void
+        /// ADR-0091 phase 1 — whether a registered commit is known above
+        /// `epoch` for the group (a hold, or a behind mark at or above it).
+        public var registeredCommitKnown: (_ groupIdHex: String, _ epoch: UInt64) -> Bool
 
         public init(
             authority: @escaping (String) -> JournalAuthority?,
@@ -92,7 +99,8 @@ public final class JournalRepair {
             journalId: @escaping (String) -> Data?,
             ds: DsStatementSending,
             schedule: @escaping (TimeInterval, @escaping @MainActor () -> Void) -> () -> Void =
-                JournalRepair.defaultSchedule
+                JournalRepair.defaultSchedule,
+            registeredCommitKnown: @escaping (String, UInt64) -> Bool = { _, _ in false }
         ) {
             self.authority = authority
             self.pollToHead = pollToHead
@@ -100,6 +108,7 @@ public final class JournalRepair {
             self.journalId = journalId
             self.ds = ds
             self.schedule = schedule
+            self.registeredCommitKnown = registeredCommitKnown
         }
     }
 
@@ -172,6 +181,13 @@ public final class JournalRepair {
         }
         guard let authority = ports.authority(groupIdHex), authority.isRootOrAdmin else {
             return .notPermitted
+        }
+        // ADR-0091 phase 1 — the head poll did not reach a registered commit
+        // this device holds (or it fell behind one): the epochs above are not
+        // fake, and a Replace would drop the group's real next epoch.
+        if ports.registeredCommitKnown(groupIdHex, epoch) {
+            NSLog("ADR-0057 repair: %@", RegisteredCommitLog.repairBlocked)
+            return .registeredCommitKnown
         }
         NSLog("ADR-0057 repair: replacing at epoch %llu", epoch)
         do {

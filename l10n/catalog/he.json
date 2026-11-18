@@ -125,6 +125,10 @@
       "text": "הדפדפן הזה לא תומך במפתחות גישה.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "המכשיר הזה לא תומך במפתחות גישה.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "מפתח הגישה הזה שייך לחשבון אחר מזה שבמכשיר הזה. התחברו קודם עם הסיסמה.",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "הדפדפן הזה לא יכול להצפין את השמע והווידאו של השיחה, ולכן השיחה לא התחילה.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "המכשיר הזה לא יכול להצפין את השמע והווידאו של השיחה, ולכן השיחה לא התחילה.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו. אפשרו גישה למצלמה בהגדרות האתר בדפדפן.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו. אפשרו זאת בהגדרות הפרטיות של המערכת.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko צריכה גישה למיקרופון כדי להקליט הודעות קוליות. אפשרו גישה למיקרופון בהגדרות האתר בדפדפן.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko צריכה גישה למיקרופון כדי להקליט הודעות קוליות. אפשרו זאת בהגדרות הפרטיות של המערכת.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "אי אפשר להקליט הודעות קוליות בדפדפן הזה",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "אי אפשר להקליט הודעות קוליות במכשיר הזה",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "ל-Lakko אין גישה למצלמה. יש לאפשר גישה למצלמה בהגדרות האתר בדפדפן ולנסות שוב.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "ל-Lakko אין גישה למצלמה. אפשרו גישה למצלמה בהגדרות הפרטיות של המערכת ונסו שוב.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "המכשיר או הדפדפן הזה לא תומכים במפתחות גישה. בחרו דרך אחרת.",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "המכשיר הזה לא תומך במפתחות גישה. בחרו דרך אחרת.",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "ממתינים למפתח הגישה...",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "מסיר את נתוני החשבון מהדפדפן הזה. ההודעות נשארות במכשירים האחרים שלכם; כדי לחזור לכאן תצטרכו מכשיר אחר, מפתח גישה שמשחזר את מפתחות החשבון, או את ביטוי השחזור.",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "מסיר את נתוני החשבון מהמכשיר הזה. ההודעות נשארות במכשירים האחרים שלכם; כדי לחזור לכאן תצטרכו מכשיר אחר, מפתח גישה שמשחזר את מפתחות החשבון, או את ביטוי השחזור.",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "לשכוח את המכשיר הזה?",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "הדפדפן הזה לא מוגדר עבור החשבון שלכם. התחברו שוב.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "המכשיר הזה לא מוגדר עבור החשבון שלכם. התחברו שוב.",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "הדפדפן או המכשיר הזה לא יכולים ליצור מפתחות גישה כרגע.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "המכשיר הזה לא יכול ליצור מפתחות גישה כרגע.",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "מפתח הגישה הזה משחזר עכשיו את מפתחות החשבון שלכם.",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "הדפדפן הזה לא יכול לנהל מפתחות גישה. השתמשו בגרסה עדכנית של Safari, Chrome, Firefox או Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "המכשיר הזה לא יכול לנהל מפתחות גישה.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "מנוהל על ידי הדפדפן",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "מנוהל על ידי המערכת",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "הסרה",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "התרגום מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language} ({size}). הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "התרגום מתבצע במכשיר הזה. macOS מוריד את חבילת {language} בהגדרות המערכת: שפה ואזור, ואז שפות תרגום. הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "ביטול",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "לא עכשיו",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "פתיחת הגדרות המערכת",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "החבילה מגיעה מ־Google.",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "החבילה מגיעה מיצרן הדפדפן שלך.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "החבילה מגיעה מיצרן המערכת שלך.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "מי יכול למצוא אותי",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "אי אפשר לשתף את המסך. אפשרו ל-Lakko הקלטת מסך בהגדרות הפרטיות של המערכת.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "אי אפשר לשתף את המסך. אפשרו ל-Lakko הקלטת מסך בהגדרות המערכת.",
       "status": "machine"
     }
   },

@@ -555,6 +555,10 @@ dev-desktop:
     app=target/debug/Lakko.app
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp target/debug/lakko-desktop "$app/Contents/MacOS/lakko-desktop"
+    # Apple's on-device translation and transcription (ADR-0082 note of
+    # 2026-11-18): the helper the host starts, next to it in the bundle.
+    swiftc -O -swift-version 5 -target arm64-apple-macos26.4 ../macos-engines/main.swift -o target/debug/lakko-engines
+    cp target/debug/lakko-engines "$app/Contents/MacOS/lakko-engines"
     if [ ! -f "$app/Contents/Resources/icon.icns" ] || [ icons/icon.png -nt "$app/Contents/Resources/icon.icns" ]; then
         set_dir=$(mktemp -d)/icon.iconset
         mkdir -p "$set_dir"
@@ -580,6 +584,7 @@ dev-desktop:
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Lakko uses the microphone for calls.</string>
     <key>NSCameraUsageDescription</key><string>Lakko uses the camera for video calls.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Lakko turns voice messages into text on this Mac. They are never sent anywhere to be transcribed.</string>
     <key>CFBundleURLTypes</key><array><dict>
     <key>CFBundleURLName</key><string>$id</string>
     <key>CFBundleURLSchemes</key><array><string>lakko</string></array>
@@ -591,9 +596,11 @@ dev-desktop:
         identity=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1)
     fi
     if [ -n "$identity" ]; then
+        codesign --force --sign "$identity" --identifier "$id.engines" "$app/Contents/MacOS/lakko-engines"
         codesign --force --sign "$identity" --identifier "$id" "$app"
         echo "signed with: $identity"
     else
+        codesign --force --sign - --identifier "$id.engines" "$app/Contents/MacOS/lakko-engines"
         codesign --force --sign - --identifier "$id" "$app"
         echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
     fi

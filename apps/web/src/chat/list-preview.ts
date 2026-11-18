@@ -66,6 +66,16 @@ export function previewLine(input: PreviewLineInput): string {
   return input.preview;
 }
 
+/**
+ * The row's line when it has no last message to show: `No messages yet`
+ * only once this device's log has been read and holds none, and nothing
+ * while it is still being read (on a cold start every row said `No messages
+ * yet` for a second or two before its preview arrived; seen 2026-11-18).
+ */
+export function emptyPreviewLine(logKnown: boolean): string {
+  return logKnown ? t("chats.row.no_messages") : "";
+}
+
 /** Case-insensitive match of a search query against a row's name and
  *  preview. An empty query matches everything. */
 export function rowMatchesQuery(query: string, name: string, preview: string, handle?: string | null): boolean {

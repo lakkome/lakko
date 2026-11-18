@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   attachmentPreviewLabel,
   attachmentsPreviewLabel,
+  emptyPreviewLine,
   previewLine,
   rowMatchesQuery,
 } from "./list-preview";
@@ -80,5 +81,15 @@ describe("rowMatchesQuery", () => {
   it("an empty or blank query matches every row", () => {
     expect(rowMatchesQuery("", "Anna", "")).toBe(true);
     expect(rowMatchesQuery("   ", "Anna", "")).toBe(true);
+  });
+});
+
+describe("emptyPreviewLine", () => {
+  it("says there are no messages only once the log was read", () => {
+    expect(emptyPreviewLine(true)).toBe("No messages yet");
+  });
+
+  it("says nothing while the log is still being read", () => {
+    expect(emptyPreviewLine(false)).toBe("");
   });
 });

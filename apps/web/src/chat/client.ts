@@ -84,6 +84,8 @@ import { boundContactsAccount } from "../contacts/local-store";
 import { DS_WAKE_HEADER_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
 import {
+  epochAfterMessage as wasmEpochAfterMessage,
+  epochOfMessage as wasmEpochOfMessage,
   isKnockRowLen as wasmIsKnockRowLen,
   knockRowVersion as wasmKnockRowVersion,
   Role,
@@ -102,6 +104,7 @@ import {
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
 import { looksLikeCallSignaling as looksLikeCallSignalingBytes } from "../calls/call-signaling-wake";
 import { DurableCursorGate } from "./durable-cursor";
+import { registeredCommitHolds } from "./registered-commit-hold";
 import {
   consumeOwnPublished,
   isOwnPublished,
@@ -1220,6 +1223,16 @@ export class ChatClient {
     const myIdentity = await this.resolveIdentity(identity);
 
     const groupId: Uint8Array = group.groupId;
+    // ADR-0091 phase 1 - a registered commit of this group failed and waits
+    // for its next attempt: do not fetch (the read would stop at the same row
+    // at once and spin). Wait out the long poll or the attempt, whichever is
+    // first, and report nothing new.
+    const holdWaitMs = registeredCommitHolds.msUntilDue(base64Encode(groupId));
+    if (holdWaitMs > 0) {
+      await sleepUnlessAborted(Math.min(waitSecs * 1000, holdWaitMs), signal);
+      const current = cursorRef?.read() ?? after;
+      return { events: [], cursor: current, hasMore: false, outcome: "applied" };
+    }
     // The FETCH — deliberately outside the lock. `signal` aborts only this
     // half: once a batch is in hand it is applied (or dropped as stale) under
     // the lock like any other, because abandoning a fetched batch mid-apply is
@@ -1525,7 +1538,12 @@ export class ChatClient {
     // row, so a commit that moves ownership away from this account is seen
     // at the apply that carried it.
     let ownerSeen = readRoleTableOwner(group);
+    // ADR-0091 phase 1 - the DS's newest registered epoch, read with this
+    // batch, judges a row that fails to apply.
+    const latestEpoch = raw.latestEpoch === undefined ? undefined : BigInt(raw.latestEpoch);
+    let holding = false;
     for (const message of raw.messages) {
+      const cursorBefore = cursor;
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
       // OpenMLS can't decrypt them on the sender side at the
@@ -1541,6 +1559,7 @@ export class ChatClient {
       // ADR-0022 role gate can refuse a commit or the ADR-0045 receipt gate can
       // drop a proposal. See `chat/durable-cursor.ts`.
       this.cursorGate.markTouched();
+      const localEpoch = readGroupEpoch(group);
       let processed;
       try {
         // ADR-0022 — the CHAT receive loop enforces the group-admin role
@@ -1553,15 +1572,29 @@ export class ChatClient {
         processed = group.processIncomingVerifyingRoles(myIdentity, message.payload);
       } catch (err) {
         // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
-        // commit refused by the gate — log and skip. The cursor still advances
-        // past it, deliberately: a row that can never apply must not be able to
-        // wedge the poll, and only a PERSIST failure holds the cursor. The two
-        // are distinguishable because they are different operations at
-        // different points in the batch.
-        // eslint-disable-next-line no-console
-        console.warn("processIncomingVerifyingRoles failed", message.id, err);
+        // commit refused by the gate. ADR-0091 phase 1: the registered commit
+        // for the next epoch is HELD - the batch stops here, the cursor stays
+        // before it, and it is retried on a later poll - so one failure no
+        // longer strands the device. Every other row is skipped as before: a
+        // row that can never apply must not wedge the poll. The line logged
+        // carries no identifier.
+        const outcome = registeredCommitHolds.recordFailure(groupIdB64, {
+          id: message.id,
+          isOwnEcho: false,
+          sealed: framedEpoch(message.payload),
+          after: framedEpochAfter(message.payload),
+          local: localEpoch,
+          latest: latestEpoch,
+          error: err,
+        });
+        if (outcome.kind === "held") {
+          cursor = cursorBefore;
+          holding = true;
+          break;
+        }
         continue;
       }
+      registeredCommitHolds.recordApplied(groupIdB64, message.id);
       {
         const ownerNow = readRoleTableOwner(group);
         noteOwnerTransition(group.groupId, ownerSeen, ownerNow);
@@ -1604,6 +1637,9 @@ export class ChatClient {
     // it used to be — a swallowed failure here left the durable MLS state
     // behind a cursor that had already moved on, which since ADR-0045 strands
     // the device permanently. See `chat/durable-cursor.ts`.
+    // ADR-0091 phase 1 - a hold the group is already past, or a behind mark
+    // it moved above, is over.
+    registeredCommitHolds.observeEpoch(groupIdB64, readGroupEpoch(group));
     const verdict = await this.cursorGate.commit(
       async () => {
         // Who-can-find-me 6.4: an opened contact request that could not be
@@ -1629,8 +1665,49 @@ export class ChatClient {
       // `outcome` and writes `result.cursor` back must still not lead.
       return { events, cursor: after, hasMore: false, outcome: "persist-held" };
     }
-    return { events, cursor, hasMore: raw.hasMore, outcome: "applied" };
+    return { events, cursor, hasMore: holding ? false : raw.hasMore, outcome: "applied" };
   }
+}
+
+/** The group's epoch, `undefined` when it cannot be read. */
+function readGroupEpoch(group: WasmGroup): bigint | undefined {
+  try {
+    return group.epoch;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A row's framed epoch without decrypting; `undefined` when not MLS. */
+function framedEpoch(payload: Uint8Array): bigint | undefined {
+  try {
+    return wasmEpochOfMessage(payload);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The epoch after a row (one above the framed epoch for a commit). */
+function framedEpochAfter(payload: Uint8Array): bigint | undefined {
+  try {
+    return wasmEpochAfterMessage(payload);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Sleep `ms`, returning early when `signal` aborts. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (ms <= 0 || signal?.aborted === true) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 /**

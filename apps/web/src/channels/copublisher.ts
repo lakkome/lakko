@@ -89,6 +89,7 @@ import { base64Encode } from "../auth/account-id";
 import type { DiscoveryClient } from "../discovery/client";
 import { newRevocationKey } from "../contacts/own-links";
 import { withGroupMlsLock } from "../mls/group-lock";
+import { failedApplyKind, failedRowLine } from "../chat/registered-commit-hold";
 import { appointCoPublisher, rememberPublisherRole } from "./api";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { commitInFlight, publisherCommitPorts, runStagedPublisherCommit } from "./rotation-cron";
@@ -546,6 +547,12 @@ export async function pollCoPublisherJournal(
       journalCursors.set(groupIdB64, Math.max(journalCursors.get(groupIdB64) ?? 0, lastRow.id));
     }
     for (const m of raw.messages) {
+      let localEpoch: bigint | undefined;
+      try {
+        localEpoch = publisherGroup.epoch();
+      } catch {
+        localEpoch = undefined;
+      }
       try {
         const processed = publisherGroup.processIncomingVerifyingRoles(device, m.payload);
         try {
@@ -560,10 +567,32 @@ export async function pollCoPublisherJournal(
         } finally {
           processed.free();
         }
-      } catch {
+      } catch (err) {
         // A commit we have already merged (epoch mismatch), a commit the
         // ADR-0090 gate refused (not merged), or a non-MLS entry — skip, the
         // FIFO journal lets the next poll catch up on any genuinely-new commit.
+        // ADR-0091 phase 1: logged without identifiers, never silently.
+        let sealed: bigint | undefined;
+        let after: bigint | undefined;
+        try {
+          sealed = wasm.epochOfMessage(m.payload);
+          after = wasm.epochAfterMessage(m.payload);
+        } catch {
+          sealed = undefined;
+          after = undefined;
+        }
+        // eslint-disable-next-line no-console
+        console.warn(
+          failedRowLine({
+            kind: failedApplyKind(err),
+            sealed,
+            after,
+            local: localEpoch,
+            latest: undefined,
+            verdict: "skip",
+            attempt: undefined,
+          }),
+        );
       }
     }
     if (knocks !== null) {

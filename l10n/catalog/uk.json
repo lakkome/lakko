@@ -125,6 +125,10 @@
       "text": "Цей браузер не підтримує ключі доступу.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Цей пристрій не підтримує ключі доступу.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Цей ключ доступу належить іншому обліковому запису, ніж той, що збережений на цьому пристрої. Спершу увійдіть за допомогою пароля.",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "Цей браузер не може шифрувати звук і відео дзвінка, тому дзвінок не почався.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Цей пристрій не може шифрувати звук і відео дзвінка, тому дзвінок не почався.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення. Дозвольте доступ до камери в налаштуваннях сайту в браузері.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення. Дозвольте доступ у налаштуваннях конфіденційності системи.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko потрібен доступ до мікрофона, щоб записувати голосові повідомлення. Дозвольте доступ до мікрофона в налаштуваннях сайту в браузері.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko потрібен доступ до мікрофона, щоб записувати голосові повідомлення. Дозвольте доступ у налаштуваннях конфіденційності системи.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "У цьому браузері не можна записувати голосові повідомлення",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "На цьому пристрої не можна записувати голосові повідомлення",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko не може використовувати камеру. Дозвольте доступ до камери в налаштуваннях сайту в браузері й спробуйте знову.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko не може використовувати камеру. Дозвольте доступ до камери в налаштуваннях конфіденційності системи й спробуйте ще раз.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "Цей пристрій або браузер не підтримує ключі доступу. Виберіть інший спосіб.",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Цей пристрій не підтримує ключі доступу. Виберіть інший спосіб.",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "Очікування ключа доступу...",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "Видаляє дані облікового запису з цього браузера. Повідомлення залишаться на інших ваших пристроях; щоб повернутися сюди, знадобиться інший пристрій, ключ доступу, який відновлює ключі облікового запису, або фраза відновлення.",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Видаляє дані облікового запису з цього пристрою. Повідомлення залишаться на інших ваших пристроях; щоб повернутися сюди, знадобиться інший пристрій, ключ доступу, який відновлює ключі облікового запису, або фраза відновлення.",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "Забути цей пристрій?",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "Цей браузер не налаштовано для вашого облікового запису. Увійдіть знову.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Цей пристрій не налаштовано для вашого облікового запису. Увійдіть знову.",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "Цей браузер або пристрій зараз не може створити ключ доступу.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Цей пристрій зараз не може створити ключ доступу.",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "Тепер цей ключ доступу відновлює ключі облікового запису.",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Цей браузер не може керувати ключами доступу. Використовуйте свіжу версію Safari, Chrome, Firefox або Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Цей пристрій не може керувати ключами доступу.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "Керується браузером",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Керується системою",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Видалити",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "Переклад відбувається на цьому пристрої. Для цього Lakko потрібен пакет «{language}» ({size}). Повідомлення нікуди не надсилаються для перекладу.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Переклад відбувається на цьому пристрої. macOS завантажує пакет «{language}» у Системних параметрах: «Мова і регіон», потім «Мови перекладу». Повідомлення нікуди не надсилаються для перекладу.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "Скасувати",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "Не зараз",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Відкрити Системні параметри",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "Пакет надає Google.",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "Пакет надає розробник вашого браузера.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "Пакет надає розробник вашої системи.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "Хто може мене знайти",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "Не вдалося показати екран. Дозвольте Lakko запис екрана в налаштуваннях конфіденційності системи.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Не вдалося показати екран. Дозвольте Lakko запис екрана в Системних параметрах.",
       "status": "machine"
     }
   },

@@ -125,6 +125,10 @@
       "text": "此浏览器不支持通行密钥。",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "此设备不支持通行密钥。",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "此通行密钥属于另一个账号，而不是此设备上保存的账号。请先使用密码登录。",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "此浏览器无法加密通话媒体，因此通话未开始。",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "此设备无法加密通话媒体，因此通话未开始。",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "Lakko 需要摄像头权限才能录制视频消息。请在浏览器的网站设置中允许访问摄像头。",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko 需要摄像头权限才能录制视频消息。请在系统隐私设置中允许。",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko 需要摄像头权限才能录制视频消息",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko 需要麦克风权限才能录制语音消息。请在浏览器的网站设置中允许访问麦克风。",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko 需要麦克风权限才能录制语音消息。请在系统隐私设置中允许。",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "此浏览器无法录制语音消息",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "此设备无法录制语音消息",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko 无法使用摄像头。请在浏览器的网站设置中允许访问摄像头，然后重试。",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko 无法使用相机。请在系统隐私设置中允许访问相机，然后重试。",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "此设备或浏览器不支持通行密钥。请选择其他方式。",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "此设备不支持通行密钥。请选择其他方式。",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "正在等待你的通行密钥…",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "从此浏览器中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要另一台设备、可恢复账号密钥的通行密钥，或恢复短语。",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "从此设备中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要另一台设备、可恢复账号密钥的通行密钥，或恢复短语。",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "忘记此设备？",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "此浏览器未为你的账号设置。请重新登录。",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "此设备未为你的账号设置。请重新登录。",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "此浏览器/设备目前无法创建通行密钥。",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "此设备目前无法创建通行密钥。",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "此通行密钥现在可以恢复你的账号密钥。",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "此浏览器无法管理通行密钥。请使用较新版本的 Safari、Chrome、Firefox 或 Edge。",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "此设备无法管理通行密钥。",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "由你的浏览器管理",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "由你的系统管理",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "移除",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "翻译在此设备上完成。Lakko 需要{language}语言包才能翻译（{size}）。消息绝不会被发送到任何地方进行翻译。",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "翻译在此设备上完成。macOS 在“系统设置”中下载{language}语言包：“语言与地区”，然后“翻译语言”。消息绝不会被发送到任何地方进行翻译。",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "取消",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "暂不",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "打开系统设置",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "语言包由 Google 提供。",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "语言包由你的浏览器开发商提供。",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "语言包由你的系统开发商提供。",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "谁可以找到我",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "无法共享你的屏幕。请在系统隐私设置中允许 Lakko 录制屏幕。",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "无法共享你的屏幕。请在“系统设置”中允许 Lakko 录制屏幕。",
       "status": "machine"
     }
   },

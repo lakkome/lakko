@@ -125,6 +125,10 @@
       "text": "هذا المتصفح لا يدعم مفاتيح المرور.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "هذا الجهاز لا يدعم مفاتيح المرور.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "ينتمي مفتاح المرور هذا إلى حساب مختلف عن الحساب الموجود على هذا الجهاز. سجّل الدخول بكلمة المرور أولًا.",
       "status": "machine"
@@ -747,6 +751,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "لا يستطيع هذا المتصفح تشفير صوت المكالمة وصورتها، لذلك لم تبدأ المكالمة.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "لا يستطيع هذا الجهاز تشفير صوت المكالمة وصورتها، لذلك لم تبدأ المكالمة.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -3425,12 +3433,20 @@
       "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو. اسمح بالوصول إلى الكاميرا في إعدادات الموقع في متصفحك.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو. اسمح به في إعدادات الخصوصية في نظامك.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "يحتاج Lakko إلى الوصول إلى الميكروفون لتسجيل الرسائل الصوتية. اسمح بالوصول إلى الميكروفون في إعدادات الموقع في متصفحك.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "يحتاج Lakko إلى الوصول إلى الميكروفون لتسجيل الرسائل الصوتية. اسمح به في إعدادات الخصوصية في نظامك.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3543,6 +3559,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "لا يمكن تسجيل الرسائل الصوتية في هذا المتصفح",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "لا يمكن تسجيل الرسائل الصوتية على هذا الجهاز",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5219,6 +5239,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "لا يستطيع Lakko استخدام الكاميرا. اسمح بالوصول إلى الكاميرا في إعدادات الموقع في متصفحك، ثم حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "لا يستطيع Lakko استخدام الكاميرا. اسمح بالوصول إلى الكاميرا في إعدادات الخصوصية في نظامك، ثم حاول مجددًا.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -7933,6 +7957,10 @@
       "text": "هذا الجهاز أو المتصفح لا يدعم مفاتيح المرور. اختر طريقة أخرى.",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "هذا الجهاز لا يدعم مفاتيح المرور. اختر طريقة أخرى.",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "في انتظار مفتاح المرور...",
       "status": "machine"
@@ -8625,6 +8653,10 @@
       "text": "يزيل بيانات حسابك من هذا المتصفح. تبقى رسائلك على أجهزتك الأخرى؛ وللعودة إلى هنا ستحتاج إلى جهاز آخر، أو مفتاح مرور يستعيد مفاتيح الحساب، أو عبارة الاسترداد.",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "يزيل بيانات حسابك من هذا الجهاز. تبقى رسائلك على أجهزتك الأخرى؛ وللعودة إلى هنا ستحتاج إلى جهاز آخر، أو مفتاح مرور يستعيد مفاتيح الحساب، أو عبارة الاسترداد.",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "هل تريد نسيان هذا الجهاز؟",
       "status": "machine"
@@ -8807,6 +8839,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "هذا المتصفح غير مُعدّ لحسابك. سجّل الدخول مجددًا.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "هذا الجهاز غير مُعدّ لحسابك. سجّل الدخول مجددًا.",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -8997,6 +9033,10 @@
       "text": "لا يستطيع هذا المتصفح أو الجهاز إنشاء مفاتيح مرور الآن.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "لا يستطيع هذا الجهاز إنشاء مفاتيح مرور الآن.",
+      "status": "machine"
+    },
     "settings.passkeys.keys_choice.done": {
       "text": "مفتاح المرور هذا يستعيد الآن مفاتيح حسابك.",
       "status": "machine"
@@ -9071,6 +9111,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "لا يستطيع هذا المتصفح إدارة مفاتيح المرور. استخدم إصدارًا حديثًا من Safari أو Chrome أو Firefox أو Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "لا يستطيع هذا الجهاز إدارة مفاتيح المرور.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9377,6 +9421,10 @@
       "text": "يديرها متصفحك",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "يديرها نظامك",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "إزالة",
       "status": "machine"
@@ -9565,6 +9613,10 @@
       "text": "تتم الترجمة على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك ({size}). لا تُرسَل الرسائل إلى أي مكان لترجمتها.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "تتم الترجمة على هذا الجهاز. يُنزّل macOS حزمة {language} من إعدادات النظام: اللغة والمنطقة، ثم لغات الترجمة. لا تُرسَل الرسائل إلى أي مكان لترجمتها.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "إلغاء",
       "status": "machine"
@@ -9593,6 +9645,10 @@
       "text": "ليس الآن",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "فتح إعدادات النظام",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "الحزمة مقدَّمة من Google.",
       "status": "machine"
@@ -9603,6 +9659,10 @@
     },
     "translate.pack.source.web": {
       "text": "الحزمة مقدَّمة من الشركة المطوّرة لمتصفحك.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "الحزمة مقدَّمة من الشركة المطوّرة لنظامك.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9851,6 +9911,14 @@
     },
     "who_can_find_me.title": {
       "text": "من يمكنه العثور عليّ",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "تعذّرت مشاركة شاشتك. اسمح لـ Lakko بتسجيل الشاشة في إعدادات الخصوصية في نظامك.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "تعذّرت مشاركة شاشتك. اسمح لـ Lakko بتسجيل الشاشة في إعدادات النظام.",
       "status": "machine"
     }
   },

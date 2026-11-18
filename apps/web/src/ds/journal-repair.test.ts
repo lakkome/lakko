@@ -131,6 +131,24 @@ describe("the check, 30 s later", () => {
     spy.mockRestore();
   });
 
+  it("ADR-0091 phase 1: a registered commit held, or a device behind at N, never Replaces", async () => {
+    const spy = vi.spyOn(console, "info").mockImplementation(info);
+    const known = { value: true };
+    const h = harness({ authority: () => fakeRegistrarAuthority("adm", RANK_ADMIN) });
+    h.repair.install({
+      authority: () => fakeRegistrarAuthority("adm", RANK_ADMIN),
+      currentEpochKey: () => ({ epoch: 7n, key: new Uint8Array(32).fill(7) }),
+      sender: h.sender,
+      registeredCommitKnown: () => known.value,
+    });
+    expect(await h.repair.check(GID, 7n)).toBe("registered-commit-known");
+    expect(h.sender.puts).toHaveLength(0);
+    known.value = false;
+    expect(await h.repair.check(GID, 7n)).toBe("replaced");
+    expect(h.sender.puts).toHaveLength(1);
+    spy.mockRestore();
+  });
+
   it("403: an equal or higher rank registered above; stop", async () => {
     const spy = vi.spyOn(console, "info").mockImplementation(info);
     const h = harness({ statuses: [403] });

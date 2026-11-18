@@ -1128,11 +1128,25 @@ enum ChannelDeviceAdmission {
                     groupId: groupId, after: after, waitSecs: 0, auth: DsAuth(signer: signer))
                 for row in page.messages {
                     after = max(after, row.id)
-                    let processed = (try? group.processIncomingVerifyingRoles(
-                        identity: identity, bytes: row.payload)) != nil
+                    let localEpoch = try? group.epoch()
+                    var failure: Error?
+                    do {
+                        _ = try group.processIncomingVerifyingRoles(identity: identity, bytes: row.payload)
+                    } catch {
+                        failure = error
+                    }
                     if isUnaccounted(
-                        rowEpoch: epochOfMessage(bytes: row.payload), heldEpoch: heldEpoch, processed: processed) {
+                        rowEpoch: epochOfMessage(bytes: row.payload), heldEpoch: heldEpoch,
+                        processed: failure == nil) {
                         unaccounted += 1
+                        // ADR-0091 phase 1 — logged, no identifier. Only the
+                        // unaccounted rows: this read starts at the journal's
+                        // first row, so every row already applied fails too.
+                        if let failure {
+                            RegisteredCommitLog.skipped(
+                                error: failure, payload: row.payload, localEpoch: localEpoch,
+                                latestEpoch: page.latestEpoch)
+                        }
                     }
                 }
                 if !page.hasMore || page.messages.isEmpty { break }

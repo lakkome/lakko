@@ -125,6 +125,10 @@
       "text": "Этот браузер не поддерживает ключи доступа.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Это устройство не поддерживает ключи доступа.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Этот ключ доступа принадлежит другому аккаунту, а не тому, что сохранён на этом устройстве. Сначала войдите с паролем.",
       "status": "machine"
@@ -749,6 +753,10 @@
       "text": "Этот браузер не может шифровать звук и видео звонка, поэтому звонок не начался.",
       "status": "machine"
     },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Это устройство не может шифровать звук и видео звонка, поэтому звонок не начался.",
+      "status": "machine"
+    },
     "call.error.not_accepting": {
       "text": "Этот звонок сейчас не принимает новых участников.",
       "status": "machine"
@@ -1297,8 +1305,16 @@
       "text": "Не удалось показать экран. Разрешите показ экрана для этого сайта в настройках браузера.",
       "status": "machine"
     },
+    "call.screen_share.refused_desktop": {
+      "text": "Не удалось показать экран. Разрешите Lakko запись экрана в настройках конфиденциальности системы.",
+      "status": "machine"
+    },
     "call.screen_share.refused_macos": {
       "text": "Не удалось показать экран. Разрешите браузеру запись экрана в Системных настройках.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Не удалось показать экран. Разрешите Lakko запись экрана в Системных настройках.",
       "status": "machine"
     },
     "call.screen_share.started": {
@@ -3537,12 +3553,20 @@
       "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения. Разрешите доступ к камере в настройках сайта в браузере.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения. Разрешите доступ в настройках конфиденциальности системы.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko нужен доступ к микрофону, чтобы записывать голосовые сообщения. Разрешите доступ к микрофону в настройках сайта в браузере.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko нужен доступ к микрофону, чтобы записывать голосовые сообщения. Разрешите доступ в настройках конфиденциальности системы.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3655,6 +3679,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "В этом браузере нельзя записывать голосовые сообщения",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "На этом устройстве нельзя записывать голосовые сообщения",
       "status": "machine"
     },
     "chat.record.video": {
@@ -5339,6 +5367,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko не может использовать камеру. Разрешите доступ к камере в настройках сайта в браузере и попробуйте снова.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko не может использовать камеру. Разрешите доступ к камере в настройках конфиденциальности системы и попробуйте ещё раз.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -8177,6 +8209,10 @@
       "text": "Это устройство или браузер не поддерживает ключи доступа. Выберите другой способ.",
       "status": "machine"
     },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Это устройство не поддерживает ключи доступа. Выберите другой способ.",
+      "status": "machine"
+    },
     "recovery.passkey.waiting": {
       "text": "Ожидание ключа доступа...",
       "status": "machine"
@@ -8905,6 +8941,10 @@
       "text": "Удаляет данные аккаунта из этого браузера. Сообщения останутся на других ваших устройствах; чтобы вернуться сюда, понадобится другое устройство, ключ доступа, который восстанавливает ключи аккаунта, или фраза восстановления.",
       "status": "machine"
     },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Удаляет данные аккаунта с этого устройства. Сообщения останутся на других ваших устройствах; чтобы вернуться сюда, понадобится другое устройство, ключ доступа, который восстанавливает ключи аккаунта, или фраза восстановления.",
+      "status": "machine"
+    },
     "settings.account.forget_device.title": {
       "text": "Забыть это устройство?",
       "status": "machine"
@@ -9087,6 +9127,10 @@
     },
     "settings.devices.error.no_device_key": {
       "text": "Этот браузер не настроен для вашего аккаунта. Войдите снова.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Это устройство не настроено для вашего аккаунта. Войдите снова.",
       "status": "machine"
     },
     "settings.devices.error.remove": {
@@ -9289,6 +9333,10 @@
       "text": "Этот браузер или устройство сейчас не может создать ключ доступа.",
       "status": "machine"
     },
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Это устройство сейчас не может создать ключ доступа.",
+      "status": "machine"
+    },
     "settings.passkeys.keys.error.other_passkey": {
       "text": "Ответил другой ключ доступа. Попробуйте ещё раз и выберите этот ключ.",
       "status": "machine"
@@ -9391,6 +9439,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Этот браузер не умеет управлять ключами доступа. Используйте свежую версию Safari, Chrome, Firefox или Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Это устройство не умеет управлять ключами доступа.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9697,6 +9749,10 @@
       "text": "Управляется браузером",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Управляется системой",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Удалить",
       "status": "machine"
@@ -9885,6 +9941,10 @@
       "text": "Перевод выполняется на этом устройстве. Для него Lakko нужен пакет «{language}» ({size}). Сообщения никуда не отправляются для перевода.",
       "status": "machine"
     },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Перевод выполняется на этом устройстве. macOS скачивает пакет «{language}» в Системных настройках: «Язык и регион», затем «Языки перевода». Сообщения никуда не отправляются для перевода.",
+      "status": "machine"
+    },
     "translate.pack.cancel": {
       "text": "Отмена",
       "status": "machine"
@@ -9913,6 +9973,10 @@
       "text": "Не сейчас",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Открыть Системные настройки",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "Пакет предоставляет Google.",
       "status": "machine"
@@ -9923,6 +9987,10 @@
     },
     "translate.pack.source.web": {
       "text": "Пакет предоставляет разработчик вашего браузера.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "Пакет предоставляет разработчик вашей системы.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {

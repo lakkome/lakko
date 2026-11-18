@@ -320,14 +320,24 @@ enum DeviceGroupJournalOneShot {
                 }
             },
             serviceEnvelope: { payload in
-                guard let entry = try? DeviceGroupJournalEnvelope.decode(payload),
-                      let processed = try? group.processIncomingVerifyingRemovals(
+                guard let entry = try? DeviceGroupJournalEnvelope.decode(payload) else { return nil }
+                let localEpoch = try? group.epoch()
+                let processed: ProcessedMessage
+                do {
+                    processed = try group.processIncomingVerifyingRemovals(
                         identity: identity,
                         messageBytes: entry.message,
                         attestations: entry.attestation.map { [$0] } ?? [],
                         attestVerifyingKey: attestVk,
-                        nowUnixSecs: Int64(Date().timeIntervalSince1970)),
-                      case .application(let data, _, _) = processed,
+                        nowUnixSecs: Int64(Date().timeIntervalSince1970))
+                } catch {
+                    // ADR-0091 phase 1 — logged, no identifier; behaviour
+                    // unchanged (this read persists nothing).
+                    RegisteredCommitLog.skipped(
+                        error: error, payload: entry.message, localEpoch: localEpoch, latestEpoch: nil)
+                    return nil
+                }
+                guard case .application(let data, _, _) = processed,
                       let parsed = try? parseDevicegroupPayload(plaintext: data),
                       case .serviceEnvelope(let envelope) = parsed.body else {
                     return nil
