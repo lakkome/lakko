@@ -423,6 +423,11 @@ async function handlePush(wake) {
         ? { wake, tapGroupHex }
         : { wake }
       : {};
+  // ADR-0047 section 6 — the first photo's or video's micro thumbnail, a
+  // `data:` URL the decrypt core built from bytes inside the message, set
+  // only on a preview that shows the message's words. A browser that
+  // ignores `image` shows the same notification without it.
+  const image = typeof preview?.image === "string" && preview.image.startsWith("data:image/jpeg;base64,") ? preview.image : null;
   try {
     await self.registration.showNotification(title, {
       body,
@@ -433,6 +438,7 @@ async function handlePush(wake) {
       data,
       icon: "/icon-192.png",
       badge: "/badge-96.png",
+      ...(image === null ? {} : { image }),
     });
   } catch {
     // Some browsers + private modes don't allow showing notifications

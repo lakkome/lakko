@@ -9593,10 +9593,6 @@
       "text": "ניסיון חוזר",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "אי אפשר להוריד חבילות שפה כשעקיפת צנזורה מופעלת.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "התמלול מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language}. הודעות קוליות אף פעם לא נשלחות לשום מקום לתמלול.",
       "status": "machine"

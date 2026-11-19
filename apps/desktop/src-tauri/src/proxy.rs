@@ -146,7 +146,7 @@ pub async fn handle<R: Runtime>(
         return tunnel::handle(&config.tunnel, request).await;
     }
     if path.starts_with(engines::PATH) {
-        return engines::handle(&config.engines, &config.tunnel, request).await;
+        return engines::handle(&config.engines, request).await;
     }
     if path == save_file::PATH {
         return save_file::handle(app, request).await;

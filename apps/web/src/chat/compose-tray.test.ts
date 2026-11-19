@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   backspaceRemovesLast,
   fitIntoTray,
+  messageRefs,
   TRAY_MAX_FILES,
   TRAY_MAX_MEDIA,
   trayDurationLabel,
@@ -17,7 +18,7 @@ import {
   traySendable,
   type TrayKind,
 } from "./compose-tray";
-import { MAX_ATTACHMENT_BYTES } from "./attachments";
+import { MAX_ATTACHMENT_BYTES, type AttachmentRefBytes } from "./attachments";
 
 describe("trayKindOf", () => {
   it("makes an inline photo or video a thumbnail when it came in as media", () => {
@@ -102,5 +103,56 @@ describe("trayDurationLabel", () => {
     expect(trayDurationLabel(65_000)).toBe("1:05");
     expect(trayDurationLabel(undefined)).toBeNull();
     expect(trayDurationLabel(0)).toBeNull();
+  });
+});
+
+describe("messageRefs (ADR-0047 section 6)", () => {
+  const ref = (mime: string, inline: number | null): AttachmentRefBytes => ({
+    blobId: new Uint8Array(32).fill(mime.length),
+    key: new Uint8Array(32),
+    nonce: new Uint8Array(12),
+    mime,
+    size: 10,
+    name: undefined,
+    ...(inline === null ? {} : { inlineThumb: new Uint8Array([0xff, 0xd8, 0xff, inline]) }),
+  });
+  const inlineType = (mime: string | undefined): "image" | "audio" | "video" | null =>
+    mime === "image/jpeg" ? "image" : mime === "video/mp4" ? "video" : mime === "audio/mp4" ? "audio" : null;
+
+  it("keeps the micro thumbnail on the first photo or video only", () => {
+    const out = messageRefs(
+      [
+        { ref: ref("application/pdf", null) },
+        { ref: ref("image/jpeg", 1) },
+        { ref: ref("video/mp4", 2) },
+      ],
+      inlineType,
+    );
+    expect(out.map((r) => r.inlineThumb?.[3])).toEqual([undefined, 1, undefined]);
+    expect("inlineThumb" in (out[2] as object)).toBe(false);
+  });
+
+  it("puts it on a File-picked JPEG that comes first, as the core does", () => {
+    const out = messageRefs(
+      [
+        { ref: ref("image/jpeg", 7) },
+        { ref: ref("image/jpeg", 8) },
+      ],
+      inlineType,
+    );
+    expect(out.map((r) => r.inlineThumb?.[3])).toEqual([7, undefined]);
+  });
+
+  it("skips items not yet uploaded and sends no thumbnail when the carrier has none", () => {
+    const out = messageRefs(
+      [
+        { ref: null },
+        { ref: ref("image/jpeg", null) },
+        { ref: ref("image/jpeg", 3) },
+      ],
+      inlineType,
+    );
+    expect(out).toHaveLength(2);
+    expect(out.map((r) => r.inlineThumb)).toEqual([undefined, undefined]);
   });
 });

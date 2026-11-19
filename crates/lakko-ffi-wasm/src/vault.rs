@@ -548,8 +548,10 @@ fn bound_media(a: &mut rec::VaultAttachment) {
         }),
         title: some_text(&a.title),
         artist: some_text(&a.artist),
+        inline_thumb: Some(std::mem::take(&mut a.inline_thumb)).filter(|t| !t.is_empty()),
     }
     .bounded();
+    a.inline_thumb = media.inline_thumb.unwrap_or_default();
     a.title = media.title.unwrap_or_default();
     a.artist = media.artist.unwrap_or_default();
     a.kind = media.kind.unwrap_or_default();
@@ -567,8 +569,24 @@ fn bound_media(a: &mut rec::VaultAttachment) {
     };
 }
 
+/// ADR-0047 section 6: only the first image or video of a message keeps its
+/// micro thumbnail, as on the envelope route (an empty `mime` is none).
+fn keep_inline_thumb_on_carrier(attachments: &mut [rec::VaultAttachment]) {
+    let carrier = lakko_attachments::inline_thumb_carrier(
+        attachments
+            .iter()
+            .map(|a| (!a.mime.is_empty()).then_some(a.mime.as_str())),
+    );
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb.clear();
+        }
+    }
+}
+
 fn bound_message(mut m: rec::VaultMessage) -> rec::VaultMessage {
     m.attachments.iter_mut().for_each(bound_media);
+    keep_inline_thumb_on_carrier(&mut m.attachments);
     m
 }
 
@@ -669,6 +687,7 @@ impl VaultAttachment {
                 thumb: None,
                 title: String::new(),
                 artist: String::new(),
+                inline_thumb: Vec::new(),
             },
         })
     }
@@ -751,6 +770,22 @@ impl VaultAttachment {
         self.inner.title = title.unwrap_or_default();
         self.inner.artist = artist.unwrap_or_default();
         bound_media(&mut self.inner);
+    }
+
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes, at most 4096).
+    /// Not a JPEG or over the bound, it is dropped (`inlineThumb` then
+    /// reads `undefined`); a message keeps it on its first image or video
+    /// only.
+    #[wasm_bindgen(js_name = setInlineThumb)]
+    pub fn set_inline_thumb(&mut self, inline_thumb: Option<Vec<u8>>) {
+        self.inner.inline_thumb = inline_thumb.unwrap_or_default();
+        bound_media(&mut self.inner);
+    }
+
+    /// ADR-0047 section 6 micro thumbnail, `undefined` when none.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        (!self.inner.inline_thumb.is_empty()).then(|| self.inner.inline_thumb.clone())
     }
 
     /// ADR-0092 audio title tag.
@@ -912,7 +947,12 @@ impl VaultMessage {
                 edited: false,
                 deleted: false,
                 text: text.to_string(),
-                attachments: attachments.into_iter().map(|a| a.inner).collect(),
+                attachments: {
+                    let mut attachments: Vec<rec::VaultAttachment> =
+                        attachments.into_iter().map(|a| a.inner).collect();
+                    keep_inline_thumb_on_carrier(&mut attachments);
+                    attachments
+                },
                 reply: None,
                 forward: None,
                 reactions: Vec::new(),
@@ -2612,6 +2652,7 @@ mod tests {
             }),
             title: String::new(),
             artist: String::new(),
+            inline_thumb: vec![0xFF, 0xD8, 0xFF, 0xE1],
         };
         let mut message = plain_message(1, 1, "").inner;
         message.attachments = vec![
@@ -2647,6 +2688,10 @@ mod tests {
         assert_eq!(voice.kind().as_deref(), Some("voice"));
         assert_eq!(voice.duration_ms(), Some(7_250));
         assert_eq!(voice.waveform(), Some(vec![7; 3]));
+        // ADR-0047 section 6: only the first image or video keeps its micro
+        // thumbnail, though the core row carried one on each.
+        assert_eq!(note.inline_thumb(), Some(vec![0xFF, 0xD8, 0xFF, 0xE1]));
+        assert_eq!((gif.inline_thumb(), voice.inline_thumb()), (None, None));
     }
 
     #[test]

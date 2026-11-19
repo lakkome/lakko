@@ -8,7 +8,6 @@ import { describe, expect, it } from "vitest";
 import {
   HOST_ENGINES_PATH,
   hostDetection,
-  hostPacksBlocked,
   hostSystemPacks,
   hostTranscription,
   hostTranslation,
@@ -97,7 +96,7 @@ describe("transcription", () => {
 
   it("install reports the host's answer", async () => {
     expect(await hostTranscription(true, host({ "speech-install": { ok: true } })).install("es")).toBe(true);
-    expect(await hostTranscription(true, host({ "speech-install": { ok: false, error: "packs-blocked" } })).install("es")).toBe(
+    expect(await hostTranscription(true, host({ "speech-install": { ok: false, error: "failed" } })).install("es")).toBe(
       false,
     );
   });
@@ -114,12 +113,16 @@ describe("16-bit PCM", () => {
   });
 });
 
-describe("packs blocked", () => {
-  it("follows the host, and an unreadable answer is blocked", async () => {
-    expect(await hostPacksBlocked(host({ "packs-blocked": { blocked: false } }))).toBe(false);
-    expect(await hostPacksBlocked(host({ "packs-blocked": { blocked: true } }))).toBe(true);
-    expect(await hostPacksBlocked(host({ "packs-blocked": {} }))).toBe(true);
-    expect(await hostPacksBlocked(host({}, [], 500))).toBe(true);
+describe("packs and anti-censorship (ADR-0082 amendment of 2026-11-19)", () => {
+  it("installs a speech pack without asking the host about anti-censorship", async () => {
+    const seen: Seen[] = [];
+    // The host as it answered while anti-censorship was on, before the amendment.
+    const t = hostTranscription(
+      true,
+      host({ "packs-blocked": { blocked: true }, "speech-install": { ok: true } }, seen),
+    );
+    expect(await t.install("es")).toBe(true);
+    expect(seen.map((s) => s.url)).toEqual([`${HOST_ENGINES_PATH}/speech-install`]);
   });
 });
 

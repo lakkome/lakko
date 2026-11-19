@@ -9593,10 +9593,6 @@
       "text": "حاول مجددًا",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "لا يمكن تنزيل حزم اللغات أثناء تشغيل تجاوز الرقابة.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "يتم تحويل الكلام إلى نص على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك. لا تُرسَل الرسائل الصوتية إلى أي مكان لتحويلها إلى نص.",
       "status": "machine"

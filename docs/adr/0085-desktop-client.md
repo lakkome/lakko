@@ -665,12 +665,15 @@ decision and the details):
   through an initialization script; starts the helper on the first request
   and keeps it; serves `/__host/engines/*` on the app scheme (capabilities,
   detect, translation state, translate, speech state, speech install,
-  transcribe with 16 kHz mono PCM as the body, `packs-blocked`, and opening
+  transcribe with 16 kHz mono PCM as the body, and opening
   System Settings > Language & Region for a translation pack). Only the
   fields of the operation reach the helper; text and audio stay in memory;
   the log names the operation and its outcome only.
-- **`packs-blocked`** is true whenever anti-censorship is switched on (the
-  tunnel's route is not direct); the speech-pack install route then refuses.
+- **`packs-blocked`** was true whenever anti-censorship was switched on (the
+  tunnel's route not direct), and the speech-pack install route then refused.
+  **Removed 2026-11-19 (maintainer, ADR-0082 note of that date):** packs are
+  offered with anti-censorship on; the route is gone and the engines handler
+  no longer takes the tunnel.
 - The bundle's `Info.plist` gains `NSSpeechRecognitionUsageDescription`.
   On this Mac (macOS 27.2) transcription through `SpeechAnalyzer` ran
   without a permission prompt; the key is there for the system that asks.

@@ -49,7 +49,7 @@ import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer
 import { checklistBodyOf, pollBodyOf } from "../attach/actions";
 import { reencodePhoto } from "../attach/photo-encode";
 import { ComposerTray } from "../chat/ComposerTray";
-import { backspaceRemovesLast, traySendable } from "../chat/compose-tray";
+import { backspaceRemovesLast, messageRefs, traySendable } from "../chat/compose-tray";
 import { release as releaseTrayItem, trayFor } from "../chat/tray-store";
 import { mediaKey } from "../media/media-hub";
 import { deleteBlobs } from "../storage/blob-deletes";
@@ -200,9 +200,9 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
       } else {
         // Taken out of the tray only once the post is published: a refused
         // publish leaves the tray as it was, to send again.
-        const items = tray.items();
-        const refs: AttachmentRefBytes[] = [];
-        for (const item of items) if (item.ref !== null) refs.push(item.ref);
+        // ADR-0047 section 6 — the micro thumbnail stays on the first photo
+        // or video (by type, however it was added) only.
+        const refs: AttachmentRefBytes[] = messageRefs(tray.items(), (mime) => props.hub.inlineType(mime));
         await props.publish(await composeEnvelope(text().trim(), refs));
         for (const item of tray.take()) {
           if (item.ref !== null && item.kind !== "file") {

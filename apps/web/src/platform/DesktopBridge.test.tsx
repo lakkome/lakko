@@ -17,12 +17,19 @@ const platform = { desktop: true };
 vi.mock("./index", () => ({ isDesktop: (): boolean => platform.desktop }));
 
 const [rows, setRows] = createSignal<readonly ConversationRow[]>([]);
+// ADR-0047 section 6 — the micro thumbnail of a row's last message, by row id
+// (base64url, as the summary keeps it).
+const inlineThumbs = new Map<string, string>();
 vi.mock("../chat/conversation-rows", () => ({
   createConversationRows: () => ({
     orderedRows: rows,
-    groupById: () => new Map(rows().map((r) => [r.id, { groupIdB64: `g-${r.id}` }])),
+    groupById: () => new Map(rows().map((r) => [r.id, { id: r.id, groupIdB64: `g-${r.id}` }])),
     kindOf: () => "chat",
     conversationIdOf: () => new Uint8Array([1, 2, 3]),
+    previewMediaFor: (g: { id: string }) => {
+      const inline = inlineThumbs.get(g.id);
+      return inline === undefined ? null : { thumb: null, inlineThumbB64: inline, video: false, count: 1 };
+    },
   }),
 }));
 
@@ -164,6 +171,23 @@ describe("DesktopBridge", () => {
     expect(navigate).toHaveBeenCalledWith("/chat/AQID");
     hostEvent("open-target", { target: "https://evil.example" });
     expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the last message's micro thumbnail on its notification beside its words", async () => {
+    inlineThumbs.set("p", "_9j_4A");
+    try {
+      setRows([{ ...row("p", 0), preview: "Photo" }]);
+      renderUi(() => <DesktopBridge />);
+      await settle();
+      setRows([{ ...row("p", 1), preview: "Photo" }]);
+      await settle();
+      const notified = posts.filter((p) => p.url === "/__host/app/notify").map((p) => p.body);
+      expect(notified).toEqual([
+        { tag: "conversation:chat:p", title: "p", body: "Photo", target: "/chat/AQID", image: "/9j/4A==" },
+      ]);
+    } finally {
+      inlineThumbs.clear();
+    }
   });
 
   it("raises one notification for a call ringing behind the window", async () => {

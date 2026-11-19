@@ -40,6 +40,10 @@ public enum PhotoVideoPrep {
         public var thumb: Data?
         public var thumbWidth: UInt32?
         public var thumbHeight: UInt32?
+        /// ADR-0047 section 6 — the micro thumbnail carried inside the
+        /// message (``InlineThumb``), made from ``thumb``; `nil` when it
+        /// does not fit.
+        public var inlineThumb: Data?
 
         public var isVideo: Bool { fileURL != nil }
     }
@@ -100,6 +104,7 @@ public enum PhotoVideoPrep {
             prepared.thumb = thumb.data
             prepared.thumbWidth = thumb.width
             prepared.thumbHeight = thumb.height
+            prepared.inlineThumb = InlineThumb.make(fromEncoded: thumb.data)
         }
         return prepared
     }
@@ -186,6 +191,7 @@ public enum PhotoVideoPrep {
             prepared.thumb = thumb.data
             prepared.thumbWidth = thumb.width
             prepared.thumbHeight = thumb.height
+            prepared.inlineThumb = InlineThumb.make(from: image)
         } else {
             log.warning("video poster unavailable; sending without it")
         }

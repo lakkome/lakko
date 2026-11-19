@@ -159,9 +159,6 @@ export function TranslationLine(props: {
               </>
             )}
           </Match>
-          <Match when={props.view.phase === "packs-blocked"}>
-            <span>{t("translate.pack.blocked_anti_censorship")}</span>
-          </Match>
           <Match when={props.view.phase === "pack-failed" ? props.view : null}>
             {(v) => (
               <>

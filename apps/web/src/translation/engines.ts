@@ -119,12 +119,6 @@ export interface Engines {
   readonly detection: DetectionEngine;
   readonly transcription: TranscriptionEngine;
   /**
-   * Whether no pack may be downloaded now: anti-censorship is on, and a
-   * vendor download would leave the device outside it (ADR-0082 section 4).
-   * Absent where the client has no anti-censorship (the browser).
-   */
-  packsBlocked?(): Promise<boolean>;
-  /**
    * The packs the system holds for these engines, where it can list them
    * (the desktop app on macOS). Absent where it cannot: a browser lists no
    * pack, and only the ones Lakko asked for are recorded (`settings.ts`).

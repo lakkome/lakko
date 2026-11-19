@@ -11,7 +11,7 @@
  * their uploads (`tray-store.ts`) and the strip that draws them
  * (`ComposerTray.tsx`) ask this module.
  */
-import { MAX_ATTACHMENT_BYTES } from "./attachments";
+import { MAX_ATTACHMENT_BYTES, type AttachmentRefBytes } from "./attachments";
 
 /** At most this many photos and videos in one message (chosen, not measured). */
 export const TRAY_MAX_MEDIA = 10;
@@ -125,4 +125,36 @@ export function trayDurationLabel(ms: number | undefined): string | null {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/**
+ * The refs one message carries, in tray order, with the micro thumbnail
+ * (ADR-0047 section 6) kept on the carrier only: the first ref whose type
+ * shows inline as an image or a video, however the item was added (a JPEG
+ * picked through File is a file chip, yet it is the carrier when it comes
+ * first). The core applies the same rule (`inline_thumb_carrier`) and drops
+ * the field everywhere else, so nothing more is sent. Items not yet uploaded
+ * are skipped.
+ */
+export function messageRefs(
+  items: readonly { readonly ref: AttachmentRefBytes | null }[],
+  inlineType: (mime: string | undefined) => "image" | "audio" | "video" | null,
+): AttachmentRefBytes[] {
+  const out: AttachmentRefBytes[] = [];
+  let carrierSeen = false;
+  for (const item of items) {
+    const ref = item.ref;
+    if (ref === null) continue;
+    const inline = inlineType(ref.mime);
+    const isCarrier = !carrierSeen && (inline === "image" || inline === "video");
+    if (isCarrier) carrierSeen = true;
+    if (isCarrier || ref.inlineThumb === undefined) {
+      out.push(ref);
+    } else {
+      const rest: { -readonly [K in keyof AttachmentRefBytes]: AttachmentRefBytes[K] } = { ...ref };
+      delete rest.inlineThumb;
+      out.push(rest);
+    }
+  }
+  return out;
 }

@@ -18,6 +18,9 @@
 //! `fuzz_api::media_metadata_within_bounds`, a property oracle asserted
 //! here: every media field that survives parse is within its bound, and
 //! re-composing the parsed refs then parsing again yields the same refs.
+//! ADR-0047 section 6: the `inline_thumb` micro thumbnail is part of that
+//! oracle too: a JPEG of at most `MAX_INLINE_THUMB_BYTES` decoded bytes, on
+//! no ref but the first inline image or video of the message.
 //! ADR-0087 section 14: the `channel_invite` card is bounded the same way
 //! (`fuzz_api::channel_invite_within_bounds`). The reaction op (an explicit
 //! add / remove and an optional target-author key) is checked by

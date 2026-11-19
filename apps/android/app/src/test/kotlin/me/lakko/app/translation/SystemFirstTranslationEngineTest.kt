@@ -100,17 +100,6 @@ class SystemFirstTranslationEngineTest {
     }
 
     @Test
-    fun `with anti-censorship on a pair the system cannot supply is unavailable`() = runTest {
-        // The real ML Kit engine answers nothing while anti-censorship is on.
-        val system = Fake("system", mapOf("es>en" to needsPack, "de>en" to ready))
-        val engine = SystemFirstTranslationEngine(system, MlKitTranslationEngine { true })
-        assertEquals(TranslationEngineState.UNAVAILABLE, engine.state("es", "en"))
-        assertEquals(PackOutcome.FAILED, engine.download("es", "en") {})
-        // A pack already on the device keeps working.
-        assertEquals(ready, engine.state("de", "en"))
-    }
-
-    @Test
     fun `below API 31 there is no system engine and ML Kit answers`() = runTest {
         val mlkit = Fake("mlkit", mapOf("es>en" to ready))
         val engine = SystemFirstTranslationEngine(null, mlkit)

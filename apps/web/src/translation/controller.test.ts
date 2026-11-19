@@ -792,7 +792,7 @@ describe("transcripts (UX section 4)", () => {
   });
 });
 
-describe("packs the system fetches, and anti-censorship (ADR-0082 note of 2026-11-18)", () => {
+describe("packs the system fetches (ADR-0082 note of 2026-11-18)", () => {
   const audioBlob = (): Promise<Blob | null> => Promise.resolve(new Blob([new Uint8Array(4)]));
 
   it("opens the system's settings instead of downloading, and translates nothing", async () => {
@@ -842,44 +842,26 @@ describe("packs the system fetches, and anti-censorship (ADR-0082 note of 2026-1
     expect(c.packRequest()?.systemSettings).toBe(false);
   });
 
-  it("says packs are blocked while anti-censorship is on, and asks nothing", async () => {
+  it("offers the pack dialog whatever the network route; there is no anti-censorship block (ADR-0082 amendment of 2026-11-19)", async () => {
     f.translationState.set("es>en", "needs-pack");
     f.transcriptionState.set("en", "needs-pack");
-    f.engines = { ...f.engines, packsBlocked: () => Promise.resolve(true) };
     const c = controller();
     c.detected(ref(1), "hola amigos");
     await flush();
     c.translate("text", ref(1), "hola amigos");
     await flush();
-    expect(c.packRequest()).toBeNull();
-    expect(c.textView("text", ref(1))).toEqual({ phase: "packs-blocked", language: "es" });
+    const translation = c.packRequest();
+    expect(translation?.use).toBe("translation");
+    expect(translation?.language).toBe("es");
+    translation?.dismiss();
+    await flush();
     c.toggleTranscript(ref(7), audioBlob);
     await flush();
-    expect(c.packRequest()).toBeNull();
-    expect(c.transcriptView(ref(7)).phase).toBe("packs-blocked");
-    expect(f.installed).toEqual([]);
-  });
-
-  it("a ready language is not affected by the block", async () => {
-    f.translationState.set("es>en", "ready");
-    f.engines = { ...f.engines, packsBlocked: () => Promise.resolve(true) };
-    const c = controller();
-    c.detected(ref(1), "hola amigos");
+    const transcription = c.packRequest();
+    expect(transcription?.use).toBe("transcription");
+    transcription?.download();
     await flush();
-    c.translate("text", ref(1), "hola amigos");
-    await flush();
-    expect(c.textView("text", ref(1)).phase).toBe("translated");
-  });
-
-  it("a failing block check counts as blocked", async () => {
-    f.translationState.set("es>en", "needs-pack");
-    f.engines = { ...f.engines, packsBlocked: () => Promise.reject(new Error("host")) };
-    const c = controller();
-    c.detected(ref(1), "hola amigos");
-    await flush();
-    c.translate("text", ref(1), "hola amigos");
-    await flush();
-    expect(c.textView("text", ref(1)).phase).toBe("packs-blocked");
+    expect(f.installed).toEqual(["en"]);
   });
 });
 

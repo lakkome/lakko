@@ -14,6 +14,7 @@
  * in the list, not in a burst of notifications.
  */
 import type { HostNotification } from "./host";
+import { isInlineThumbJpeg } from "../media/visual-media";
 
 /** One conversation, as the notification rules need it. */
 export interface NotifyRow {
@@ -26,6 +27,9 @@ export interface NotifyRow {
   readonly preview: string;
   /** Where a click opens it; `null` when it cannot be opened. */
   readonly href: string | null;
+  /** ADR-0047 section 6 — the last message's micro thumbnail (its first
+   *  photo or video), when it carries one: a JPEG of at most 4096 bytes. */
+  readonly image?: Uint8Array | undefined;
   /** A channel's row: its posts are announced by the channel rule
    *  (`feed/ChannelPostNotifier.tsx`, `docs/ux/channel-notifications.md`),
    *  which keeps history and the person's own posts quiet; a rise in its
@@ -67,14 +71,28 @@ export function messageNotifications(
     if (row.muted || row.href === null || row.channel === true) continue;
     // The conversation is on screen in front of the person.
     if (view.focused && view.path === row.href) continue;
+    const showsText = row.preview.trim() !== "";
+    // The picture shows exactly when the message's words do: never beside
+    // the generic "New message".
+    const image = showsText ? notificationImage(row.image) : null;
     notify.push({
       tag: conversationTag(row.key),
       title: row.title,
-      body: row.preview.trim() === "" ? newMessageWord : row.preview,
+      body: showsText ? row.preview : newMessageWord,
       target: row.href,
+      ...(image === null ? {} : { image }),
     });
   }
   return { next, notify };
+}
+
+/** Standard base64 of a micro thumbnail for the host, or `null` when the
+ *  bytes are not a JPEG within the core's bound. */
+export function notificationImage(bytes: Uint8Array | undefined): string | null {
+  if (!isInlineThumbJpeg(bytes)) return null;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i] as number);
+  return btoa(binary);
 }
 
 /** Tag of a ringing call's notification: taken back when the ring ends. */

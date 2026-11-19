@@ -11,6 +11,8 @@
  * profile resolver); this module only puts the pieces in order.
  */
 import type { PersistedAttachment } from "./message-log-store";
+import { inlineThumbFromPersisted } from "./persisted-attachment";
+import { jpegDataUrl } from "../media/visual-media";
 import { t } from "../l10n";
 
 /** The one-word label for a media attachment, from its kind and MIME type.
@@ -128,11 +130,15 @@ export function messagePreviewWords(
 }
 
 /** The picture at the start of a row's preview line (section 11): the first
- *  photo's or video's own sent thumbnail, and how many photos and videos the
- *  message holds (a stack behind it for more than one). `null` for a message
- *  with none. */
+ *  photo's or video's micro thumbnail carried inside the message (ADR-0047
+ *  section 6), else its own sent thumbnail, and how many photos and videos
+ *  the message holds (a stack behind it for more than one). `null` for a
+ *  message with none. */
 export interface PreviewMedia {
   readonly thumb: PersistedAttachment["thumb"] | null;
+  /** Base64url of the first photo's or video's micro thumbnail, when the
+   *  message carries one: drawn at once, no fetch. */
+  readonly inlineThumbB64?: string;
   readonly video: boolean;
   readonly count: number;
 }
@@ -146,7 +152,30 @@ export function previewMediaOf(attachments: readonly PersistedAttachment[]): Pre
     count += 1;
   }
   if (first === null) return null;
-  return { thumb: first.thumb ?? null, video: visualKindOf(first) === "video", count };
+  const inline = first.inlineThumbB64;
+  return {
+    thumb: first.thumb ?? null,
+    ...(typeof inline === "string" && inline.length > 0 ? { inlineThumbB64: inline } : {}),
+    video: visualKindOf(first) === "video",
+    count,
+  };
+}
+
+/** Where the row's 20 px picture comes from: the micro thumbnail carried
+ *  inside the message, drawn at once as a `data:` URL (ADR-0047 section 6);
+ *  else the sent thumb blob, fetched and decrypted; else nothing (the
+ *  neutral placeholder). The micro thumbnail is used only when it is a JPEG
+ *  within the core's bound. */
+export type RowThumbSource =
+  | { readonly kind: "inline"; readonly url: string }
+  | { readonly kind: "thumb" }
+  | { readonly kind: "none" };
+
+export function rowThumbSource(media: Pick<PreviewMedia, "thumb" | "inlineThumbB64">): RowThumbSource {
+  const inline = inlineThumbFromPersisted(media.inlineThumbB64);
+  if (inline !== undefined) return { kind: "inline", url: jpegDataUrl(inline) };
+  if (media.thumb !== null && media.thumb !== undefined) return { kind: "thumb" };
+  return { kind: "none" };
 }
 
 /** How many offset edges the row thumbnail's stack draws behind it: none for

@@ -202,7 +202,7 @@ public enum ForwardAttachments {
         }
         let hasMedia = ref.kind != nil || ref.durationMs != nil || ref.waveform != nil
             || ref.width != nil || ref.height != nil || thumb != nil
-        return try await AttachmentBridge.encryptAndUpload(
+        let uploaded = try await AttachmentBridge.encryptAndUpload(
             bytes: bytes,
             mime: ref.mime,
             name: ref.name,
@@ -216,6 +216,20 @@ public enum ForwardAttachments {
                     thumb: thumb)
                 : nil,
             storage: storage)
+        return carryingInlineFields(from: ref, onto: uploaded)
+    }
+
+    /// The fields of `original` that ride inside the message rather than in
+    /// a blob, copied onto the re-encrypted `uploaded` as they are: an audio
+    /// file's title and artist (ADR-0092 section 2), and the micro thumbnail
+    /// (ADR-0047 section 6; the core keeps it only on the first photo or
+    /// video).
+    static func carryingInlineFields(from original: AttachmentRef, onto uploaded: AttachmentRef) -> AttachmentRef {
+        var out = uploaded
+        out.title = original.title
+        out.artist = original.artist
+        out.inlineThumb = InlineThumb.bounded(original.inlineThumb)
+        return out
     }
 
     /// Every attachment of a message, re-encrypted in order. One failure

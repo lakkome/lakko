@@ -4307,6 +4307,15 @@ impl HistoryAttachmentInput {
         self.media_val.artist = artist;
     }
 
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes, at most 4096).
+    /// Not a JPEG, over the bound, or on any attachment but the first image
+    /// or video of the message, it is dropped on encode, as for a live
+    /// envelope.
+    #[wasm_bindgen(js_name = setInlineThumb)]
+    pub fn set_inline_thumb(&mut self, inline_thumb: Option<Vec<u8>>) {
+        self.media_val.inline_thumb = inline_thumb;
+    }
+
     /// ADR-0047 poster frame. `blobId` / `key` MUST be 32 bytes, `nonce`
     /// 12 bytes.
     #[wasm_bindgen(js_name = setThumb)]
@@ -4345,6 +4354,7 @@ fn bound_history_media(
         height: a.height,
         title: a.title.take(),
         artist: a.artist.take(),
+        inline_thumb: a.inline_thumb.take(),
         thumb: a
             .thumb
             .as_ref()
@@ -4363,6 +4373,7 @@ fn bound_history_media(
     a.height = raw.height;
     a.title = raw.title;
     a.artist = raw.artist;
+    a.inline_thumb = raw.inline_thumb;
     a.thumb = match (a.thumb.take(), raw.thumb) {
         (Some(mut t), Some(bounded)) => {
             t.mime = bounded.mime;
@@ -4373,6 +4384,20 @@ fn bound_history_media(
         _ => None,
     };
     a
+}
+
+/// ADR-0047 section 6: only the first image or video of a message keeps
+/// its micro thumbnail, as on the envelope route.
+fn keep_history_inline_thumb_on_carrier(
+    attachments: &mut [lakko_mls::history_placeholder::HistoryAttachmentPlaceholder],
+) {
+    let carrier =
+        lakko_attachments::inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()));
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb = None;
+        }
+    }
 }
 
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue> {
@@ -4495,8 +4520,10 @@ pub fn encode_history_placeholder(
             thumb,
             title: media.title,
             artist: media.artist,
+            inline_thumb: media.inline_thumb,
         }));
     }
+    keep_history_inline_thumb_on_carrier(&mut atts);
     let forward = (forwarded_from.is_some()
         || forward_origin_group.is_some()
         || forward_origin_message.is_some())
@@ -4549,6 +4576,7 @@ pub struct OpenedHistoryAttachment {
     thumb_val: Option<OpenedHistoryThumb>,
     title_val: Option<String>,
     artist_val: Option<String>,
+    inline_thumb_val: Option<Vec<u8>>,
 }
 
 /// A decoded poster frame (ADR-0047) — flat getters.
@@ -4660,6 +4688,12 @@ impl OpenedHistoryAttachment {
     pub fn artist(&self) -> Option<String> {
         self.artist_val.clone()
     }
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes), present only on
+    /// the first image or video of the message.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb_val.clone()
+    }
 }
 
 /// A decoded placeholder — flat getters for the JS caller.
@@ -4756,8 +4790,9 @@ impl OpenedHistoryPlaceholder {
 /// [`OpenedHistoryPlaceholder`].
 #[wasm_bindgen(js_name = decodeHistoryPlaceholder)]
 pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsValue> {
-    let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
+    let mut msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
         .map_err(mls_err)?;
+    keep_history_inline_thumb_on_carrier(&mut msg.attachments);
     let (channel_invite_val, reply_val, forward_val) = bounded_history_extras(
         msg.channel_invite,
         msg.reply.map(|r| (r.target, r.author, r.excerpt)),
@@ -4808,6 +4843,7 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
                 }),
                 title_val: a.title,
                 artist_val: a.artist,
+                inline_thumb_val: a.inline_thumb,
             })
             .collect(),
     })
@@ -6107,6 +6143,57 @@ fn key_32(key: &[u8]) -> Result<[u8; 32], JsValue> {
 
 #[cfg(test)]
 mod tests {
+    /// ADR-0047 section 6 — the micro thumbnail rides the history bundle
+    /// under the envelope's rules: a JPEG within its bound, on the first
+    /// image or video only.
+    #[test]
+    fn inline_thumb_survives_the_history_bundle_on_the_first_media_only() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 3];
+        let attachments: Vec<super::HistoryAttachmentInput> = [
+            ("audio/mp4", jpeg.clone()),
+            ("image/jpeg", jpeg.clone()),
+            ("video/mp4", jpeg.clone()),
+            ("image/png", vec![0x89, b'P', b'N', b'G']),
+        ]
+        .into_iter()
+        .map(|(mime, thumb)| {
+            let mut a = super::HistoryAttachmentInput::new(
+                &[1; 32],
+                &[2; 32],
+                &[3; 12],
+                10,
+                Some(mime.into()),
+                None,
+            );
+            a.set_inline_thumb(Some(thumb));
+            a
+        })
+        .collect();
+        let bytes = super::encode_history_placeholder(
+            7,
+            1,
+            "2026-11-19T12:00:00Z",
+            "",
+            attachments,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("encodes");
+        let back = super::decode_history_placeholder(&bytes).expect("decodes");
+        let thumbs: Vec<_> = back
+            .attachments()
+            .iter()
+            .map(super::OpenedHistoryAttachment::inline_thumb)
+            .collect();
+        assert_eq!(thumbs, vec![None, Some(jpeg), None, None]);
+    }
+
     #[test]
     fn a_media_state_signal_round_trips() {
         let call_id = [7u8; 16];

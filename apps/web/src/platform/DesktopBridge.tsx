@@ -30,6 +30,7 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { useCallHost } from "../calls/CallHostContext";
 import type { ConversationRow } from "../chat/conversation-list";
 import { createConversationRows } from "../chat/conversation-rows";
+import { inlineThumbFromPersisted } from "../chat/persisted-attachment";
 import { allChatsUnreadCount } from "../chat/folders/folder-view";
 import { t } from "../l10n";
 import { paths } from "../routes/paths";
@@ -69,7 +70,7 @@ export function DesktopBridge(): JSX.Element {
   const callHost = useCallHost();
   const navigate = useNavigate();
   const location = useLocation();
-  const { orderedRows, groupById, kindOf, conversationIdOf } = createConversationRows();
+  const { orderedRows, groupById, kindOf, conversationIdOf, previewMediaFor } = createConversationRows();
 
   /** Where a row opens, as the conversation list routes it. */
   const hrefOf = (row: ConversationRow): string | null => {
@@ -78,6 +79,15 @@ export function DesktopBridge(): JSX.Element {
     if (g === undefined) return null;
     const slug = base64UrlEncodeNoPad(conversationIdOf(g));
     return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
+  };
+
+  /** ADR-0047 section 6 — the micro thumbnail of a row's last message, the
+   *  picture its notification shows (no fetch). */
+  const imageOf = (row: ConversationRow): Uint8Array | undefined => {
+    if (row.kind === "channel") return undefined;
+    const g = groupById().get(row.id);
+    if (g === undefined) return undefined;
+    return inlineThumbFromPersisted(previewMediaFor(g)?.inlineThumbB64);
   };
 
   /** Whether the window is in front of the person. */
@@ -107,6 +117,7 @@ export function DesktopBridge(): JSX.Element {
       preview: r.preview,
       href: hrefOf(r),
       channel: r.kind === "channel",
+      image: imageOf(r),
     }));
     const view = untrack(() => ({ focused: focused(), path: location.pathname }));
     const { next, notify } = messageNotifications(counts, rows, view, t("notification.message.new"));

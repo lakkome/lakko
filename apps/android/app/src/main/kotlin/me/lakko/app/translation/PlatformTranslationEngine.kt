@@ -179,8 +179,8 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
  * on-device service (API 31+) where it has the pack, ML Kit otherwise
  * (ADR-0082 notes of 2026-10-27 and 2026-11-15).
  */
-internal fun translationEngineFor(context: Context, antiCensorshipArmed: () -> Boolean): TranslationEngine =
+internal fun translationEngineFor(context: Context): TranslationEngine =
     SystemFirstTranslationEngine(
         system = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PlatformTranslationEngine(context) else null,
-        fallback = MlKitTranslationEngine(antiCensorshipArmed),
+        fallback = MlKitTranslationEngine(),
     )

@@ -253,6 +253,12 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
     if (meta?.size !== undefined && meta.size !== null) {
       out = { ...out, width: meta.size.width, height: meta.size.height };
     }
+    // ADR-0047 section 6 — the micro thumbnail rides inside the message;
+    // `messageRefs` keeps it on the message's first image or video by type
+    // (a JPEG picked through File included).
+    if (meta?.inline !== undefined) {
+      out = { ...out, inlineThumb: meta.inline };
+    }
     if (item.thumbBlob !== null && meta?.thumbSize !== undefined) {
       try {
         const bytes = new Uint8Array(await item.thumbBlob.arrayBuffer());
@@ -299,7 +305,7 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
   const metaOf = new Map<number, PreparedMeta>();
 
   async function prepare(item: TrayItem): Promise<Partial<TrayItem>> {
-    const prepared = await prepareItem(item);
+    const prepared = await prepareItem(item, deps.inlineType);
     metaOf.set(item.id, prepared.meta);
     return prepared.patch;
   }
@@ -393,6 +399,8 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
 interface PreparedMeta {
   readonly size?: { readonly width: number; readonly height: number } | null;
   readonly thumbSize?: { readonly width: number; readonly height: number };
+  /** ADR-0047 section 6 — the micro thumbnail, from the same decode. */
+  readonly inline?: Uint8Array;
   readonly audio?: {
     readonly title: string;
     readonly artist?: string;
@@ -409,9 +417,25 @@ interface PreparedMeta {
  * "never block a send on a preview"); a photo that cannot be read at all goes
  * as a file chip (attachments section 3).
  */
-async function prepareItem(item: TrayItem): Promise<{ patch: Partial<TrayItem>; meta: PreparedMeta }> {
+async function prepareItem(
+  item: TrayItem,
+  inlineType: TrayDeps["inlineType"],
+): Promise<{ patch: Partial<TrayItem>; meta: PreparedMeta }> {
   if (item.kind === "file") {
-    if (item.source !== "audio") return { patch: {}, meta: {} };
+    if (item.source !== "audio") {
+      // ADR-0047 section 6 — a file chip whose type shows inline as an image
+      // or a video can be the message's carrier of the micro thumbnail (the
+      // core picks the first such ref by type), so it gets one too; the chip
+      // itself stays a chip.
+      const inline = inlineType(item.file.type.length > 0 ? item.file.type : undefined);
+      if (inline !== "image" && inline !== "video") return { patch: {}, meta: {} };
+      try {
+        const preview = inline === "image" ? await describeImage(item.file) : await describeVideo(item.file);
+        return { patch: {}, meta: preview.inline === undefined ? {} : { inline: preview.inline } };
+      } catch {
+        return { patch: {}, meta: {} };
+      }
+    }
     try {
       const tags = await readAudioTags(item.file);
       return {
@@ -454,6 +478,7 @@ async function prepareItem(item: TrayItem): Promise<{ patch: Partial<TrayItem>; 
     meta: {
       size: preview.size,
       ...(preview.thumb === null ? {} : { thumbSize: { width: preview.thumb.width, height: preview.thumb.height } }),
+      ...(preview.inline === undefined ? {} : { inline: preview.inline }),
     },
   };
 }

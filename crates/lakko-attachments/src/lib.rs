@@ -70,6 +70,12 @@
 //!   ([`inline_media_type`]), never by `kind`. `kind: voice` with
 //!   `mime: text/html` is a file.
 //! - [`WIRE_VERSION`] stays 1.
+//! - **The micro thumbnail** (`inline_thumb`, ADR-0047 section 6): a JPEG
+//!   of at most [`MAX_INLINE_THUMB_BYTES`] carried inside the envelope, so
+//!   a notification or a list row needs no blob fetch. Only the first
+//!   attachment whose MIME is an inline image or video
+//!   ([`inline_thumb_carrier`]) keeps it; it is dropped from every other
+//!   ref on parse and on compose. [`first_inline_thumb`] reads it.
 //!
 //! # Reaction op (ADR-0023, UX `reactions-and-emoji.md` section 17)
 //!
@@ -277,6 +283,20 @@ pub const MAX_MEDIA_DIMENSION: u32 = 4096;
 /// ADR-0047 — the largest plaintext `size` of a [`ThumbRef`] (256 KiB).
 pub const MAX_THUMB_BYTES: u64 = 256 * 1024;
 
+/// ADR-0047 section 6 — the largest decoded `inline_thumb`, the micro
+/// thumbnail carried inside the envelope (chosen, not measured).
+pub const MAX_INLINE_THUMB_BYTES: usize = 4096;
+
+/// Base64 (standard alphabet, padded) length of
+/// [`MAX_INLINE_THUMB_BYTES`]. Checked before decoding so an oversize
+/// string is refused without allocating its decode.
+const MAX_INLINE_THUMB_B64_LEN: usize = MAX_INLINE_THUMB_BYTES.div_ceil(3) * 4;
+
+/// ADR-0047 section 6 — the first three bytes every JPEG starts with (SOI
+/// marker followed by the first marker byte). An `inline_thumb` that does
+/// not start with them is dropped.
+pub const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
+
 // ============================================================================
 // Encrypted attachment
 // ============================================================================
@@ -392,9 +412,9 @@ pub fn sha256(bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
 /// storage server only sees the `ciphertext` bytes and the URL
 /// path's hex blob_id).
 ///
-/// The ADR-0047 media fields (`kind` … `thumb`) are optional and
-/// bounded. Deserialization goes through a lenient wire shape: a
-/// field of the wrong type or out of its bound is dropped, never
+/// The ADR-0047 media fields (`kind` … `thumb`, `inline_thumb`) are
+/// optional and bounded. Deserialization goes through a lenient wire
+/// shape: a field of the wrong type or out of its bound is dropped, never
 /// failing the ref or the envelope (see the crate docs).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "AttachmentRefWire")]
@@ -463,6 +483,16 @@ pub struct AttachmentRef {
     /// the same rule as [`Self::title`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artist: Option<String>,
+    /// ADR-0047 section 6 — the micro thumbnail: standard base64 (padded)
+    /// of a JPEG (starting [`JPEG_MAGIC`]) of 1..=[`MAX_INLINE_THUMB_BYTES`]
+    /// bytes, carried inside the envelope so a notification or a list row
+    /// can draw the picture without fetching a blob. Kept only on the
+    /// first attachment of a message whose MIME is an inline image or
+    /// video ([`inline_thumb_carrier`]); anywhere else, or out of bounds,
+    /// it is dropped alone. Read the bytes via
+    /// [`Self::decode_inline_thumb`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_thumb: Option<String>,
 }
 
 /// The receiver-side classification of [`AttachmentRef::kind`]
@@ -682,6 +712,7 @@ impl AttachmentRef {
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -733,6 +764,25 @@ impl AttachmentRef {
         self
     }
 
+    /// ADR-0047 section 6 — attach the micro thumbnail from raw JPEG bytes
+    /// (base64-encoded here). Not a JPEG, empty, more than
+    /// [`MAX_INLINE_THUMB_BYTES`], or on any ref but the first inline image
+    /// or video of the message, it is dropped at compose.
+    #[must_use]
+    pub fn with_inline_thumb(mut self, jpeg: &[u8]) -> Self {
+        self.inline_thumb = Some(B64.encode(jpeg));
+        self
+    }
+
+    /// ADR-0047 section 6 — the decoded micro thumbnail (JPEG bytes),
+    /// `None` when absent or out of bounds.
+    #[must_use]
+    pub fn decode_inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb
+            .as_deref()
+            .and_then(decode_inline_thumb_b64)
+    }
+
     /// ADR-0047 — the typed media kind, `None` when `kind` is absent (a
     /// plain file).
     #[must_use]
@@ -774,6 +824,9 @@ impl AttachmentRef {
         let audio = self.media_kind() == Some(MediaKind::Audio);
         self.title = self.title.filter(|t| audio && audio_tag_in_bounds(t));
         self.artist = self.artist.filter(|a| audio && audio_tag_in_bounds(a));
+        self.inline_thumb = self
+            .inline_thumb
+            .filter(|t| decode_inline_thumb_b64(t).is_some());
         self
     }
 
@@ -850,6 +903,8 @@ struct AttachmentRefWire {
     title: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     artist: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    inline_thumb: Option<String>,
 }
 
 impl From<AttachmentRefWire> for AttachmentRef {
@@ -869,6 +924,7 @@ impl From<AttachmentRefWire> for AttachmentRef {
             thumb: w.thumb,
             title: w.title,
             artist: w.artist,
+            inline_thumb: w.inline_thumb,
         }
         .sanitized()
     }
@@ -936,6 +992,71 @@ const fn thumb_size_in_bounds(size: u64) -> bool {
     size > 0 && size <= MAX_THUMB_BYTES
 }
 
+/// ADR-0047 section 6 — whether `bytes` may be carried as an
+/// `inline_thumb`: 1..=[`MAX_INLINE_THUMB_BYTES`] bytes starting with
+/// [`JPEG_MAGIC`]. Shared by the envelope route and [`RawMediaMetadata`].
+#[must_use]
+pub fn inline_thumb_in_bounds(bytes: &[u8]) -> bool {
+    bytes.len() <= MAX_INLINE_THUMB_BYTES && bytes.starts_with(&JPEG_MAGIC)
+}
+
+/// ADR-0047 section 6 — the index of the one attachment of a message that
+/// may carry an `inline_thumb`: the first whose MIME is an inline image or
+/// video ([`inline_media_type`]). `None` when no attachment qualifies.
+/// Takes the MIME types in message order, so a caller holding another
+/// attachment shape (a history bundle, a vault record) applies the same
+/// rule.
+#[must_use]
+pub fn inline_thumb_carrier<'a, I>(mimes: I) -> Option<usize>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    mimes.into_iter().position(|mime| {
+        matches!(
+            mime.and_then(inline_media_type),
+            Some(InlineMediaType::Image | InlineMediaType::Video)
+        )
+    })
+}
+
+/// ADR-0047 section 6 — the decoded micro thumbnail of a message: the
+/// `inline_thumb` of its carrier ([`inline_thumb_carrier`]), `None` when
+/// the carrier has none or no attachment is an image or video. What a
+/// notification or a list row draws.
+#[must_use]
+pub fn first_inline_thumb(attachments: &[AttachmentRef]) -> Option<Vec<u8>> {
+    let carrier = inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()))?;
+    attachments.get(carrier)?.decode_inline_thumb()
+}
+
+/// Apply every per-ref bound, then keep `inline_thumb` only on the carrier
+/// ([`inline_thumb_carrier`]). Runs on every deserialized envelope and in
+/// every compose path, so the sender's view matches every receiver's.
+fn sanitized_attachments(attachments: Vec<AttachmentRef>) -> Vec<AttachmentRef> {
+    let mut attachments: Vec<AttachmentRef> = attachments
+        .into_iter()
+        .map(AttachmentRef::sanitized)
+        .collect();
+    let carrier = inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()));
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb = None;
+        }
+    }
+    attachments
+}
+
+/// Deserialize an envelope's attachment list and apply
+/// [`sanitized_attachments`]. Each ref already went through its own lenient
+/// shape; this adds the one rule a single ref cannot see, which ref carries
+/// the micro thumbnail.
+fn deserialize_attachments<'de, D>(deserializer: D) -> Result<Vec<AttachmentRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<AttachmentRef>::deserialize(deserializer).map(sanitized_attachments)
+}
+
 /// ADR-0047 media metadata in decoded form, as a history bundle carries it
 /// (raw waveform bytes; the blob references stay with the caller, whose
 /// fixed-size arrays are valid by construction).
@@ -957,6 +1078,11 @@ pub struct RawMediaMetadata {
     pub title: Option<String>,
     /// ADR-0092 audio artist tag.
     pub artist: Option<String>,
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes). [`Self::bounded`]
+    /// checks the bytes; which attachment of a message may carry it is the
+    /// caller's rule ([`inline_thumb_carrier`]), since one attachment's
+    /// metadata cannot see the others.
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// The poster-frame part of [`RawMediaMetadata`].
@@ -997,6 +1123,7 @@ impl RawMediaMetadata {
                     ..t
                 })
             }),
+            inline_thumb: self.inline_thumb.filter(|t| inline_thumb_in_bounds(t)),
             kind: self.kind,
         }
     }
@@ -1009,6 +1136,15 @@ fn decode_waveform_b64(encoded: &str) -> Option<Vec<u8>> {
     B64.decode(encoded)
         .ok()
         .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_WAVEFORM_BYTES)
+}
+
+fn decode_inline_thumb_b64(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.is_empty() || encoded.len() > MAX_INLINE_THUMB_B64_LEN {
+        return None;
+    }
+    B64.decode(encoded)
+        .ok()
+        .filter(|bytes| inline_thumb_in_bounds(bytes))
 }
 
 fn decode_blob_id_b64(encoded: &str) -> Result<[u8; BLOB_ID_LEN], AttachmentError> {
@@ -1065,7 +1201,11 @@ pub struct Envelope {
     /// Zero or more attachment references. Omitted from the
     /// serialised form when empty to keep text-only messages
     /// byte-identical to the simplest possible JSON envelope.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_attachments"
+    )]
     pub attachments: Vec<AttachmentRef>,
     /// ADR-0023 — if set, this message EDITS the message whose DS
     /// `messageId` equals this value; `text` is the new body. At
@@ -2085,10 +2225,7 @@ pub fn compose_content(
     reply: Option<&Reply>,
     forward: Option<&Forward>,
 ) -> Result<Vec<u8>, AttachmentError> {
-    let attachments: Vec<AttachmentRef> = attachments
-        .into_iter()
-        .map(AttachmentRef::sanitized)
-        .collect();
+    let attachments = sanitized_attachments(attachments);
     if !matches!(content, Content::Article(_)) && !attachments.is_empty() {
         return Err(AttachmentError::Content(ContentError::Malformed {
             what: "attachments",
@@ -2303,10 +2440,7 @@ pub fn compose_article_edit(
     article: &Article,
     attachments: Vec<AttachmentRef>,
 ) -> Result<Vec<u8>, AttachmentError> {
-    let attachments: Vec<AttachmentRef> = attachments
-        .into_iter()
-        .map(AttachmentRef::sanitized)
-        .collect();
+    let attachments = sanitized_attachments(attachments);
     article.check_images(&attachments)?;
     let envelope = Envelope {
         edit_of: Some(target),
@@ -2414,10 +2548,7 @@ pub fn compose_chat(
     });
     let envelope = Envelope {
         text: text.to_string(),
-        attachments: attachments
-            .into_iter()
-            .map(AttachmentRef::sanitized)
-            .collect(),
+        attachments: sanitized_attachments(attachments),
         reply_to: reply.map(|r| r.target),
         reply_author: reply
             .and_then(|r| truncated_snapshot(r.author.as_deref(), MAX_REPLY_AUTHOR_BYTES)),
@@ -2966,6 +3097,15 @@ pub mod fuzz_api {
         if !refs.iter().all(ref_within_bounds) {
             return false;
         }
+        // ADR-0047 section 6: at most the carrier keeps a micro thumbnail.
+        let carrier = super::inline_thumb_carrier(refs.iter().map(|r| r.mime.as_deref()));
+        if refs
+            .iter()
+            .enumerate()
+            .any(|(i, r)| r.inline_thumb.is_some() && Some(i) != carrier)
+        {
+            return false;
+        }
         let Ok(recomposed) = compose(&text, refs.clone()) else {
             return false;
         };
@@ -3007,7 +3147,16 @@ pub mod fuzz_api {
                 && dim_ok(t.width)
                 && dim_ok(t.height)
         });
-        duration_ok && waveform_ok && dim_ok(r.width) && dim_ok(r.height) && thumb_ok
+        let inline_thumb_ok = r.inline_thumb.is_none()
+            || r.decode_inline_thumb().is_some_and(|t| {
+                t.len() <= super::MAX_INLINE_THUMB_BYTES && t.starts_with(&super::JPEG_MAGIC)
+            });
+        duration_ok
+            && waveform_ok
+            && dim_ok(r.width)
+            && dim_ok(r.height)
+            && thumb_ok
+            && inline_thumb_ok
     }
 
     /// Drive the receiver-side message-body decode chain on
@@ -3025,6 +3174,7 @@ pub mod fuzz_api {
     #[must_use]
     pub fn parse_message_body(bytes: &[u8]) -> bool {
         let (_text, refs) = parse(bytes);
+        let _ = super::first_inline_thumb(&refs);
         for r in &refs {
             let _ = r.decode_blob_id();
             let _ = r.decode_key();
@@ -3032,6 +3182,7 @@ pub mod fuzz_api {
             // ADR-0047: the media-metadata readers a client calls on
             // every ref, including the nested thumb's own decoders.
             let _ = (r.media_kind(), r.decode_waveform(), r.inline_media_type());
+            let _ = r.decode_inline_thumb();
             if let Some(t) = &r.thumb {
                 let _ = (t.decode_blob_id(), t.decode_key(), t.decode_nonce());
                 let _ = t.mime.as_deref().map(super::inline_media_type);
@@ -3724,6 +3875,168 @@ mod tests {
         assert_eq!((thumb.width, thumb.height), (None, Some(240)));
     }
 
+    // ---- ADR-0047 section 6: the micro thumbnail ----
+
+    /// A small JPEG-looking byte string: the magic, then filler.
+    fn jpeg(len: usize) -> Vec<u8> {
+        let mut out = JPEG_MAGIC.to_vec();
+        out.resize(len.max(JPEG_MAGIC.len()), 0x42);
+        out
+    }
+
+    #[test]
+    fn inline_thumb_round_trips_through_compose_parse() {
+        let thumb = jpeg(900);
+        let photo = plain_ref("image/jpeg", "photo.jpg")
+            .with_dimensions(1200, 800)
+            .with_inline_thumb(&thumb);
+        let bytes = compose("caption", vec![photo.clone()]).unwrap();
+        let got = parse_one(&bytes);
+        assert_eq!(got, photo);
+        assert_eq!(got.decode_inline_thumb(), Some(thumb.clone()));
+        match parse_body(&bytes) {
+            MessageBody::Chat { attachments, .. } => {
+                assert_eq!(first_inline_thumb(&attachments), Some(thumb));
+            },
+            other => panic!("expected Chat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_thumb_at_the_bound_is_kept_and_over_it_dropped() {
+        let r = plain_ref("video/mp4", "clip.mp4");
+        let at_max = jpeg(MAX_INLINE_THUMB_BYTES);
+        let kept = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("inline_thumb", B64.encode(&at_max).into())],
+        ));
+        assert_eq!(kept.decode_inline_thumb(), Some(at_max));
+
+        let over = jpeg(MAX_INLINE_THUMB_BYTES + 1);
+        let dropped = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("inline_thumb", B64.encode(&over).into())],
+        ));
+        assert_eq!(dropped.inline_thumb, None);
+        assert_eq!(dropped.name.as_deref(), Some("clip.mp4"));
+
+        // Compose drops it too, so the wire never carries it.
+        let composed = compose("caption", vec![r.with_inline_thumb(&over)]).unwrap();
+        assert!(!String::from_utf8(composed)
+            .unwrap()
+            .contains("inline_thumb"));
+    }
+
+    #[test]
+    fn inline_thumb_that_is_not_a_jpeg_is_dropped() {
+        let r = plain_ref("image/png", "p.png");
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        for bad in [png.to_vec(), vec![0xFF, 0xD8], Vec::new()] {
+            let got = parse_one(&envelope_with_ref_fields(
+                &r,
+                &[("inline_thumb", B64.encode(&bad).into())],
+            ));
+            assert_eq!(got.inline_thumb, None, "bytes {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_inline_thumb_never_fails_the_envelope() {
+        let r = plain_ref("image/jpeg", "p.jpg").with_dimensions(10, 20);
+        for bad in [
+            serde_json::json!(42),
+            serde_json::json!("%%% not base64 %%%"),
+            serde_json::json!({"nested": true}),
+            serde_json::json!(null),
+            serde_json::json!("A".repeat(MAX_INLINE_THUMB_B64_LEN + 4)),
+        ] {
+            let got = parse_one(&envelope_with_ref_fields(&r, &[("inline_thumb", bad)]));
+            assert_eq!(got.inline_thumb, None);
+            assert_eq!((got.width, got.height), (Some(10), Some(20)));
+        }
+    }
+
+    #[test]
+    fn only_the_first_image_or_video_keeps_the_inline_thumb() {
+        let thumb = jpeg(64);
+        let file = plain_ref("application/pdf", "a.pdf").with_inline_thumb(&thumb);
+        let first = plain_ref("video/mp4", "v.mp4").with_inline_thumb(&thumb);
+        let second = plain_ref("image/jpeg", "p.jpg").with_inline_thumb(&thumb);
+
+        // Parse: a hostile sender puts the field on every ref.
+        let refs: Vec<serde_json::Value> = [&file, &first, &second]
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"v": 1, "text": "", "attachments": refs}))
+                .unwrap();
+        let (_, got) = parse(&bytes);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].inline_thumb, None, "a file never carries it");
+        assert_eq!(got[1].decode_inline_thumb(), Some(thumb.clone()));
+        assert_eq!(got[2].inline_thumb, None, "a second image never carries it");
+        assert_eq!(first_inline_thumb(&got), Some(thumb.clone()));
+
+        // Compose applies the same rule.
+        let composed = compose("", vec![file, first, second]).unwrap();
+        assert_eq!(parse(&composed).1, got);
+    }
+
+    #[test]
+    fn a_carrier_without_an_inline_thumb_hands_it_to_nobody() {
+        let thumb = jpeg(64);
+        let first = plain_ref("image/webp", "a.webp");
+        let second = plain_ref("image/jpeg", "b.jpg").with_inline_thumb(&thumb);
+        let composed = compose("", vec![first, second]).unwrap();
+        let (_, got) = parse(&composed);
+        assert!(got.iter().all(|r| r.inline_thumb.is_none()));
+        assert_eq!(first_inline_thumb(&got), None);
+    }
+
+    #[test]
+    fn inline_thumb_carrier_takes_images_and_videos_only() {
+        assert_eq!(
+            inline_thumb_carrier([
+                Some("audio/mp4"),
+                None,
+                Some("image/gif"),
+                Some("video/mp4")
+            ]),
+            Some(2)
+        );
+        assert_eq!(
+            inline_thumb_carrier([Some("audio/mpeg"), Some("image/svg+xml")]),
+            None
+        );
+        assert_eq!(
+            inline_thumb_carrier([Some("VIDEO/MP4; codecs=avc1")]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn raw_metadata_bounds_the_inline_thumb_like_the_envelope() {
+        let ok = jpeg(100);
+        for (bytes, kept) in [
+            (ok.clone(), true),
+            (jpeg(MAX_INLINE_THUMB_BYTES), true),
+            (jpeg(MAX_INLINE_THUMB_BYTES + 1), false),
+            (vec![1, 2, 3, 4], false),
+            (Vec::new(), false),
+        ] {
+            let raw = RawMediaMetadata {
+                inline_thumb: Some(bytes.clone()),
+                ..RawMediaMetadata::default()
+            }
+            .bounded();
+            assert_eq!(raw.inline_thumb.is_some(), kept, "{} bytes", bytes.len());
+            let r = plain_ref("image/jpeg", "x.jpg").with_inline_thumb(&bytes);
+            let via_envelope = parse(&compose("", vec![r]).unwrap()).1;
+            assert_eq!(via_envelope[0].decode_inline_thumb(), raw.inline_thumb);
+        }
+    }
+
     #[test]
     fn wrongly_typed_media_fields_never_fail_the_envelope() {
         let r = plain_ref("audio/mp4", "v.m4a")
@@ -3918,6 +4231,7 @@ mod tests {
                 thumb: None,
                 title: Some("dropped: not audio".into()),
                 artist: None,
+                inline_thumb: Some(vec![0xFF, 0xD8, 0xFF, 0xE0]),
             },
             RawMediaMetadata {
                 kind: Some("video_note".into()),
@@ -3933,6 +4247,7 @@ mod tests {
                 }),
                 title: None,
                 artist: None,
+                inline_thumb: Some(vec![0xFF; MAX_INLINE_THUMB_BYTES + 1]),
             },
             RawMediaMetadata {
                 kind: Some("gif".into()),
@@ -3948,6 +4263,7 @@ mod tests {
                 }),
                 title: None,
                 artist: None,
+                inline_thumb: Some(vec![0x89, b'P', b'N', b'G']),
             },
             RawMediaMetadata {
                 kind: Some("audio".into()),
@@ -3991,6 +4307,9 @@ mod tests {
             if let Some(a) = &raw.artist {
                 obj.insert("artist".into(), a.clone().into());
             }
+            if let Some(t) = &raw.inline_thumb {
+                obj.insert("inline_thumb".into(), B64.encode(t).into());
+            }
             if let Some(t) = &raw.thumb {
                 let mut thumb = serde_json::json!({
                     "blob_id": blob, "key": key, "nonce": nonce, "size": t.size,
@@ -4021,6 +4340,11 @@ mod tests {
             assert_eq!(via_history.height, via_envelope.height, "{raw:?}");
             assert_eq!(via_history.title, via_envelope.title, "{raw:?}");
             assert_eq!(via_history.artist, via_envelope.artist, "{raw:?}");
+            assert_eq!(
+                via_history.inline_thumb,
+                via_envelope.decode_inline_thumb(),
+                "{raw:?}"
+            );
             assert_eq!(
                 via_history
                     .thumb

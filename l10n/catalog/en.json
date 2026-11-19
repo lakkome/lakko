@@ -11110,11 +11110,6 @@
       "text": "Try again",
       "comment": "Button after a failed translation or transcription."
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "Language packs can't be downloaded while anti-censorship is on.",
-      "comment": "Shown instead of the pack dialog while anti-censorship is on; the download would leave the protected connection.",
-      "security_critical": true
-    },
     "translate.pack.body.transcription": {
       "text": "Transcription happens on this device. Lakko needs the {language} pack to do it. Voice messages are never sent anywhere to be transcribed.",
       "comment": "Dialog body when the pack size is unknown. {language} is a language name in the interface language, e.g. 'Spanish'.",

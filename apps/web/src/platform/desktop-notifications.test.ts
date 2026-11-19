@@ -3,7 +3,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { callAlert, callTag, conversationTag, messageNotifications, type NotifyRow } from "./desktop-notifications";
+import {
+  callAlert,
+  callTag,
+  conversationTag,
+  messageNotifications,
+  notificationImage,
+  type NotifyRow,
+} from "./desktop-notifications";
 import { isAppPath } from "./host";
 
 const row = (over: Partial<NotifyRow> = {}): NotifyRow => ({
@@ -122,5 +129,32 @@ describe("isAppPath", () => {
     expect(isAppPath("/a\\b")).toBe(false);
     expect(isAppPath("/a\nb")).toBe(false);
     expect(isAppPath("chat")).toBe(false);
+  });
+});
+
+describe("message notification picture (ADR-0047 section 6)", () => {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+  const prev = new Map([["chat:a", 0]]);
+
+  it("carries the micro thumbnail beside the message's words", () => {
+    const r = messageNotifications(prev, [row({ unread: 1, preview: "Photo", image: jpeg })], hidden, "New message");
+    expect(r.notify[0]?.image).toBe("/9j/4A==");
+    expect(r.notify[0]?.body).toBe("Photo");
+  });
+
+  it("shows no picture when the notification shows no text", () => {
+    const r = messageNotifications(prev, [row({ unread: 1, preview: "  ", image: jpeg })], hidden, "New message");
+    expect(r.notify[0]?.body).toBe("New message");
+    expect(r.notify[0]?.image).toBeUndefined();
+  });
+
+  it("sends nothing that is not a JPEG within the bound", () => {
+    const big = new Uint8Array(4097);
+    big.set([0xff, 0xd8, 0xff]);
+    for (const image of [big, new Uint8Array([1, 2, 3])]) {
+      const r = messageNotifications(prev, [row({ unread: 1, image })], hidden, "New message");
+      expect(r.notify[0]?.image).toBeUndefined();
+    }
+    expect(notificationImage(undefined)).toBeNull();
   });
 });

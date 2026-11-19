@@ -163,8 +163,10 @@ final class ChannelPostNotifierTests: XCTestCase {
 
     private final class Poster: ChannelPostNotificationPoster {
         var shown: [(String, String, String)] = []
-        func post(channelIdHex: String, title: String, body: String) {
+        var pictures: [Data?] = []
+        func post(channelIdHex: String, title: String, body: String, picture: Data?) {
             shown.append((channelIdHex, title, body))
+            pictures.append(picture)
         }
     }
 
@@ -200,6 +202,54 @@ final class ChannelPostNotifierTests: XCTestCase {
         // nothing: the stored cursor already covers it.
         n.handle(accountIdB64: account, reads: [ongoing([11, 12])])
         XCTAssertEqual(poster.shown.count, 1)
+    }
+
+    // MARK: - The picture (ADR-0047 section 6)
+
+    private let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 3, count: 80)
+
+    private func photoPost(_ cursor: UInt64, line: String, inline: Data?) -> PersistedChannelPost {
+        let b64 = Data(repeating: 1, count: 32).base64EncodedString()
+        let attachment = PersistedAttachment(
+            blobIdB64: b64, keyB64: b64, nonceB64: Data(repeating: 2, count: 12).base64EncodedString(),
+            mime: "image/jpeg", size: 1_000, name: nil, width: 400, height: 300,
+            inlineThumbB64: inline?.base64EncodedString())
+        return PersistedChannelPost(
+            cursor: cursor, serverTsMs: Int64(now - 1_000), text: line, caption: "", attachments: [attachment])
+    }
+
+    /// The picture goes with the post's own line, within the bound, and is
+    /// handed to the poster with it.
+    func testAPhotoPostIsNotifiedWithItsPicture() {
+        XCTAssertEqual(ChannelNotify.picture(post: photoPost(1, line: "Photo", inline: jpeg)), jpeg)
+        XCTAssertNil(ChannelNotify.picture(post: photoPost(1, line: "  ", inline: jpeg)), "never with the generic line")
+        XCTAssertNil(ChannelNotify.picture(post: photoPost(1, line: "Photo", inline: nil)))
+        XCTAssertNil(ChannelNotify.picture(post: photoPost(1, line: "Photo", inline: Data([1, 2, 3, 4]))), "not a JPEG")
+        let over = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0, count: notificationPictureMaxBytes)
+        XCTAssertNil(ChannelNotify.picture(post: photoPost(1, line: "Photo", inline: over)), "over the bound")
+        XCTAssertNil(ChannelNotify.picture(post: post(1)), "a text post has none")
+
+        let poster = Poster()
+        let read = ChannelRead(
+            channelIdHex: channel, slotBefore: ChannelPostSlot(cursor: 10, posts: []),
+            slotAfter: ChannelPostSlot(cursor: 11, posts: [photoPost(11, line: "Photo", inline: jpeg)]),
+            readMarker: 10)
+        notifier(poster: poster).handle(accountIdB64: account, reads: [read])
+        XCTAssertEqual(poster.shown.first?.2, "Photo")
+        XCTAssertEqual(poster.pictures, [jpeg])
+    }
+
+    /// The shared attachment helper writes a `.jpg` the system takes, and
+    /// writes nothing for refused bytes.
+    func testThePictureAttachmentGoesThroughATemporaryJpeg() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("channel-picture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNil(notificationPictureAttachment(Data([1, 2, 3, 4]), directory: dir))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
+        let url = try XCTUnwrap(writeNotificationPicture(jpeg, directory: dir))
+        XCTAssertEqual(url.pathExtension, "jpg")
     }
 
     // MARK: - The sync hands its reads over

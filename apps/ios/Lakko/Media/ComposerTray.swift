@@ -145,8 +145,29 @@ public struct ComposerTray: Equatable {
         (hasText || !items.isEmpty) && !isBusy && !hasFailed
     }
 
-    /// What the message carries, in the order the items were added.
-    public var refs: [AttachmentRef] { items.compactMap(\.ref) }
+    /// What the message carries, in the order the items were added. The
+    /// micro thumbnail (ADR-0047 section 6) stays on the first photo or
+    /// video only, as the core keeps it.
+    public var refs: [AttachmentRef] { Self.keepingInlineThumbOnFirstMedia(items.compactMap(\.ref)) }
+
+    /// ADR-0047 section 6 — `refs` with `inlineThumb` kept only on the first
+    /// ref whose MIME is an inline image or video (the core's carrier rule,
+    /// `lakko_attachments::inline_thumb_carrier`) and cleared on every other.
+    static func keepingInlineThumbOnFirstMedia(
+        _ refs: [AttachmentRef], allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> [AttachmentRef] {
+        let carrier = refs.firstIndex {
+            switch InlineMedia.inlineType(mime: $0.mime, allowlist: allowlist) {
+            case .image?, .video?: return true
+            default: return false
+            }
+        }
+        return refs.enumerated().map { index, ref in
+            var out = ref
+            out.inlineThumb = index == carrier ? InlineThumb.bounded(ref.inlineThumb) : nil
+            return out
+        }
+    }
 
     /// The photos and videos, in order: what the viewer pages through.
     public var mediaItems: [ComposerTrayItem] { items.filter(\.isMedia) }
@@ -488,7 +509,7 @@ enum ComposerTrayUpload {
             }
             return try await uploadFile(
                 data, name: url.lastPathComponent, mime: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType,
-                idleDays: idleDays, report: report, progress: progress)
+                fileURL: url, idleDays: idleDays, report: report, progress: progress)
         case .file(let data, let name, let mime):
             return try await uploadFile(data, name: name, mime: mime, idleDays: idleDays, report: report, progress: progress)
         case .audio(let url):
@@ -549,7 +570,7 @@ enum ComposerTrayUpload {
         }
         let meta = MediaAttachmentMeta(kind: nil, width: prepared.width, height: prepared.height, thumb: thumbRef)
         do {
-            let ref: AttachmentRef
+            var ref: AttachmentRef
             if let bytes = prepared.bytes {
                 ref = try await AttachmentBridge.encryptAndUpload(
                     bytes: bytes, mime: prepared.mime, name: prepared.name, media: meta, idleDays: idleDays,
@@ -567,6 +588,11 @@ enum ComposerTrayUpload {
             if let thumbRef, let thumb = prepared.thumb {
                 MediaSessionCache.shared.store(thumb, key: MediaSessionCache.key(for: thumbRef))
             }
+            // ADR-0047 section 6 — every photo and video keeps its micro
+            // thumbnail here; ``ComposerTray/refs`` leaves it only on the
+            // message's first photo or video, so removing the first item
+            // hands the role to the next one.
+            ref.inlineThumb = InlineThumb.bounded(prepared.inlineThumb)
             return ref
         } catch {
             // The preview went up, the file did not: the preview is an orphan.
@@ -577,7 +603,7 @@ enum ComposerTrayUpload {
 
     @MainActor
     private static func uploadFile(
-        _ data: Data, name: String, mime: String?, idleDays: UInt8?,
+        _ data: Data, name: String, mime: String?, fileURL: URL? = nil, idleDays: UInt8?,
         report: @MainActor (ComposerTrayEvent) -> Void, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> AttachmentRef {
         // Section 4 — a file over the cap is not added.
@@ -585,12 +611,43 @@ enum ComposerTrayUpload {
             throw ComposerTrayRefusal(text: .key("attach.preview.file_too_big"))
         }
         report(.prepared(kind: .file, name: name, size: UInt64(data.count), durationMs: nil, thumbnail: nil))
-        let ref = try await AttachmentBridge.encryptAndUpload(
+        var ref = try await AttachmentBridge.encryptAndUpload(
             bytes: data, mime: mime, name: name, idleDays: idleDays, onProgress: progress)
         if InlineMedia.decision(for: ref).bubble != .file {
             MediaSessionCache.shared.store(data, key: MediaSessionCache.key(for: ref))
         }
+        // ADR-0047 section 6 — the core keeps the micro thumbnail on the
+        // first ref whose MIME is an inline image or video, however it was
+        // added: a JPEG or MP4 picked through File, pasted or dropped can
+        // be that ref, so it gets one too.
+        ref.inlineThumb = await inlineThumb(forFile: data, mime: ref.mime, fileURL: fileURL)
         return ref
+    }
+
+    /// The micro thumbnail of a file whose MIME is an inline image or video;
+    /// `nil` for anything else, or when none can be made or fits.
+    static func inlineThumb(forFile data: Data, mime: String?, fileURL: URL? = nil) async -> Data? {
+        switch InlineMedia.inlineType(mime: mime) {
+        case .image?:
+            return await Task.detached(priority: .utility) { InlineThumb.make(fromEncoded: data) }.value
+        case .video?:
+            if let fileURL { return await InlineThumb.make(fromVideo: fileURL) }
+            // The bytes only: a temporary copy for the frame reader, removed
+            // at once (under the media temp parent the launch sweep clears).
+            let dir = MediaTempFiles.defaultParent
+                .appendingPathComponent("inline-thumb-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let file = dir.appendingPathComponent("video.mp4")
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try data.write(to: file)
+            } catch {
+                return nil
+            }
+            return await InlineThumb.make(fromVideo: file)
+        default:
+            return nil
+        }
     }
 
     /// Attachments UX section 6 — an audio file's own tags (title, artist,

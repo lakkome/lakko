@@ -58,6 +58,7 @@ fn attachment() -> VaultAttachment {
         thumb: Some(thumb()),
         title: "Song".into(),
         artist: "Band".into(),
+        inline_thumb: vec![0xFF, 0xD8, 0xFF],
     }
 }
 
@@ -210,7 +211,7 @@ fn minimal_message_bytes(id: u64) -> Vec<u8> {
 
 #[test]
 fn a_minimal_chunk_is_pinned() {
-    let mut expected = vec![0x02, 0x00, 0x01];
+    let mut expected = vec![0x03, 0x00, 0x01];
     expected.extend_from_slice(&minimal_message_bytes(12));
     assert_eq!(minimal_message_bytes(12).len(), MIN_MESSAGE_LEN);
     let chunk = chunk_of(minimal(12));
@@ -220,8 +221,8 @@ fn a_minimal_chunk_is_pinned() {
     let empty = HistoryChunk {
         messages: Vec::new(),
     };
-    assert_eq!(empty.encode().unwrap(), [0x02, 0x00, 0x00]);
-    assert_eq!(HistoryChunk::decode(&[0x02, 0x00, 0x00]).unwrap(), empty);
+    assert_eq!(empty.encode().unwrap(), [0x03, 0x00, 0x00]);
+    assert_eq!(HistoryChunk::decode(&[0x03, 0x00, 0x00]).unwrap(), empty);
 }
 
 fn full_attachment_bytes() -> Vec<u8> {
@@ -258,6 +259,8 @@ fn full_attachment_bytes() -> Vec<u8> {
     b.extend_from_slice(b"Song");
     b.push(4); // artist_len
     b.extend_from_slice(b"Band");
+    b.extend_from_slice(&[0, 3]); // inline_thumb_len
+    b.extend_from_slice(&[0xFF, 0xD8, 0xFF]);
     b
 }
 
@@ -308,7 +311,7 @@ fn full_message_bytes(id: u64) -> Vec<u8> {
 
 #[test]
 fn a_full_message_is_pinned() {
-    let mut expected = vec![0x02, 0x00, 0x01];
+    let mut expected = vec![0x03, 0x00, 0x01];
     expected.extend_from_slice(&full_message_bytes(40));
     let chunk = chunk_of(full(40));
     assert_eq!(chunk.encode().unwrap(), expected);
@@ -318,7 +321,7 @@ fn a_full_message_is_pinned() {
 
 #[test]
 fn a_head_is_pinned() {
-    let mut e = vec![0x02]; // version
+    let mut e = vec![0x03]; // version
     e.extend_from_slice(&[0x01, 0x02, 0x02, 0xC1, 0xC1]); // ref: group, 2-byte id
     e.push(2); // kind: group
     e.extend_from_slice(&[0, 1]); // title_len
@@ -375,7 +378,7 @@ fn a_devices_head_and_an_index_are_pinned() {
             },
         ],
     };
-    let mut e = vec![0x02, 0x02];
+    let mut e = vec![0x03, 0x02];
     e.extend_from_slice(&4u64.to_be_bytes());
     e.extend_from_slice(&[0x44; 32]);
     e.extend_from_slice(&1u32.to_be_bytes());
@@ -389,10 +392,10 @@ fn a_devices_head_and_an_index_are_pinned() {
     let none = DevicesHead {
         reentry: Vec::new(),
     };
-    assert_eq!(none.encode().unwrap(), [0x02, 0x00]);
-    assert_eq!(DevicesHead::decode(&[0x02, 0x00]).unwrap(), none);
+    assert_eq!(none.encode().unwrap(), [0x03, 0x00]);
+    assert_eq!(DevicesHead::decode(&[0x03, 0x00]).unwrap(), none);
 
-    let mut e = vec![0x02];
+    let mut e = vec![0x03];
     e.extend_from_slice(&2u32.to_be_bytes()); // entry_count
     e.extend_from_slice(&[0x01, 0x02, 0x02, 0xC1, 0xC1]); // ref: group
     e.extend_from_slice(&7u64.to_be_bytes());
@@ -405,7 +408,7 @@ fn a_devices_head_and_an_index_are_pinned() {
     let empty = VaultIndex {
         entries: Vec::new(),
     };
-    assert_eq!(empty.encode().unwrap(), [0x02, 0, 0, 0, 0]);
+    assert_eq!(empty.encode().unwrap(), [0x03, 0, 0, 0, 0]);
 }
 
 // --- round trips ------------------------------------------------------
@@ -534,6 +537,11 @@ fn attachment_field_bounds() {
     message_bound(
         with_attachment(|a| a.waveform = vec![7; MAX_WAVEFORM_BYTES]),
         with_attachment(|a| a.waveform = vec![7; MAX_WAVEFORM_BYTES + 1]),
+        err,
+    );
+    message_bound(
+        with_attachment(|a| a.inline_thumb = vec![0xFF; MAX_INLINE_THUMB_BYTES]),
+        with_attachment(|a| a.inline_thumb = vec![0xFF; MAX_INLINE_THUMB_BYTES + 1]),
         err,
     );
     let thumb_mime = |len: usize| {
@@ -845,6 +853,7 @@ fn empty_attachment() -> VaultAttachment {
         thumb: None,
         title: String::new(),
         artist: String::new(),
+        inline_thumb: Vec::new(),
     }
 }
 
@@ -967,7 +976,7 @@ fn versions_trailing_bytes_and_truncation() {
         assert_eq!(decode(good), Ok(()));
         assert_eq!(decode(&[]), Err(RecordError::Truncated));
 
-        for version in [0x00, 0x01, 0x03, 0xFF] {
+        for version in [0x00, 0x01, 0x02, 0x04, 0xFF] {
             let mut bytes = good.clone();
             bytes[0] = version;
             assert_eq!(decode(&bytes), Err(RecordError::UnknownVersion));
@@ -1101,27 +1110,27 @@ fn a_count_larger_than_the_input_is_refused_before_allocation() {
     // 512 messages declared, none present.
     let declared = u16::try_from(MAX_CHUNK_MESSAGES).unwrap().to_be_bytes();
     assert_eq!(
-        HistoryChunk::decode(&[0x02, declared[0], declared[1]]),
+        HistoryChunk::decode(&[0x03, declared[0], declared[1]]),
         Err(RecordError::Truncated)
     );
     // One past the bound reports the bound, with or without the bytes.
     let declared = u16::try_from(MAX_CHUNK_MESSAGES + 1).unwrap().to_be_bytes();
     assert_eq!(
-        HistoryChunk::decode(&[0x02, declared[0], declared[1]]),
+        HistoryChunk::decode(&[0x03, declared[0], declared[1]]),
         Err(RecordError::Messages)
     );
     assert_eq!(
-        HistoryChunk::decode(&[0x02, 0xFF, 0xFF]),
+        HistoryChunk::decode(&[0x03, 0xFF, 0xFF]),
         Err(RecordError::Messages)
     );
 
     // An index declaring 65536 entries in five bytes.
     let declared = u32::try_from(MAX_INDEX_ENTRIES).unwrap().to_be_bytes();
-    let mut bytes = vec![0x02];
+    let mut bytes = vec![0x03];
     bytes.extend_from_slice(&declared);
     assert_eq!(VaultIndex::decode(&bytes), Err(RecordError::Truncated));
     assert_eq!(
-        VaultIndex::decode(&[0x02, 0xFF, 0xFF, 0xFF, 0xFF]),
+        VaultIndex::decode(&[0x03, 0xFF, 0xFF, 0xFF, 0xFF]),
         Err(RecordError::Entries)
     );
 

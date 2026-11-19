@@ -23,11 +23,26 @@
 //!   carries, so it needs the installed app.
 //! - Linux: the desktop notification service over D-Bus (`notify-rust`);
 //!   withdrawing is `CloseNotification`.
+//!
+//! **Picture** (ADR-0047 section 6): a message notification may carry the
+//! first photo's or video's micro thumbnail, the JPEG bytes carried inside
+//! the message (at most [`MAX_IMAGE_BYTES`], checked here again). On macOS a
+//! notification takes a picture only as a file: it is written to the app's
+//! own folder under the user's temporary directory ([`image_dir`]), handed to
+//! the notification as its content image, and deleted once the notification
+//! is delivered; the folder is swept at launch ([`sweep_image_dir`]). Windows
+//! and Linux show the notification without the picture: a toast and the
+//! D-Bus `image-path` hint also take a file, which the system reads at a time
+//! the host cannot observe, so there is no moment it could be deleted.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use serde_json::Value;
 
 /// Accept and Decline on a ringing call.
@@ -51,6 +66,36 @@ pub struct Request {
     /// The app path a click opens; `None` only brings the window forward.
     pub target: Option<String>,
     pub call: Option<CallActions>,
+    /// The message's micro thumbnail: a JPEG of at most
+    /// [`MAX_IMAGE_BYTES`], or `None`. Shown on macOS only.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub image: Option<Vec<u8>>,
+}
+
+/// ADR-0047 section 6 — the core's bound on a message's micro thumbnail
+/// (`MAX_INLINE_THUMB_BYTES`).
+pub const MAX_IMAGE_BYTES: usize = 4096;
+/// The longest standard base64 text of [`MAX_IMAGE_BYTES`] bytes, checked
+/// before decoding so a long string is never decoded.
+const MAX_IMAGE_B64_LEN: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+
+/// Whether `bytes` may be shown as a notification picture: 1 to
+/// [`MAX_IMAGE_BYTES`] bytes of a JPEG (starting `FF D8 FF`).
+pub fn is_notification_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() <= MAX_IMAGE_BYTES && bytes.starts_with(&[0xff, 0xd8, 0xff])
+}
+
+/// The picture of a request: standard base64 of a JPEG within the bound.
+/// Anything else is refused (`None`); the notification still shows its text.
+fn image_from_json(v: Option<&Value>) -> Option<Vec<u8>> {
+    let text = v?.as_str()?;
+    if text.is_empty() || text.len() > MAX_IMAGE_B64_LEN {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .ok()?;
+    is_notification_jpeg(&bytes).then_some(bytes)
 }
 
 /// Longest title and body kept, in characters; the page sends short text,
@@ -89,6 +134,7 @@ impl Request {
             body: clip(body, MAX_BODY),
             target,
             call,
+            image: image_from_json(v.get("image")),
         })
     }
 }
@@ -143,6 +189,93 @@ fn clip(s: &str, max: usize) -> String {
     out
 }
 
+/// The folder notification pictures are written to: the app's own folder
+/// under `base` (the user's temporary directory), named by its identifier.
+pub fn image_dir(base: &Path, app_id: &str) -> PathBuf {
+    let safe: String = app_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    base.join(format!("{safe}.notification-images"))
+}
+
+/// Delete everything left in the picture folder by an earlier run (a picture
+/// is normally deleted once its notification is delivered; a quit in between
+/// leaves it). A symbolic link is removed, never followed; a folder inside is
+/// left alone. Returns how many entries were removed.
+pub fn sweep_image_dir(dir: &Path) -> usize {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            continue;
+        }
+        if fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Write `bytes` to a new file with a random name in `dir`, creating the
+/// folder (owner-only) when it is missing. Refuses a `dir` that is not a
+/// plain folder (a symbolic link included) and bytes that are not a
+/// notification JPEG.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub fn write_image(dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    if !is_notification_jpeg(bytes) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a notification picture",
+        ));
+    }
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => {},
+        Ok(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(dir)?;
+        },
+        Err(e) => return Err(e),
+    }
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw).map_err(|_| io::Error::other("rng"))?;
+    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{name}.jpg"));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    io::Write::write_all(&mut file, bytes)?;
+    Ok(path)
+}
+
 /// At most this many notifications wait for a click at once; later ones are
 /// shown without waiting (a click on them only brings the app forward).
 const MAX_WAITING: usize = 16;
@@ -170,17 +303,29 @@ pub struct Notifier {
     available: bool,
     app_id: String,
     delivered: Arc<Mutex<HashMap<String, platform::Delivered>>>,
+    /// Where notification pictures are written (macOS only uses it).
+    image_dir: PathBuf,
 }
 
 impl Notifier {
     /// Set up for this process. `app_id` names the app the notifications are
-    /// attributed to.
+    /// attributed to. Pictures an earlier run left behind are deleted here,
+    /// at launch.
     pub fn new(app_id: &str) -> Self {
+        let image_dir = image_dir(&std::env::temp_dir(), app_id);
+        let swept = sweep_image_dir(&image_dir);
+        if swept > 0 {
+            tracing::info!(
+                count = swept,
+                "notification pictures left by an earlier run deleted"
+            );
+        }
         Self {
             waiting: AtomicUsize::new(0),
             available: platform::init(app_id),
             app_id: app_id.to_owned(),
             delivered: Arc::new(Mutex::new(HashMap::new())),
+            image_dir,
         }
     }
 
@@ -209,7 +354,14 @@ impl Notifier {
             .spawn(move || {
                 let tag = req.tag.clone();
                 let remember = |d: platform::Delivered| me.remember(&tag, d);
-                let outcome = platform::show(&me.app_id, &req, wait, replaced.as_ref(), remember);
+                let outcome = platform::show(
+                    &me.app_id,
+                    &req,
+                    wait,
+                    replaced.as_ref(),
+                    remember,
+                    &me.image_dir,
+                );
                 if wait {
                     me.waiting.fetch_sub(1, Ordering::SeqCst);
                 }
@@ -248,12 +400,21 @@ impl Notifier {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
     use mac_notification_sys::{MainButton, Notification, NotificationResponse};
     #[allow(deprecated)] // The same API `mac-notification-sys` delivers through.
     use objc2_foundation::{NSString, NSUserNotificationCenter};
     use tracing::warn;
 
     use super::{Outcome, Request};
+
+    /// How often, and how many times, the picture's deleter looks for the
+    /// delivered notification before deleting the file anyway (chosen; the
+    /// library delivers before `send` waits for a click).
+    const DELIVERY_POLL: Duration = Duration::from_millis(250);
+    const DELIVERY_POLLS: u32 = 40;
 
     /// What finds a delivered notification again: the library keeps its
     /// identifier to itself.
@@ -274,12 +435,47 @@ mod platform {
         }
     }
 
+    /// How many delivered notifications show this title and text.
+    #[allow(deprecated)] // The same API `mac-notification-sys` delivers through.
+    fn delivered_count(title: &str, body: &str) -> usize {
+        let center = NSUserNotificationCenter::defaultUserNotificationCenter();
+        let title = NSString::from_str(title);
+        let body = NSString::from_str(body);
+        center
+            .deliveredNotifications()
+            .iter()
+            .filter(|n| {
+                n.title().is_some_and(|t| t.isEqualToString(&title))
+                    && n.informativeText()
+                        .is_some_and(|t| t.isEqualToString(&body))
+            })
+            .count()
+    }
+
+    /// Delete `path` once a notification with this title and text is
+    /// delivered (one more than `before`), or after the last poll.
+    fn delete_after_delivery(path: PathBuf, title: String, body: String, before: usize) -> bool {
+        std::thread::Builder::new()
+            .name("lakko-notification-image".into())
+            .spawn(move || {
+                for _ in 0..DELIVERY_POLLS {
+                    std::thread::sleep(DELIVERY_POLL);
+                    if delivered_count(&title, &body) > before {
+                        break;
+                    }
+                }
+                let _ = std::fs::remove_file(&path);
+            })
+            .is_ok()
+    }
+
     pub fn show(
         app_id: &str,
         req: &Request,
         wait: bool,
         replaced: Option<&Delivered>,
         remember: impl FnOnce(Delivered),
+        image_dir: &Path,
     ) -> Outcome {
         if let Some(old) = replaced {
             withdraw(app_id, &req.tag, old);
@@ -288,11 +484,36 @@ mod platform {
             title: req.title.clone(),
             body: req.body.clone(),
         });
+        // ADR-0047 section 6 — the picture as a file of the app's own
+        // folder, deleted once the notification is delivered. A failure
+        // shows the notification without it.
+        let picture =
+            req.image
+                .as_deref()
+                .and_then(|bytes| match super::write_image(image_dir, bytes) {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        warn!(error = %e.kind(), "notification picture not written");
+                        None
+                    },
+                });
+        let picture_text = picture.as_deref().and_then(Path::to_str).map(str::to_owned);
+        let mut deleter = false;
+        if let (Some(path), Some(_)) = (&picture, &picture_text) {
+            let before = delivered_count(&req.title, &req.body);
+            deleter =
+                delete_after_delivery(path.clone(), req.title.clone(), req.body.clone(), before);
+        }
         let mut n = Notification::new();
         n.title(&req.title)
             .message(&req.body)
             .default_sound()
             .wait_for_click(wait);
+        if deleter {
+            if let Some(text) = &picture_text {
+                n.content_image(text);
+            }
+        }
         if let Some(call) = &req.call {
             n.main_button(MainButton::SingleAction(&call.accept))
                 .close_button(&call.decline);
@@ -300,7 +521,13 @@ mod platform {
         if !wait {
             n.asynchronous(true);
         }
-        match n.send() {
+        let sent = n.send();
+        if !deleter || sent.is_err() {
+            if let Some(path) = &picture {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        match sent {
             Ok(NotificationResponse::Click) => Outcome::Clicked,
             Ok(NotificationResponse::ActionButton(_)) => Outcome::Accepted,
             Ok(NotificationResponse::CloseButton(_)) => Outcome::Declined,
@@ -401,12 +628,14 @@ mod platform {
         Ok(toast)
     }
 
+    /// Shown without the picture (see the module notes).
     pub fn show(
         app_id: &str,
         req: &Request,
         wait: bool,
         _replaced: Option<&Delivered>,
         remember: impl FnOnce(Delivered),
+        _image_dir: &std::path::Path,
     ) -> Outcome {
         remember(Delivered);
         let (tx, rx) = mpsc::channel();
@@ -459,12 +688,14 @@ mod platform {
         true
     }
 
+    /// Shown without the picture (see the module notes).
     pub fn show(
         _app_id: &str,
         req: &Request,
         wait: bool,
         replaced: Option<&Delivered>,
         remember: impl FnOnce(Delivered),
+        _image_dir: &std::path::Path,
     ) -> Outcome {
         let mut n = Notification::new();
         // A notification service may read the body as markup.
@@ -626,6 +857,129 @@ mod tests {
         );
     }
 
+    /// A JPEG-shaped byte string of `len` bytes.
+    fn jpeg(len: usize) -> Vec<u8> {
+        let mut b = vec![0u8; len];
+        b[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+        b
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn picture_is_kept_within_the_bound() {
+        let ok = jpeg(MAX_IMAGE_BYTES);
+        let r = Request::from_json(&json!({ "tag": "t", "title": "x", "image": b64(&ok) }))
+            .expect("valid");
+        assert_eq!(r.image.as_deref(), Some(ok.as_slice()));
+        let small = jpeg(3);
+        let r = Request::from_json(&json!({ "tag": "t", "title": "x", "image": b64(&small) }))
+            .expect("valid");
+        assert_eq!(r.image.as_deref(), Some(small.as_slice()));
+    }
+
+    #[test]
+    fn picture_over_the_bound_or_not_a_jpeg_is_refused() {
+        let cases = [
+            json!(b64(&jpeg(MAX_IMAGE_BYTES + 1))),
+            json!(b64(&[0x89, b'P', b'N', b'G', 0, 0])),
+            json!(b64(&[0xff, 0xd8])),
+            json!(b64(&[0xff, 0xd8, 0xfe, 0])),
+            json!(""),
+            json!("not base64 !"),
+            json!("A".repeat(MAX_IMAGE_B64_LEN + 4)),
+            json!(42),
+            Value::Null,
+        ];
+        for image in cases {
+            let r = Request::from_json(
+                &json!({ "tag": "t", "title": "x", "body": "b", "image": image }),
+            )
+            .expect("the notification still shows");
+            assert!(r.image.is_none());
+            assert_eq!(r.body, "b");
+        }
+        let none = Request::from_json(&json!({ "tag": "t", "title": "x" })).expect("valid");
+        assert!(none.image.is_none());
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lakko-notify-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn image_dir_is_named_by_the_app() {
+        let base = Path::new("/tmp/x");
+        assert_eq!(
+            image_dir(base, "me.lakko.desktop"),
+            base.join("me.lakko.desktop.notification-images")
+        );
+        assert_eq!(
+            image_dir(base, "a/../b"),
+            base.join("a_.._b.notification-images")
+        );
+    }
+
+    #[test]
+    fn written_picture_lands_in_an_owner_only_folder() {
+        let dir = scratch("write");
+        let bytes = jpeg(100);
+        let path = write_image(&dir, &bytes).expect("written");
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("jpg"));
+        assert_eq!(fs::read(&path).expect("read"), bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&dir).expect("dir").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+            let mode = fs::metadata(&path).expect("file").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let other = write_image(&dir, &bytes).expect("written");
+        assert_ne!(path, other);
+        assert!(write_image(&dir, &jpeg(MAX_IMAGE_BYTES + 1)).is_err());
+        assert!(write_image(&dir, b"png").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_deletes_what_an_earlier_run_left() {
+        let dir = scratch("sweep");
+        write_image(&dir, &jpeg(10)).expect("written");
+        write_image(&dir, &jpeg(20)).expect("written");
+        fs::write(dir.join("stray"), b"x").expect("stray");
+        fs::create_dir(dir.join("inner")).expect("inner");
+        assert_eq!(sweep_image_dir(&dir), 3);
+        let left: Vec<_> = fs::read_dir(&dir)
+            .expect("dir")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("inner")]);
+        assert_eq!(sweep_image_dir(&dir.join("missing")), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_and_write_never_follow_a_link() {
+        let dir = scratch("link");
+        let target = scratch("link-target");
+        fs::create_dir(&target).expect("target");
+        fs::write(target.join("keep.jpg"), b"x").expect("keep");
+        std::os::unix::fs::symlink(&target, &dir).expect("link");
+        assert_eq!(sweep_image_dir(&dir), 0);
+        assert!(target.join("keep.jpg").exists());
+        assert!(write_image(&dir, &jpeg(10)).is_err());
+        let _ = fs::remove_file(&dir);
+        let _ = fs::remove_dir_all(&target);
+    }
+
     #[test]
     fn toast_text_cannot_break_out_of_the_xml() {
         let r = Request {
@@ -639,6 +993,7 @@ mod tests {
                 call_id: "0".repeat(32),
                 video: false,
             }),
+            image: None,
         };
         let xml = toast_xml(&r, "accept", "decline");
         assert!(xml.contains("<text>&lt;a&amp;b&gt;</text>"));

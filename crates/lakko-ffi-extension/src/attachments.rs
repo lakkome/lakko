@@ -112,6 +112,11 @@ pub struct AttachmentRef {
     /// ADR-0092 — an `audio` attachment's artist tag.
     #[uniffi(default = None)]
     pub artist: Option<String>,
+    /// ADR-0047 section 6 — the micro thumbnail (raw JPEG bytes, at most
+    /// 4096), present only on the first image or video of the message.
+    /// [`ParsedBody::inline_thumb`] already picks it out.
+    #[uniffi(default = None)]
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// ADR-0047 — a decoded poster-frame blob reference, the parse-side mirror
@@ -182,6 +187,12 @@ pub struct ParsedBody {
     /// message text, which is the `/g/` link with its secret.
     #[uniffi(default = None)]
     pub channel_invite: Option<ChannelInviteNotice>,
+    /// ADR-0047 section 6 — the picture of the message's first photo or
+    /// video: the micro thumbnail carried inside the envelope (raw JPEG
+    /// bytes, at most 4096), `Chat` only. The extension shows it in the
+    /// notification exactly when it shows the text, with no download.
+    #[uniffi(default = None)]
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// What a notification needs from a channel invitation card, opened offline
@@ -254,6 +265,7 @@ impl ParsedBody {
             reaction_action: None,
             reaction_target_author: None,
             channel_invite: None,
+            inline_thumb: None,
         }
     }
 }
@@ -278,6 +290,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             ..
         } => ParsedBody {
             text,
+            inline_thumb: inner::first_inline_thumb(&attachments),
             attachments: refs_to_ffi(attachments),
             resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
             resend_origin_message_id: resend.map(|r| r.message_id),
@@ -381,6 +394,7 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             let key = r.decode_key().ok()?;
             let nonce = r.decode_nonce().ok()?;
             let waveform = r.decode_waveform();
+            let inline_thumb = r.decode_inline_thumb();
             let thumb = r.thumb.as_ref().and_then(|t| {
                 Some(ThumbRef {
                     blob_id: t.decode_blob_id().ok()?.to_vec(),
@@ -405,6 +419,7 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 width: r.width,
                 height: r.height,
                 thumb,
+                inline_thumb,
                 title: r.title,
                 artist: r.artist,
             })
@@ -435,6 +450,43 @@ mod tests {
         assert_eq!(got.duration_ms, Some(4200));
         assert_eq!(got.waveform, Some(vec![9, 8, 7]));
         assert!(got.thumb.is_none());
+        assert!(got.inline_thumb.is_none());
+        assert!(body.inline_thumb.is_none());
+    }
+
+    /// ADR-0047 section 6 — the extension gets the first photo or video's
+    /// micro thumbnail without any download, and from no other ref.
+    #[test]
+    fn the_first_media_inline_thumb_reaches_the_extension() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46];
+        let make = |mime: &str| {
+            let enc = inner::encrypt_attachment(b"media").unwrap();
+            inner::AttachmentRef::from_encrypted(&enc, 5, Some(mime.to_string()), None)
+                .with_inline_thumb(&jpeg)
+        };
+        let body = parse_body_envelope(
+            inner::compose(
+                "",
+                vec![
+                    make("application/pdf"),
+                    make("video/mp4"),
+                    make("image/jpeg"),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(body.inline_thumb, Some(jpeg.to_vec()));
+        assert_eq!(body.attachments[0].inline_thumb, None);
+        assert_eq!(body.attachments[1].inline_thumb, Some(jpeg.to_vec()));
+        assert_eq!(body.attachments[2].inline_thumb, None);
+
+        // Not a JPEG: nothing to show.
+        let enc = inner::encrypt_attachment(b"media").unwrap();
+        let png = inner::AttachmentRef::from_encrypted(&enc, 5, Some("image/png".into()), None)
+            .with_inline_thumb(&[0x89, b'P', b'N', b'G']);
+        let body = parse_body_envelope(inner::compose("", vec![png]).unwrap());
+        assert!(body.inline_thumb.is_none());
     }
 
     #[test]

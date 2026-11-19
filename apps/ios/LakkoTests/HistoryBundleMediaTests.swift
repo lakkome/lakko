@@ -52,6 +52,18 @@ final class HistoryBundleMediaTests: XCTestCase {
         XCTAssertEqual(back.thumb, thumb)
     }
 
+    /// ADR-0047 section 6 — the first photo's micro thumbnail travels in the
+    /// bundle, so a restored list row has its picture.
+    func testThePhotoKeepsItsInlineThumb() throws {
+        let inline = (Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 4, count: 60)).base64EncodedString()
+        let back = try roundTrip(PersistedAttachment(
+            blobIdB64: b64(32, 1), keyB64: b64(32, 2), nonceB64: b64(12, 3),
+            mime: "image/jpeg", size: 50_000, name: "photo.jpg",
+            width: 400, height: 300, inlineThumbB64: inline
+        ))
+        XCTAssertEqual(back.inlineThumbB64, inline)
+    }
+
     func testOutOfBoundValuesAreDroppedLikeTheEnvelope() throws {
         let back = try roundTrip(PersistedAttachment(
             blobIdB64: b64(32, 1), keyB64: b64(32, 2), nonceB64: b64(12, 3),

@@ -48,6 +48,8 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-media";
+import { b64UrlEncode, inlineThumbFromPersisted } from "../chat/persisted-attachment";
+import { isInlineThumbJpeg } from "../media/visual-media";
 import { fileHistoryRows } from "../chat/background-log";
 import {
   loadMessageLog,
@@ -278,7 +280,8 @@ function decodeB64OrUndefined(b64: string | undefined): Uint8Array | undefined {
 }
 
 /** Encode the local-store message row into the canonical
- *  cross-platform placeholder bytes (version 4: the ADR-0047 media metadata,
+ *  cross-platform placeholder bytes (version 5 adds the ADR-0047 section 6
+ *  micro thumbnail; version 4: the ADR-0047 media metadata,
  *  so a voice message, video note or GIF restores as itself on the new
  *  device; the ADR-0087 channel invitation card, so an invitation restores
  *  as its card and not as the bare `/g/` link; the ADR-0052 reply and forward
@@ -305,6 +308,10 @@ export function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage, groupI
     if (typeof a.title === "string" || typeof a.artist === "string") {
       input.setAudioTags(a.title ?? null, a.artist ?? null);
     }
+    // ADR-0047 section 6 — the micro thumbnail travels too (placeholder
+    // version 5); the core keeps it on the first photo or video only.
+    const inline = inlineThumbFromPersisted(a.inlineThumbB64);
+    if (inline !== undefined) input.setInlineThumb(inline);
     if (thumb !== null) {
       input.setThumb(
         thumb.blobId,
@@ -409,6 +416,7 @@ export function decodeMessagePlaceholder(
     ...persistedMediaFromOpened(a),
     ...(a.title === undefined ? {} : { title: a.title }),
     ...(a.artist === undefined ? {} : { artist: a.artist }),
+    ...(isInlineThumbJpeg(a.inlineThumb) ? { inlineThumbB64: b64UrlEncode(a.inlineThumb) } : {}),
   }));
   const content = opened.content?.content;
   const contentState = opened.content?.state ?? undefined;

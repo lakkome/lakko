@@ -116,7 +116,6 @@ public class LakkoMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        val startedAtMs = android.os.SystemClock.elapsedRealtime()
         // A push can arrive before any Activity has run in this process: load
         // the interface language for the notification words (ADR-0061).
         me.lakko.app.l10n.Localization.init(applicationContext)
@@ -193,40 +192,12 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "wake posts nothing: no message from someone else")
             return
         }
-        // docs/ux/media-messages.md section 11 — the first photo or video's
-        // sent thumbnail as the notification's picture, when it can be fetched
-        // in the time left; otherwise the notification goes out with text only.
-        val picture = outcome?.preview?.thumb?.let { thumb ->
-            val left = NOTIFICATION_TOTAL_BUDGET_MS - (android.os.SystemClock.elapsedRealtime() - startedAtMs)
-            notificationThumbBlocking(thumb, minOf(left, NOTIFICATION_THUMB_BUDGET_MS))
-        }
+        // docs/ux/media-messages.md section 11, ADR-0047 section 6 — the
+        // first photo or video's micro thumbnail, carried inside the message,
+        // as the notification's picture: decoded in memory, nothing fetched,
+        // so a process this wake started shows it too.
+        val picture = me.lakko.app.media.decodeInlineThumb(notificationPictureBytes(outcome?.preview))
         showWakeNotification(wake, accountIdB64, outcome?.preview, picture)
-    }
-
-    /**
-     * Fetch and open the sent thumbnail (never the full photo or video) within
-     * [budgetMs]; `null` on a timeout or any failure. The read needs a blob
-     * read pass (ADR-0065), bought with an anonymous token of the signed-in
-     * session: in a process the app already runs in it is there; in a process
-     * started by this wake no session is bound yet, the pass cannot be had and
-     * the notification goes out with text only.
-     */
-    private fun notificationThumbBlocking(thumb: uniffi.lakko_ffi_uniffi.ThumbRef, budgetMs: Long): android.graphics.Bitmap? {
-        if (budgetMs <= 0) return null
-        if (me.lakko.app.media.inlineKindOf(thumb.mime, me.lakko.app.media.coreAllowlist) != me.lakko.app.media.InlineKind.IMAGE) return null
-        return try {
-            runBlocking {
-                withTimeoutOrNull(budgetMs) {
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        val bytes = me.lakko.app.chat.AttachmentBridge.downloadAndDecryptThumb(thumb)
-                        me.lakko.app.ui.chat.RowThumbs.decodeSmall(bytes, NOTIFICATION_THUMB_SIDE)
-                    }
-                }
-            }
-        } catch (cause: Throwable) {
-            Log.i(TAG, "notification thumbnail not fetched (${cause.javaClass.simpleName})")
-            null
-        }
     }
 
     /**
@@ -454,15 +425,6 @@ public class LakkoMessagingService : FirebaseMessagingService() {
          *  (~10 s), so we cap the DS-fetch + MLS-decrypt work and fall
          *  back to the generic notification on a timeout. */
         private const val BACKGROUND_DECRYPT_BUDGET_MS: Long = 8_000
-
-        /** Section 11 — at most this long for the notification thumbnail,
-         *  within [NOTIFICATION_TOTAL_BUDGET_MS] since the wake arrived
-         *  (both chosen, not measured). */
-        private const val NOTIFICATION_THUMB_BUDGET_MS: Long = 3_000
-        private const val NOTIFICATION_TOTAL_BUDGET_MS: Long = 9_500
-
-        /** The thumbnail is sent at most 320 px on its longest side. */
-        private const val NOTIFICATION_THUMB_SIDE: Int = 320
 
         /** Notification channel id. Lives across process
          *  restarts; created on first wake via

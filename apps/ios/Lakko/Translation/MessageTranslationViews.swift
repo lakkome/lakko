@@ -112,8 +112,6 @@ struct TranslationQuietLine: View {
                 Text(l10n.t("translate.pack.waiting_wifi", texts: ["language": LanguageNames.inInterface(language)]))
                 dot
                 link(l10n.t("translate.pack.cancel"), actions.cancel)
-            case .blocked:
-                Text(l10n.t("translate.pack.blocked_anti_censorship"))
             }
         }
         .font(.caption)
@@ -474,8 +472,6 @@ struct TranscriptBlock: View {
                         center.cancelDownload(key: MessageTranslationCenter.key(conversation, target.messageId, transcript: true))
                     }
                 }
-            case .blocked:
-                line { Text(l10n.t("translate.pack.blocked_anti_censorship")) }
             case .unsupported(let language):
                 line { Text(l10n.t("transcript.unavailable_source", texts: ["language": LanguageNames.inInterface(language)])) }
             }

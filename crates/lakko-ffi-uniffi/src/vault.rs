@@ -595,6 +595,10 @@ pub struct VaultAttachment {
     /// ADR-0092 audio artist tag.
     #[uniffi(default = None)]
     pub artist: Option<String>,
+    /// ADR-0047 section 6 micro thumbnail: raw JPEG bytes, at most 4096,
+    /// kept only on the first image or video of the message.
+    #[uniffi(default = None)]
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for VaultAttachment {
@@ -883,6 +887,7 @@ fn attachment_to_core(a: VaultAttachment) -> Result<rec::VaultAttachment, FfiErr
         thumb: thumb_meta,
         title: a.title,
         artist: a.artist,
+        inline_thumb: a.inline_thumb,
     }
     .bounded();
     let thumb = match (thumb_refs, media.thumb) {
@@ -914,6 +919,7 @@ fn attachment_to_core(a: VaultAttachment) -> Result<rec::VaultAttachment, FfiErr
         thumb,
         title: media.title.unwrap_or_default(),
         artist: media.artist.unwrap_or_default(),
+        inline_thumb: media.inline_thumb.unwrap_or_default(),
     })
 }
 
@@ -934,6 +940,7 @@ fn attachment_from_core(a: rec::VaultAttachment) -> VaultAttachment {
         }),
         title: some_text(a.title),
         artist: some_text(a.artist),
+        inline_thumb: (!a.inline_thumb.is_empty()).then_some(a.inline_thumb),
     }
     .bounded();
     let thumb = match (a.thumb, media.thumb) {
@@ -963,6 +970,34 @@ fn attachment_from_core(a: rec::VaultAttachment) -> VaultAttachment {
         thumb,
         title: media.title,
         artist: media.artist,
+        inline_thumb: media.inline_thumb,
+    }
+}
+
+/// ADR-0047 section 6: only the first image or video of a message keeps its
+/// micro thumbnail, as on the envelope route.
+fn keep_inline_thumb_on_carrier(attachments: &mut [VaultAttachment]) {
+    let carrier =
+        lakko_attachments::inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()));
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb = None;
+        }
+    }
+}
+
+/// [`keep_inline_thumb_on_carrier`] over the core shape (an empty `mime` or
+/// `inline_thumb` is none).
+fn keep_core_inline_thumb_on_carrier(attachments: &mut [rec::VaultAttachment]) {
+    let carrier = lakko_attachments::inline_thumb_carrier(
+        attachments
+            .iter()
+            .map(|a| (!a.mime.is_empty()).then_some(a.mime.as_str())),
+    );
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb.clear();
+        }
     }
 }
 
@@ -983,11 +1018,12 @@ fn message_to_core(m: VaultMessage) -> Result<rec::VaultMessage, FfiError> {
         .author
         .map(|a| fixed::<32>(&a, "accountKeyLength", "author account key"))
         .transpose()?;
-    let attachments = m
+    let mut attachments = m
         .attachments
         .into_iter()
         .map(attachment_to_core)
         .collect::<Result<Vec<_>, _>>()?;
+    keep_core_inline_thumb_on_carrier(&mut attachments);
     let reactions = m
         .reactions
         .into_iter()
@@ -1049,11 +1085,15 @@ fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
         edited: m.edited,
         deleted: m.deleted,
         text: m.text,
-        attachments: m
-            .attachments
-            .into_iter()
-            .map(attachment_from_core)
-            .collect(),
+        attachments: {
+            let mut attachments: Vec<VaultAttachment> = m
+                .attachments
+                .into_iter()
+                .map(attachment_from_core)
+                .collect();
+            keep_inline_thumb_on_carrier(&mut attachments);
+            attachments
+        },
         reply: m.reply.map(|r| VaultReply {
             target: r.target,
             author: r.author,
@@ -1092,6 +1132,7 @@ const _: () = assert!(
     rec::MAX_CONTENT_STATE_BYTES == lakko_attachments::content_state::MAX_CONTENT_STATE_BYTES
 );
 const _: () = assert!(rec::MAX_AUDIO_TAG_BYTES == lakko_attachments::MAX_AUDIO_TAG_BYTES);
+const _: () = assert!(rec::MAX_INLINE_THUMB_BYTES == lakko_attachments::MAX_INLINE_THUMB_BYTES);
 const _: () = assert!(
     *rec::CONTENT_KINDS.start() == lakko_attachments::content_state::CONTENT_KIND_POLL
         && *rec::CONTENT_KINDS.end() == lakko_attachments::content_state::CONTENT_KIND_ARTICLE
@@ -1450,6 +1491,7 @@ mod tests {
             }),
             title: None,
             artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -1966,6 +2008,7 @@ mod tests {
             }),
             title: String::new(),
             artist: String::new(),
+            inline_thumb: vec![0xFF, 0xD8, 0xFF, 0xE1],
         };
         let message = rec::VaultMessage {
             message_id: 1,
@@ -2023,6 +2066,11 @@ mod tests {
         assert_eq!(voice.kind.as_deref(), Some("voice"));
         assert_eq!(voice.duration_ms, Some(7_250));
         assert_eq!(voice.waveform, Some(vec![7; 3]));
+
+        // ADR-0047 section 6: only the first image or video keeps its micro
+        // thumbnail, though the core row carried one on each.
+        assert_eq!(note.inline_thumb, Some(vec![0xFF, 0xD8, 0xFF, 0xE1]));
+        assert_eq!((&gif.inline_thumb, &voice.inline_thumb), (&None, &None));
 
         // The same holds on the way in: re-encoding what a client was handed
         // writes the bounded row, not the original.

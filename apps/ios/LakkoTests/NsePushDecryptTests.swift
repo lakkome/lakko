@@ -901,6 +901,86 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(preview?.body, "VG3: Notification test 2")
     }
 
+    // MARK: - Notification picture (ADR-0047 section 6)
+
+    private let jpegThumb = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 7, count: 200)
+
+    /// A message preview carries the first photo's micro thumbnail as its
+    /// picture, with its words or its text.
+    func testAMessagePreviewCarriesTheInlineThumbAsItsPicture() async {
+        let photo = FakeThrowawayGroup(decode: { _ in
+            NseProcessedRow(
+                kind: .chat, text: "", attachmentCount: 1,
+                attachmentCounts: NseAttachmentCounts(photos: 1), inlineThumb: self.jpegThumb)
+        })
+        let shown = await decryptPushPreview(
+            NsePushWake(groupHex: groupHex, pointer: 5), FakeDeps(account: okAccount(), group: photo, rows: [row(5, 1)]))
+        XCTAssertFalse(shown?.body.isEmpty ?? true, "the picture goes with a line of text")
+        XCTAssertEqual(shown?.picture, jpegThumb)
+
+        let withText = FakeThrowawayGroup(decode: { _ in
+            NseProcessedRow(kind: .chat, text: "look", attachmentCount: 1, inlineThumb: self.jpegThumb)
+        })
+        let texted = await decryptPushPreview(
+            NsePushWake(groupHex: groupHex, pointer: 5), FakeDeps(account: okAccount(), group: withText, rows: [row(5, 1)]))
+        XCTAssertEqual(texted?.body, "look")
+        XCTAssertEqual(texted?.picture, jpegThumb)
+    }
+
+    /// Only a message shows a picture: a reaction, an edit or the generic
+    /// line never does.
+    func testOnlyAMessagePreviewHasAPicture() async {
+        let reacted = NseProcessedRow(
+            kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "vg3",
+            reaction: NseReaction(targetMessageId: 5, emoji: "\u{1F44D}", add: true, targetAuthorB64: "me"),
+            inlineThumb: jpegThumb)
+        XCTAssertNil(reacted.inlineThumb, "a reaction row keeps no picture")
+        let group = FakeThrowawayGroup(decode: { _ in reacted })
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        deps.ownKey = "me"
+        deps.names = ["vg3": "VG3"]
+        let reaction = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertNotNil(reaction?.reactionKey)
+        XCTAssertNil(reaction?.picture)
+
+        let edit = NseProcessedRow(kind: .edit, text: "fixed", attachmentCount: 0, inlineThumb: jpegThumb)
+        XCTAssertNil(edit.inlineThumb)
+
+        // The generic banner: a row that does not decrypt yields no preview,
+        // so there is nothing a picture could ride on.
+        let broken = FakeThrowawayGroup(decode: { _ in self.chat("x") }, throwOn: [1])
+        let outcome = await decryptPushOutcome(
+            NsePushWake(groupHex: groupHex, pointer: 5), FakeDeps(account: okAccount(), group: broken, rows: [row(5, 1)]))
+        if case .preview = outcome { XCTFail("an unreadable row must not become a preview") }
+
+        // A reaction preview built directly drops a picture too.
+        XCTAssertNil(NsePushPreview(title: "t", body: "b", tag: "g", reactionKey: "k", picture: jpegThumb).picture)
+    }
+
+    /// The bytes are bounded again here: over 4096 bytes or not a JPEG is
+    /// refused, and nothing is written for refused bytes.
+    func testTheNotificationPictureIsBoundedAndOnlyAJpeg() throws {
+        XCTAssertEqual(notificationPicture(jpegThumb), jpegThumb)
+        let atLimit = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 1, count: notificationPictureMaxBytes - 3)
+        XCTAssertEqual(notificationPicture(atLimit), atLimit)
+        XCTAssertNil(notificationPicture(atLimit + Data([0])), "over the bound")
+        XCTAssertNil(notificationPicture(Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])), "a PNG is not taken")
+        XCTAssertNil(notificationPicture(Data([0xFF, 0xD8])), "too short")
+        XCTAssertNil(notificationPicture(nil))
+        XCTAssertNil(NseProcessedRow(kind: .chat, text: "", attachmentCount: 1, inlineThumb: Data([1, 2, 3])).inlineThumb)
+        XCTAssertNil(NsePushPreview(title: "t", body: "b", tag: "g", picture: atLimit + Data([0])).picture)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nse-picture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try XCTUnwrap(writeNotificationPicture(jpegThumb, directory: dir))
+        XCTAssertEqual(url.pathExtension, "jpg")
+        XCTAssertEqual(try Data(contentsOf: url), jpegThumb)
+        XCTAssertNil(writeNotificationPicture(Data([1, 2, 3, 4]), directory: dir))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).count, 1)
+    }
+
     /// A reaction to this person's own message names the reactor from the
     /// mirror, and the Reactions switch is read from the deps.
     func testAReactionNamesTheReactorAndHonoursTheSwitch() async {

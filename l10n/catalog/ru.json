@@ -9921,10 +9921,6 @@
       "text": "Повторить",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "Языковые пакеты нельзя скачать, пока включён обход блокировок.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "Расшифровка выполняется на этом устройстве. Для неё Lakko нужен пакет «{language}». Голосовые сообщения никуда не отправляются для расшифровки.",
       "status": "machine"

@@ -116,6 +116,10 @@ export interface AttachmentRefBytes {
    *  read on the sender's device. */
   readonly title?: string | undefined;
   readonly artist?: string | undefined;
+  /** ADR-0047 section 6 — the micro thumbnail carried inside the message: a
+   *  JPEG of at most 4096 bytes, longest side at most 96. Kept by the core on
+   *  the first photo or video of a message only. */
+  readonly inlineThumb?: Uint8Array | undefined;
 }
 
 /** ADR-0047 — the poster-frame reference inside an [`AttachmentRefBytes`]. */
@@ -354,7 +358,7 @@ export async function reencryptAttachmentRef(
     };
   }
   const bytes = await downloadAndDecryptRef(ref, storage);
-  return encryptAndUploadBytes(
+  const fresh = await encryptAndUploadBytes(
     bytes,
     { mime: ref.mime, name: ref.name },
     {
@@ -367,6 +371,10 @@ export async function reencryptAttachmentRef(
     },
     storage,
   );
+  // ADR-0047 section 6 — the micro thumbnail is bytes inside the message,
+  // not a blob: it travels with the forward as it is (the core keeps it on
+  // the forwarded message's first photo or video only).
+  return ref.inlineThumb === undefined ? fresh : { ...fresh, inlineThumb: ref.inlineThumb };
 }
 
 /**
@@ -562,6 +570,7 @@ function addRefsToBuilder(
       if (r.height !== undefined) wasmRef.height = r.height;
       if (r.title !== undefined) wasmRef.title = r.title;
       if (r.artist !== undefined) wasmRef.artist = r.artist;
+      if (r.inlineThumb !== undefined) wasmRef.inlineThumb = r.inlineThumb;
       if (r.thumb !== undefined) {
         wasmThumb = new wasm.ThumbRef(
           r.thumb.blobId,
@@ -588,6 +597,7 @@ function addRefsToBuilder(
  * returns a fresh handle, which is freed here.
  */
 function fromWasmRef(wasmRef: WasmAttachmentRef): AttachmentRefBytes {
+  const inlineThumb = wasmRef.inlineThumb;
   const thumbHandle = wasmRef.thumb;
   let thumb: ThumbRefBytes | undefined;
   if (thumbHandle !== undefined) {
@@ -620,6 +630,7 @@ function fromWasmRef(wasmRef: WasmAttachmentRef): AttachmentRefBytes {
     thumb,
     ...(wasmRef.title === undefined ? {} : { title: wasmRef.title }),
     ...(wasmRef.artist === undefined ? {} : { artist: wasmRef.artist }),
+    ...(inlineThumb === undefined ? {} : { inlineThumb }),
   };
 }
 
@@ -855,6 +866,7 @@ function toWasmRef(
   if (r.height !== undefined) wasmRef.height = r.height;
   if (r.title !== undefined) wasmRef.title = r.title;
   if (r.artist !== undefined) wasmRef.artist = r.artist;
+  if (r.inlineThumb !== undefined) wasmRef.inlineThumb = r.inlineThumb;
   if (r.thumb !== undefined) {
     const thumb = new wasm.ThumbRef(
       r.thumb.blobId,

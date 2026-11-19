@@ -9,14 +9,16 @@
  * with two or more. Until the thumbnail is decrypted, and if it cannot be,
  * the space shows the row's neutral placeholder, never a broken image.
  *
- * A row's thumbnail is fetched and decrypted when the row is drawn and kept
- * for the session, a bounded number at a time, so scrolling the list does
- * not fetch it again.
+ * The picture is the micro thumbnail carried inside the message (ADR-0047
+ * section 6) when the message has one: drawn at once, nothing fetched. Only
+ * without it is the sent thumbnail fetched and decrypted when the row is
+ * drawn and kept for the session, a bounded number at a time, so scrolling
+ * the list does not fetch it again.
  */
 import { createResource, For, Show, type JSX } from "solid-js";
 
 import { downloadAndDecryptRef } from "./attachments";
-import { stackEdges, type PreviewMedia } from "./list-preview";
+import { rowThumbSource, stackEdges, type PreviewMedia } from "./list-preview";
 import { thumbFromPersisted } from "./persisted-attachment";
 import { allowlist } from "../media/media-hub";
 import { inlineTypeOf } from "../media/inline-media";
@@ -41,6 +43,9 @@ function keep(key: string, value: Promise<string | null>): void {
 
 /** The object URL of a row thumbnail, decrypted once per session. */
 function thumbUrl(media: PreviewMedia): Promise<string | null> {
+  const source = rowThumbSource(media);
+  if (source.kind === "inline") return Promise.resolve(source.url);
+  if (source.kind === "none") return Promise.resolve(null);
   const ref = thumbFromPersisted(media.thumb);
   if (ref === undefined) return Promise.resolve(null);
   const key = Array.from(ref.blobId, (b) => b.toString(16).padStart(2, "0")).join("");

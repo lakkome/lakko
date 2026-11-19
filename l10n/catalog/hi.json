@@ -9593,10 +9593,6 @@
       "text": "फिर से कोशिश करें",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "सेंसरशिप से बचाव चालू होने पर भाषा पैक डाउनलोड नहीं किए जा सकते।",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "ट्रांसक्रिप्शन इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए। वॉइस मैसेज ट्रांसक्रिप्शन के लिए कभी कहीं नहीं भेजे जाते।",
       "status": "machine"

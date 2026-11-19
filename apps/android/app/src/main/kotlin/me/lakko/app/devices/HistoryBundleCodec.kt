@@ -310,6 +310,8 @@ public object HistoryBundleCodec {
                 width = a.width,
                 height = a.height,
                 thumb = a.thumb?.let(::historyThumb),
+                inlineThumb = a.inlineThumbB64?.let { runCatching { Base64.decode(it, Base64.NO_WRAP) }.getOrNull() }
+                    ?.let { me.lakko.app.media.inlineThumbOrNull(it) },
             )
         }
         val card = if (m.deleted) {
@@ -373,6 +375,8 @@ public object HistoryBundleCodec {
                         height = t.height,
                     )
                 },
+                inlineThumbB64 = me.lakko.app.media.inlineThumbOrNull(a.inlineThumb)
+                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
             )
         }
         return PersistedMessage(

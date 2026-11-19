@@ -8,7 +8,9 @@
  *   * the pixel size a sender attaches (`fitWithin`, the 4096 wire bound);
  *   * the thumb a sender renders (`thumbDimensions`, longest side 320);
  *   * the JPEG quality ladder that keeps a thumb under its budget
- *     (`pickThumbQuality`).
+ *     (`pickThumbQuality`);
+ *   * the micro thumbnail carried inside the message (ADR-0047 section 6:
+ *     `inlineThumbDimensions`, `pickInlineThumb`, `isInlineThumbJpeg`).
  *
  * Where a received photo or video is drawn is the shared mosaic rule
  * (`mosaic-layout.ts`, section 11), one item included.
@@ -71,6 +73,66 @@ export async function pickThumbQuality<T>(
   }
   if (best !== null && best.bytes <= THUMB_HARD_CAP_BYTES) return { quality: best.quality, value: best.value };
   return null;
+}
+
+/** ADR-0047 section 6 — longest side of the micro thumbnail carried inside
+ *  the message (chosen, not measured). */
+export const INLINE_THUMB_LONGEST_SIDE = 96;
+/** ADR-0047 section 6 — the core's bound on the micro thumbnail
+ *  (`MAX_INLINE_THUMB_BYTES`). */
+export const INLINE_THUMB_MAX_BYTES = 4096;
+/** JPEG qualities tried in order until the micro thumbnail fits. */
+export const INLINE_THUMB_QUALITY_STEPS: readonly number[] = [0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1];
+
+/** The size the micro thumbnail is rendered at: longest side
+ *  `INLINE_THUMB_LONGEST_SIDE`, never upscaled past the source. */
+export function inlineThumbDimensions(width: number, height: number): Size | null {
+  return fitWithin(width, height, INLINE_THUMB_LONGEST_SIDE);
+}
+
+/** Whether `bytes` may ride in a message as its micro thumbnail: 1 to
+ *  `INLINE_THUMB_MAX_BYTES` bytes of a JPEG (starting `FF D8 FF`). The core
+ *  drops anything else; the sender checks first so it never sends it. */
+export function isInlineThumbJpeg(bytes: Uint8Array | null | undefined): bytes is Uint8Array {
+  return (
+    bytes !== null &&
+    bytes !== undefined &&
+    bytes.length >= 3 &&
+    bytes.length <= INLINE_THUMB_MAX_BYTES &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  );
+}
+
+/**
+ * Walk the micro thumbnail's quality ladder: `encode(q)` returns the JPEG at
+ * quality `q` (or `null` when the encoder gave nothing). The first result that
+ * fits `INLINE_THUMB_MAX_BYTES` and is a JPEG wins; when none does, `null`
+ * and the message goes without one.
+ */
+export async function pickInlineThumb(
+  encode: (quality: number) => Promise<Uint8Array | null>,
+): Promise<Uint8Array | null> {
+  for (const quality of INLINE_THUMB_QUALITY_STEPS) {
+    const bytes = await encode(quality);
+    if (isInlineThumbJpeg(bytes)) return bytes;
+  }
+  return null;
+}
+
+/** A `data:image/jpeg;base64,...` URL of a micro thumbnail, or `null` when
+ *  `bytes` is not one (`isInlineThumbJpeg`). Nothing else ever becomes a
+ *  `data:` URL handed to an element. */
+export function inlineThumbDataUrl(bytes: Uint8Array | null | undefined): string | null {
+  return isInlineThumbJpeg(bytes) ? jpegDataUrl(bytes) : null;
+}
+
+/** A `data:image/jpeg;base64,...` URL of `bytes`. */
+export function jpegDataUrl(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i] as number);
+  return `data:image/jpeg;base64,${btoa(binary)}`;
 }
 
 const EXTENSIONS: Readonly<Record<string, string>> = {

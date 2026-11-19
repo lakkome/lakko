@@ -9593,10 +9593,6 @@
       "text": "重试",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "开启反审查时无法下载语言包。",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "转写在此设备上完成。Lakko 需要{language}语言包才能转写。语音消息绝不会被发送到任何地方进行转写。",
       "status": "machine"

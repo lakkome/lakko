@@ -56,6 +56,7 @@ fn attachment() -> impl Strategy<Value = VaultAttachment> {
         (any::<Option<u16>>(), any::<Option<u16>>()),
         prop::option::of(thumb()),
         (text(8), text(8)),
+        prop::collection::vec(any::<u8>(), 0..64),
     )
         .prop_map(
             |(
@@ -67,6 +68,7 @@ fn attachment() -> impl Strategy<Value = VaultAttachment> {
                 (width, height),
                 thumb,
                 (title, artist),
+                inline_thumb,
             )| {
                 VaultAttachment {
                     blob_id,
@@ -83,6 +85,7 @@ fn attachment() -> impl Strategy<Value = VaultAttachment> {
                     thumb,
                     title,
                     artist,
+                    inline_thumb,
                 }
             },
         )

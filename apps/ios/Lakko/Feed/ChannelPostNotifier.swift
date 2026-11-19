@@ -121,6 +121,22 @@ enum ChannelNotify {
             .replacingOccurrences(of: "\n", with: " ")
         return line.isEmpty ? generic : line
     }
+
+    /// ADR-0047 section 6 — the notification's picture: the micro thumbnail
+    /// of the post's first photo or video, within the shared bound
+    /// (``notificationPicture(_:)``). Shown only with the post's own line,
+    /// never with the generic one, as the notification extension does.
+    static func picture(post: PersistedChannelPost) -> Data? {
+        let line = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return nil }
+        for attachment in post.attachments ?? [] {
+            if let b64 = attachment.inlineThumbB64 {
+                // The core keeps it on one ref only; the first found is it.
+                return notificationPicture(Data(base64Encoded: b64))
+            }
+        }
+        return nil
+    }
 }
 
 /// The per-channel "last notified post" cursor (spec section 5): per device,
@@ -165,7 +181,9 @@ struct ChannelNotifiedStore {
 
 /// Shows a channel's notification. Injectable for tests.
 protocol ChannelPostNotificationPoster {
-    @MainActor func post(channelIdHex: String, title: String, body: String)
+    /// `picture`: the post's micro thumbnail (``ChannelNotify/picture(post:)``),
+    /// `nil` for none.
+    @MainActor func post(channelIdHex: String, title: String, body: String, picture: Data?)
 }
 
 /// The system notification through `UNUserNotificationCenter`, under the
@@ -173,11 +191,17 @@ protocol ChannelPostNotificationPoster {
 /// request identifier is the channel's tag, so a newer post replaces the
 /// older notification; the thread identifier groups it with the channel.
 struct SystemChannelPostNotifier: ChannelPostNotificationPoster {
-    func post(channelIdHex: String, title: String, body: String) {
+    func post(channelIdHex: String, title: String, body: String, picture: Data?) {
         let tag = ChannelNotify.tag(channelIdHex: channelIdHex)
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        // ADR-0047 section 6 — through a temporary `.jpg` the system moves
+        // into its store; deleted when the attachment is refused, and the
+        // notification then goes without a picture.
+        if let picture, let attachment = notificationPictureAttachment(picture) {
+            content.attachments = [attachment]
+        }
         content.sound = .default
         content.threadIdentifier = tag
         content.userInfo = [ChannelNotificationTaps.routeKey: channelIdHex.lowercased()]
@@ -276,7 +300,8 @@ final class ChannelPostNotifier {
             poster.post(
                 channelIdHex: id,
                 title: deps.title(id),
-                body: ChannelNotify.body(post: post, generic: generic))
+                body: ChannelNotify.body(post: post, generic: generic),
+                picture: ChannelNotify.picture(post: post))
         }
     }
 

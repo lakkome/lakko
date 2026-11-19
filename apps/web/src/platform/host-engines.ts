@@ -267,19 +267,6 @@ export function hostTranscription(
   };
 }
 
-/** Whether anti-censorship forbids a pack download now (the host decides). */
-export async function hostPacksBlocked(fetchImpl: Fetch = fetch): Promise<boolean> {
-  try {
-    const res = await fetchImpl(`${HOST_ENGINES_PATH}/packs-blocked`);
-    if (!res.ok) return true;
-    const body = (await res.json()) as { blocked?: unknown };
-    return body.blocked !== false;
-  } catch {
-    // Unknown is treated as blocked: a download never starts on a guess.
-    return true;
-  }
-}
-
 /** Language tags in a host answer's `field`; anything malformed is dropped. */
 function tagsOf(answer: Answer, field: string): string[] {
   const v = answer[field];
@@ -318,7 +305,6 @@ export function hostEngines(rank: HypothesisRanker | null, fetchImpl: Fetch = fe
     translation: hostTranslation(caps.translation, fetchImpl),
     detection: hostDetection(caps.translation, rank, fetchImpl),
     transcription: hostTranscription(caps.transcription, fetchImpl),
-    packsBlocked: () => hostPacksBlocked(fetchImpl),
     systemPacks: (target) => hostSystemPacks(caps, target, fetchImpl),
   };
 }

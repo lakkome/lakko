@@ -578,6 +578,11 @@ targets:
       - path: Lakko/Shared/SharedStorage.swift
         type: file
         buildPhase: sources
+      # ADR-0047 section 6 — the notification picture rule, shared with the
+      # app (Foundation + UserNotifications only).
+      - path: Lakko/Shared/NotificationPicture.swift
+        type: file
+        buildPhase: sources
       - path: Lakko/Shared/KeychainWrapKey.swift
         type: file
         buildPhase: sources
@@ -753,6 +758,11 @@ targets:
       # same reason: the pure core compiles into this target without the
       # `Lakko` module, so the file has to travel with it.
       - path: Lakko/Shared/DsTimestamp.swift
+        type: file
+        buildPhase: sources
+      # …and the notification picture rule that core reads (ADR-0047
+      # section 6), for the same reason.
+      - path: Lakko/Shared/NotificationPicture.swift
         type: file
         buildPhase: sources
     settings:

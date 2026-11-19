@@ -15,6 +15,7 @@
  */
 
 import type { AttachmentRefBytes, ThumbRefBytes } from "./attachments";
+import { isInlineThumbJpeg } from "../media/visual-media";
 import type { PersistedAttachment, PersistedThumb } from "./message-log-store";
 
 /** Mirrors `lakko-attachments` — see ADR-0047 §1. */
@@ -131,6 +132,7 @@ export function persistedFromAttachmentRef(
     ...(a.thumb === undefined ? {} : { thumb: persistedThumb(a.thumb) }),
     ...(a.title === undefined ? {} : { title: a.title }),
     ...(a.artist === undefined ? {} : { artist: a.artist }),
+    ...(isInlineThumbJpeg(a.inlineThumb) ? { inlineThumbB64: b64UrlEncode(a.inlineThumb) } : {}),
     ...(played ? { played: true } : {}),
   };
 }
@@ -140,9 +142,18 @@ export interface RestoredAttachment {
   readonly played: boolean;
 }
 
+/** ADR-0047 section 6 — a stored micro thumbnail, or `undefined` when the
+ *  row carries none or carries something that is not a JPEG within the
+ *  core's bound. */
+export function inlineThumbFromPersisted(b64: unknown): Uint8Array | undefined {
+  const bytes = tryDecode(b64);
+  return isInlineThumbJpeg(bytes) ? bytes : undefined;
+}
+
 export function attachmentRefFromPersisted(a: PersistedAttachment): RestoredAttachment {
   const kind = typeof a.kind === "string" ? a.kind : undefined;
   const waveform = tryDecode(a.waveformB64);
+  const inlineThumb = inlineThumbFromPersisted(a.inlineThumbB64);
   return {
     ref: {
       blobId: b64UrlDecode(a.blobIdB64),
@@ -162,6 +173,7 @@ export function attachmentRefFromPersisted(a: PersistedAttachment): RestoredAtta
       thumb: thumbFromPersisted(a.thumb),
       ...(typeof a.title === "string" ? { title: a.title } : {}),
       ...(typeof a.artist === "string" ? { artist: a.artist } : {}),
+      ...(inlineThumb === undefined ? {} : { inlineThumb }),
     },
     played: a.played === true,
   };

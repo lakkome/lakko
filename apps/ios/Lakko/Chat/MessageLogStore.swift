@@ -727,6 +727,11 @@ public struct PersistedAttachment: Codable, Equatable {
     /// ADR-0092 section 2 — an audio file's title and artist tags.
     public var title: String?
     public var artist: String?
+    /// ADR-0047 section 6 — base64 of the micro thumbnail (a JPEG of at most
+    /// 4096 bytes) the first photo or video of a message carries inside the
+    /// envelope; what the chat list row and the first mosaic tile draw
+    /// without a fetch.
+    public var inlineThumbB64: String?
 
     public init(
         blobIdB64: String,
@@ -742,10 +747,12 @@ public struct PersistedAttachment: Codable, Equatable {
         height: UInt32? = nil,
         thumb: PersistedThumb? = nil,
         title: String? = nil,
-        artist: String? = nil
+        artist: String? = nil,
+        inlineThumbB64: String? = nil
     ) {
         self.title = title
         self.artist = artist
+        self.inlineThumbB64 = inlineThumbB64
         self.blobIdB64 = blobIdB64
         self.keyB64 = keyB64
         self.nonceB64 = nonceB64
@@ -764,6 +771,7 @@ public struct PersistedAttachment: Codable, Equatable {
         case blobIdB64, keyB64, nonceB64, mime, size, name
         case kind, durationMs, waveformB64, width, height, thumb
         case title, artist
+        case inlineThumbB64
     }
 
     // ADR-0047 — every media field is optional and read with `try?`: a row
@@ -786,6 +794,7 @@ public struct PersistedAttachment: Codable, Equatable {
         self.thumb = (try? c.decodeIfPresent(PersistedThumb.self, forKey: .thumb)) ?? nil
         self.title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil
         self.artist = (try? c.decodeIfPresent(String.self, forKey: .artist)) ?? nil
+        self.inlineThumbB64 = (try? c.decodeIfPresent(String.self, forKey: .inlineThumbB64)) ?? nil
     }
 }
 

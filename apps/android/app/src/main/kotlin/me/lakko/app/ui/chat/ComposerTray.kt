@@ -103,8 +103,10 @@ public data class ComposerTray(
     /** Section 11 Send — text or at least one item, and every item uploaded. */
     public fun canSend(text: String): Boolean = (text.isNotBlank() || items.isNotEmpty()) && !busy
 
-    /** The references that go with the message, in the order added. */
-    public fun refs(): List<AttachmentRef> = items.mapNotNull { it.ref }
+    /** The references that go with the message, in the order added; the
+     *  micro thumbnail (ADR-0047 section 6) only on the first photo or video. */
+    public fun refs(allowlist: me.lakko.app.media.MediaAllowlist = me.lakko.app.media.coreAllowlist): List<AttachmentRef> =
+        me.lakko.app.media.keepInlineThumbOnCarrier(items.mapNotNull { it.ref }, allowlist)
 
     /** The notice still on screen at [nowMs], or `null`. */
     public fun noticeAt(nowMs: Long): me.lakko.app.l10n.UiText? =
@@ -190,4 +192,16 @@ public fun trayKindAfterRead(guess: TrayKind, mime: String?, decodedPhoto: Boole
             if (essence == "video/mp4" && videoCodec == "video/avc") TrayKind.VIDEO else TrayKind.FILE
         }
         TrayKind.FILE -> TrayKind.FILE
+    }
+
+/**
+ * ADR-0047 section 6 — whether an item gets a micro thumbnail: its MIME is an
+ * allowlisted image or video (the core's `inline_thumb_carrier` rule), however
+ * it was added (Photo or Video, File, paste, drop, camera). [ComposerTray.refs]
+ * then keeps it on the first such ref only.
+ */
+public fun wantsInlineThumb(mime: String?, allowlist: me.lakko.app.media.MediaAllowlist): Boolean =
+    when (me.lakko.app.media.inlineKindOf(mime, allowlist)) {
+        me.lakko.app.media.InlineKind.IMAGE, me.lakko.app.media.InlineKind.VIDEO -> true
+        else -> false
     }

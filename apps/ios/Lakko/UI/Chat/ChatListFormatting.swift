@@ -175,7 +175,8 @@ public enum ChatListFormatting {
         return ConversationPreviewMedia(
             thumb: first.thumb,
             isVideo: InlineMedia.decision(kind: first.kind, mime: first.mime, allowlist: allowlist).bubble == .video,
-            count: media.count)
+            count: media.count,
+            inlineThumb: InlineThumb.bounded(first.inlineThumb))
     }
 
     /// ADR-0087 sections 14 and 15.2 — what the row says for a message that

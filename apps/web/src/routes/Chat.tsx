@@ -36,7 +36,7 @@ import { Portal } from "solid-js/web";
 import { openMessageMenu } from "../chat/message-menu-registry";
 import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
 import { ComposerTray } from "../chat/ComposerTray";
-import { backspaceRemovesLast, traySendable, type TrayStatus } from "../chat/compose-tray";
+import { backspaceRemovesLast, messageRefs, traySendable, type TrayStatus } from "../chat/compose-tray";
 import { release as releaseTrayItem, trayFor, type TrayStore } from "../chat/tray-store";
 import type { ContentHost } from "../attach/ContentBubble";
 import { ArticleReader } from "../attach/ArticleReader";
@@ -4890,10 +4890,11 @@ function ChatView(props: {
     // and every item of the tray; Send waits until each item is uploaded.
     if (!traySendable(text, trayStatuses())) return;
     const items = tray.take();
-    const attached: AttachmentRefBytes[] = [];
+    // ADR-0047 section 6 — the micro thumbnail stays on the first photo or
+    // video (by type, however it was added) only.
+    const attached: AttachmentRefBytes[] = messageRefs(items, (mime) => hub.inlineType(mime));
     for (const item of items) {
       if (item.ref === null) continue;
-      attached.push(item.ref);
       // The sender's own bubble shows the local bytes rather than downloading
       // its own upload.
       if (item.kind !== "file") {

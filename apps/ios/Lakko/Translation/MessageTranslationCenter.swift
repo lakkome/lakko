@@ -46,8 +46,6 @@ final class MessageTranslationCenter: ObservableObject {
         case unsupported(String)
         case downloading(language: String, percent: Int?)
         case waitingForWifi(String)
-        /// Anti-censorship is on: no pack is downloaded (UX 3.5).
-        case blocked
     }
 
     enum TranscriptPhase: Equatable {
@@ -60,7 +58,6 @@ final class MessageTranslationCenter: ObservableObject {
         case permissionDenied
         case downloadingPack(language: String, percent: Int?)
         case waitingForWifi(String)
-        case blocked
         case unsupported(String)
     }
 
@@ -107,7 +104,6 @@ final class MessageTranslationCenter: ObservableObject {
     let settings: MessageTranslationSettings
     private let store: MessageTranslationStore
     private let accountProvider: @MainActor () -> String?
-    private let antiCensorshipOn: @MainActor () -> Bool
     private let expensivePath: @MainActor () -> Bool
 
     private var translationStates: [String: TranslationEngineState] = [:]
@@ -128,7 +124,6 @@ final class MessageTranslationCenter: ObservableObject {
         settings: MessageTranslationSettings? = nil,
         store: MessageTranslationStore = .shared,
         accountProvider: @escaping @MainActor () -> String? = { MessageTranslationPurge.boundAccountIdB64 },
-        antiCensorshipOn: (@MainActor () -> Bool)? = nil,
         expensivePath: (@MainActor () -> Bool)? = nil
     ) {
         if let translationEngine {
@@ -142,9 +137,6 @@ final class MessageTranslationCenter: ObservableObject {
         self.settings = settings ?? .shared
         self.store = store
         self.accountProvider = accountProvider
-        self.antiCensorshipOn = antiCensorshipOn ?? {
-            AntiCensorshipConfig.current.armed || AntiCensorshipManager.shared.isEnabled
-        }
         self.expensivePath = expensivePath ?? { NetworkCostWatcher.shared.isExpensive }
         if expensivePath == nil {
             NetworkCostWatcher.shared.$isExpensive
@@ -692,14 +684,11 @@ final class MessageTranslationCenter: ObservableObject {
 
     // MARK: - Packs (UX 3.5)
 
+    /// Offered whether or not anti-censorship is on (ADR-0082 amendment of
+    /// 2026-11-19): a pack comes from Apple, ordinary platform traffic that
+    /// tells a censor nothing about Lakko; a download the network blocks ends
+    /// in the ordinary failure.
     private func askForPack(kind: PackRequest.Kind, language: String, key: String, download: @escaping () -> Void) {
-        if antiCensorshipOn() {
-            switch kind {
-            case .translation: phases[key] = .blocked
-            case .transcription: transcripts[key] = .blocked
-            }
-            return
-        }
         let onMobile = expensivePath() && !settings.mobileData
         packRequest = PackRequest(kind: kind, language: language, onMobileData: onMobile, download: { [weak self] in
             self?.packRequest = nil
@@ -726,10 +715,6 @@ final class MessageTranslationCenter: ObservableObject {
     }
 
     private func downloadTranslationPack(key: String, source: String, then: @escaping () -> Void) {
-        guard !antiCensorshipOn() else {
-            phases[key] = .blocked
-            return
-        }
         // Apple draws the approval and the progress of its own packs; no
         // percentage reaches the app.
         phases[key] = .downloading(language: source, percent: nil)
@@ -885,10 +870,6 @@ final class MessageTranslationCenter: ObservableObject {
     }
 
     private func downloadTranscriptionPack(key: String, language: String, then: @escaping () -> Void) {
-        guard !antiCensorshipOn() else {
-            transcripts[key] = .blocked
-            return
-        }
         transcripts[key] = .downloadingPack(language: language, percent: 0)
         tasks[key] = Task { [weak self] in
             guard let self else { return }

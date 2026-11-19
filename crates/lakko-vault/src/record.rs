@@ -14,8 +14,8 @@
 //!
 //! All integers are big-endian. `opt<T>` is `0x00`, or `0x01` followed by
 //! `T`; a `bool` is `0x00` or `0x01`; any other byte in either is refused.
-//! Each of the four containers starts with `version(1) = 0x02` (version 1,
-//! before ADR-0092, is refused).
+//! Each of the four containers starts with `version(1) = 0x03` (versions 1
+//! and 2, before ADR-0047 section 6, are refused).
 //!
 //! ```text
 //! chunk := version || count u16 (<= 512) || message*
@@ -37,6 +37,7 @@
 //!   || waveform_len u8 (<= 128) || waveform
 //!   || opt<width u16> || opt<height u16> || opt<thumb>
 //!   || title_len u8 (<= 255) || title || artist_len u8 (<= 255) || artist
+//!   || inline_thumb_len u16 (<= 4096) || inline_thumb
 //! thumb :=
 //!   blob_id(32) || key(32) || nonce(12) || mime_len u16 (<= 256) || mime
 //!   || size u32 || opt<width u16> || opt<height u16>
@@ -88,8 +89,8 @@
 //! A string without a presence byte (`mime`, `name`, `kind`, `title`,
 //! `artist`, a reply's or a
 //! forward's `author`, `excerpt`, `title`, `display_name`, `username`) is
-//! absent when it is empty; the same holds for `waveform`. Every string is
-//! UTF-8.
+//! absent when it is empty; the same holds for `waveform` and
+//! `inline_thumb`. Every string is UTF-8.
 //!
 //! ## Canonical
 //!
@@ -115,7 +116,8 @@
 //!
 //! The bounds are structural. The media rules of ADR-0047 (a duration only
 //! for a voice or video note and within its limit, a dimension within its
-//! range, a thumb within its size limit) live in `lakko-attachments`
+//! range, a thumb within its size limit, a micro thumbnail that is a JPEG on
+//! the first image or video of a message only) live in `lakko-attachments`
 //! (`RawMediaMetadata::bounded`), which this crate does not depend on; the
 //! FFI crates apply them on both routes, as they do for the history bundle
 //! of `lakko_mls::history_placeholder`, whose attachment field set and caps
@@ -139,8 +141,9 @@ use crate::seal::MAX_PLAINTEXT_BYTES;
 
 /// The one version byte the four containers carry. Version 2 (ADR-0092):
 /// audio title and artist on an attachment, and the content block on a
-/// message. Flag day: version 1 is refused.
-pub const RECORD_VERSION_V2: u8 = 0x02;
+/// message. Version 3 (ADR-0047 section 6): the micro thumbnail on an
+/// attachment. Flag day: versions 1 and 2 are refused.
+pub const RECORD_VERSION_V3: u8 = 0x03;
 
 /// Largest encoded record, in bytes: what one sealed object carries.
 pub const MAX_RECORD_BYTES: usize = MAX_PLAINTEXT_BYTES;
@@ -167,6 +170,9 @@ pub const MAX_NAME_BYTES: usize = 1024;
 pub const MAX_KIND_BYTES: usize = 32;
 /// Longest waveform, in bytes.
 pub const MAX_WAVEFORM_BYTES: usize = 128;
+/// Longest micro thumbnail, in bytes (ADR-0047 section 6; matches
+/// `lakko_attachments::MAX_INLINE_THUMB_BYTES`).
+pub const MAX_INLINE_THUMB_BYTES: usize = 4096;
 /// Longest reply author snapshot, in UTF-8 bytes.
 pub const MAX_REPLY_AUTHOR_BYTES: usize = 255;
 /// Longest reply excerpt snapshot, in UTF-8 bytes.
@@ -212,7 +218,7 @@ const FLAG_KNOWN: u8 = FLAG_EDITED | FLAG_DELETED;
 // checked against the remaining input at this size before a list is
 // allocated.
 const MIN_MESSAGE_LEN: usize = 8 + 1 + 1 + 8 + 8 + 1 + 4 + 1 + 1 + 1 + 2 + 1 + 1 + 1;
-const MIN_ATTACHMENT_LEN: usize = 32 + 32 + 12 + 8 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+const MIN_ATTACHMENT_LEN: usize = 32 + 32 + 12 + 8 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2;
 const MIN_REACTION_LEN: usize = 32 + 1;
 const MIN_PERSON_LEN: usize = 32 + 1 + 1 + 1;
 const SHARED_PIN_LEN: usize = 8 + 1 + 8;
@@ -477,6 +483,8 @@ pub struct VaultAttachment {
     pub title: String,
     /// ADR-0092 audio artist; empty when none.
     pub artist: String,
+    /// ADR-0047 section 6 micro thumbnail (JPEG bytes); empty when none.
+    pub inline_thumb: Vec<u8>,
 }
 
 impl core::fmt::Debug for VaultAttachment {
@@ -496,6 +504,7 @@ impl core::fmt::Debug for VaultAttachment {
             .field("thumb", &self.thumb)
             .field("title", &self.title)
             .field("artist", &self.artist)
+            .field("inline_thumb_len", &self.inline_thumb.len())
             .finish()
     }
 }
@@ -779,6 +788,11 @@ impl VaultAttachment {
             MAX_AUDIO_TAG_BYTES,
             RecordError::Attachment,
         )?;
+        within(
+            self.inline_thumb.len(),
+            MAX_INLINE_THUMB_BYTES,
+            RecordError::Attachment,
+        )?;
         self.thumb.as_ref().map_or(Ok(()), VaultThumb::validate)
     }
 }
@@ -1050,6 +1064,7 @@ fn put_attachment(out: &mut Vec<u8>, attachment: &VaultAttachment) {
     }
     put_bytes_u8(out, attachment.title.as_bytes());
     put_bytes_u8(out, attachment.artist.as_bytes());
+    put_bytes_u16(out, &attachment.inline_thumb);
 }
 
 fn put_message(out: &mut Vec<u8>, message: &VaultMessage) {
@@ -1144,7 +1159,7 @@ impl HistoryChunk {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V2];
+        let mut out = vec![RECORD_VERSION_V3];
         put_messages(&mut out, &self.messages)?;
         check_size(&out)?;
         Ok(out)
@@ -1167,7 +1182,7 @@ impl ConversationHead {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V2];
+        let mut out = vec![RECORD_VERSION_V3];
         self.conversation.write_to(&mut out);
         out.push(self.kind.to_wire());
         put_bytes_u16(&mut out, self.title.as_bytes());
@@ -1227,7 +1242,7 @@ impl DevicesHead {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V2];
+        let mut out = vec![RECORD_VERSION_V3];
         put_reentry(&mut out, &self.reentry)?;
         check_size(&out)?;
         Ok(out)
@@ -1250,7 +1265,7 @@ impl VaultIndex {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V2];
+        let mut out = vec![RECORD_VERSION_V3];
         put_len_u32(&mut out, self.entries.len());
         for entry in &self.entries {
             entry.conversation.write_to(&mut out);
@@ -1275,7 +1290,7 @@ impl<'a> Reader<'a> {
             return Err(RecordError::TooLarge);
         }
         let mut reader = Self { rest: bytes };
-        if reader.u8()? != RECORD_VERSION_V2 {
+        if reader.u8()? != RECORD_VERSION_V3 {
             return Err(RecordError::UnknownVersion);
         }
         Ok(reader)
@@ -1451,6 +1466,14 @@ fn read_attachment(r: &mut Reader<'_>) -> Result<VaultAttachment, RecordError> {
     let title = r.string(title_len, MAX_AUDIO_TAG_BYTES, RecordError::Attachment)?;
     let artist_len = r.len_u8()?;
     let artist = r.string(artist_len, MAX_AUDIO_TAG_BYTES, RecordError::Attachment)?;
+    let inline_thumb_len = r.len_u16()?;
+    let inline_thumb = r
+        .bounded(
+            inline_thumb_len,
+            MAX_INLINE_THUMB_BYTES,
+            RecordError::Attachment,
+        )?
+        .to_vec();
     Ok(VaultAttachment {
         blob_id,
         key,
@@ -1466,6 +1489,7 @@ fn read_attachment(r: &mut Reader<'_>) -> Result<VaultAttachment, RecordError> {
         thumb,
         title,
         artist,
+        inline_thumb,
     })
 }
 

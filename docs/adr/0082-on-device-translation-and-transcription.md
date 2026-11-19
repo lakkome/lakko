@@ -21,6 +21,11 @@
   engine for a language it is used, otherwise an on-device engine Lakko
   ships (unbuilt); the macOS desktop app runs Apple's engines through a host
   helper (note of 2026-11-18).
+  **Amended 2026-11-19 (maintainer):** anti-censorship no longer blocks
+  language packs or the ML Kit fallback; a pack is offered and downloaded
+  whether it is on or off (note of 2026-11-19; supersedes the
+  anti-censorship paragraph of section 4 and the anti-censorship sentences of
+  the As-built section and the notes of 2026-11-15 and 2026-11-18).
 - **Date:** 2026-10-25
 - **Context:** media messages (ADR-0047), message actions (ADR-0052), interface
   localization (ADR-0061), store gate (ADR-0077), anti-censorship transport
@@ -100,6 +105,8 @@ When anti-censorship is armed (ADR-0026), a pack download would leave the
 device outside the tunnel. The client does not start one and says
 `Language packs can't be downloaded while anti-censorship is on`; translation
 and transcription in packs already on the device keep working.
+**Superseded 2026-11-19 (maintainer, note of that date):** packs are offered
+and downloaded whether anti-censorship is on or off; that line is removed.
 
 Packs Lakko does not control are not deleted by Lakko (UX section 6, `Managed by
 iOS`, `Managed by Android`, `Managed by your browser`).
@@ -205,7 +212,9 @@ engine has run on any device, simulator, emulator or browser, nothing walked.
   to turn it off, so on such a device Google learns, per use, which languages
   this Lakko installation translates from and into. Text is translated on
   the device and never sent. The fallback answers nothing while
-  anti-censorship is on, so no ML Kit traffic leaves outside the tunnel.
+  anti-censorship is on, so no ML Kit traffic leaves outside the tunnel
+  (superseded 2026-11-19: the fallback works with anti-censorship on; note
+  of that date).
   ML Kit models are Lakko's to remove (Settings shows `Remove`); system packs
   show `Managed by Android`. ML Kit does not document whether a model it keeps
   by default appears among the downloaded ones, so a pair it confirmed in this
@@ -438,7 +447,8 @@ which it rarely was. iOS uses `NLLanguageRecognizer` and is unchanged.
   no longer pretends to download (DONE only when the pair is on the device,
   else FAILED). ML Kit's rules stay: nothing while anti-censorship is on
   (such a pair reads as unavailable and the line follows the usual rule;
-  packs already on the device keep working), Wi-Fi only unless the person
+  packs already on the device keep working; superseded 2026-11-19, note of
+  that date), Wi-Fi only unless the person
   allowed mobile data, the dialog says the pack comes from Google, its packs
   are listed in Settings with Remove. A download that ends `scheduled` no
   longer leaves the line on `Downloading…`: it returns to the line the
@@ -516,7 +526,9 @@ object per line (`apps/desktop/src-tauri/src/engines.rs`, routes
   anti-censorship (ADR-0085). While it is switched on, no pack is offered: the
   host answers `packs-blocked`, and the line says `Language packs can't be
   downloaded while anti-censorship is on` (the web client gained this state;
-  the browser has no anti-censorship and never shows it).
+  the browser has no anti-censorship and never shows it). **Superseded
+  2026-11-19 (note of that date):** the `packs-blocked` route and that state
+  are removed; the desktop offers packs with anti-censorship on.
 - **Measured on this Mac (macOS 27.2.1, 2026-11-18), with unbundled test
   programs:** no translation pack was installed, and es, ru, de, fr to en
   and en to ru all answered `needs-pack`; an English recording, fed to the
@@ -532,6 +544,39 @@ object per line (`apps/desktop/src-tauri/src/engines.rs`, routes
   the page says translation and transcription are not available on this
   device); an Intel build of the helper (arm64 only); partial transcripts
   while the helper works (the line says `Transcribing…` until the end).
+
+## Amended 2026-11-19 (maintainer): anti-censorship does not block language packs
+
+Anti-censorship (ADR-0026, ADR-0085 section 14) protects against a censor
+blocking or identifying Lakko's traffic. It is not a promise that the device
+makes no other connection. A language pack download from Apple or Google, and
+ML Kit's report of the configured languages to Google, is ordinary platform
+traffic and tells a censor nothing about Lakko. That Apple or Google learns
+the language is a separate privacy fact, stated in the pack dialog (section
+4), and it holds whether anti-censorship is on or off. So:
+
+- a pack is offered and downloaded whether anti-censorship is on or off, on
+  every client (web, desktop, iOS, Android);
+- Android's ML Kit fallback works whether anti-censorship is on or off;
+- a download that fails, for example because the network blocks Apple or
+  Google too, ends in the ordinary download-failure state of UX 3.5; there is
+  no pre-emptive ban, and the line `Language packs can't be downloaded while
+  anti-censorship is on` and its catalog key
+  `translate.pack.blocked_anti_censorship` are removed.
+
+As built the same day: the desktop host's `GET /__host/engines/packs-blocked`
+route and its refusal of `speech-install` are removed, and the engines
+handler no longer takes the tunnel (`apps/desktop/src-tauri/src/engines.rs`);
+the web client lost `Engines.packsBlocked`, `hostPacksBlocked` and the
+`packs-blocked` view phases (`apps/web/src/translation/`,
+`apps/web/src/platform/host-engines.ts`); iOS lost the `antiCensorshipOn`
+check of `MessageTranslationCenter`, its `.blocked` phases and
+`MessageTranslationError.blockedAntiCensorship`; Android lost the
+`antiCensorshipArmed` checks of `MlKitTranslationEngine` and
+`TranslationCenter` and `PackPrompt.blocked`. Each client has a test that a
+pack is offered with anti-censorship on (on Android a source test, since the
+host JVM does not load the native core `TranslationCenter` needs). Host
+tests only; not run on a device or against a censored network.
 
 ## Alternatives
 

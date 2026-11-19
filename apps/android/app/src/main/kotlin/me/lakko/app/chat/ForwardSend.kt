@@ -111,7 +111,12 @@ public class ForwardSender(
                 height = source.height,
                 thumb = thumb,
             ),
-        )
+        ).let { ref ->
+            // ADR-0047 section 6 — the micro thumbnail is part of the message
+            // text, not a blob: it goes along as it is (the core keeps it on
+            // the first photo or video only).
+            me.lakko.app.media.inlineThumbOrNull(source.inlineThumb)?.let { ref.copy(inlineThumb = it) } ?: ref
+        }
     }
 
     private suspend fun reEncryptThumb(source: ThumbRef): ThumbRef? {

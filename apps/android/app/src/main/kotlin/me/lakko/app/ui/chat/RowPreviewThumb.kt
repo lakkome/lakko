@@ -99,13 +99,22 @@ internal object RowThumbs {
  */
 @Composable
 internal fun RowPreviewThumb(thumb: PreviewThumb) {
-    val key = thumb.key
-    var bitmap by remember(key) { mutableStateOf(key?.let(RowThumbs::cached)) }
-    LaunchedEffect(key) {
-        val ref = thumb.thumb ?: return@LaunchedEffect
-        if (key == null || bitmap != null) return@LaunchedEffect
-        bitmap = RowThumbs.load(key, ref)
+    val source = thumb.source
+    // ADR-0047 section 6 — the micro thumbnail inside the message is drawn at
+    // once, decoded in memory; the sent thumb is fetched only without one (or
+    // when the micro thumbnail does not decode).
+    val inlineBitmap = remember(thumb.inline) {
+        (source as? me.lakko.app.chat.RowThumbSource.Inline)?.let { me.lakko.app.media.decodeInlineThumb(it.bytes)?.asImageBitmap() }
     }
+    val key = thumb.key
+    var fetched by remember(key) { mutableStateOf(key?.let(RowThumbs::cached)) }
+    LaunchedEffect(key, inlineBitmap) {
+        if (inlineBitmap != null) return@LaunchedEffect
+        val ref = thumb.thumb ?: return@LaunchedEffect
+        if (key == null || fetched != null) return@LaunchedEffect
+        fetched = RowThumbs.load(key, ref)
+    }
+    val bitmap = inlineBitmap ?: fetched
     val edges = thumb.stackEdges
     val muted = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
     val shape = RoundedCornerShape(4.dp)

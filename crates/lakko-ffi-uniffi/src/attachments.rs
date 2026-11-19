@@ -128,6 +128,14 @@ pub struct AttachmentRef {
     /// only on kind `audio`.
     #[uniffi(default = None)]
     pub artist: Option<String>,
+    /// ADR-0047 section 6 — the micro thumbnail: raw JPEG bytes (starting
+    /// `FF D8 FF`), at most 4096, carried inside the message so a
+    /// notification or a list row needs no download. Kept only on the first
+    /// attachment whose MIME is an inline image or video; on compose it is
+    /// dropped anywhere else or out of bound, and on parse it arrives only
+    /// on that ref.
+    #[uniffi(default = None)]
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// ADR-0047 — a poster-frame blob attached to an [`AttachmentRef`]: its
@@ -467,6 +475,7 @@ pub(crate) fn refs_from_ffi(
                 thumb,
                 title: r.title,
                 artist: r.artist,
+                inline_thumb: r.inline_thumb.map(|t| B64.encode(t)),
             })
         })
         .collect()
@@ -991,6 +1000,7 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             // ADR-0047 media fields arrive already bounded by the core
             // parser; a thumb that still fails to decode is dropped alone.
             let waveform = r.decode_waveform();
+            let inline_thumb = r.decode_inline_thumb();
             let thumb = r.thumb.as_ref().and_then(thumb_to_ffi);
             Some(AttachmentRef {
                 blob_id: blob_id.to_vec(),
@@ -1007,6 +1017,7 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 thumb,
                 title: r.title,
                 artist: r.artist,
+                inline_thumb,
             })
         })
         .collect()
@@ -1279,6 +1290,7 @@ mod tests {
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -1314,6 +1326,7 @@ mod tests {
             thumb: Some(thumb.clone()),
             title: None,
             artist: None,
+            inline_thumb: Some(vec![0xFF, 0xD8, 0xFF, 0xDB]),
         };
         let bytes = compose_envelope("c".to_string(), vec![r.clone()]).unwrap();
         for got in [
@@ -1334,6 +1347,45 @@ mod tests {
                 (t.size, t.width, t.height, &t.mime),
                 (6, Some(240), Some(240), &thumb.mime)
             );
+            assert_eq!(got.inline_thumb, Some(vec![0xFF, 0xD8, 0xFF, 0xDB]));
+        }
+    }
+
+    /// ADR-0047 section 6 — the micro thumbnail crosses the binding both
+    /// ways and stays only on the first image or video.
+    #[test]
+    fn inline_thumb_crosses_the_binding_on_the_first_media_only() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+        let with = |mime: &str| AttachmentRef {
+            mime: Some(mime.to_string()),
+            inline_thumb: Some(jpeg.clone()),
+            ..bare_media()
+        };
+        let bytes = compose_envelope(
+            String::new(),
+            vec![with("audio/mp4"), with("image/jpeg"), with("video/mp4")],
+        )
+        .unwrap();
+        for got in [
+            parse_envelope(bytes.clone()).attachments,
+            parse_body_envelope(bytes.clone()).attachments,
+        ] {
+            let thumbs: Vec<_> = got.iter().map(|a| a.inline_thumb.clone()).collect();
+            assert_eq!(thumbs, vec![None, Some(jpeg.clone()), None]);
+        }
+
+        // Over the bound or not a JPEG: dropped, the message survives.
+        let mut over = vec![0xFF; 4097];
+        over[1] = 0xD8;
+        for bad in [over, vec![0x89, b'P', b'N', b'G']] {
+            let r = AttachmentRef {
+                mime: Some("image/jpeg".to_string()),
+                inline_thumb: Some(bad),
+                ..bare_media()
+            };
+            let got = parse_body_envelope(compose_envelope("c".into(), vec![r]).unwrap());
+            assert_eq!(got.text, "c");
+            assert_eq!(got.attachments[0].inline_thumb, None);
         }
     }
 

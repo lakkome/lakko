@@ -4619,6 +4619,11 @@ pub struct HistoryAttachment {
     /// ADR-0092 audio artist tag.
     #[uniffi(default = None)]
     pub artist: Option<String>,
+    /// ADR-0047 section 6 micro thumbnail: raw JPEG bytes, at most 4096,
+    /// kept only on the first image or video of the message (encode and
+    /// decode both apply the envelope's rule).
+    #[uniffi(default = None)]
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// A poster-frame blob on a [`HistoryAttachment`] (ADR-0047).
@@ -4658,6 +4663,7 @@ fn bound_history_media(
         height: a.height,
         title: a.title.take(),
         artist: a.artist.take(),
+        inline_thumb: a.inline_thumb.take(),
         thumb: a
             .thumb
             .as_ref()
@@ -4676,6 +4682,7 @@ fn bound_history_media(
     a.height = raw.height;
     a.title = raw.title;
     a.artist = raw.artist;
+    a.inline_thumb = raw.inline_thumb;
     a.thumb = match (a.thumb.take(), raw.thumb) {
         (Some(mut t), Some(bounded)) => {
             t.mime = bounded.mime;
@@ -4686,6 +4693,20 @@ fn bound_history_media(
         _ => None,
     };
     a
+}
+
+/// ADR-0047 section 6: only the first image or video of a message keeps
+/// its micro thumbnail, as on the envelope route.
+fn keep_history_inline_thumb_on_carrier(
+    attachments: &mut [lakko_mls::history_placeholder::HistoryAttachmentPlaceholder],
+) {
+    let carrier =
+        lakko_attachments::inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()));
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb = None;
+        }
+    }
 }
 
 /// The display projection of one history-bundle message —
@@ -4850,8 +4871,10 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
             thumb,
             title: a.title,
             artist: a.artist,
+            inline_thumb: a.inline_thumb,
         }));
     }
+    keep_history_inline_thumb_on_carrier(&mut attachments);
     let content = placeholder
         .content
         .map(|m| {
@@ -4896,7 +4919,8 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
 /// direction tag, trailing bytes).
 #[uniffi::export]
 pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, FfiError> {
-    let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(&bytes)?;
+    let mut msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(&bytes)?;
+    keep_history_inline_thumb_on_carrier(&mut msg.attachments);
     let mimes: Vec<Option<String>> = msg.attachments.iter().map(|a| a.mime.clone()).collect();
     let content = msg.content.as_ref().and_then(|c| {
         crate::content::content_message_from_core(c.kind, &c.payload, &c.state, &mimes)
@@ -4959,6 +4983,7 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
                 }),
                 title: a.title,
                 artist: a.artist,
+                inline_thumb: a.inline_thumb,
             })
             .collect(),
         content,
@@ -4976,6 +5001,10 @@ const _: () = assert!(
 );
 const _: () = assert!(
     lakko_mls::history_placeholder::MAX_AUDIO_TAG_BYTES == lakko_attachments::MAX_AUDIO_TAG_BYTES
+);
+const _: () = assert!(
+    lakko_mls::history_placeholder::MAX_INLINE_THUMB_BYTES
+        == lakko_attachments::MAX_INLINE_THUMB_BYTES
 );
 const _: () = assert!(
     *lakko_mls::history_placeholder::CONTENT_KINDS.start()
@@ -5012,6 +5041,7 @@ mod history_placeholder_media_tests {
             }),
             title: None,
             artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -5048,6 +5078,51 @@ mod history_placeholder_media_tests {
             (thumb.size, thumb.width, thumb.height),
             (5000, Some(240), None)
         );
+    }
+
+    /// ADR-0047 section 6 — the micro thumbnail rides the history bundle
+    /// under the envelope's rules: a JPEG within its bound, on the first
+    /// image or video only.
+    #[test]
+    fn inline_thumb_survives_the_history_bundle_on_the_first_media_only() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 9];
+        let with = |mime: &str, thumb: Vec<u8>| HistoryAttachment {
+            mime: Some(mime.into()),
+            inline_thumb: Some(thumb),
+            ..attachment("photo", 1)
+        };
+        let bytes = encode_history_placeholder(HistoryPlaceholder {
+            message_id: 7,
+            direction: HistoryMessageDirection::Incoming,
+            created_at: "2026-11-19T12:00:00Z".into(),
+            text: String::new(),
+            attachments: vec![
+                with("audio/mp4", jpeg.clone()),
+                with("image/jpeg", jpeg.clone()),
+                with("video/mp4", jpeg.clone()),
+            ],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+        })
+        .expect("encodes");
+        let back = decode_history_placeholder(bytes).expect("decodes");
+        let thumbs: Vec<_> = back
+            .attachments
+            .iter()
+            .map(|a| a.inline_thumb.clone())
+            .collect();
+        assert_eq!(thumbs, vec![None, Some(jpeg), None]);
+
+        // Not a JPEG: dropped alone.
+        let back = round_trip(HistoryAttachment {
+            mime: Some("image/png".into()),
+            inline_thumb: Some(vec![0x89, b'P', b'N', b'G']),
+            ..attachment("photo", 1)
+        });
+        assert_eq!(back.inline_thumb, None);
+        assert_eq!(back.mime.as_deref(), Some("image/png"));
     }
 
     #[test]

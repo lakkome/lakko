@@ -86,9 +86,7 @@ export type TextView =
   /** `percent` is `null` until the browser reports progress, if ever. */
   | { readonly phase: "downloading"; readonly language: string; readonly percent: number | null }
   | { readonly phase: "waiting-wifi"; readonly language: string }
-  | { readonly phase: "pack-failed"; readonly language: string }
-  /** A pack is needed and anti-censorship is on (ADR-0082 section 4). */
-  | { readonly phase: "packs-blocked"; readonly language: string };
+  | { readonly phase: "pack-failed"; readonly language: string };
 
 /** The transcript block of a voice or video message (UX 4.3). */
 export type TranscriptView =
@@ -107,9 +105,7 @@ export type TranscriptView =
   | { readonly phase: "no-speech"; readonly language: string }
   | { readonly phase: "failed" }
   | { readonly phase: "unsupported"; readonly language: string }
-  | { readonly phase: "unavailable-file" }
-  /** A pack is needed and anti-censorship is on (ADR-0082 section 4). */
-  | { readonly phase: "packs-blocked" };
+  | { readonly phase: "unavailable-file" };
 
 /** The UX 3.5 dialog. */
 export interface PackRequest {
@@ -580,10 +576,6 @@ export class TranslationController {
     }
     if (state === "needs-pack") {
       this.setView(key, { phase: "none" });
-      if (await this.packsBlocked()) {
-        this.setView(key, { phase: "packs-blocked", language: source });
-        return;
-      }
       if (this.packFetch(source, target) === "system-settings") {
         this.askForSystemPack(source, () => this.forgetState(`t:${source}>${target}`));
         return;
@@ -713,13 +705,6 @@ export class TranslationController {
         onDismiss();
       },
     });
-  }
-
-  /** Whether a pack may not be downloaded now (anti-censorship on). */
-  private async packsBlocked(): Promise<boolean> {
-    const check = this.deps.engines.packsBlocked;
-    if (check === undefined) return false;
-    return check.call(this.deps.engines).catch(() => true);
   }
 
   /** Who fetches the pack of a pair (`engines.ts`, `PackFetch`). */
@@ -859,12 +844,9 @@ export class TranslationController {
     if (this.translationState(language) !== "needs-pack") return;
     const target = this.target();
     if (this.packFetch(language, target) === "system-settings") {
-      void this.packsBlocked().then((blocked) => {
-        if (blocked) return;
-        this.askForSystemPack(language, () => {
-          this.forgetState(`t:${language}>${target}`);
-          for (const k of [...this.autoTried]) if (k.startsWith(`text|${conversation}|`)) this.autoTried.delete(k);
-        });
+      this.askForSystemPack(language, () => {
+        this.forgetState(`t:${language}>${target}`);
+        for (const k of [...this.autoTried]) if (k.startsWith(`text|${conversation}|`)) this.autoTried.delete(k);
       });
       return;
     }
@@ -1015,10 +997,6 @@ export class TranslationController {
       return;
     }
     if (state === "needs-pack") {
-      if (await this.packsBlocked()) {
-        this.setTranscript(key, { phase: "packs-blocked" });
-        return;
-      }
       this.askForPack(
         "transcription",
         language,

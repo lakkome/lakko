@@ -156,11 +156,6 @@ export function TranscriptBlock(props: { host: TranscriptHost | undefined }): JS
               </div>
             )}
           </Match>
-          <Match when={view().phase === "packs-blocked"}>
-            <div class="lakko-transcript lk-translate-line" role="status">
-              {t("translate.pack.blocked_anti_censorship")}
-            </div>
-          </Match>
           <Match when={view().phase === "no-speech"}>
             <div class="lakko-transcript lk-translate-line">{t("transcript.no_speech")}</div>
           </Match>

@@ -162,7 +162,8 @@ extension PersistedAttachment {
             height: ref.height,
             thumb: ref.thumb.map(PersistedThumb.init(from:)),
             title: ref.title,
-            artist: ref.artist
+            artist: ref.artist,
+            inlineThumbB64: ref.inlineThumb?.base64EncodedString()
         )
     }
 
@@ -191,7 +192,10 @@ extension PersistedAttachment {
             height: height,
             thumb: thumb?.toThumbRef(),
             title: title,
-            artist: artist
+            artist: artist,
+            // ADR-0047 section 6 — re-bounded on the way out, so a stored
+            // value never reaches a decoder unchecked.
+            inlineThumb: InlineThumb.bounded(inlineThumbB64.flatMap { Data(base64Encoded: $0) })
         )
     }
 }

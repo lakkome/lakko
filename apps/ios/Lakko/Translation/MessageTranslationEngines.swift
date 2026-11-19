@@ -93,7 +93,6 @@ enum MessageTranslationError: Error, Equatable {
     case notInstalled
     case failed
     case permissionDenied
-    case blockedAntiCensorship
 }
 
 /// How every Apple translation session is configured. One place, so the

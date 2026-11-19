@@ -11,8 +11,10 @@ import {
   previewLine,
   previewMediaOf,
   rowMatchesQuery,
+  rowThumbSource,
   stackEdges,
 } from "./list-preview";
+import { b64UrlEncode } from "./persisted-attachment";
 
 describe("attachmentPreviewLabel", () => {
   it("names the recording flows by their kind", () => {
@@ -164,5 +166,55 @@ describe("emptyPreviewLine", () => {
 
   it("says nothing while the log is still being read", () => {
     expect(emptyPreviewLine(false)).toBe("");
+  });
+});
+
+describe("the row picture prefers the micro thumbnail (ADR-0047 section 6)", () => {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+  const thumb = {
+    blobIdB64: "a",
+    keyB64: "b",
+    nonceB64: "c",
+    mime: "image/jpeg",
+    sizeStr: "10",
+    width: 10,
+    height: 10,
+  };
+
+  it("draws the inline thumbnail at once, without the sent thumb", () => {
+    expect(rowThumbSource({ thumb, inlineThumbB64: b64UrlEncode(jpeg) })).toEqual({
+      kind: "inline",
+      url: "data:image/jpeg;base64,/9j/4A==",
+    });
+  });
+
+  it("falls back to the sent thumb only when there is no inline one", () => {
+    expect(rowThumbSource({ thumb })).toEqual({ kind: "thumb" });
+    expect(rowThumbSource({ thumb: null })).toEqual({ kind: "none" });
+  });
+
+  it("ignores an inline value that is not a JPEG within the bound", () => {
+    const png = b64UrlEncode(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+    expect(rowThumbSource({ thumb, inlineThumbB64: png })).toEqual({ kind: "thumb" });
+    const big = new Uint8Array(4097);
+    big.set([0xff, 0xd8, 0xff]);
+    expect(rowThumbSource({ thumb: null, inlineThumbB64: b64UrlEncode(big) })).toEqual({ kind: "none" });
+  });
+
+  it("is carried from the message's first photo or video", () => {
+    const media = previewMediaOf([
+      { blobIdB64: "x", keyB64: "y", nonceB64: "z", mime: "application/pdf", sizeStr: "1", name: null },
+      {
+        blobIdB64: "x",
+        keyB64: "y",
+        nonceB64: "z",
+        mime: "image/jpeg",
+        sizeStr: "1",
+        name: null,
+        inlineThumbB64: b64UrlEncode(jpeg),
+      },
+    ]);
+    expect(media?.inlineThumbB64).toBe(b64UrlEncode(jpeg));
+    expect(media === null ? null : rowThumbSource(media).kind).toBe("inline");
   });
 });

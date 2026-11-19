@@ -408,6 +408,10 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {string} title  Notification title.
  * @property {string} body   Decrypted preview body (truncated).
  * @property {string} tag    Notification tag (the group hex — collapses a burst).
+ * @property {string} [image]  ADR-0047 section 6 — the first photo's or
+ *   video's micro thumbnail as a `data:image/jpeg;base64,...` URL, present
+ *   only on a message notification that shows the message's own words; never
+ *   on a reaction, a call, an edit or the generic banner.
  * @property {CallNotice} [call]  Present ONLY when the newest relevant row was
  *   call signalling. A message preview carries no `call` key at all, so the
  *   message shape is byte-for-byte what it was before calls could ring.
@@ -854,7 +858,10 @@ export async function decryptPushWake(wake, deps) {
       const preview = previewFromProcessed(deps.wasm, processed, words);
       if (preview !== null) {
         latestReaction = null;
-        latest = { title: "Lakko", body: preview, tag: groupHex };
+        latest =
+          preview.image === null
+            ? { title: "Lakko", body: preview.body, tag: groupHex }
+            : { title: "Lakko", body: preview.body, tag: groupHex, image: preview.image };
         // ADR-0048 / C-68 — resolve the sender's KEY now, against the roster
         // of the epoch this frame decrypted at; a leaf resolved later could
         // name whoever took the slot.
@@ -952,12 +959,13 @@ export async function decryptPushWake(wake, deps) {
       if (shaped === null) {
         // A sender is always a contact or a member whose name is on this
         // device; none found is a defect. Never a made-up name, never a body
-        // without its sender: the generic banner.
+        // without its sender: the generic banner, and with it no picture
+        // (ADR-0047 section 6: the picture shows exactly when the text does).
         // eslint-disable-next-line no-console
         console.error("[push] the sender of a notification has no name on this device; showing the generic banner");
         latest = genericMessageBanner(words, latest.tag);
       } else {
-        latest = { ...latest, title: shaped.title, body: shaped.body };
+        latest = notificationWithPicture({ ...latest, title: shaped.title, body: shaped.body }, latestReaction === null);
       }
     }
     return { preview: latest, readRan: true, unreadableRows };
@@ -2420,9 +2428,13 @@ function reactionFromProcessed(wasm, processed, ownKeyB64) {
  * @param {DecryptWasm} wasm
  * @param {any} processed
  * @param {{ attachments: readonly string[], unsupportedMessage: string, newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
- * @returns {string | null}
+ * @returns {{ body: string, image: string | null } | null}  The preview
+ *   words and, for a chat message carrying a photo or video, its micro
+ *   thumbnail (ADR-0047 section 6) as a `data:` URL.
  */
 function previewFromProcessed(wasm, processed, words) {
+  /** @param {string | null} body */
+  const plain = (body) => (body === null ? null : { body, image: null });
   if (
     processed === null ||
     processed === undefined ||
@@ -2454,36 +2466,41 @@ function previewFromProcessed(wasm, processed, words) {
     // version this build cannot read. It is a message, so it is the preview,
     // in the words the page stored; never the core's English placeholder.
     // (`notificationStrings` falls back to English word by word.)
-    if (kind === "unsupported") return words.unsupportedMessage;
+    if (kind === "unsupported") return plain(words.unsupportedMessage);
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
       // ADR-0087 section 14, UX 15.2 — a message carrying a channel
       // invitation card reads like its card ("Invitation to {channel}"),
       // never as its text, which is the `/g/` link with its secret.
       const card = parsed.channelInvite;
-      if (card instanceof Uint8Array && card.length > 0) return channelInvitePreview(wasm, card, words);
+      if (card instanceof Uint8Array && card.length > 0) return plain(channelInvitePreview(wasm, card, words));
       const text = typeof parsed.text === "string" ? parsed.text : "";
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
+      // ADR-0047 section 6 — the first photo's or video's micro thumbnail,
+      // carried inside the message: nothing is downloaded for it.
+      const image = count > 0 ? inlineThumbDataUrl(parsed.inlineThumb) : null;
       if (text.length > 0) {
         // Section 11 — a message of files only reads `2 files · <text>`; any
         // other message with text reads as its text.
         const files = count > 0 ? attachmentsWords(parsed, count, words, filesOnlyLine) : null;
         const shown = withoutGroupLinkSecret(text);
-        return truncate(files === null ? shown : `${files}${PREVIEW_WORDS_SEPARATOR}${shown}`);
+        return { body: truncate(files === null ? shown : `${files}${PREVIEW_WORDS_SEPARATOR}${shown}`), image };
       }
-      if (count > 0) return attachmentsWords(parsed, count, words, mediaWordsLine) ?? attachmentsLine(words, count);
+      if (count > 0) {
+        return { body: attachmentsWords(parsed, count, words, mediaWordsLine) ?? attachmentsLine(words, count), image };
+      }
       return null;
     }
     // ADR-0092 — a poll, checklist, location, contact card or article: its
     // one-line preview, never JSON. Ops on them (votes, ticks, closes, added
     // items, edits) fall through to `null` below, like reactions.
     if (kind === "poll" || kind === "checklist" || kind === "location" || kind === "contact-card" || kind === "article") {
-      return contentPreviewLine(parsed.content, words);
+      return plain(contentPreviewLine(parsed.content, words));
     }
     // An edit rewrites a prior message → surface the new text.
     if (kind === "edit") {
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      return text.length > 0 ? truncate(text) : null;
+      return text.length > 0 ? plain(truncate(text)) : null;
     }
     // delete / reaction / typing / read-receipt carry no standalone
     // preview — skip so an older real message stays the preview.
@@ -2632,6 +2649,43 @@ function isPollBallotRow(wasm, payload) {
 function truncate(text) {
   if (text.length <= PREVIEW_MAX_CHARS) return text;
   return `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…`;
+}
+
+/** ADR-0047 section 6 — the core's bound on the micro thumbnail. */
+const INLINE_THUMB_MAX_BYTES = 4096;
+
+/**
+ * A `data:image/jpeg;base64,...` URL of a message's micro thumbnail, or
+ * `null` when `bytes` is not a JPEG (`FF D8 FF`) of 1 to 4096 bytes. The core
+ * already applies this bound; the worker checks again before anything
+ * becomes a URL. Pure; exported for the tests.
+ *
+ * @param {unknown} bytes
+ * @returns {string | null}
+ */
+export function inlineThumbDataUrl(bytes) {
+  if (!(bytes instanceof Uint8Array)) return null;
+  if (bytes.length < 3 || bytes.length > INLINE_THUMB_MAX_BYTES) return null;
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) return null;
+  return `data:image/jpeg;base64,${bytesToBase64(bytes)}`;
+}
+
+/**
+ * ADR-0047 section 6 — a message notification keeps its picture exactly when
+ * it shows the message's words: `showsText` is false for a reaction ("Anna
+ * reacted to your message"), and the generic banner never reaches here.
+ * Pure; exported for the tests.
+ *
+ * @template {{ image?: string }} T
+ * @param {T} notification
+ * @param {boolean} showsText
+ * @returns {T}
+ */
+export function notificationWithPicture(notification, showsText) {
+  if (showsText && typeof notification.image === "string" && notification.image.length > 0) return notification;
+  if (notification.image === undefined) return notification;
+  const { image: _image, ...rest } = notification;
+  return /** @type {T} */ (rest);
 }
 
 /** Standard-alphabet base64 of raw bytes (matches `auth/account-id`). */

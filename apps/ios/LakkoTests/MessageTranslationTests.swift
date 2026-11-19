@@ -36,7 +36,6 @@ final class MessageTranslationTests: XCTestCase {
     private func makeCenter(
         translation: FakeTranslationEngine? = nil,
         transcription: FakeTranscriptionEngine? = nil,
-        antiCensorship: Bool = false,
         expensive: Bool = false
     ) -> (MessageTranslationCenter, MessageTranslationStore) {
         let store = MessageTranslationStore(directory: directory)
@@ -47,7 +46,7 @@ final class MessageTranslationTests: XCTestCase {
             translationEngine: translation ?? FakeTranslationEngine(),
             transcriptionEngine: transcription ?? FakeTranscriptionEngine(), settings: settings,
             store: store, accountProvider: { [account] in account },
-            antiCensorshipOn: { antiCensorship }, expensivePath: { expensive })
+            expensivePath: { expensive })
         return (center, store)
     }
 
@@ -174,13 +173,20 @@ final class MessageTranslationTests: XCTestCase {
         XCTAssertEqual(engine.translateCalls, 1)
     }
 
-    func testAPackIsAskedForAndNeverDownloadedWhileAntiCensorshipIsOn() async {
+    /// ADR-0082 amendment of 2026-11-19: a pack is offered and downloaded
+    /// with anti-censorship on, as with it off.
+    func testAPackIsOfferedAndDownloadedWithAntiCensorshipOn() async {
+        let previous = AntiCensorshipConfig.current
+        AntiCensorshipConfig.current = AntiCensorshipConfig(
+            armed: true, bootstrapConfigJson: Data(), trustAnchor: Data())
+        defer { AntiCensorshipConfig.current = previous }
         let engine = FakeTranslationEngine(state: .needsPack)
-        let (center, _) = makeCenter(translation: engine, antiCensorship: true)
+        let (center, _) = makeCenter(translation: engine)
         center.translate(conversation: conversation, message: message(10, spanish))
-        await eventually { center.phase(conversation: conversation, messageId: 10) == .blocked }
-        XCTAssertNil(center.packRequest)
-        XCTAssertEqual(engine.prepareCalls, 0)
+        await eventually { center.packRequest != nil }
+        XCTAssertEqual(center.packRequest?.kind, .translation)
+        center.packRequest?.download()
+        await eventually { engine.prepareCalls == 1 }
     }
 
     func testAPackOnMobileDataWaitsForWifi() async {

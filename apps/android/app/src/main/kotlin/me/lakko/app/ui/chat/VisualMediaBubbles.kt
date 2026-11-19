@@ -142,7 +142,11 @@ internal fun PhotoBubble(
         )
     }
     val animated = remember(ref.mime) { isAnimatedImage(ref.mime) }
-    var thumb by remember(key) { mutableStateOf<ImageBitmap?>(null) }
+    // ADR-0047 section 6 — the first photo of a message carries a micro
+    // thumbnail inside it: the placeholder until the sent thumb arrives.
+    var thumb by remember(key) {
+        mutableStateOf<ImageBitmap?>(me.lakko.app.media.decodeInlineThumb(ref.inlineThumb)?.asImageBitmap())
+    }
     var file by remember(key) { mutableStateOf<File?>(hub.fileFor(key)) }
     var full by remember(key) { mutableStateOf<ImageBitmap?>(null) }
     var failed by remember(key) { mutableStateOf(false) }
@@ -153,7 +157,7 @@ internal fun PhotoBubble(
         val t = ref.thumb ?: return@LaunchedEffect
         if (file != null) return@LaunchedEffect
         val tf = hub.loadThumb(t) ?: return@LaunchedEffect
-        thumb = withContext(Dispatchers.IO) { decodeOrientedBitmap(tf, 640)?.asImageBitmap() }
+        withContext(Dispatchers.IO) { decodeOrientedBitmap(tf, 640)?.asImageBitmap() }?.let { thumb = it }
     }
     LaunchedEffect(key, attempt) {
         val f = file ?: hub.load(ref)
@@ -282,7 +286,10 @@ internal fun VideoBubble(
     }
     val strings = LocalStrings.current
     val sizeLabel = remember(ref.size, strings) { AttachmentBridge.formatSize(ref.size, strings) }
+    // ADR-0047 section 6 — the first video of a message carries a micro
+    // thumbnail inside it: shown blurred until the sent poster arrives.
     var poster by remember(key) { mutableStateOf<ImageBitmap?>(null) }
+    val inlinePoster = remember(key) { me.lakko.app.media.decodeInlineThumb(ref.inlineThumb)?.asImageBitmap() }
     var file by remember(key) { mutableStateOf<File?>(hub.fileFor(key)) }
     var loading by remember(key) { mutableStateOf(false) }
     var failed by remember(key) { mutableStateOf(false) }
@@ -343,12 +350,20 @@ internal fun VideoBubble(
                 contentDescription = videoLabel
             },
     ) {
-        poster?.let {
+        val shownPoster = poster
+        if (shownPoster != null) {
             Image(
-                bitmap = it,
+                bitmap = shownPoster,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
+            )
+        } else if (inlinePoster != null) {
+            Image(
+                bitmap = inlinePoster,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().blur(6.dp),
             )
         }
         val compact = tileSize != null && minOf(tileSize.width, tileSize.height) < 140.dp

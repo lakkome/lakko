@@ -27,7 +27,20 @@ vi.mock("./attachments", async (orig) => {
   };
 });
 
+// ADR-0047 section 6 — the browser decoder stands in: every image or video
+// decodes to a picture with a micro thumbnail whose fourth byte is the
+// file's size, so a test can tell which file a thumbnail came from.
+vi.mock("../media/visual-thumb", () => {
+  const preview = async (file: Blob) => ({
+    size: { width: 100, height: 100 },
+    thumb: null,
+    inline: new Uint8Array([0xff, 0xd8, 0xff, file.size]),
+  });
+  return { describeImage: vi.fn(preview), describeVideo: vi.fn(preview) };
+});
+
 import { encryptAndUploadBytes } from "./attachments";
+import { messageRefs } from "./compose-tray";
 import { createTrayStore, trayFor, type TrayDeps } from "./tray-store";
 import type { StorageClient } from "../storage/client";
 
@@ -128,5 +141,28 @@ describe("tray store", () => {
     expect(again).toBe(first);
     expect(again.items()).toHaveLength(1);
     expect(trayFor("acct:conv-b", deps()).items()).toHaveLength(0);
+  });
+});
+
+describe("tray store: the micro thumbnail (ADR-0047 section 6)", () => {
+  const inlineType = (mime: string | undefined): "image" | "audio" | "video" | null =>
+    mime?.startsWith("image/") === true ? "image" : mime?.startsWith("video/") === true ? "video" : null;
+
+  it("gives a File-picked JPEG placed first the thumbnail, not the photo after it", async () => {
+    const store = createTrayStore(deps({ inlineType }));
+    store.add([new File([new Uint8Array(7)], "first.jpg", { type: "image/jpeg" })], "file");
+    // A GIF photo skips the re-encode, which needs the wasm core.
+    store.add([new File([new Uint8Array(9)], "second.gif", { type: "image/gif" })], "media");
+    await settled(store);
+    expect(store.items().map((i) => i.kind)).toEqual(["file", "photo"]);
+    const refs = messageRefs(store.items(), inlineType);
+    expect(refs.map((r) => r.inlineThumb?.[3])).toEqual([7, undefined]);
+  });
+
+  it("makes no thumbnail for a file the receivers cannot show inline", async () => {
+    const store = createTrayStore(deps({ inlineType }));
+    store.add([file("a.pdf")], "file");
+    await settled(store);
+    expect(store.items()[0]?.ref?.inlineThumb).toBeUndefined();
   });
 });

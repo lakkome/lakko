@@ -129,6 +129,7 @@ impl EncryptedAttachment {
 /// r.kind = "voice";
 /// r.durationMs = 4200;
 /// r.waveform = amplitudes; // Uint8Array, 1..=128 bytes
+/// photo.inlineThumb = jpeg; // ADR-0047 section 6: <= 4096 bytes, JPEG
 /// ```
 ///
 /// Out-of-bound values are not errors: `EnvelopeBuilder.build` drops them,
@@ -150,6 +151,7 @@ pub struct AttachmentRef {
     thumb: Option<ThumbRef>,
     title: Option<String>,
     artist: Option<String>,
+    inline_thumb: Option<Vec<u8>>,
 }
 
 /// ADR-0047 — a poster-frame blob attached to an [`AttachmentRef`]: its
@@ -302,7 +304,26 @@ impl AttachmentRef {
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         }
+    }
+
+    /// ADR-0047 section 6 — the micro thumbnail: raw JPEG bytes (starting
+    /// `FF D8 FF`), at most 4096, carried inside the message so a
+    /// notification or a list row needs no download. Present on parse only
+    /// on the first attachment whose MIME is an inline image or video;
+    /// `undefined` otherwise.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb.clone()
+    }
+
+    /// Set (or clear with `undefined`) the micro thumbnail. Not a JPEG, over
+    /// 4096 bytes, or on any ref but the first image or video of the
+    /// message, `EnvelopeBuilder.build` drops it, as every receiver would.
+    #[wasm_bindgen(setter, js_name = inlineThumb)]
+    pub fn set_inline_thumb(&mut self, inline_thumb: Option<Vec<u8>>) {
+        self.inline_thumb = inline_thumb;
     }
 
     /// ADR-0092 — an `audio` attachment's title tag (<= 255 bytes); kept on
@@ -787,6 +808,7 @@ pub struct ParsedBody {
     checklist_item: Option<inner::ChecklistItemRef>,
     checklist_done: Option<bool>,
     poll_tally: Option<crate::channel_poll::ChannelPollTally>,
+    inline_thumb: Option<Vec<u8>>,
 }
 
 impl ParsedBody {
@@ -814,6 +836,7 @@ impl ParsedBody {
             checklist_item: None,
             checklist_done: None,
             poll_tally: None,
+            inline_thumb: None,
         }
     }
 
@@ -841,6 +864,15 @@ impl ParsedBody {
 
 #[wasm_bindgen]
 impl ParsedBody {
+    /// ADR-0047 section 6 — the picture of a `"chat"` message's first photo
+    /// or video: the micro thumbnail carried inside the envelope (raw JPEG
+    /// bytes, at most 4096), `undefined` when none. What a notification or a
+    /// list row draws, with no download.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb.clone()
+    }
+
     /// ADR-0092 — the `MessageContent` object of a `"poll"` / `"checklist"`
     /// / `"location"` / `"contact-card"` / `"article"` message, or the
     /// replacement of an `"edit-checklist"` / `"edit-article"`; otherwise
@@ -1147,6 +1179,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
         } => {
             let mut p = ParsedBody::empty("chat").with_reply_forward(reply, forward);
             p.text = text;
+            p.inline_thumb = inner::first_inline_thumb(&attachments);
             p.attachments = refs_to_wasm(attachments);
             p.resend_origin_group_b64 = resend.as_ref().map(|r| r.group_id_b64.clone());
             p.resend_origin_message_id = resend.map(|r| r.message_id);
@@ -1299,6 +1332,7 @@ fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             // ADR-0047 media fields arrive already bounded by the core
             // parser; a thumb that still fails to decode is dropped alone.
             let waveform = r.decode_waveform();
+            let inline_thumb = r.decode_inline_thumb();
             let thumb = r.thumb.as_ref().and_then(thumb_to_wasm);
             Some(AttachmentRef {
                 blob_id: blob_id.to_vec(),
@@ -1315,6 +1349,7 @@ fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 thumb,
                 title: r.title,
                 artist: r.artist,
+                inline_thumb,
             })
         })
         .collect()
@@ -1367,6 +1402,7 @@ fn ref_to_inner(r: &AttachmentRef) -> Result<inner::AttachmentRef, JsError> {
         thumb,
         title: r.title.clone(),
         artist: r.artist.clone(),
+        inline_thumb: r.inline_thumb.as_ref().map(|t| B64.encode(t)),
     })
 }
 
@@ -1579,6 +1615,52 @@ mod tests {
         assert_eq!((got.duration_ms(), got.waveform()), (None, None));
         assert_eq!((got.width(), got.height()), (None, Some(4096)));
         assert!(got.thumb().is_none());
+    }
+
+    /// ADR-0047 section 6 — the micro thumbnail crosses the binding both
+    /// ways, stays only on the first image or video, and `ParsedBody`
+    /// hands it out for a notification.
+    #[test]
+    fn inline_thumb_crosses_the_binding_on_the_first_media_only() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 7, 7];
+        let mut builder = EnvelopeBuilder::new(String::new());
+        for mime in ["application/pdf", "image/jpeg", "video/mp4"] {
+            let enc = encrypt_attachment(b"media").unwrap();
+            let mut r = AttachmentRef::new(
+                enc.blob_id(),
+                enc.key(),
+                enc.nonce(),
+                Some(mime.to_string()),
+                5,
+                None,
+            );
+            r.set_inline_thumb(Some(jpeg.clone()));
+            builder.add(&r).unwrap();
+        }
+        let bytes = builder.build().unwrap();
+        let body = parse_body_envelope(&bytes);
+        assert_eq!(body.inline_thumb(), Some(jpeg.clone()));
+        let thumbs: Vec<_> = (0..3)
+            .map(|i| body.attachment(i).unwrap().inline_thumb())
+            .collect();
+        assert_eq!(thumbs, vec![None, Some(jpeg), None]);
+
+        // Not a JPEG: dropped at build, the attachment survives.
+        let enc = encrypt_attachment(b"media").unwrap();
+        let mut r = AttachmentRef::new(
+            enc.blob_id(),
+            enc.key(),
+            enc.nonce(),
+            Some("image/png".to_string()),
+            5,
+            None,
+        );
+        r.set_inline_thumb(Some(vec![0x89, b'P', b'N', b'G']));
+        let mut builder = EnvelopeBuilder::new("c".to_string());
+        builder.add(&r).unwrap();
+        let body = parse_body_envelope(&builder.build().unwrap());
+        assert_eq!(body.inline_thumb(), None);
+        assert_eq!(body.attachment(0).unwrap().inline_thumb(), None);
     }
 
     #[test]

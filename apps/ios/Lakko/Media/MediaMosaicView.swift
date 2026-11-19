@@ -103,6 +103,9 @@ struct MosaicTileView: View {
     let onOpen: () -> Void
 
     @Environment(\.displayScale) private var displayScale
+    /// ADR-0047 section 6 — the micro thumbnail inside the message (the
+    /// first tile only carries one): the placeholder until ``thumb`` arrives.
+    @State private var inline: UIImage?
     @State private var thumb: UIImage?
     @State private var full: UIImage?
     @State private var loadingFull = false
@@ -122,6 +125,9 @@ struct MosaicTileView: View {
                 } else if let thumb {
                     Image(uiImage: thumb).resizable().scaledToFill()
                         .blur(radius: isVideo ? 0 : 6, opaque: true)
+                } else if let inline {
+                    Image(uiImage: inline).resizable().scaledToFill()
+                        .blur(radius: 6, opaque: true)
                 }
                 if isVideo, !failed {
                     ZStack {
@@ -190,6 +196,9 @@ struct MosaicTileView: View {
     private func load() async {
         let cache = MediaSessionCache.shared
         failed = false
+        if full == nil, thumb == nil, inline == nil, let bytes = InlineThumb.bounded(ref.inlineThumb) {
+            inline = UIImage(data: bytes)
+        }
         if full == nil, thumb == nil, let thumbRef = ref.thumb, let bytes = await cache.thumbData(thumbRef) {
             thumb = await cache.displayImage(
                 key: MediaSessionCache.key(for: thumbRef), bytes: bytes, maxPixel: PhotoVideoPrep.thumbMaxPixel)
@@ -229,6 +238,14 @@ struct PreviewMediaThumbnail: View {
 
     @State private var image: UIImage?
 
+    private static func taskId(_ source: ConversationPreviewMedia.Source) -> String {
+        switch source {
+        case .inline(let bytes): return "inline-\(bytes.hashValue)"
+        case .fetch(let thumb): return MediaSessionCache.key(for: thumb)
+        case .none: return "none"
+        }
+    }
+
     var body: some View {
         let edges = media.stackedEdges
         let off = Self.edgeOffset
@@ -260,12 +277,20 @@ struct PreviewMediaThumbnail: View {
             width: Self.side + off * CGFloat(edges), height: Self.side + off * CGFloat(edges),
             alignment: .bottomLeading)
         .accessibilityHidden(true)
-        .task(id: media.thumb.map(MediaSessionCache.key(for:))) {
-            guard let thumb = media.thumb else { return }
-            let cache = MediaSessionCache.shared
-            guard let bytes = await cache.thumbData(thumb) else { return }
-            image = await cache.displayImage(
-                key: MediaSessionCache.key(for: thumb), bytes: bytes, maxPixel: Int(Self.side * 3))
+        .task(id: Self.taskId(media.source)) {
+            switch media.source {
+            case .inline(let bytes):
+                // ADR-0047 section 6 — the picture is inside the message:
+                // no fetch. Bytes that do not decode keep the placeholder.
+                image = UIImage(data: bytes)
+            case .fetch(let thumb):
+                let cache = MediaSessionCache.shared
+                guard let bytes = await cache.thumbData(thumb) else { return }
+                image = await cache.displayImage(
+                    key: MediaSessionCache.key(for: thumb), bytes: bytes, maxPixel: Int(Self.side * 3))
+            case .none:
+                return
+            }
         }
     }
 }

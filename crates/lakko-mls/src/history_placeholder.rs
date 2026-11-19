@@ -39,7 +39,7 @@
 //! ambiguity, no floating-point, no map iteration order):
 //!
 //! ```text
-//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (4)
+//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (5)
 //! message_id:        u64 (big-endian)
 //! direction:         u8  (0 = outgoing, 1 = incoming, 2 = system)
 //! created_at_len:    u16 (big-endian)   + created_at UTF-8 bytes
@@ -60,6 +60,7 @@
 //!     thumb_present:  u8 (0 | 1)  [ + thumb ]
 //!     title_present:  u8 (0 | 1)  [ + title_len: u16 + title UTF-8 ]
 //!     artist_present: u8 (0 | 1)  [ + artist_len: u16 + artist UTF-8 ]
+//!     inline_thumb_present: u8 (0 | 1)  [ + inline_thumb_len: u16 + bytes ]
 //!   thumb:
 //!     blob_id: 32 bytes, key: 32 bytes, nonce: 12 bytes, size: u64
 //!     mime_present:  u8 (0 | 1)  [ + mime_len: u16 + mime UTF-8 ]
@@ -118,6 +119,16 @@
 //! `lakko_attachments::content_state::ContentState::decode`, the decoders
 //! the envelope route uses. Flag day: versions 1 to 3 are refused.
 //!
+//! ## Version 5: the micro thumbnail (ADR-0047 section 6)
+//!
+//! Version 5 adds, after the `artist` tag, the attachment's `inline_thumb`:
+//! the small JPEG the envelope carries inline so a notification or a list
+//! row draws the picture without fetching a blob. Here it is opaque bytes
+//! bounded by [`MAX_INLINE_THUMB_BYTES`]; the JPEG check and the rule that
+//! only the first image or video of a message carries it are
+//! `lakko-attachments`' and are applied by the FFI crates. Flag day:
+//! versions 1 to 4 are refused.
+//!
 //! This codec enforces **structure** only (lengths, caps, presence bytes).
 //! The **semantic** ADR-0047 bounds (a duration only for a voice or video
 //! note and within its limit, a dimension within 1..=4096, a thumb within
@@ -145,7 +156,7 @@ use crate::error::{Error, Result};
 /// Wire-format version byte. Bump on any layout change; the
 /// decoder refuses any other value so an older binary fails
 /// loudly rather than mis-parsing a newer placeholder.
-pub const HISTORY_PLACEHOLDER_VERSION: u8 = 4;
+pub const HISTORY_PLACEHOLDER_VERSION: u8 = 5;
 
 /// Hard cap on the message text, in UTF-8 bytes (1 MiB). Larger
 /// inputs are refused at encode time and rejected at decode.
@@ -172,6 +183,11 @@ pub const MAX_KIND_BYTES: usize = 32;
 /// Hard cap on the waveform, in bytes (one amplitude per bar), matching
 /// ADR-0047's `MAX_WAVEFORM_BYTES`.
 pub const MAX_WAVEFORM_BYTES: usize = 128;
+
+/// Hard cap on an attachment's micro thumbnail, in bytes, matching
+/// `lakko_attachments::MAX_INLINE_THUMB_BYTES` (ADR-0047 section 6; pinned
+/// in the FFI crates).
+pub const MAX_INLINE_THUMB_BYTES: usize = 4096;
 
 /// Hard cap on an audio attachment's `title` or `artist`, in UTF-8 bytes,
 /// matching ADR-0092's `MAX_AUDIO_TAG_BYTES`.
@@ -279,6 +295,9 @@ pub struct HistoryAttachmentPlaceholder {
     pub title: Option<String>,
     /// ADR-0092 audio artist tag, at most [`MAX_AUDIO_TAG_BYTES`].
     pub artist: Option<String>,
+    /// ADR-0047 section 6 micro thumbnail (JPEG bytes), at most
+    /// [`MAX_INLINE_THUMB_BYTES`]; opaque here.
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// A poster-frame blob attached to a [`HistoryAttachmentPlaceholder`]
@@ -466,6 +485,12 @@ impl HistoryMessagePlaceholder {
                 MAX_AUDIO_TAG_BYTES,
                 "artist",
             )?;
+            encode_opt_bytes(
+                &mut out,
+                att.inline_thumb.as_deref(),
+                MAX_INLINE_THUMB_BYTES,
+                "inline_thumb",
+            )?;
         }
 
         self.encode_extras(&mut out)?;
@@ -596,6 +621,7 @@ impl HistoryMessagePlaceholder {
             };
             let title = r.opt_string(MAX_AUDIO_TAG_BYTES, "title")?;
             let artist = r.opt_string(MAX_AUDIO_TAG_BYTES, "artist")?;
+            let inline_thumb = r.opt_bytes(MAX_INLINE_THUMB_BYTES, "inline_thumb")?;
             attachments.push(HistoryAttachmentPlaceholder {
                 blob_id,
                 key,
@@ -611,6 +637,7 @@ impl HistoryMessagePlaceholder {
                 thumb,
                 title,
                 artist,
+                inline_thumb,
             });
         }
 
@@ -955,6 +982,7 @@ mod tests {
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: Some(vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
         }
     }
 
@@ -974,6 +1002,7 @@ mod tests {
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -1001,6 +1030,7 @@ mod tests {
             }),
             title: None,
             artist: None,
+            inline_thumb: Some(vec![0xFF; MAX_INLINE_THUMB_BYTES]),
         }
     }
 
@@ -1064,6 +1094,7 @@ mod tests {
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         }];
         let bytes = msg.encode().expect("encode");
         assert_eq!(
@@ -1091,8 +1122,8 @@ mod tests {
     }
 
     #[test]
-    fn versions_1_to_3_are_refused() {
-        for old in [1u8, 2, 3] {
+    fn versions_1_to_4_are_refused() {
+        for old in [1u8, 2, 3, 4] {
             let mut bytes = sample().encode().expect("encode");
             bytes[0] = old;
             let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("old version refused");
@@ -1342,14 +1373,46 @@ mod tests {
         att.waveform = Some(vec![1; 3]);
         att.width = None;
         att.height = None;
+        att.inline_thumb = None;
         msg.attachments = vec![att];
         let mut bytes = msg.encode().expect("encode");
         // From the end: the content, forward, reply and card presence bytes,
-        // then the artist, title, thumb, height and width presence bytes, the
-        // 3 waveform bytes, then its u16 length.
-        let waveform_len_at = bytes.len() - (4 + 5 + 3 + 2);
+        // then the inline thumb, artist, title, thumb, height and width
+        // presence bytes, the 3 waveform bytes, then its u16 length.
+        let waveform_len_at = bytes.len() - (4 + 6 + 3 + 2);
         bytes[waveform_len_at..waveform_len_at + 2].copy_from_slice(
             &u16::try_from(MAX_WAVEFORM_BYTES + 1)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+    }
+
+    /// ADR-0047 section 6: the micro thumbnail rides the bundle; over its
+    /// cap it is refused on encode and on decode.
+    #[test]
+    fn inline_thumb_round_trips_and_is_bounded_both_ways() {
+        let mut msg = sample();
+        msg.attachments = vec![video_note_attachment(), sample_attachment()];
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            msg
+        );
+
+        let mut over = sample();
+        over.attachments[0].inline_thumb = Some(vec![0xFF; MAX_INLINE_THUMB_BYTES + 1]);
+        assert!(over.encode().is_err());
+
+        // A hand-edited length over the cap is refused on decode.
+        let mut msg = sample();
+        msg.attachments[0].inline_thumb = Some(vec![0xFF, 0xD8, 0xFF]);
+        let mut bytes = msg.encode().expect("encode");
+        // From the end: the content, forward, reply and card presence bytes,
+        // the 3 thumbnail bytes, then its u16 length.
+        let len_at = bytes.len() - (4 + 3 + 2);
+        bytes[len_at..len_at + 2].copy_from_slice(
+            &u16::try_from(MAX_INLINE_THUMB_BYTES + 1)
                 .expect("fits")
                 .to_be_bytes(),
         );
@@ -1361,11 +1424,12 @@ mod tests {
         let mut msg = sample();
         msg.attachments = vec![voice_note_attachment()];
         let bytes = msg.encode().expect("encode");
-        // In a voice attachment without a thumb, title or artist, the thumb
-        // presence byte is seventh from the end: title, artist, card, reply,
-        // forward and content presence bytes follow.
+        // In a voice attachment without a thumb, title, artist or inline
+        // thumb, the thumb presence byte is eighth from the end: title,
+        // artist, inline thumb, card, reply, forward and content presence
+        // bytes follow.
         let mut bad = bytes;
-        let last = bad.len() - 7;
+        let last = bad.len() - 8;
         assert_eq!(bad[last], 0);
         bad[last] = 2;
         let err = HistoryMessagePlaceholder::decode(&bad).expect_err("must reject");
@@ -1429,6 +1493,10 @@ mod tests {
                 (
                     opt_string(MAX_AUDIO_TAG_BYTES),
                     opt_string(MAX_AUDIO_TAG_BYTES),
+                    proptest::option::of(proptest::collection::vec(
+                        any::<u8>(),
+                        0..=MAX_INLINE_THUMB_BYTES,
+                    )),
                 ),
             )
                 .prop_map(
@@ -1436,7 +1504,7 @@ mod tests {
                         (blob_id, key, nonce, size),
                         (mime, name, kind),
                         (duration_ms, waveform, width, height, thumb),
-                        (title, artist),
+                        (title, artist, inline_thumb),
                     )| {
                         HistoryAttachmentPlaceholder {
                             blob_id,
@@ -1453,6 +1521,7 @@ mod tests {
                             thumb,
                             title,
                             artist,
+                            inline_thumb,
                         }
                     },
                 )

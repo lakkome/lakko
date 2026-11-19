@@ -24,15 +24,15 @@ import java.util.concurrent.ConcurrentHashMap
  * The text is translated on the device. What ML Kit sends Google, by its data
  * disclosure, is the configured source and target languages, for diagnostics
  * and usage analytics; the maintainer accepted that for this fallback only.
- * While anti-censorship is on the engine answers nothing at all, so no ML Kit
- * traffic leaves the device outside the protected connection.
+ * It works the same with anti-censorship on (ADR-0082 amendment of
+ * 2026-11-19): ML Kit's traffic to Google is ordinary platform traffic and
+ * tells a censor nothing about Lakko. A download the network blocks fails as
+ * any other download does.
  *
  * Its models are downloaded by ML Kit for this app, so they are Lakko's to
  * remove ([PackInfo.managedBySystem] false).
  */
-internal class MlKitTranslationEngine(
-    private val antiCensorshipArmed: () -> Boolean,
-) : TranslationEngine {
+internal class MlKitTranslationEngine : TranslationEngine {
     /**
      * Pairs whose models ML Kit confirmed present this session. ML Kit does
      * not say whether a model it keeps by default is listed among the
@@ -63,10 +63,9 @@ internal class MlKitTranslationEngine(
             emptySet()
         }
 
-    override suspend fun available(): Boolean = !antiCensorshipArmed()
+    override suspend fun available(): Boolean = true
 
     override suspend fun state(source: String, target: String): TranslationEngineState {
-        if (antiCensorshipArmed()) return TranslationEngineState.UNAVAILABLE
         val s = code(source) ?: return TranslationEngineState.UNAVAILABLE
         val t = code(target) ?: return TranslationEngineState.UNAVAILABLE
         if (s == t) return TranslationEngineState.UNAVAILABLE
@@ -76,7 +75,6 @@ internal class MlKitTranslationEngine(
     }
 
     override suspend fun sources(target: String): List<String> {
-        if (antiCensorshipArmed()) return emptyList()
         val t = code(target) ?: return emptyList()
         return TranslateLanguage.getAllLanguages().filter { it != t }.map { PlatformLanguageTags.fromPlatform(it) }
     }
@@ -104,7 +102,6 @@ internal class MlKitTranslationEngine(
      * reports no progress.
      */
     override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome {
-        if (antiCensorshipArmed()) return PackOutcome.FAILED
         val s = code(source) ?: return PackOutcome.FAILED
         val t = code(target) ?: return PackOutcome.FAILED
         progress(null)
@@ -166,9 +163,8 @@ internal class MlKitTranslationEngine(
  * Pixel 9, API 35, the pack never came), so the pair goes to ML Kit: its
  * state, its pack download and its translation. When the system answers
  * UNAVAILABLE, ML Kit answers for the pair (Ukrainian on a system without
- * it). A pair ML Kit cannot take, which includes every pair while
- * anti-censorship is on, is UNAVAILABLE unless the system has it on the
- * device. Packs of both are listed; only ML Kit's are Lakko's to remove.
+ * it). A pair ML Kit cannot take is UNAVAILABLE unless the system has it on
+ * the device. Packs of both are listed; only ML Kit's are Lakko's to remove.
  */
 internal class SystemFirstTranslationEngine(
     private val system: TranslationEngine?,

@@ -29,7 +29,7 @@ import type { MediaHub } from "./media-hub";
 import { mediaKey } from "./media-hub";
 import { mosaicBoxStyle, mosaicLayout, mosaicTileStyle, type MosaicLayout } from "./mosaic-layout";
 import { whenVisible } from "./near-viewport";
-import { saveNameFor } from "./visual-media";
+import { inlineThumbDataUrl, saveNameFor } from "./visual-media";
 
 /** The most photos and videos a mosaic shows (section 11; the rule's own
  *  constant, read once). */
@@ -159,6 +159,11 @@ function MosaicTile(props: {
   const hasRemote = (): boolean => props.attachment.blobId.length > 0;
   const fullUrl = (): string | null => (props.kind === "photo" ? props.hub.urlFor(props.mediaKey) : null);
 
+  // ADR-0047 section 6 — the micro thumbnail inside the message (on the first
+  // photo or video only) stands in until the sent thumb arrives.
+  const inlineUrl = createMemo(() => inlineThumbDataUrl(props.attachment.inlineThumb));
+  const placeholderUrl = (): string | null => thumbUrl() ?? inlineUrl();
+
   const thumbKey = (): string | null => {
     const th = props.attachment.thumb;
     return th === undefined || th.blobId.length === 0 ? null : `thumb:${mediaKey(th.blobId)}`;
@@ -234,7 +239,7 @@ function MosaicTile(props: {
       <Show
         when={fullUrl()}
         fallback={
-          <Show when={thumbUrl()}>
+          <Show when={placeholderUrl()}>
             {(u) => <img class={props.kind === "photo" ? "thumb" : undefined} src={u()} alt="" draggable={false} />}
           </Show>
         }

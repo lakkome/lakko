@@ -200,6 +200,10 @@ export interface HostNotification {
   target: string | null;
   /** Accept and Decline on a ringing call, where the OS has buttons. */
   call?: HostCallButtons;
+  /** ADR-0047 section 6 — standard base64 of the message's micro thumbnail
+   *  (a JPEG of at most 4096 bytes), shown where the OS takes a picture
+   *  (macOS). Set only beside the message's own words. */
+  image?: string;
 }
 
 /** The buttons of a ringing call's notification. */

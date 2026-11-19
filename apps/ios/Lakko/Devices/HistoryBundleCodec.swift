@@ -279,7 +279,10 @@ public enum HistoryBundleCodec {
                 height: a.height,
                 thumb: a.thumb.flatMap(Self.historyThumb(from:)),
                 title: a.title,
-                artist: a.artist
+                artist: a.artist,
+                // ADR-0047 section 6 — the micro thumbnail travels too; the
+                // core keeps it only on the first photo or video.
+                inlineThumb: a.inlineThumbB64.flatMap { Data(base64Encoded: $0) }
             )
         }
         // ADR-0092 section 3.11 — a content message travels with its content
@@ -351,7 +354,8 @@ public enum HistoryBundleCodec {
                     )
                 },
                 title: a.title,
-                artist: a.artist
+                artist: a.artist,
+                inlineThumbB64: a.inlineThumb.flatMap { $0.isEmpty ? nil : $0.base64EncodedString() }
             )
         }
         let restored = placeholder.content.flatMap { content in

@@ -24,6 +24,9 @@ public class VisualPrep(
     public val size: PixelSize?,
     public val thumb: ByteArray?,
     public val thumbSize: PixelSize?,
+    /** ADR-0047 section 6 — the micro thumbnail carried inside the message
+     *  (at most 96 px, at most 4096 bytes); `null` when it never fit. */
+    public val inlineThumb: ByteArray? = null,
 )
 
 private const val TAG = "LakkoVisualMedia"
@@ -70,8 +73,9 @@ private fun prepareImage(bytes: ByteArray): VisualPrep {
             },
         )
     }
-    val (thumb, thumbSize) = bitmap?.let { encodeThumb(rotate(it, rotation)) } ?: (null to null)
-    return VisualPrep(size, thumb, thumbSize)
+    val oriented = bitmap?.let { rotate(it, rotation) }
+    val (thumb, thumbSize) = oriented?.let { encodeThumb(it) } ?: (null to null)
+    return VisualPrep(size, thumb, thumbSize, oriented?.let(::encodeInlineThumb))
 }
 
 private fun prepareVideo(bytes: ByteArray, scratchDir: File): VisualPrep {
@@ -95,7 +99,7 @@ private fun prepareVideo(bytes: ByteArray, scratchDir: File): VisualPrep {
             retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         }.getOrNull()
         val (thumb, thumbSize) = frame?.let { encodeThumb(it) } ?: (null to null)
-        return VisualPrep(size, thumb, thumbSize)
+        return VisualPrep(size, thumb, thumbSize, frame?.let(::encodeInlineThumb))
     } finally {
         runCatching { retriever.release() }
         scratch.delete()
@@ -120,6 +124,39 @@ private fun encodeThumb(source: Bitmap): Pair<ByteArray?, PixelSize?> {
         }.toByteArray()
     }
     return if (bytes == null) null to null else bytes to target
+}
+
+/**
+ * ADR-0047 section 6 — the micro thumbnail of [source]: longest side at most
+ * [INLINE_THUMB_LONGEST_SIDE] px, JPEG, quality lowered until it fits
+ * [INLINE_THUMB_MAX_BYTES]; `null` when it never fits (the message goes
+ * without one). Never throws.
+ */
+internal fun encodeInlineThumb(source: Bitmap): ByteArray? = runCatching {
+    val target = fitWithin(source.width, source.height, INLINE_THUMB_LONGEST_SIDE) ?: return@runCatching null
+    val scaled = if (target.width == source.width && target.height == source.height) {
+        source
+    } else {
+        Bitmap.createScaledBitmap(source, target.width, target.height, true)
+    }
+    inlineThumbUnderBound { quality ->
+        ByteArrayOutputStream().also { out -> scaled.compress(Bitmap.CompressFormat.JPEG, quality, out) }.toByteArray()
+    }
+}.getOrNull()
+
+/**
+ * ADR-0047 section 6 — decode a received micro thumbnail in memory. `null`
+ * for anything over the bound, not a JPEG, or that does not decode. Never
+ * throws; cheap enough (at most 4096 bytes, 96 px) for the main thread.
+ */
+public fun decodeInlineThumb(bytes: ByteArray?): Bitmap? {
+    val jpeg = inlineThumbOrNull(bytes) ?: return null
+    return try {
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+    } catch (e: Throwable) {
+        Log.w(TAG, "micro thumbnail did not decode: ${e.javaClass.simpleName}")
+        null
+    }
 }
 
 private fun exifRotation(open: () -> ExifInterface): Int = runCatching {

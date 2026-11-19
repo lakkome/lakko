@@ -112,6 +112,10 @@ export interface PersistedAttachment {
   /** ADR-0092 section 2 — an audio file's tags. */
   readonly title?: string | null;
   readonly artist?: string | null;
+  /** ADR-0047 section 6 — base64url of the micro thumbnail carried inside
+   *  the message (a JPEG of at most 4096 bytes), on the first photo or video
+   *  only. What the Chats row and a notification draw without a fetch. */
+  readonly inlineThumbB64?: string | null;
   /**
    * UX spec §8 — "played" is LOCAL state: this device has started playing
    * the message. Never sent, never part of a history bundle. Absent means

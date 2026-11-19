@@ -193,10 +193,14 @@ itself can reveal which language was asked for, and what the dialog then says,
 is decided in the ADR (decision 4); the dialog must not claim more privacy than
 the download has.
 
-While anti-censorship is on, no pack is downloaded (the download would leave
-the device outside the protected connection): the dialog is replaced by one
-line, `Language packs can't be downloaded while anti-censorship is on`, and
-packs already on the device keep working.
+Anti-censorship does not change any of this (amended 2026-11-19,
+maintainer; ADR-0082 note of that date): the dialog is offered and the pack
+downloaded whether it is on or off. A pack download is ordinary traffic to
+Apple or Google and tells a censor nothing about Lakko. A download that fails,
+for example because the network blocks Apple or Google too, shows the ordinary
+download-failure line. (Until that date the dialog was replaced by the line
+`Language packs can't be downloaded while anti-censorship is on`; that line is
+removed.)
 
 While downloading, the quiet line reads `Downloading Spanish… 40%` and the
 action can be cancelled from it. A pack is downloaded only on Wi-Fi unless the
@@ -223,9 +227,8 @@ its title and says where:
 `Open System Settings` opens Language & Region. Nothing waits on it: the line
 goes back to `Spanish · Translate`, and the next `Translate` asks macOS again.
 The names are the ones macOS shows in the interface language. A transcription
-pack on macOS downloads in the app, as on iOS. The desktop app can arm
-anti-censorship, so the line `Language packs can't be downloaded while
-anti-censorship is on` applies there too, for both kinds of pack.
+pack on macOS downloads in the app, as on iOS. As on every client, packs are
+offered with anti-censorship on (amended 2026-11-19).
 
 ### 3.6 The conversation bar
 

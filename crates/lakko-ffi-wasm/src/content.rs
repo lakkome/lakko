@@ -1533,6 +1533,7 @@ pub(crate) fn content_message_to_js(
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         })
         .collect();
     let Ok(content) = inner::Content::from_payload(kind, payload, &refs) else {
@@ -1616,6 +1617,10 @@ const _: () =
     assert!(lakko_vault::record::MAX_CONTENT_PAYLOAD_BYTES == cs::MAX_CONTENT_PAYLOAD_BYTES);
 const _: () = assert!(lakko_vault::record::MAX_CONTENT_STATE_BYTES == cs::MAX_CONTENT_STATE_BYTES);
 const _: () = assert!(lakko_vault::record::MAX_AUDIO_TAG_BYTES == inner::MAX_AUDIO_TAG_BYTES);
+const _: () = assert!(lakko_vault::record::MAX_INLINE_THUMB_BYTES == inner::MAX_INLINE_THUMB_BYTES);
+const _: () = assert!(
+    lakko_mls::history_placeholder::MAX_INLINE_THUMB_BYTES == inner::MAX_INLINE_THUMB_BYTES
+);
 
 #[cfg(test)]
 mod tests {

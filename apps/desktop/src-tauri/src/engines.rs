@@ -35,7 +35,6 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, warn};
 
 use crate::proxy::plain;
-use crate::tunnel::{Route, Tunnel};
 
 /// Path prefix of these routes.
 pub const PATH: &str = "/__host/engines";
@@ -268,13 +267,6 @@ impl SystemEngines {
     }
 }
 
-/// Whether a pack download must not start: anti-censorship is switched on
-/// (armed or refusing), and a vendor download would leave outside it
-/// (ADR-0082 section 4).
-fn packs_blocked(tunnel: &Tunnel) -> bool {
-    !matches!(tunnel.route(), Route::Direct)
-}
-
 /// The JSON fields the page may send for each operation; anything else is
 /// dropped before the helper sees it.
 fn fields(op: &str) -> Option<&'static [&'static str]> {
@@ -289,11 +281,7 @@ fn fields(op: &str) -> Option<&'static [&'static str]> {
 }
 
 /// Answer one request from the page.
-pub async fn handle(
-    engines: &SystemEngines,
-    tunnel: &Tunnel,
-    request: Request<Vec<u8>>,
-) -> Response<Vec<u8>> {
+pub async fn handle(engines: &SystemEngines, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let path = request.uri().path().to_owned();
     let Some(op) = path.strip_prefix(PATH).and_then(|p| p.strip_prefix('/')) else {
         return plain(StatusCode::NOT_FOUND, "not found");
@@ -304,9 +292,6 @@ pub async fn handle(
             return json_response(
                 &json!({ "translation": c.translation, "transcription": c.transcription }),
             );
-        },
-        (&Method::GET, "packs-blocked") => {
-            return json_response(&json!({ "blocked": packs_blocked(tunnel) }))
         },
         (&Method::POST, "open-pack-settings") => {
             let Some(link) = PACK_SETTINGS else {
@@ -336,9 +321,6 @@ pub async fn handle(
     };
     if !present {
         return plain(StatusCode::SERVICE_UNAVAILABLE, "no engine");
-    }
-    if op == "speech-install" && packs_blocked(tunnel) {
-        return json_response(&json!({ "ok": false, "error": "packs-blocked" }));
     }
     let message = if op == "transcribe" {
         let language = request
@@ -486,6 +468,23 @@ mod tests {
             .await
             .expect("answer");
         assert_eq!(unknown["error"], json!("bad-request"));
+    }
+
+    /// The host answers pack questions the same way whatever the network
+    /// route: there is no anti-censorship block (ADR-0082 amendment of
+    /// 2026-11-19), so the old `packs-blocked` route is gone and `handle`
+    /// takes no tunnel.
+    #[tokio::test]
+    async fn no_pack_block_route() {
+        let engines =
+            SystemEngines::with_helper(PathBuf::from("/nonexistent"), Capabilities::default());
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("{PATH}/packs-blocked"))
+            .body(Vec::new())
+            .expect("request");
+        let response = handle(&engines, request).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]

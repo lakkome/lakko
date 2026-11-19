@@ -9593,10 +9593,6 @@
       "text": "Reintentar",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "No se pueden descargar paquetes de idioma mientras Anticensura está activado.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "La transcripción se hace en este dispositivo. Lakko necesita el paquete de {language} para hacerla. Los mensajes de voz nunca se envían a ningún sitio para transcribirlos.",
       "status": "machine"

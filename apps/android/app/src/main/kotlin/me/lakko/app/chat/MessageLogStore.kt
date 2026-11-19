@@ -490,6 +490,10 @@ public data class PersistedAttachment(
     val width: UInt? = null,
     val height: UInt? = null,
     val thumb: PersistedThumb? = null,
+    /** ADR-0047 section 6 — the micro thumbnail (standard base64 of a JPEG of
+     *  at most 4096 bytes), kept so the list row draws it after a restart
+     *  with no fetch. Only on the first photo or video of a message. */
+    val inlineThumbB64: String? = null,
 ) {
     public companion object
 }
@@ -699,6 +703,7 @@ public fun PersistedAttachment.Companion.from(
             height = t.height,
         )
     },
+    inlineThumbB64 = me.lakko.app.media.inlineThumbOrNull(ref.inlineThumb)?.let(b64Encoder::encodeToString),
 )
 
 /**
@@ -735,6 +740,8 @@ public fun PersistedAttachment.toAttachmentRef(): uniffi.lakko_ffi_uniffi.Attach
                     )
                 }.getOrNull()
             },
+            inlineThumb = inlineThumbB64?.let { runCatching { b64Decoder.decode(it) }.getOrNull() }
+                ?.let { me.lakko.app.media.inlineThumbOrNull(it) },
         )
     } catch (_: IllegalArgumentException) {
         null

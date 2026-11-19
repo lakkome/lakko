@@ -28,7 +28,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error — plain JS ESM in public/, no .d.ts; typed via JSDoc.
-import { decryptPushPreview, resolveWakeTarget, wakeBoundAccount } from "../../public/sw-push-decrypt.js";
+import { decryptPushPreview, inlineThumbDataUrl, notificationWithPicture, resolveWakeTarget, wakeBoundAccount } from "../../public/sw-push-decrypt.js";
 
 // A valid 64-hex-char group id.
 const GROUP_HEX = "aa".repeat(32);
@@ -192,6 +192,12 @@ function mockWasm() {
       const text = new TextDecoder().decode(bytes);
       try {
         const parsed = JSON.parse(text) as Record<string, unknown>;
+        // ADR-0047 section 6 — `inlineThumbBytes` in a fixture is the core's
+        // `ParsedBody.inlineThumb`, a Uint8Array on the real handle.
+        if (Array.isArray(parsed.inlineThumbBytes)) {
+          parsed.inlineThumb = new Uint8Array(parsed.inlineThumbBytes as number[]);
+          delete parsed.inlineThumbBytes;
+        }
         // A test that lists `attachmentMimes` gets the core's per-attachment
         // reader (`ParsedBody.attachment(i)`), as the real handle has.
         const mimes = parsed.attachmentMimes;
@@ -1042,5 +1048,82 @@ describe("ADR-0042 / ADR-0078 — a wake is handled only for a subscription the 
       const target = await resolveWakeTarget(PUSH_GID_HEX, SUB, ACCOUNT_ID, { lookupRoute });
       expect(target).toEqual({ groupIdBytes: GROUP_BYTES, groupHex: GROUP_HEX });
     });
+  });
+});
+
+describe("decryptPushPreview — the picture (ADR-0047 section 6)", () => {
+  const JPEG = [0xff, 0xd8, 0xff, 0xe0];
+  const run = async (body: Record<string, unknown>, over: Record<string, unknown> = {}) => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [msg(42, body)] })),
+      ...over,
+    });
+    return decryptPushPreview(wake(), deps);
+  };
+
+  it("carries the first photo's micro thumbnail beside the text", async () => {
+    const out = await run({
+      kind: "chat",
+      text: "The trip",
+      attachmentCount: 1,
+      attachmentMimes: ["image/jpeg"],
+      inlineThumbBytes: JPEG,
+    });
+    expect(out).toEqual({
+      title: "Test Sender",
+      body: "The trip",
+      tag: GROUP_HEX,
+      image: "data:image/jpeg;base64,/9j/4A==",
+    });
+  });
+
+  it("carries it beside the words of a photo sent without text", async () => {
+    const out = await run({
+      kind: "chat",
+      text: "",
+      attachmentCount: 1,
+      attachmentMimes: ["image/jpeg"],
+      inlineThumbBytes: JPEG,
+    });
+    expect(out?.body).toBe("Photo");
+    expect(out?.image).toBe("data:image/jpeg;base64,/9j/4A==");
+  });
+
+  it("shows no picture with the generic banner", async () => {
+    const out = await run(
+      { kind: "chat", text: "The trip", attachmentCount: 1, attachmentMimes: ["image/jpeg"], inlineThumbBytes: JPEG },
+      { lookupSenderName: async () => null },
+    );
+    expect(out?.title).toBe("Lakko");
+    expect(out?.body).toBe("New message");
+    expect(out?.image).toBeUndefined();
+  });
+
+  it("shows no picture for a message that carries none, or carries bytes that are not a JPEG", async () => {
+    const none = await run({ kind: "chat", text: "hi", attachmentCount: 1, attachmentMimes: ["image/jpeg"] });
+    expect(none?.image).toBeUndefined();
+    const png = await run({
+      kind: "chat",
+      text: "hi",
+      attachmentCount: 1,
+      attachmentMimes: ["image/jpeg"],
+      inlineThumbBytes: [0x89, 0x50, 0x4e, 0x47],
+    });
+    expect(png?.image).toBeUndefined();
+  });
+
+  it("keeps a picture only where the notification shows the message's words", () => {
+    const n = { title: "Ann", body: "Photo", tag: "t", image: "data:image/jpeg;base64,/9j/4A==" };
+    expect(notificationWithPicture(n, true)).toEqual(n);
+    expect(notificationWithPicture(n, false)).toEqual({ title: "Ann", body: "Photo", tag: "t" });
+  });
+
+  it("builds a data URL only from a JPEG within the 4096-byte bound", () => {
+    expect(inlineThumbDataUrl(new Uint8Array(JPEG))).toBe("data:image/jpeg;base64,/9j/4A==");
+    const big = new Uint8Array(4097);
+    big.set(JPEG);
+    expect(inlineThumbDataUrl(big)).toBeNull();
+    expect(inlineThumbDataUrl([0xff, 0xd8, 0xff])).toBeNull();
+    expect(inlineThumbDataUrl(undefined)).toBeNull();
   });
 });

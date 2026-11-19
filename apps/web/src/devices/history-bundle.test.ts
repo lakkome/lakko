@@ -19,8 +19,10 @@ import {
   saveMessageLog,
   updateMessageLog,
   type MessageLogPayload,
+  type PersistedAttachment,
   type PersistedMessage,
 } from "../chat/message-log-store";
+import { attachmentRefFromPersisted, b64UrlEncode } from "../chat/persisted-attachment";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 import { applyHistoryBundleToLog, buildHistoryBundleFromLog, isBookkeepingSystemRow } from "./history-bundle";
 
@@ -299,5 +301,38 @@ describe("the invitation card, the reply and the forward reach the new device", 
     expect(opened.forwardedFrom).toBeUndefined();
     expect(Array.from(opened.forwardOriginGroup ?? [])).toEqual(Array.from(originGroup));
     expect(opened.forwardOriginMessage).toBe(77n);
+  });
+});
+
+describe("the micro thumbnail travels in the history bundle (ADR-0047 section 6)", () => {
+  const b64 = (n: number, fill: number): string => btoa(String.fromCharCode(...new Uint8Array(n).fill(fill)));
+
+  it("a joiner's log keeps the first photo's inline thumbnail", async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+    const key = await deviceKey();
+    const photo: PersistedMessage = {
+      ...row(1, "incoming", "The trip"),
+      attachments: [
+        {
+          blobIdB64: b64(32, 1),
+          keyB64: b64(32, 2),
+          nonceB64: b64(12, 3),
+          mime: "image/jpeg",
+          sizeStr: "100",
+          name: null,
+          width: 640,
+          height: 480,
+          inlineThumbB64: b64UrlEncode(jpeg),
+        },
+      ],
+    };
+    await saveMessageLog(SENDER, key, { version: 1, groups: { [GROUP_HEX]: { cursor: "1", messages: [photo] } } });
+    const sealed = await buildHistoryBundleFromLog({ accountIdB64: SENDER, deviceKey: key, secret: SECRET });
+    if (sealed === null) throw new Error("no bundle");
+    const joinerKey = await deviceKey();
+    expect(await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: joinerKey, secret: SECRET, sealedBytes: sealed })).toBe(1);
+    const log = await loadMessageLog(JOINER, joinerKey);
+    const carried = log?.groups[GROUP_HEX]?.messages[0]?.attachments[0];
+    expect(attachmentRefFromPersisted(carried as PersistedAttachment).ref.inlineThumb).toEqual(jpeg);
   });
 });

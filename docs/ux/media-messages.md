@@ -522,15 +522,12 @@ receiver sees the message as it was composed.
   thumbnail is the attachment's own sent thumb (section 10), already decrypted for the
   timeline or fetched and decrypted when the row is drawn; until it is there the space shows
   the row's neutral placeholder, never a broken image. A failed fetch keeps the placeholder.
-- **Notifications:** the same words and text as the list row, plus the first item's
-  thumbnail as the notification's picture where the platform takes one (iOS: a notification
-  attachment from the extension; Android: the large icon or a big-picture style; macOS
-  desktop: the notification's content image; web: the notification `image` where the
-  browser shows it). Only the sent thumbnail is fetched, never the full photo or video, and
-  only by the device that already decrypts the message preview for that notification. Where
-  the system hides notification content on the lock screen, it hides the picture with the
-  text; Lakko shows the picture exactly when it shows the text. If the thumbnail cannot be
-  fetched in the time the platform gives, the notification goes out with text only.
+- **Notifications:** the same words and text as the list row, plus the first photo or
+  video's picture on every platform (iOS, Android, web, desktop), taken from the micro
+  thumbnail carried inside the message (ADR-0047 section 6), so nothing is downloaded and a
+  notification shown in the background has it too. The picture is shown exactly when the
+  text is: where the system hides notification content on the lock screen, it hides both.
+  The list row's thumbnail comes from the same micro thumbnail, so it appears at once.
 - **Reactions, reply, forward, delete, save** act on the whole message. Forwarding a message
   with several items forwards them all, re-encrypted (ADR-0052).
 

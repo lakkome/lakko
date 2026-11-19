@@ -232,6 +232,11 @@ public struct NseProcessedRow: Equatable {
     /// `docs/ux/media-messages.md` section 11 — how many photos, videos and
     /// files the message carries, for the words a notification says.
     public let attachmentCounts: NseAttachmentCounts
+    /// ADR-0047 section 6 — the micro thumbnail of the message's first photo
+    /// or video, carried inside the envelope: the notification's picture.
+    /// Kept for a chat row only, and only within its bound
+    /// (``notificationPicture(_:)``).
+    public let inlineThumb: Data?
 
     public init(
         kind: NseProcessedKind,
@@ -243,9 +248,11 @@ public struct NseProcessedRow: Equatable {
         resendOrigin: NseResendOrigin? = nil,
         reaction: NseReaction? = nil,
         profileName: String? = nil,
-        attachmentCounts: NseAttachmentCounts = NseAttachmentCounts()
+        attachmentCounts: NseAttachmentCounts = NseAttachmentCounts(),
+        inlineThumb: Data? = nil
     ) {
         self.attachmentCounts = attachmentCounts
+        self.inlineThumb = kind == .chat ? notificationPicture(inlineThumb) : nil
         self.reaction = kind == .reaction ? reaction : nil
         let name = profileName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.profileName = kind == .profile && name?.isEmpty == false ? name : nil
@@ -265,7 +272,7 @@ public struct NseProcessedRow: Equatable {
             kind: kind, text: text, attachmentCount: attachmentCount,
             singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
             senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction,
-            attachmentCounts: attachmentCounts)
+            attachmentCounts: attachmentCounts, inlineThumb: inlineThumb)
     }
 }
 
@@ -445,15 +452,21 @@ public struct NsePushPreview: Equatable {
 
     /// Reactions-and-emoji spec section 12 — set on a reaction notification.
     public let reactionKey: String?
+    /// ADR-0047 section 6 — the picture shown with the message text: the
+    /// micro thumbnail of the message's first photo or video. Only a message
+    /// preview carries one; a reaction, a call and the generic line never do.
+    public let picture: Data?
 
     public init(
-        title: String, body: String, tag: String, movedConversation: Bool = false, reactionKey: String? = nil
+        title: String, body: String, tag: String, movedConversation: Bool = false, reactionKey: String? = nil,
+        picture: Data? = nil
     ) {
         self.title = title
         self.body = body
         self.tag = tag
         self.movedConversation = movedConversation
         self.reactionKey = reactionKey
+        self.picture = reactionKey == nil ? notificationPicture(picture) : nil
     }
 }
 
@@ -934,7 +947,8 @@ public func decryptPushOutcome(
                 text: text)
             latest = NsePushPreview(
                 title: shown.title, body: shown.body, tag: conversationTag,
-                movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame)
+                movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
+                picture: processed.inlineThumb)
         }
     }
     if let latestCall, let callIdHex = latestCall.row.callIdHex {

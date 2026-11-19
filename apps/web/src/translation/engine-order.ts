@@ -136,20 +136,11 @@ export function detectionInOrder(list: readonly DetectionEngine[]): DetectionEng
 
 /** A whole set of engines over `list`, in order. */
 export function enginesInOrder(list: readonly Engines[]): Engines {
-  const blockers = list.flatMap((e) => (e.packsBlocked === undefined ? [] : [e.packsBlocked.bind(e)]));
   const listers = list.flatMap((e) => (e.systemPacks === undefined ? [] : [e.systemPacks.bind(e)]));
   return {
     translation: translationInOrder(list.map((e) => e.translation)),
     detection: detectionInOrder(list.map((e) => e.detection)),
     transcription: transcriptionInOrder(list.map((e) => e.transcription)),
-    ...(blockers.length > 0
-      ? {
-          packsBlocked: async () => {
-            for (const b of blockers) if (await b().catch(() => true)) return true;
-            return false;
-          },
-        }
-      : {}),
     ...(listers.length > 0
       ? {
           systemPacks: async (target: string) => {

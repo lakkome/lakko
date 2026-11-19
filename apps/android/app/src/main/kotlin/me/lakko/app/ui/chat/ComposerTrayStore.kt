@@ -59,6 +59,10 @@ public object ComposerTrays {
         val visual: me.lakko.app.media.VisualPrep?,
         val audio: me.lakko.app.media.AudioTags?,
         val idleDays: Int?,
+        /** ADR-0047 section 6 — the micro thumbnail of an item that goes as a
+         *  file but whose MIME is an allowlisted image or video (the core
+         *  makes such an item the carrier when it comes first). */
+        val fileInlineThumb: ByteArray? = null,
     )
 
     private val prepared = ConcurrentHashMap<Long, Prepared>()
@@ -270,7 +274,16 @@ public object ComposerTrays {
             runCatching { me.lakko.app.media.prepareVisualMedia(sendBytes, sendMime, app.cacheDir) }.getOrNull()
         }
         val duration = if (kind == TrayKind.VIDEO) videoDurationMs(file) else null
-        return PrepResult(Prepared(file, sendMime, sendName, visual, audio, idleDays), kind, duration)
+        // ADR-0047 section 6 — the core keeps the micro thumbnail on the first
+        // ref whose MIME is an inline image or video, however the item came
+        // in: a file-picked JPEG first takes that slot, so it gets one too.
+        // No size or sent thumb is added; it still goes as the file it is.
+        val fileInline = if (visual == null && wantsInlineThumb(sendMime, me.lakko.app.media.coreAllowlist)) {
+            runCatching { me.lakko.app.media.prepareVisualMedia(sendBytes, sendMime, app.cacheDir)?.inlineThumb }.getOrNull()
+        } else {
+            null
+        }
+        return PrepResult(Prepared(file, sendMime, sendName, visual, audio, idleDays, fileInline), kind, duration)
     }
 
     private fun videoDurationMs(file: File): Long? {
@@ -324,6 +337,10 @@ public object ComposerTrays {
                 if (p.audio != null) {
                     ref = ref.copy(title = p.audio.title ?: p.name?.substringBeforeLast('.'), artist = p.audio.artist)
                 }
+                // ADR-0047 section 6 — the micro thumbnail rides inside the
+                // message; [ComposerTray.refs] keeps it on the first photo or
+                // video only.
+                me.lakko.app.media.inlineThumbOrNull(p.visual?.inlineThumb ?: p.fileInlineThumb)?.let { ref = ref.copy(inlineThumb = it) }
                 if (tray(key).item(id) == null) {
                     // Removed while the upload ran: the file was never sent.
                     appContext?.let { me.lakko.app.storage.BlobLifetime.delete(it, listOfNotNull(ref.blobId, ref.thumb?.blobId)) }

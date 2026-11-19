@@ -99,12 +99,11 @@ describe("transcription in order", () => {
 });
 
 describe("a whole set", () => {
-  it("detects with the first engine that answers, and any blocker blocks", async () => {
+  it("detects with the first engine that answers", async () => {
     const quiet: Engines = {
       translation: translator("system", {}, []),
       detection: { present: true, detect: () => Promise.resolve(null) },
       transcription: recognizer("system", {}, []),
-      packsBlocked: () => Promise.resolve(true),
     };
     const loud: Engines = {
       translation: translator("own", {}, []),
@@ -113,8 +112,6 @@ describe("a whole set", () => {
     };
     const all = enginesInOrder([quiet, loud]);
     expect(await all.detection.detect("hola")).toEqual({ tag: "es", permille: 900 });
-    expect(await all.packsBlocked?.()).toBe(true);
-    expect(enginesInOrder([loud]).packsBlocked).toBeUndefined();
   });
 });
 

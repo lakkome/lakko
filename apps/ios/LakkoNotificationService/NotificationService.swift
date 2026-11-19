@@ -176,6 +176,14 @@ public final class NotificationService: UNNotificationServiceExtension {
                 // grouped under the conversation instead (the tag differs
                 // from the wake's group only then).
                 best.threadIdentifier = preview.tag
+                // ADR-0047 section 6 — the picture goes with the text and
+                // only with it: this arm is the one that shows the message
+                // text; the generic line never gets a picture. Where the
+                // system hides notification content on the lock screen, it
+                // hides the attachment too.
+                if let picture = preview.picture, let attachment = Self.pictureAttachment(picture) {
+                    best.attachments = [attachment]
+                }
                 self.deliver(best)
             case .callOffer(let alert):
                 self.deliverCallAlert(alert, into: best)
@@ -192,6 +200,22 @@ public final class NotificationService: UNNotificationServiceExtension {
                 self.deliver(best)
             }
         }
+    }
+
+    /// ADR-0047 section 6 — the message's micro thumbnail as a notification
+    /// attachment (``notificationPictureAttachment(_:directory:)``, shared
+    /// with the app). iOS takes a picture only as a file: it is written to
+    /// this extension's own temporary directory and iOS moves it into its
+    /// notification store; when making the attachment fails the file is
+    /// deleted and the notification goes without a picture.
+    ///
+    /// The temporary file is not app or MLS state (C-59): it lives only in
+    /// this process's temporary directory, carries nothing but the picture
+    /// the notification shows, and no store the app reads is touched.
+    private static func pictureAttachment(_ picture: Data) -> UNNotificationAttachment? {
+        let attachment = notificationPictureAttachment(picture, directory: FileManager.default.temporaryDirectory)
+        if attachment == nil { nseTrace("picture: not attached") }
+        return attachment
     }
 
     /// DEBUG trace: the outcome's case, without its content.

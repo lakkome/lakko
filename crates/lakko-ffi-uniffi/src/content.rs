@@ -1476,6 +1476,7 @@ pub(crate) fn content_message_from_core(
             thumb: None,
             title: None,
             artist: None,
+            inline_thumb: None,
         })
         .collect();
     let content = inner::Content::from_payload(kind, payload, &refs).ok()?;

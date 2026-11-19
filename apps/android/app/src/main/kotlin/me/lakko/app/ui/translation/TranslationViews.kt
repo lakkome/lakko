@@ -213,42 +213,30 @@ public fun TranslationDialogs(hub: me.lakko.app.media.ChatMediaHub?) {
             if (p.kind == PackKind.TRANSLATION) "translate.pack.title.translation" else "translate.pack.title.transcription",
             mapOf("language" to language),
         )
-        if (p.blocked) {
-            // UX 3.5 — while anti-censorship is on, one line and nothing to
-            // decide: a notice with a single button.
-            LakkoDialog(
-                onDismissRequest = TranslationCenter::dismissPack,
-                title = title,
-                body = t("translate.pack.blocked_anti_censorship"),
-                confirm = LakkoDialogAction(label = t("common.close"), onClick = TranslationCenter::dismissPack),
-                cancel = null,
+        val size = p.sizeBytes?.let { android.text.format.Formatter.formatShortFileSize(context, it) }
+        val bodyKey = when (p.kind) {
+            PackKind.TRANSLATION -> if (size != null) "translate.pack.body.translation_sized" else "translate.pack.body.translation"
+            PackKind.TRANSCRIPTION -> if (size != null) "translate.pack.body.transcription_sized" else "translate.pack.body.transcription"
+        }
+        LakkoDialog(
+            onDismissRequest = TranslationCenter::dismissPack,
+            title = title,
+            body = t(bodyKey, buildMap { put("language", language); size?.let { put("size", it) } }),
+            confirm = LakkoDialogAction(
+                label = t(if (p.waitForWifi) "translate.pack.download_wifi" else "translate.pack.download"),
+                onClick = TranslationCenter::acceptPack,
+            ),
+            cancel = LakkoDialogAction(
+                label = t("translate.pack.not_now"),
+                tone = LakkoDialogTone.Ghost,
+                onClick = TranslationCenter::dismissPack,
+            ),
+        ) {
+            Text(
+                t("translate.pack.source.android"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        } else {
-            val size = p.sizeBytes?.let { android.text.format.Formatter.formatShortFileSize(context, it) }
-            val bodyKey = when (p.kind) {
-                PackKind.TRANSLATION -> if (size != null) "translate.pack.body.translation_sized" else "translate.pack.body.translation"
-                PackKind.TRANSCRIPTION -> if (size != null) "translate.pack.body.transcription_sized" else "translate.pack.body.transcription"
-            }
-            LakkoDialog(
-                onDismissRequest = TranslationCenter::dismissPack,
-                title = title,
-                body = t(bodyKey, buildMap { put("language", language); size?.let { put("size", it) } }),
-                confirm = LakkoDialogAction(
-                    label = t(if (p.waitForWifi) "translate.pack.download_wifi" else "translate.pack.download"),
-                    onClick = TranslationCenter::acceptPack,
-                ),
-                cancel = LakkoDialogAction(
-                    label = t("translate.pack.not_now"),
-                    tone = LakkoDialogTone.Ghost,
-                    onClick = TranslationCenter::dismissPack,
-                ),
-            ) {
-                Text(
-                    t("translate.pack.source.android"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     }
     picker?.let { p ->

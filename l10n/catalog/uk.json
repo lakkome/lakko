@@ -9593,10 +9593,6 @@
       "text": "Спробувати ще раз",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "Мовні пакети не можна завантажити, поки ввімкнено обхід блокувань.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "Розшифровка відбувається на цьому пристрої. Для цього Lakko потрібен пакет «{language}». Голосові повідомлення нікуди не надсилаються для розшифровки.",
       "status": "machine"

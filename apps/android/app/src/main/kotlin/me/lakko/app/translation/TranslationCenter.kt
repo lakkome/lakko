@@ -98,8 +98,6 @@ public data class PackPrompt(
     val sizeBytes: Long?,
     /** On mobile data without permission: `Download on Wi-Fi`. */
     val waitForWifi: Boolean,
-    /** Anti-censorship is on: one line instead of the dialog. */
-    val blocked: Boolean,
     internal val messageKey: String,
     internal val opId: Long,
 )
@@ -149,8 +147,6 @@ public object TranslationCenter {
     @Volatile public var translation: TranslationEngine = NoTranslationEngine
     @Volatile public var transcription: TranscriptionEngine = NoTranscriptionEngine
     @Volatile public var detector: LanguageDetector = NoLanguageDetector
-    @Volatile public var antiCensorshipArmed: () -> Boolean =
-        { me.lakko.app.transport.AntiCensorshipConfig.current.armed }
     @Volatile public var onUnmeteredNetwork: () -> Boolean = { true }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -193,7 +189,7 @@ public object TranslationCenter {
         appContext = ctx
         settingsStore = TranslationSettingsStore(ctx).also { mutableSettings.value = it.load() }
         detector = CoreLanguageDetector
-        translation = translationEngineFor(ctx) { antiCensorshipArmed() }
+        translation = translationEngineFor(ctx)
         transcription = transcriptionEngineFor(ctx)
         onUnmeteredNetwork = { unmetered(ctx) }
         refreshCapability()
@@ -825,13 +821,11 @@ public object TranslationCenter {
     // ---------------------------------------------------------------------
 
     private suspend fun promptPack(kind: PackKind, language: String, key: String, opId: Long, size: suspend () -> Long?) {
-        val blocked = antiCensorshipArmed()
         mutablePack.value = PackPrompt(
             kind = kind,
             language = language,
-            sizeBytes = if (blocked) null else size(),
+            sizeBytes = size(),
             waitForWifi = !settings.value.mobileData && !onUnmeteredNetwork(),
-            blocked = blocked,
             messageKey = key,
             opId = opId,
         )
@@ -842,11 +836,14 @@ public object TranslationCenter {
         mutablePack.value = null
     }
 
-    /** `Download` / `Download on Wi-Fi`. Refused while anti-censorship is on. */
+    /**
+     * `Download` / `Download on Wi-Fi`, whether or not anti-censorship is on
+     * (ADR-0082 amendment of 2026-11-19); a download the network blocks ends
+     * in the ordinary failure.
+     */
     public fun acceptPack() {
         val p = mutablePack.value ?: return
         mutablePack.value = null
-        if (antiCensorshipArmed()) return
         val key = p.messageKey
         val messageId = key.substringAfterLast('/').toLongOrNull() ?: return
         val conversation = key.substringBeforeLast('/')
@@ -861,14 +858,6 @@ public object TranslationCenter {
                     PackKind.TRANSCRIPTION -> setTranscript(key, p.opId, TranscriptUi.WaitingWifi(p.language), open = true)
                 }
                 delay(5_000)
-            }
-            // Checked again: anti-censorship may have been armed while waiting.
-            if (antiCensorshipArmed()) {
-                when (p.kind) {
-                    PackKind.TRANSLATION -> setLine(key, p.opId, null)
-                    PackKind.TRANSCRIPTION -> setTranscript(key, p.opId, TranscriptUi.Idle, open = false)
-                }
-                return@launchFor
             }
             downloading(null)
             val target = target()
