@@ -36,6 +36,7 @@ import { MessageText } from "../chat/MessageText";
 import { maxPerPerson, reactionRow, rowExpands } from "../chat/reaction-rules";
 import { EmojiPicker } from "../media/EmojiPicker";
 import { MediaAttachment } from "../media/MediaBubbles";
+import { MediaMosaic } from "../media/MediaMosaic";
 import { mediaKey, type MediaHub } from "../media/media-hub";
 import { t } from "../l10n";
 import { Icon } from "../ui/icons";
@@ -90,6 +91,14 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
     plainRefs().filter((a) => props.hub.decision(a).bubble !== "file");
   const fileRefs = (): AttachmentRefBytes[] =>
     plainRefs().filter((a) => props.hub.decision(a).bubble === "file");
+  // `docs/ux/media-messages.md` section 11 — a post's photos and videos are one
+  // mosaic; a voice message, video note or GIF keeps its own bubble.
+  const isMosaicRef = (a: AttachmentRefBytes): boolean => {
+    const b = props.hub.decision(a).bubble;
+    return b === "photo" || b === "video";
+  };
+  const mosaicRefs = (): AttachmentRefBytes[] => mediaRefs().filter(isMosaicRef);
+  const otherMediaRefs = (): AttachmentRefBytes[] => mediaRefs().filter((a) => !isMosaicRef(a));
 
   const own = (): string[] => {
     void ownFeedbackVersion();
@@ -214,9 +223,12 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
           <div class="lk-post-unavailable">{t("channels.post.unavailable")}</div>
         </Show>
         <Show when={props.post.state === "ok"}>
-          <Show when={mediaRefs().length > 0}>
+          <Show when={mosaicRefs().length > 0}>
+            <MediaMosaic refs={mosaicRefs()} hub={props.hub} />
+          </Show>
+          <Show when={otherMediaRefs().length > 0}>
             <div class="lk-channel-post-media">
-              <Index each={mediaRefs()}>
+              <Index each={otherMediaRefs()}>
                 {(ref) => (
                   <MediaAttachment
                     attachment={ref()}
@@ -253,11 +265,6 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
               />
             )}
           </Show>
-          <Show when={props.post.text.length > 0}>
-            <div class="lk-post-text">
-              <MessageText text={props.post.text} />
-            </div>
-          </Show>
           <Show when={fileRefs().length > 0}>
             <ul class="lk-channel-files">
               <For each={fileRefs()}>
@@ -272,6 +279,11 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
                 )}
               </For>
             </ul>
+          </Show>
+          <Show when={props.post.text.length > 0}>
+            <div class="lk-post-text">
+              <MessageText text={props.post.text} />
+            </div>
           </Show>
         </Show>
         <div class="lk-post-time">

@@ -229,6 +229,9 @@ public struct NseProcessedRow: Equatable {
     /// ADR-0048 — the display name a ``NseProcessedKind/profile`` row
     /// carried, `nil` for every other kind or a profile with no name.
     public let profileName: String?
+    /// `docs/ux/media-messages.md` section 11 — how many photos, videos and
+    /// files the message carries, for the words a notification says.
+    public let attachmentCounts: NseAttachmentCounts
 
     public init(
         kind: NseProcessedKind,
@@ -239,8 +242,10 @@ public struct NseProcessedRow: Equatable {
         senderKeyB64: String? = nil,
         resendOrigin: NseResendOrigin? = nil,
         reaction: NseReaction? = nil,
-        profileName: String? = nil
+        profileName: String? = nil,
+        attachmentCounts: NseAttachmentCounts = NseAttachmentCounts()
     ) {
+        self.attachmentCounts = attachmentCounts
         self.reaction = kind == .reaction ? reaction : nil
         let name = profileName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.profileName = kind == .profile && name?.isEmpty == false ? name : nil
@@ -259,7 +264,8 @@ public struct NseProcessedRow: Equatable {
         NseProcessedRow(
             kind: kind, text: text, attachmentCount: attachmentCount,
             singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
-            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction)
+            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction,
+            attachmentCounts: attachmentCounts)
     }
 }
 
@@ -1296,7 +1302,9 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     switch row.kind {
     // A normal chat message → its text (or an attachment hint).
     case .chat:
-        if !row.text.isEmpty { return truncate(row.text) }
+        if !row.text.isEmpty { return truncate(nseTextWithFileWords(row.text, row.attachmentCounts)) }
+        // Section 11 — `Photo`, `3 photos`, `2 videos`, `File`, ...
+        if let words = nseAttachmentWords(row.attachmentCounts) { return words }
         if row.attachmentCount == 1 {
             return nseMediaLabel(kind: row.singleAttachmentKind) ?? nseAttachmentsLine(count: 1)
         }
@@ -1880,6 +1888,82 @@ private func hexToData(_ hex: String) -> Data? {
         index = next
     }
     return out
+}
+
+/// `docs/ux/media-messages.md` section 11 — the photos, videos and plain
+/// files of a message, as the chat list row counts them.
+public struct NseAttachmentCounts: Equatable {
+    public var photos = 0
+    public var videos = 0
+    public var files = 0
+    /// A voice message, video note, GIF or audio file: its own word.
+    public var other = 0
+
+    public init(photos: Int = 0, videos: Int = 0, files: Int = 0, other: Int = 0) {
+        self.photos = photos
+        self.videos = videos
+        self.files = files
+        self.other = other
+    }
+}
+
+/// The inline list of the core (`lakko_attachments::inline_media_type`),
+/// restated because the slim extension surface does not carry it. It only
+/// picks a word for a notification: a photo counted as a file reads `File`.
+private let nseInlineImageTypes: Set<String> = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+private let nseInlineOtherTypes: Set<String> = ["audio/mp4", "audio/mpeg", "video/mp4"]
+
+/// Count `(kind, mime)` pairs the way the app's list row does: a photo is an
+/// allowlisted image with no kind, a video `video/mp4` with no kind, a file
+/// anything with no kind and no allowlisted type.
+public func nseAttachmentCounts(_ attachments: [(kind: String?, mime: String?)]) -> NseAttachmentCounts {
+    var counts = NseAttachmentCounts()
+    for attachment in attachments {
+        let essence = (attachment.mime ?? "").split(separator: ";").first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+        guard attachment.kind == nil else {
+            counts.other += 1
+            continue
+        }
+        if nseInlineImageTypes.contains(essence) {
+            counts.photos += 1
+        } else if essence == "video/mp4" {
+            counts.videos += 1
+        } else if nseInlineOtherTypes.contains(essence) {
+            counts.other += 1
+        } else {
+            counts.files += 1
+        }
+    }
+    return counts
+}
+
+/// Section 11 — the words a message of photos, videos or files says without
+/// text, in the interface language (the app stores one rendered line per
+/// count; English otherwise). `nil` when it carries anything else.
+public func nseAttachmentWords(_ counts: NseAttachmentCounts) -> String? {
+    guard counts.other == 0 else { return nil }
+    func counted(_ key: String, _ count: Int, one: String, many: String) -> String {
+        if let line = nseNotificationWordLookup("\(key)#\(count)") { return line }
+        return count == 1 ? one : "\(count) \(many)"
+    }
+    let media = counts.photos + counts.videos
+    if counts.photos > 0, counts.videos > 0 {
+        return counted("chat.media.photos_and_videos", media, one: "1 photo and video", many: "photos and videos")
+    }
+    if counts.photos > 0 { return counted("chat.media.photos", counts.photos, one: "Photo", many: "photos") }
+    if counts.videos > 0 { return counted("chat.media.videos", counts.videos, one: "Video", many: "videos") }
+    if counts.files > 0 { return counted("chat.media.files", counts.files, one: "File", many: "files") }
+    return nil
+}
+
+/// Section 11 — a files-only message with text says the words, the literal
+/// separator web and Android use, then the text ("2 files · Weekend plans");
+/// any other message keeps its text.
+public func nseTextWithFileWords(_ text: String, _ counts: NseAttachmentCounts) -> String {
+    guard !text.isEmpty, counts.files > 0, counts.photos + counts.videos == 0, counts.other == 0,
+          let words = nseAttachmentWords(counts) else { return text }
+    return words + " · " + text
 }
 
 /// ADR-0047 — the notification body for a media message whose kind the

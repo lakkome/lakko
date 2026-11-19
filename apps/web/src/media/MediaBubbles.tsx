@@ -25,7 +25,6 @@ import { whenVisible } from "./near-viewport";
 import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } from "./playback-outcome";
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { elapsedSeconds, formatClock, formatTotalClock, spokenDuration, spokenElapsed, totalSeconds } from "./recording-machine";
-import { PhotoBubble, VideoBubble } from "./VisualBubbles";
 import { TranscriptBlock, TranscriptButton, type TranscriptHost } from "../translation/Transcript";
 import { voicePress } from "./voice-press";
 import { barIsPlayed, waveformBars } from "./waveform";
@@ -994,12 +993,6 @@ export function MediaAttachment(props: MediaBubbleProps): JSX.Element {
       </Show>
       <Show when={decision() === "gif"}>
         <GifBubble {...props} />
-      </Show>
-      <Show when={decision() === "photo"}>
-        <PhotoBubble {...props} />
-      </Show>
-      <Show when={decision() === "video"}>
-        <VideoBubble {...props} />
       </Show>
     </>
   );

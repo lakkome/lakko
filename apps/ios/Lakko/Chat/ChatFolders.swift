@@ -528,6 +528,7 @@ extension ConversationListRow {
             id: id, kind: kind, title: title, preview: preview,
             lastActivityMs: lastActivityMs, unread: unread, pinned: pinned,
             muted: muted, archived: archived, endedLine: endedLine,
-            markedUnread: markedUnread)
+            markedUnread: markedUnread, personKey: personKey, photoGroupIdHex: photoGroupIdHex,
+            hasUnseenReactions: hasUnseenReactions, previewMedia: previewMedia)
     }
 }

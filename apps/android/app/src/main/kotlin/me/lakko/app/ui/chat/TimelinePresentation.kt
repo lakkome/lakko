@@ -142,6 +142,75 @@ public fun mediaPreviewKey(attachment: PreviewAttachment): String = when {
     else -> "chat.media.file"
 }
 
+/** What a message's attachments count as for its preview words
+ *  (docs/ux/media-messages.md section 11). */
+public data class MediaCounts(val photos: Int, val videos: Int, val files: Int) {
+    val media: Int get() = photos + videos
+}
+
+/**
+ * Section 11 — the counts of a message's photos, videos and files, or `null`
+ * when it carries something with words of its own (a voice message, a video
+ * note, a GIF, an audio file), which keeps the single-kind label.
+ */
+public fun mediaCounts(attachments: List<PreviewAttachment>): MediaCounts? {
+    var photos = 0
+    var videos = 0
+    var files = 0
+    for (a in attachments) {
+        if (a.kind != null) return null
+        val mime = a.mime?.lowercase(Locale.ROOT)
+        when {
+            mime?.startsWith("image/") == true -> photos += 1
+            mime?.startsWith("video/") == true -> videos += 1
+            else -> files += 1
+        }
+    }
+    return MediaCounts(photos, videos, files)
+}
+
+/**
+ * Section 11 — the words for a message's attachments when it has no text:
+ * `Photo`, `3 photos`, `Video`, `2 videos`, `4 photos and videos`; with no
+ * photo or video, `File` / `3 files`. `null` for nothing, or for a kind with
+ * words of its own.
+ */
+public fun mediaCountWords(attachments: List<PreviewAttachment>, strings: Strings = Localization.strings.value): String? {
+    val c = mediaCounts(attachments) ?: return null
+    return when {
+        c.media > 0 && c.videos == 0 -> strings.format("chat.media.photos", counts = mapOf("count" to c.photos.toULong()))
+        c.media > 0 && c.photos == 0 -> strings.format("chat.media.videos", counts = mapOf("count" to c.videos.toULong()))
+        c.media > 0 -> strings.format("chat.media.photos_and_videos", counts = mapOf("count" to c.media.toULong()))
+        c.files > 0 -> strings.format("chat.media.files", counts = mapOf("count" to c.files.toULong()))
+        else -> null
+    }
+}
+
+/**
+ * Section 11 — the body of a row or notification line before any sender
+ * prefix: the text (a photo or video's thumbnail is drawn beside it); with
+ * files only, their words and then the text; without text, the words.
+ */
+public fun messagePreviewBody(text: String, attachments: List<PreviewAttachment>, strings: Strings = Localization.strings.value): String {
+    val flat = text.trim().replace(Regex("\\s+"), " ")
+    if (attachments.isEmpty()) return flat
+    val counts = mediaCounts(attachments)
+    if (flat.isNotEmpty()) {
+        return if (counts != null && counts.media == 0 && counts.files > 0) {
+            mediaCountWords(attachments, strings) + " · " + flat
+        } else {
+            flat
+        }
+    }
+    mediaCountWords(attachments, strings)?.let { return it }
+    val first = mediaPreviewLabel(attachments.first(), strings)
+    return if (attachments.size > 1) {
+        strings.format("chat.media.and_more", mapOf("label" to first), mapOf("count" to (attachments.size - 1).toULong()))
+    } else {
+        first
+    }
+}
+
 /**
  * The second line of a conversation row: the text, else the media word, else
  * nothing; a deleted message reads "Message deleted". [prefix] is the
@@ -160,19 +229,7 @@ public fun previewLine(
         deleted -> strings["chat.message.deleted"]
         // ADR-0061 section 6 — a message from a newer wire version.
         unsupported -> strings[UNSUPPORTED_MESSAGE_KEY]
-        text.isNotBlank() -> text.trim().replace(Regex("\\s+"), " ")
-        attachments.isNotEmpty() -> {
-            val first = mediaPreviewLabel(attachments.first(), strings)
-            if (attachments.size > 1) {
-                strings.format(
-                    "chat.media.and_more",
-                    mapOf("label" to first),
-                    mapOf("count" to (attachments.size - 1).toULong()),
-                )
-            } else {
-                first
-            }
-        }
+        text.isNotBlank() || attachments.isNotEmpty() -> messagePreviewBody(text, attachments, strings)
         else -> ""
     }
     if (body.isEmpty()) return body

@@ -25,6 +25,8 @@ export interface VisualPreview {
   readonly size: Size | null;
   /** The JPEG thumb, or `null` when none could be produced. */
   readonly thumb: { readonly blob: Blob; readonly width: number; readonly height: number } | null;
+  /** A video's length in milliseconds, when the decoder reported one. */
+  readonly durationMs?: number;
 }
 
 const NONE: VisualPreview = { size: null, thumb: null };
@@ -122,7 +124,8 @@ export async function describeVideo(file: Blob): Promise<VisualPreview> {
     } catch {
       thumb = null;
     }
-    return { size, thumb };
+    const durationMs = Number.isFinite(video.duration) && video.duration > 0 ? Math.round(video.duration * 1000) : undefined;
+    return durationMs === undefined ? { size, thumb } : { size, thumb, durationMs };
   } catch {
     return NONE;
   } finally {

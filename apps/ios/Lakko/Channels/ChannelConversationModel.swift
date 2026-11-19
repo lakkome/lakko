@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 import LakkoCore
 import UIKit
@@ -56,8 +57,10 @@ final class ChannelConversationModel: ObservableObject {
     @Published var draft: String = ""
     @Published private(set) var sending = false
     @Published private(set) var sendError: UiText?
-    @Published private(set) var pendingAttachments: [AttachmentRef] = []
-    @Published private(set) var uploading = false
+    /// `docs/ux/media-messages.md` section 11 — the composer tray of this
+    /// channel, kept while the app runs. Channel files live 45 days idle.
+    let tray: ComposerTrayStore
+    private var trayChanges: AnyCancellable?
 
     /// Section 13.1 — resolved reaction counts per post, as the service last
     /// answered them.
@@ -79,6 +82,8 @@ final class ChannelConversationModel: ObservableObject {
         self.client = client
         self.accountIdentitySeed = accountIdentitySeed
         self.access = Self.initialAccess(channelId: channelId, state: state)
+        self.tray = ComposerTrays.shared.store(for: "channel:\(channelId)", idleDays: Self.fileIdleDays)
+        trayChanges = tray.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     func attach(sync: DeviceGroupSyncRepository) { self.sync = sync }
@@ -435,16 +440,16 @@ final class ChannelConversationModel: ObservableObject {
 
     // MARK: - Publishing (section 13)
 
-    /// Publish the draft and the staged attachments as one post.
+    /// Publish the draft and every item in the tray as one post (section 11).
     func sendDraft() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let attachments = pendingAttachments
-        guard !text.isEmpty || !attachments.isEmpty, !sending else { return }
+        guard tray.tray.canSend(hasText: !text.isEmpty), !sending else { return }
+        let attachments = tray.tray.refs
         do {
             let envelope = try composeEnvelope(text: text, attachments: attachments)
             if await publish(envelope) {
                 draft = ""
-                pendingAttachments = []
+                _ = tray.takeForSend()
             }
         } catch {
             sendError = .key("channels.publish.error.generic")
@@ -510,77 +515,6 @@ final class ChannelConversationModel: ObservableObject {
                     fallbackKey: "channels.publish.error.generic")
             return false
         }
-    }
-
-    /// Encrypt and upload one picked file into the tray. Channel files live
-    /// 45 days idle (ADR-0087 section 13).
-    func stageAttachment(
-        bytes: Data, mime: String?, name: String?, media: MediaAttachmentMeta? = nil,
-        title: String? = nil, artist: String? = nil
-    ) async {
-        uploading = true
-        sendError = nil
-        defer { uploading = false }
-        do {
-            var ref = try await AttachmentBridge.encryptAndUpload(
-                bytes: bytes, mime: mime, name: name, media: media, idleDays: Self.fileIdleDays)
-            // ADR-0092 section 2 — an audio file's own tags.
-            ref.title = title
-            ref.artist = artist
-            MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
-            pendingAttachments.append(ref)
-        } catch let err as AttachmentBridgeError {
-            sendError = err.userText(fileName: name)
-        } catch {
-            sendError = .key("chat.attachment.error.upload", texts: ["name": name ?? ""])
-        }
-    }
-
-    /// A photo or video prepared by ``PhotoVideoPrep``: its pixel size and a
-    /// small preview go with it, as in a chat (media spec section 10).
-    func stagePrepared(_ prepared: PhotoVideoPrep.Prepared) async {
-        uploading = true
-        sendError = nil
-        defer {
-            uploading = false
-            if let file = prepared.fileURL {
-                try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-            }
-        }
-        var thumbRef: ThumbRef?
-        if let thumb = prepared.thumb {
-            thumbRef = try? await AttachmentBridge.encryptAndUploadThumb(
-                bytes: thumb, mime: "image/jpeg", width: prepared.thumbWidth, height: prepared.thumbHeight)
-        }
-        let meta = MediaAttachmentMeta(
-            kind: nil, width: prepared.width, height: prepared.height, thumb: thumbRef)
-        do {
-            let ref: AttachmentRef
-            if let bytes = prepared.bytes {
-                ref = try await AttachmentBridge.encryptAndUpload(
-                    bytes: bytes, mime: prepared.mime, name: prepared.name, media: meta,
-                    idleDays: Self.fileIdleDays)
-                MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
-            } else if let file = prepared.fileURL {
-                ref = try await AttachmentBridge.encryptAndUpload(
-                    fileURL: file, mime: prepared.mime, name: prepared.name, media: meta,
-                    idleDays: Self.fileIdleDays)
-            } else {
-                return
-            }
-            pendingAttachments.append(ref)
-        } catch let err as AttachmentBridgeError {
-            if let thumbRef { BlobLifecycle.shared.delete([thumbRef.blobId]) }
-            sendError = err.userText(fileName: prepared.name)
-        } catch {
-            sendError = .key("chat.attachment.error.upload", texts: ["name": prepared.name])
-        }
-    }
-
-    func removePendingAttachment(at index: Int) {
-        guard pendingAttachments.indices.contains(index) else { return }
-        let removed = pendingAttachments.remove(at: index)
-        BlobLifecycle.shared.delete(MessageBlobs.ids(of: [removed]))
     }
 
     func clearSendError() { sendError = nil }

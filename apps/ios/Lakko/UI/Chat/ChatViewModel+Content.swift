@@ -106,45 +106,6 @@ extension ChatViewModel {
         PollChoiceCenter.shared.choice(groupIdHex: groupIdHex, pollMessageId: messageId)
     }
 
-    // MARK: The send preview (UX sections 3 and 4)
-
-    /// Send the preview's items, each its own message in order, the caption
-    /// on the first. `asFile` sends every item's original bytes as a file.
-    func sendPreviewItems(_ items: [SendPreviewItem], caption: String, asFile: Bool) async {
-        var first = true
-        let stamp = String(UUID().uuidString.prefix(8)).lowercased()
-        for item in items {
-            _ = takePendingAttachments()
-            if asFile || !item.isMedia {
-                guard let (bytes, name, mime) = item.originalBytes else { continue }
-                await onAttachmentPicked(bytes: bytes, mime: mime, name: name)
-            } else if case .photo(let data) = item.source {
-                guard let prepared = await Task.detached(priority: .userInitiated, operation: {
-                    PhotoVideoPrep.preparePhoto(data, stamp: stamp)
-                }).value else {
-                    reportAttachmentProblem(.key("attach.preview.photo_unreadable"))
-                    continue
-                }
-                await onMediaPrepared(prepared)
-            } else if case .video(let url) = item.source {
-                guard let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp, allowReencode: false) else {
-                    reportAttachmentProblem(.key("attach.preview.video_refused"))
-                    continue
-                }
-                await onMediaPrepared(prepared)
-            }
-            let refs = takePendingAttachments()
-            guard !refs.isEmpty else { continue }
-            let text = first ? caption : ""
-            first = false
-            do {
-                try await repository.sendMessage(groupIdHex: groupIdHex, plaintext: text, attachments: refs)
-            } catch {
-                reportAttachmentProblem(.key("attach.error.not_sent"))
-            }
-        }
-    }
-
     // MARK: Article images and audio
 
     /// Upload an article image (processed as a photo, UX section 11.1).
@@ -166,41 +127,11 @@ extension ChatViewModel {
         }
     }
 
-    /// UX section 6 — an audio file: its own tags (title, artist, duration,
-    /// cover art as a 320-px thumbnail) read on this device, then uploaded as
-    /// an `audio` attachment waiting in the composer tray like any file.
-    func onAudioPicked(url: URL) async {
-        let didStart = url.startAccessingSecurityScopedResource()
-        defer { if didStart { url.stopAccessingSecurityScopedResource() } }
-        guard let bytes = try? Data(contentsOf: url) else {
-            reportAttachmentProblem(.key("audio.unplayable"))
-            return
-        }
-        if bytes.count > AttachmentBridge.maxAttachmentBytes {
-            reportAttachmentProblem(.key("attach.preview.file_too_big"))
-            return
-        }
-        let tags = await AudioTags.read(url: url)
-        let limits = contentLimits()
-        var thumb: ThumbRef?
-        if let cover = tags.cover {
-            thumb = try? await AttachmentBridge.encryptAndUploadThumb(
-                bytes: cover.data, mime: "image/jpeg", width: cover.width, height: cover.height)
-        }
-        let mime = UTTypeMime.of(url)
-        do {
-            var ref = try await AttachmentBridge.encryptAndUpload(
-                bytes: bytes, mime: mime, name: url.lastPathComponent,
-                media: MediaAttachmentMeta(
-                    kind: "audio",
-                    durationMs: tags.durationMs.map { min($0, limits.maxAudioDurationMs) },
-                    width: nil, height: nil, thumb: thumb))
-            ref.title = AudioTags.bounded(tags.title ?? url.deletingPathExtension().lastPathComponent, limits)
-            ref.artist = tags.artist.flatMap { AudioTags.bounded($0, limits) }
-            appendPendingAttachment(ref)
-        } catch {
-            reportAttachmentProblem(.key("chat.attachment.error.upload", texts: ["name": url.lastPathComponent]))
-        }
+    /// UX section 6 — an audio file joins the composer tray as a file chip;
+    /// its own tags (title, artist, duration, cover art) are read on this
+    /// device when it uploads (``ComposerTrayUpload``).
+    func onAudioPicked(url: URL) {
+        tray.add([.audio(url)])
     }
 }
 

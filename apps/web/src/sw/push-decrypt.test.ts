@@ -192,6 +192,16 @@ function mockWasm() {
       const text = new TextDecoder().decode(bytes);
       try {
         const parsed = JSON.parse(text) as Record<string, unknown>;
+        // A test that lists `attachmentMimes` gets the core's per-attachment
+        // reader (`ParsedBody.attachment(i)`), as the real handle has.
+        const mimes = parsed.attachmentMimes;
+        if (Array.isArray(mimes)) {
+          return {
+            ...parsed,
+            attachment: (i: number) => ({ mime: mimes[i] as string, kind: undefined, free: freeSpy }),
+            free: freeSpy,
+          };
+        }
         return { ...parsed, free: freeSpy };
       } catch {
         // The legacy UTF-8 fallback — exactly what surfaces a service
@@ -326,6 +336,40 @@ describe("decryptPushPreview — happy path", () => {
     });
     const out = await decryptPushPreview(wake(), deps);
     expect(out?.body).toBe("Sent 2 attachments");
+  });
+
+  it("names photos, videos and files by count (media-messages section 11)", async () => {
+    const run = async (mimes: string[], words?: Record<string, unknown>) => {
+      const { deps } = baseDeps({
+        dsFetchGroup: vi.fn(async () => ({
+          messages: [msg(42, { kind: "chat", text: "", attachmentCount: mimes.length, attachmentMimes: mimes })],
+        })),
+        ...(words === undefined ? {} : { notificationWords: words }),
+      });
+      return (await decryptPushPreview(wake(), deps))?.body;
+    };
+    expect(await run(["image/jpeg", "image/png", "image/webp"])).toBe("3 photos");
+    expect(await run(["video/mp4"])).toBe("Video");
+    expect(await run(["image/jpeg", "video/mp4"])).toBe("2 photos and videos");
+    expect(await run(["application/pdf", "text/plain"])).toBe("2 files");
+    expect(await run(["image/jpeg", "image/jpeg"], { photos: ["Фото", "2 фото"] })).toBe("2 фото");
+  });
+
+  it("follows the list row's three cases with text (media-messages section 11)", async () => {
+    const run = async (text: string, mimes: string[]) => {
+      const { deps } = baseDeps({
+        dsFetchGroup: vi.fn(async () => ({
+          messages: [msg(42, { kind: "chat", text, attachmentCount: mimes.length, attachmentMimes: mimes })],
+        })),
+      });
+      return (await decryptPushPreview(wake(), deps))?.body;
+    };
+    // Files only, with text: the words, a middle dot, the text.
+    expect(await run("Weekend plans", ["application/pdf", "text/plain"])).toBe("2 files \u00b7 Weekend plans");
+    // Photos or videos, with text: the text alone.
+    expect(await run("The trip", ["image/jpeg", "video/mp4"])).toBe("The trip");
+    // No text: the words alone.
+    expect(await run("", ["application/pdf"])).toBe("File");
   });
 
   it("renders the attachment hint in the words the page stored (ADR-0061)", async () => {

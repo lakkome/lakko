@@ -382,6 +382,12 @@ private class RealThrowawayGroup(
                 me.lakko.app.ui.channels.invitationAwarePreviewText(body.text, body.channelInvite)
             },
             attachmentCount = body.attachments.size,
+            previewAttachments = if (body.content != null) {
+                emptyList()
+            } else {
+                body.attachments.map { me.lakko.app.ui.chat.PreviewAttachment(it.kind, it.mime) }
+            },
+            previewThumb = if (body.content != null) null else me.lakko.app.chat.previewThumbOf(body.attachments)?.thumb,
             senderName = senderNameOf(app.senderLeaf),
             senderAccountB64 = senderAccountOf(app),
             resendOrigin = me.lakko.app.chat.resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),

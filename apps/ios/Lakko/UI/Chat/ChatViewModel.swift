@@ -40,51 +40,16 @@ public final class ChatViewModel: ObservableObject {
 
     @Published public var draft: String = ""
 
-    /// Phase 1.19c3 — attachments staged in the composer. The
-    /// user picks photo / file; each call to
-    /// ``onAttachmentPicked(bytes:mime:name:)`` encrypts +
-    /// uploads to storage immediately so the ref is ready by
-    /// the time Send is tapped. Cleared on successful Send, on
-    /// per-chip remove, and on screen dismount.
-    @Published public private(set) var pendingAttachments: [AttachmentRef] = [] {
-        didSet { unsentAttachmentBlobIds = MessageBlobs.ids(of: pendingAttachments) }
-    }
-    /// ADR-0065 section 6 — the staged uploads' blob ids, for `deinit`: a
-    /// chat left with attachments never sent deletes them. Written on the
-    /// main actor only.
-    private nonisolated(unsafe) var unsentAttachmentBlobIds: [Data] = []
+    /// `docs/ux/media-messages.md` section 11 — the composer tray of this
+    /// conversation: what is attached to the message being written, each item
+    /// uploading as soon as it is added. Kept per conversation for the life
+    /// of the app process (``ComposerTrays``), so it outlives this screen.
+    public let tray: ComposerTrayStore
 
     // MARK: - Ephemeral status
 
     @Published public private(set) var sending: Bool = false
     @Published public private(set) var sendError: UiText?
-    /// `true` while one or more picked items are being
-    /// encrypted + uploaded. The composer disables Send and the
-    /// picker buttons until it flips back.
-    @Published public private(set) var uploading: Bool = false
-
-    /// Polish 1.x — per-pick upload-progress detail. `nil` when
-    /// no upload is in flight; otherwise carries the file name
-    /// + which stage of the encrypt / upload pipeline the
-    /// in-flight pick is at, so the composer tray can render a
-    /// specific "Uploading hello.png…" caption instead of a
-    /// generic "Uploading…". The user picks one file at a time
-    /// (Apple's photo picker UX is single-image-per-pick by
-    /// default in the ChatScreen), so no file-index ornament —
-    /// the index is always 1.
-    @Published public private(set) var uploadStage: UploadStage?
-
-    /// UX spec section 10 — the preview of the photo or video being uploaded,
-    /// shown in the composer's upload chip while the upload runs.
-    @Published public private(set) var uploadingThumbnail: Data?
-
-    /// Stage of a single pick's encrypt+upload pipeline. Mirror
-    /// of the web client's `uploadProgress.stage` discriminator.
-    public enum UploadStage: Equatable {
-        case encrypting(fileName: String)
-        case uploading(fileName: String)
-    }
-
     // MARK: - Mirror of the repository's per-thread state
 
     /// The messages list for this group's thread. Reactive — every
@@ -337,6 +302,7 @@ public final class ChatViewModel: ObservableObject {
         // minted before the move still opens the conversation).
         self.conversationIdHex = repository.conversationIdHex(ofGroup: groupIdHex)
         self.groupIdHex = repository.headGroupIdHex(of: groupIdHex)
+        self.tray = ComposerTrays.shared.store(for: repository.conversationIdHex(ofGroup: groupIdHex))
         // The composition root passes the app-level host. A view model built
         // without one (previews) gets a host of its own that is NOT attached to
         // the repository's signaling feed, so it can never steal it.
@@ -413,6 +379,10 @@ public final class ChatViewModel: ObservableObject {
             .sink { [weak self] text in
                 self?.onDraftChanged(text)
             }
+            .store(in: &cancellables)
+        // Section 11 — Send's state reads the tray.
+        tray.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         // ADR-0024 — publish a read receipt when the timeline advances
         // while the screen is open. Gated on `screenVisible` so a
@@ -592,10 +562,6 @@ public final class ChatViewModel: ObservableObject {
     }
 
     deinit {
-        let orphans = unsentAttachmentBlobIds
-        if !orphans.isEmpty {
-            Task { @MainActor in BlobLifecycle.shared.delete(orphans) }
-        }
         typingExpiryTimer?.invalidate()
         typingSendThrottle?.cancel()
         beaconTicker?.invalidate()
@@ -2742,12 +2708,10 @@ public final class ChatViewModel: ObservableObject {
     public func onSendClicked() {
         guard !sending else { return }
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stagedAttachments = pendingAttachments
-        // 1.19c3: attachment-only messages are valid (empty
-        // text + ≥1 attachment); pre-1.19 text-only messages
-        // still valid (≥1 char text + zero attachments). The
-        // only invalid input is the all-empty composer.
-        guard !trimmed.isEmpty || !stagedAttachments.isEmpty else { return }
+        // `docs/ux/media-messages.md` section 11 — one message: the text and
+        // every item in the tray, once no item is still uploading or failed.
+        guard tray.tray.canSend(hasText: !trimmed.isEmpty) else { return }
+        let stagedAttachments = tray.takeForSend()
 
         sending = true
         sendError = nil
@@ -2761,7 +2725,6 @@ public final class ChatViewModel: ObservableObject {
         // failure left nothing in the conversation, and is wrong now that it
         // would leave the same text in two places.
         draft = ""
-        pendingAttachments = []
         // ADR-0052 — the armed reply goes with the message and the strip
         // clears now, for the same reason the draft does: the row in the
         // conversation carries the quote from this moment, Retry included.
@@ -3798,160 +3761,10 @@ public final class ChatViewModel: ObservableObject {
         return plain.date(from: s)
     }
 
-    /// Drive the encrypt + upload flow for one picked item.
-    /// Called by the screen layer after a photo / document
-    /// picker resolves to raw bytes + MIME + filename.
-    /// Sequential — one picked item at a time, called from the
-    /// screen's `Task { … }` per pick — keeps the upload-state
-    /// flag honest.
-    public func onAttachmentPicked(
-        bytes: Data,
-        mime: String?,
-        name: String?
-    ) async {
-        uploading = true
-        sendError = nil
-        // Drive `uploadStage` immediately so the composer tray
-        // doesn't show the generic spinner for the brief encrypt
-        // window. `AttachmentBridge.encryptAndUpload` flips the
-        // stage to `.uploading` once it reaches the PUT path.
-        let displayName = (name?.isEmpty ?? true) ? Localization.text("chat.attachment.unnamed") : name!
-        uploadStage = .encrypting(fileName: displayName)
-        defer {
-            uploading = false
-            uploadStage = nil
-        }
-        do {
-            let ref = try await AttachmentBridge.encryptAndUpload(
-                bytes: bytes,
-                mime: mime,
-                name: name,
-                onStage: { [weak self] stage in
-                    // Hop back to MainActor for the published
-                    // mutation — `onStage` may run on whatever
-                    // thread the URLSession completion lands on.
-                    Task { @MainActor in
-                        switch stage {
-                        case .encrypting:
-                            self?.uploadStage = .encrypting(fileName: displayName)
-                        case .uploading:
-                            self?.uploadStage = .uploading(fileName: displayName)
-                        }
-                    }
-                }
-            )
-            pendingAttachments.append(ref)
-        } catch let err as AttachmentBridgeError {
-            sendError = err.userText(fileName: displayName)
-            NSLog("attachment failed: %@", err.errorDescription ?? "")
-        } catch {
-            sendError = .key("chat.attachment.error.upload", texts: ["name": displayName])
-            NSLog("attachment failed: %@", String(describing: error))
-        }
-    }
-
     /// A picked item that could not be prepared for sending: one sentence
     /// in the composer's error line, nothing sent.
     public func reportAttachmentProblem(_ copy: UiText) {
         sendError = copy
-    }
-
-    /// ADR-0092 — an attachment prepared elsewhere (an audio file with its
-    /// tags) joins the composer tray.
-    /// ADR-0092 — the send preview takes what its upload put in the tray.
-    func takePendingAttachments() -> [AttachmentRef] {
-        let taken = pendingAttachments
-        pendingAttachments = []
-        return taken
-    }
-
-    func appendPendingAttachment(_ ref: AttachmentRef) {
-        sendError = nil
-        pendingAttachments.append(ref)
-    }
-
-    /// UX spec section 10 — encrypt and upload a picked photo or video with
-    /// the metadata the receiver needs before downloading: pixel size and a
-    /// small JPEG preview uploaded as its own encrypted blob. The attachment
-    /// carries no `kind`; its MIME type makes it a photo or video bubble. A
-    /// preview that fails to upload is dropped, never the send.
-    public func onMediaPrepared(_ prepared: PhotoVideoPrep.Prepared) async {
-        uploading = true
-        sendError = nil
-        uploadingThumbnail = prepared.thumb
-        let displayName = prepared.name
-        uploadStage = .encrypting(fileName: displayName)
-        defer {
-            uploading = false
-            uploadStage = nil
-            uploadingThumbnail = nil
-            if let file = prepared.fileURL {
-                try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-            }
-        }
-        var thumbRef: ThumbRef?
-        if let thumb = prepared.thumb {
-            do {
-                thumbRef = try await AttachmentBridge.encryptAndUploadThumb(
-                    bytes: thumb,
-                    mime: "image/jpeg",
-                    width: prepared.thumbWidth,
-                    height: prepared.thumbHeight
-                )
-            } catch {
-                thumbRef = nil
-            }
-        }
-        let meta = MediaAttachmentMeta(
-            kind: nil,
-            width: prepared.width,
-            height: prepared.height,
-            thumb: thumbRef
-        )
-        do {
-            let ref: AttachmentRef
-            if let bytes = prepared.bytes {
-                ref = try await AttachmentBridge.encryptAndUpload(
-                    bytes: bytes,
-                    mime: prepared.mime,
-                    name: prepared.name,
-                    media: meta,
-                    onStage: { [weak self] stage in
-                        Task { @MainActor in
-                            switch stage {
-                            case .encrypting: self?.uploadStage = .encrypting(fileName: displayName)
-                            case .uploading: self?.uploadStage = .uploading(fileName: displayName)
-                            }
-                        }
-                    }
-                )
-                // Our own bytes: the sent bubble shows them without a download.
-                MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
-            } else if let file = prepared.fileURL {
-                uploadStage = .uploading(fileName: displayName)
-                ref = try await AttachmentBridge.encryptAndUpload(
-                    fileURL: file,
-                    mime: prepared.mime,
-                    name: prepared.name,
-                    media: meta
-                )
-                MediaSessionCache.shared.adoptVideoFile(file, key: MediaSessionCache.key(for: ref))
-            } else {
-                return
-            }
-            if let thumbRef, let thumb = prepared.thumb {
-                MediaSessionCache.shared.store(thumb, key: MediaSessionCache.key(for: thumbRef))
-            }
-            pendingAttachments.append(ref)
-        } catch let err as AttachmentBridgeError {
-            // The preview went up, the file did not: the preview is an orphan.
-            if let thumbRef { BlobLifecycle.shared.delete([thumbRef.blobId]) }
-            sendError = err.userText(fileName: displayName)
-            NSLog("attachment failed: %@", err.errorDescription ?? "")
-        } catch {
-            sendError = .key("chat.attachment.error.upload", texts: ["name": displayName])
-            NSLog("attachment failed: %@", String(describing: error))
-        }
     }
 
     /// ADR-0047 — what the per-chat media runtime needs, as closures over the
@@ -3983,15 +3796,6 @@ public final class ChatViewModel: ObservableObject {
     func reactFromPicker(to message: ChatMessage, emoji: String) {
         guard EmojiIndex.isSingleEmojiGrapheme(emoji) else { return }
         react(to: message, emoji: emoji)
-    }
-
-    /// Drop a staged attachment from the pending tray. Index
-    /// matches the order in ``pendingAttachments``.
-    public func onRemovePendingAttachment(at index: Int) {
-        guard pendingAttachments.indices.contains(index) else { return }
-        let removed = pendingAttachments.remove(at: index)
-        // ADR-0065 section 6 — uploaded, never sent: deleted at once.
-        BlobLifecycle.shared.delete(MessageBlobs.ids(of: [removed]))
     }
 
     /// One long-poll tick — used by ``ChatScreen``'s

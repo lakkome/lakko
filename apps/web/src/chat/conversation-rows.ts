@@ -26,7 +26,7 @@ import { createChannelRowFeed } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
 import { groupTitle } from "./group-title";
-import { emptyPreviewLine, previewLine } from "./list-preview";
+import { emptyPreviewLine, previewLine, type PreviewMedia } from "./list-preview";
 import { channelInviteRowPreview } from "./channel-invite-preview";
 import { publicOrigin } from "../platform";
 import { memberNameOf } from "../profile/member-label";
@@ -284,6 +284,20 @@ export function createConversationRows() {
     return emptyPreviewLine(logKnown());
   };
 
+  /** `docs/ux/media-messages.md` section 11 — the thumbnail at the start of
+   *  the row's line, when that line is the last message and it carries a
+   *  photo or video; `null` otherwise (an ended chat, a request to leave, a
+   *  channel invitation, a message with none). */
+  const previewMediaFor = (g: ActiveGroup): PreviewMedia | null => {
+    if (endedLine(g) !== null) return null;
+    membershipEnd.leaveVersion();
+    const account = accountId();
+    if (account !== null && loadLeaveRequestedAt(account, g.groupIdB64) !== undefined) return null;
+    const s = summaryFor(g.group.groupId);
+    if (s.previewChannelInviteB64 !== undefined) return null;
+    return s.previewMedia ?? null;
+  };
+
   /**
    * Every conversation, ordered.
    *
@@ -423,6 +437,7 @@ export function createConversationRows() {
     summaryFor,
     endedLine,
     subOf,
+    previewMediaFor,
     clock,
     orderedRows,
     groupById,

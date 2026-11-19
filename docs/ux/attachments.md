@@ -105,14 +105,18 @@ would otherwise not understand why the thing they look for is missing:
   in the open conversation, not only in the composer; a paste into another field stays that
   field's text, and a copy from a document (plain text and HTML together) pastes as text.
   iOS and Android: the composer's Paste offers a copied photo or video and attaches it, as
-  the system keyboard's image insertion does.
+  the system keyboard's image insertion does. Everything pasted or dropped goes into the
+  composer tray ([`media-messages.md`](media-messages.md) section 11), never a dialog.
 - The emoji button and the record button are not in this menu ([`media-messages.md`](media-messages.md)).
 
 ## 3. Photo or Video
 
-**Flow.** Picker → the **send preview** (one screen for one or many items): thumbnails in a
-strip, the current item large, a caption field, a `Send as file` switch off by default, a
-delete control per item, `Send`. Cancel returns to the conversation with nothing sent.
+**Amended 2026-11-19 (maintainer): no send preview, no `Send as file`.** A picked photo or
+video goes straight into the **composer tray** of [`media-messages.md`](media-messages.md)
+section 11, as a paste or a drop does. The text typed in the composer is the message's text.
+One message carries the text and every photo and video in the tray, and the receiver sees
+them together in one bubble (section 11 there). Sending a photo or video as an original file
+is the File item's job (section 4).
 
 **What is sent.**
 
@@ -121,25 +125,19 @@ delete control per item, `Send`. Cancel returns to the conversation with nothing
   thumbnail and dimensions are those of [`media-messages.md`](media-messages.md) section 10.
 - Each **video** is sent as picked when it is MP4 with H.264 and at most the attachment cap
   (50 MiB today); a poster thumbnail and dimensions are added. H.264 in another container
-  (an iPhone `.mov`) is moved into an MP4 container on the device without re-encoding, so
-  what is sent is still MP4 with H.264. A video in another format or
-  over the cap is refused in the preview: `This video can't be sent. Videos must be MP4 and
-  up to 50 MB. Send it as a file instead.` (with `Send as file`). Re-encoding a picked video
-  is not in v1.
-- `Send as file` sends every item as its original bytes through the File path (section 4).
-- Several items send as several bubbles, one message each, in the order shown, the caption
-  on the first. An album bubble is not in v1.
+  (an iPhone `.mov`) is moved into an MP4 container on the device without re-encoding. A
+  video in another format or over the cap goes into the tray as a file chip instead (it is
+  sent as a file), never refused.
 
-**States.** Picker cancelled: nothing. Decoding (a large photo): the item shows a spinner in
-the strip. An item that fails to decode: `Couldn't read this photo` on that item, the rest
-still send. Uploading and upload failed: as for any attachment (`Not sent · Retry`).
+**States.** Decoding (a large photo): the tray thumbnail shows a spinner. An item that
+fails to decode: it goes into the tray as a file chip. Uploading and upload failed: on the
+tray thumbnail (media-messages section 11).
 
 ## 4. File
 
-Picker → the same send preview with file chips instead of thumbnails (name, size, type),
-caption field, `Send`. The bytes are sent unchanged. The bubble is the existing file chip
-(name, size, `Open`, `Save`). A file over the cap: `Files up to 50 MB can be sent.` and the
-item is removed from the preview.
+Picker → the composer tray, as file chips (an icon, the name, the size). The bytes are sent
+unchanged. The receiver's bubble shows the file chip (name, size, `Open`, `Save`). A file
+over the cap: `Files up to 50 MB can be sent.` and it is not added.
 
 ## 5. Camera
 
@@ -148,7 +146,10 @@ Lakko's own full-screen capture view on all four clients.
 - **Controls:** the shutter (tap = photo; on native, press and hold = video while held;
   a `Photo` / `Video` switch above the shutter does the same for a mouse or a screen
   reader), switch camera (front / back) where there are two, flash on native, close.
-- **After capture:** the send preview of section 3 with `Retake` in place of the strip.
+- **After capture:** the photo or video goes into the composer tray
+  ([`media-messages.md`](media-messages.md) section 11) and the camera view closes
+  (amended 2026-11-19; no send preview, no Retake: remove it from the tray and open the
+  camera again).
 - **Video:** at most 60 s (chosen); the same MP4 / H.264 rule as video notes. A browser
   that cannot record that format hides the Video switch: `Video can't be recorded in this
   browser`, photos still work.

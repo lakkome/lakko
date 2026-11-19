@@ -690,6 +690,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
               hub={hub}
               contentEdit={contentEdit}
               clearContentEdit={() => setContentEdit(null)}
+              trayKey={id}
             />
           </Show>
           {/* UX second-device.md section 4a: the account posts here from

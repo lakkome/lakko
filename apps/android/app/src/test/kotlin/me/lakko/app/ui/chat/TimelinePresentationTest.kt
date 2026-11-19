@@ -134,11 +134,23 @@ class TimelinePresentationTest {
             "Anna: Photo",
             previewLine("", listOf(PreviewAttachment(null, "image/png")), deleted = false, author = PreviewAuthor.Named("Anna")),
         )
+        // media-messages section 11 — photos and videos are counted; a file
+        // beside them adds no words.
         assertEquals(
-            "Photo and 2 more",
+            "2 photos",
             previewLine(
                 "",
                 listOf(PreviewAttachment(null, "image/png"), PreviewAttachment(null, "image/png"), PreviewAttachment(null, null)),
+                deleted = false,
+                author = null,
+            ),
+        )
+        // A voice message keeps its own word.
+        assertEquals(
+            "Voice message and 1 more",
+            previewLine(
+                "",
+                listOf(PreviewAttachment("voice", "audio/mp4"), PreviewAttachment(null, "image/png")),
                 deleted = false,
                 author = null,
             ),
@@ -320,5 +332,36 @@ class TimelinePresentationTest {
         val rows = buildTimeline(storedLogWithCommits(), now, zone, use24h = true, locale = en, isGroup = true)
             .filterIsInstance<TimelineItem.Row>()
         assertEquals(listOf(1L, 4L), rows.map { it.message.messageId })
+    }
+
+    @Test
+    fun `section 11 words for photos, videos and files`() {
+        val photo = PreviewAttachment(null, "image/jpeg")
+        val video = PreviewAttachment(null, "video/mp4")
+        val file = PreviewAttachment(null, "application/pdf")
+        assertEquals("Photo", mediaCountWords(listOf(photo)))
+        assertEquals("3 photos", mediaCountWords(List(3) { photo }))
+        assertEquals("Video", mediaCountWords(listOf(video)))
+        assertEquals("2 videos", mediaCountWords(listOf(video, video, file)))
+        assertEquals("4 photos and videos", mediaCountWords(listOf(photo, video, photo, video)))
+        assertEquals("File", mediaCountWords(listOf(file)))
+        assertEquals("3 files", mediaCountWords(List(3) { file }))
+        assertNull(mediaCountWords(emptyList()))
+        assertNull(mediaCountWords(listOf(photo, PreviewAttachment("gif", "image/gif"))))
+    }
+
+    @Test
+    fun `section 11 line - the text with photos, the words then the text with files only`() {
+        val photo = PreviewAttachment(null, "image/jpeg")
+        val file = PreviewAttachment(null, "application/pdf")
+        assertEquals("Look at this", messagePreviewBody(" Look\n at  this ", listOf(photo, photo)))
+        assertEquals("2 files · Here they are", messagePreviewBody("Here they are", listOf(file, file)))
+        assertEquals("Hello", messagePreviewBody("Hello", listOf(photo, file)))
+        assertEquals("3 photos", messagePreviewBody("", List(3) { photo }))
+        assertEquals("Hi", messagePreviewBody("Hi", emptyList()))
+        assertEquals(
+            "Anna: 2 photos",
+            previewLine("", listOf(photo, photo), deleted = false, author = PreviewAuthor.Named("Anna")),
+        )
     }
 }

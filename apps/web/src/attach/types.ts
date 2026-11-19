@@ -106,14 +106,6 @@ export interface PreviewItem {
   readonly file: File;
 }
 
-/** What the send preview returns: the items still on it, whether they go as
- *  files, and the caption (for the first item). */
-export interface PreviewResult {
-  readonly files: readonly File[];
-  readonly asFile: boolean;
-  readonly caption: string;
-}
-
 // ----- bubbles ---------------------------------------------------------
 
 /** One option of a poll card, folded. */

@@ -8,7 +8,7 @@
  * component.
  */
 
-import { attachmentsPreviewLabel } from "../chat/list-preview";
+import { messagePreviewWords } from "../chat/list-preview";
 import { formatListTime } from "../chat/list-time";
 import { joinFacts, t } from "../l10n";
 
@@ -145,8 +145,7 @@ export interface ChannelRowLastPost {
  *  has no sender to name. */
 export function channelRowPreview(lastPost: ChannelRowLastPost | null, fallback: string): string {
   if (lastPost === null) return fallback;
-  const text = lastPost.text.replace(/\s+/g, " ").trim();
-  if (text.length > 0) return text;
-  const media = attachmentsPreviewLabel(lastPost.media ?? []);
-  return media.length > 0 ? media : fallback;
+  // docs/ux/media-messages.md section 11 — the same words as a chat row.
+  const line = messagePreviewWords(lastPost.text.replace(/\s+/g, " ").trim(), lastPost.media ?? []);
+  return line.length > 0 ? line : fallback;
 }

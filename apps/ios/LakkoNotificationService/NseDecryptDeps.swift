@@ -465,7 +465,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil,
             senderKeyB64: senderKeyB64,
             resendOrigin: Self.resendOrigin(of: body),
-            reaction: reaction
+            reaction: reaction,
+            attachmentCounts: nseAttachmentCounts(body.attachments.map { (kind: $0.kind, mime: $0.mime) })
         )
     }
 

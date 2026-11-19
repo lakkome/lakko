@@ -107,6 +107,7 @@ import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
 import { conversationAvatarKeys } from "../chat/conversation-avatar";
 import { MediaAttachment } from "../media/MediaBubbles";
+import { MediaMosaic } from "../media/MediaMosaic";
 import { createMediaHub, mediaKey } from "../media/media-hub";
 import { ownAvatarLabel } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
@@ -1024,6 +1025,11 @@ export default function Feed(): JSX.Element {
     ref.message.attachments
       .map((a) => attachmentRefFromPersisted(a).ref)
       .filter((a) => mediaHub.decision(a).bubble !== "file");
+  /** A photo or video: drawn in the message's mosaic. */
+  const isMosaicRef = (a: AttachmentRefBytes): boolean => {
+    const b = mediaHub.decision(a).bubble;
+    return b === "photo" || b === "video";
+  };
 
   /** A one-line text for a place that draws no bubble: a reply, a preview. */
   const bodyOf = (ref: FeedCandidateRef): string =>
@@ -1389,9 +1395,16 @@ export default function Feed(): JSX.Element {
                           </p>
                         </Show>
                       </button>
-                      <Show when={mediaRefsOf(item.ref).length > 0}>
+                      {/* docs/ux/media-messages.md section 11 — the photos and
+                          videos of one message as one mosaic. */}
+                      <Show when={mediaRefsOf(item.ref).filter((r) => isMosaicRef(r)).length > 0}>
                         <div class="lk-feed-media">
-                          <Index each={mediaRefsOf(item.ref)}>
+                          <MediaMosaic refs={mediaRefsOf(item.ref).filter((r) => isMosaicRef(r))} hub={mediaHub} />
+                        </div>
+                      </Show>
+                      <Show when={mediaRefsOf(item.ref).filter((r) => !isMosaicRef(r)).length > 0}>
+                        <div class="lk-feed-media">
+                          <Index each={mediaRefsOf(item.ref).filter((r) => !isMosaicRef(r))}>
                             {(ref) => (
                               <MediaAttachment
                                 attachment={ref()}

@@ -56,6 +56,10 @@ use lakko_ui_rules::layer_display::{
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
+use lakko_ui_rules::media_mosaic::{
+    media_mosaic as rust_media_mosaic, MediaMosaic as RustMediaMosaic, MediaSize as RustMediaSize,
+    MOSAIC_GAP, MOSAIC_MAX_ITEMS,
+};
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
@@ -1505,6 +1509,87 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
     }
 }
 
+/// The laid-out media mosaic of one message (`docs/ux/media-messages.md`
+/// section 11). `x` is measured from the START edge: a right-to-left layout
+/// places a tile at `width - x - tileWidth`.
+#[wasm_bindgen(js_name = MediaMosaic)]
+#[derive(Clone, Debug)]
+pub struct MediaMosaic {
+    inner: RustMediaMosaic,
+}
+
+#[wasm_bindgen(js_class = MediaMosaic)]
+impl MediaMosaic {
+    /// Width of the mosaic: the bubble width, or less for one narrow item.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.inner.width
+    }
+
+    /// Total height, gaps included.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.inner.height
+    }
+
+    /// Number of tiles: one per item, in input order, for the first ten;
+    /// 0 when there is nothing to lay out or the width cannot hold them.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.inner.tiles.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The tiles flattened, four numbers each: `x, y, width, height`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tiles(&self) -> Vec<u32> {
+        self.inner
+            .tiles
+            .iter()
+            .flat_map(|t| [t.x, t.y, t.width, t.height])
+            .collect()
+    }
+}
+
+/// Lay out the photos and videos of one message in a bubble `bubbleWidth`
+/// wide with `gap` between tiles. `widths` and `heights` are parallel, one
+/// entry per item (`0` = unknown, laid out as 4:3); a missing entry reads
+/// as unknown, entries past `widths.length` are ignored. Every tile is drawn
+/// cropped to fill.
+#[wasm_bindgen(js_name = mediaMosaic)]
+#[must_use]
+pub fn media_mosaic(bubble_width: u32, gap: u32, widths: &[u32], heights: &[u32]) -> MediaMosaic {
+    let items: Vec<RustMediaSize> = widths
+        .iter()
+        .enumerate()
+        .map(|(i, &width)| RustMediaSize {
+            width,
+            height: heights.get(i).copied().unwrap_or(0),
+        })
+        .collect();
+    MediaMosaic {
+        inner: rust_media_mosaic(bubble_width, gap, &items),
+    }
+}
+
+/// The gap the spec draws between mosaic tiles. Chosen.
+#[wasm_bindgen(js_name = mediaMosaicGap)]
+#[must_use]
+pub fn media_mosaic_gap() -> u32 {
+    MOSAIC_GAP
+}
+
+/// The most photos and videos one message carries and its mosaic shows.
+/// Chosen, not measured.
+#[wasm_bindgen(js_name = mediaMosaicMaxItems)]
+#[must_use]
+pub fn media_mosaic_max_items() -> u32 {
+    u32::try_from(MOSAIC_MAX_ITEMS).unwrap_or(u32::MAX)
+}
+
 /// Flag bit of {@link callStage}: this device's own tile.
 pub const STAGE_FLAG_LOCAL: u8 = 1;
 /// Flag bit of {@link callStage}: the person is sending a picture.
@@ -2517,6 +2602,19 @@ pub fn photo_max_longest_side_px() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_media_mosaic_crosses_the_boundary_intact() {
+        let m = media_mosaic(320, media_mosaic_gap(), &[1000, 1600], &[1000, 900]);
+        assert_eq!((m.width(), m.height(), m.count()), (320, 89, 2));
+        assert_eq!(m.tiles(), vec![0, 0, 159, 89, 161, 0, 159, 89]);
+        // A missing height reads as unknown (4:3 at 320 = 240).
+        assert_eq!(
+            media_mosaic(320, 2, &[7], &[]).tiles(),
+            vec![0, 0, 320, 240]
+        );
+        assert_eq!(media_mosaic_max_items(), 10);
+    }
 
     #[test]
     fn the_subscriber_list_crosses_the_boundary_intact() {

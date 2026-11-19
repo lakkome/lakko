@@ -218,6 +218,8 @@ public fun ChatScreen(
     onOpenConversation: (groupIdHex: String) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // docs/ux/media-messages.md section 11 — what is attached to the draft.
+    val tray by viewModel.tray.collectAsStateWithLifecycle()
     // Saving an attachment asks the system where to put the file.
     val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     val listState = rememberLazyListState()
@@ -473,9 +475,9 @@ public fun ChatScreen(
     val pickFilesLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> ->
-        // ADR-0092 / attachments UX section 4 — the same send preview, file
-        // chips, the bytes unchanged.
-        viewModel.openSendPreview(uris, filesOnly = true)
+        // media-messages section 11 / attachments UX section 4 — into the
+        // composer tray as file chips, the bytes unchanged.
+        viewModel.addToTray(uris, filesOnly = true)
     }
     // UX spec §10 — the gallery pick for photos and videos, next to the
     // document pick above. Both paths attach size + thumb when the MIME type
@@ -483,9 +485,9 @@ public fun ChatScreen(
     val pickVisualLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(),
     ) { uris: List<Uri> ->
-        // ADR-0092 / attachments UX section 3 — the send preview: a photo is
-        // re-encoded with its metadata dropped, each item its own message.
-        viewModel.openSendPreview(uris, filesOnly = false)
+        // media-messages section 11 / attachments UX section 3 — into the
+        // composer tray; a photo is re-encoded with its metadata dropped.
+        viewModel.addToTray(uris, filesOnly = false)
     }
     // ADR-0092 / attachments UX section 6 — the document picker filtered to audio.
     val pickAudioLauncher = rememberLauncherForActivityResult(
@@ -1379,10 +1381,7 @@ public fun ChatScreen(
                 draftRevision = state.draftRevision,
                 sending = state.sending,
                 sendError = state.sendError,
-                pendingAttachments = state.pendingAttachments,
-                uploading = state.uploading,
-                inFlightUploads = state.inFlightUploads,
-                pendingPreviews = state.pendingPreviews,
+                tray = tray,
                 onDraftChange = viewModel::onDraftChange,
                 onSendClicked = viewModel::onSendClicked,
                 onFocusChanged = viewModel::onComposerFocusChanged,
@@ -1397,8 +1396,10 @@ public fun ChatScreen(
                     )
                 },
                 onAttachClicked = { attachMenuOpen = true },
-                onRemoveAttachment = viewModel::onRemovePendingAttachment,
-                onPasteMedia = viewModel::openPastedMedia,
+                onRemoveTrayItem = viewModel::onRemoveTrayItem,
+                onRetryTrayItem = viewModel::onRetryTrayItem,
+                trayLocalFile = viewModel::trayLocalFile,
+                onPasteMedia = viewModel::onPasteMedia,
             )
 
             is me.lakko.app.chat.ComposerSlot.Withdrawn -> WithdrawnComposer(slot)
@@ -2192,7 +2193,28 @@ internal fun Bubble(
         // rather than the three conditionals that used to encode it here and
         // could disagree (the voice case fell through all three and got a
         // second row below the bubble).
-        val metaSlot = me.lakko.app.media.bubbleMetaSlot(soleBubble)
+        // docs/ux/media-messages.md section 11 — the photos and videos of the
+        // message as one mosaic at the top of the bubble, then the other
+        // attachments, then the text. Laid out by the shared rule.
+        val mosaicSplit = remember(msg) {
+            if (msg.deleted || msg.content != null || msg.unsupportedVersion != null) {
+                null
+            } else {
+                splitForMosaic(msg.attachments, mediaHub.allowlist, mosaicMaxItems()).takeIf { it.media.isNotEmpty() }
+            }
+        }
+        val mosaicLayout = remember(mosaicSplit) { mosaicSplit?.let { layoutMosaic(it.media) } }
+        // Section 11 — the mosaic alone: no text, no other attachment, no
+        // quote or forward line; drawn with no bubble behind it.
+        val mosaicBare = mosaicSplit != null && msg.text.isEmpty() && mosaicSplit.others.isEmpty() &&
+            msg.reply == null && msg.forward == null
+        val metaSlot = when {
+            // Without text the time rides a pill on the mosaic; with text it
+            // sits at the end of the text, drawn by the mosaic branch.
+            mosaicSplit != null && msg.text.isEmpty() -> me.lakko.app.media.BubbleMetaSlot.MEDIA_PILL
+            mosaicSplit != null -> me.lakko.app.media.BubbleMetaSlot.BUBBLE_ROW
+            else -> me.lakko.app.media.bubbleMetaSlot(soleBubble)
+        }
         val mediaOnly = metaSlot == me.lakko.app.media.BubbleMetaSlot.MEDIA_PILL
         // reactions-and-emoji section 13 — one to three emoji and nothing
         // else (no attachment, quote or forward line) are drawn large, with
@@ -2208,7 +2230,8 @@ internal fun Bubble(
                 }
             }
         }
-        val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly || emojiOnly > 0
+        val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE ||
+            (mediaOnly && (mosaicSplit == null || mosaicBare)) || emojiOnly > 0
         val reactionCtx = LocalBubbleReactions.current
         val contentBubbleCtx = LocalContentBubble.current
         val ownEmoji = remember(msg.reactions, ownIdentity) {
@@ -2290,7 +2313,7 @@ internal fun Bubble(
                     // column to its widest child makes that fill resolve to
                     // the content instead, so the bubble hugs what is in it
                     // and the time still sits in the trailing corner.
-                    modifier = (if (mediaOnly) Modifier else Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                    modifier = (if (mediaOnly || mosaicSplit != null) Modifier else Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
                         .width(IntrinsicSize.Max),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -2331,6 +2354,44 @@ internal fun Bubble(
                             )
                         }
                         ContentBubble(msg, contentColor, isOwn)
+                    } else if (mosaicSplit != null) {
+                        MosaicMessageBody(
+                            msg = msg,
+                            split = mosaicSplit,
+                            mosaic = mosaicLayout,
+                            bare = mosaicBare,
+                            hub = mediaHub,
+                            isOwn = isOwn,
+                            time = time,
+                            readState = readState,
+                            saved = savedMessage,
+                            background = background,
+                            contentColor = contentColor,
+                            shownText = tr.shownText,
+                            captionLine = tr.captionLine?.let { line ->
+                                {
+                                    me.lakko.app.ui.translation.TranslateQuietLine(
+                                        line = line,
+                                        contentColor = contentColor,
+                                        onShowOriginal = tr.onShowOriginal,
+                                        onTranslate = tr.onTranslate,
+                                        onNotLanguage = tr.onNotLanguage,
+                                        onCancel = tr.onCancel,
+                                    )
+                                }
+                            },
+                            onSave = onSave,
+                            onPreview = onPreview,
+                            openMenu = openMenu,
+                            onRetry = if (msg.ack == Ack.FAILED) {
+                                { onRetrySend(msg.localId) }
+                            } else {
+                                null
+                            },
+                            onJumpToForward = onJumpToForward,
+                            onJumpToReply = onJumpToReply,
+                            replyTargetIsOwn = replyTargetIsOwn,
+                        )
                     } else {
                         // ADR-0052 / UX 3.1 — the quote above the message's
                         // own text, in the bubble's own colours, drawn from
@@ -2530,7 +2591,7 @@ internal fun Bubble(
                     // after it. A voice row carries it on its own quiet line
                     // and chromeless media below the bubble, so neither adds a
                     // row here.
-                    if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BUBBLE_ROW) {
+                    if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BUBBLE_ROW && mosaicSplit == null) {
                         BubbleMeta(
                             edited = msg.edited && !msg.deleted,
                             saved = savedMessage && !msg.deleted,
@@ -3031,6 +3092,137 @@ private fun MediaMetaPill(
     }
 }
 
+/**
+ * docs/ux/media-messages.md section 11 — a message carrying photos or videos:
+ * the quote or forward line, the mosaic edge to edge, the other attachments,
+ * then the text, all in one bubble. With text the time sits at the end of the
+ * text; without it, on a pill over the mosaic.
+ */
+@Composable
+private fun MosaicMessageBody(
+    msg: ChatMessage,
+    split: MosaicSplit,
+    mosaic: uniffi.lakko_ffi_uniffi.MediaMosaic?,
+    /** The mosaic alone, with no bubble behind it. */
+    bare: Boolean,
+    hub: me.lakko.app.media.ChatMediaHub,
+    isOwn: Boolean,
+    time: String?,
+    readState: OwnReadState,
+    saved: Boolean,
+    background: Color,
+    contentColor: Color,
+    shownText: String,
+    captionLine: (@Composable () -> Unit)?,
+    onSave: (AttachmentRef) -> Unit,
+    onPreview: (AttachmentRef) -> Unit,
+    openMenu: (() -> Unit)?,
+    onRetry: (() -> Unit)?,
+    onJumpToForward: (ForwardRef) -> Unit,
+    onJumpToReply: (Long) -> Unit,
+    replyTargetIsOwn: (Long) -> Boolean,
+) {
+    val hasText = msg.text.isNotEmpty()
+    val tail = hasText || split.others.isNotEmpty()
+    val mosaicWidth = mosaic?.width?.toInt() ?: MOSAIC_BUBBLE_WIDTH_DP
+    // A narrow lone item keeps a readable text column under it.
+    val columnWidth = if (tail) maxOf(mosaicWidth, MOSAIC_TEXT_MIN_WIDTH_DP) else mosaicWidth
+    val pad = Modifier.padding(horizontal = 12.dp)
+    Column(
+        modifier = Modifier.width(columnWidth.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        val forward = msg.forward
+        val reply = msg.reply
+        if (forward != null || reply != null) {
+            Column(pad.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (forward != null) {
+                    ForwardLine(forward = forward, contentColor = contentColor, onClick = { onJumpToForward(forward) })
+                }
+                if (reply != null) {
+                    ReplyQuote(
+                        reply = reply,
+                        quotesOwnAccount = replyTargetIsOwn(reply.target),
+                        contentColor = contentColor,
+                        onClick = { onJumpToReply(reply.target) },
+                    )
+                }
+            }
+        }
+        MediaMosaicView(
+            refs = split.media,
+            mosaic = mosaic,
+            hub = hub,
+            onSave = onSave,
+            onLongPress = openMenu,
+            squareBottom = tail,
+            squareTop = forward != null || reply != null,
+            overlay = if (!hasText) {
+                {
+                    MediaMetaPill(
+                        edited = msg.edited,
+                        saved = saved,
+                        time = time,
+                        readState = if (isOwn) readState else OwnReadState.None,
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                    )
+                }
+            } else {
+                null
+            },
+        )
+        if (split.others.isNotEmpty()) {
+            Column(pad.padding(top = 4.dp, bottom = if (hasText) 0.dp else 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (ref in split.others) {
+                    AttachmentView(
+                        ref = ref,
+                        hub = hub,
+                        isOwn = isOwn,
+                        contentColor = contentColor,
+                        bubbleColor = background,
+                        onSave = onSave,
+                        onLongPress = openMenu,
+                    ) {
+                        AttachmentChipRow(ref = ref, hub = hub, onPreview = { onPreview(ref) }, onSave = { onSave(ref) })
+                    }
+                }
+            }
+        }
+        if (hasText) {
+            Column(pad.padding(top = 4.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                me.lakko.app.ui.components.MessageLinkText(
+                    text = shownText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
+                    onLongPress = openMenu,
+                )
+                captionLine?.invoke()
+                BubbleMeta(
+                    edited = msg.edited,
+                    saved = saved,
+                    time = time,
+                    readState = if (isOwn) readState else OwnReadState.None,
+                    contentColor = contentColor,
+                    onRetry = onRetry,
+                )
+            }
+        } else if (onRetry != null) {
+            // A failed send still offers Retry next to the message.
+            BubbleMeta(
+                edited = false,
+                time = null,
+                readState = OwnReadState.None,
+                contentColor = if (bare) MaterialTheme.colorScheme.onSurfaceVariant else contentColor,
+                modifier = pad.padding(bottom = 4.dp),
+                onRetry = onRetry,
+            )
+        }
+    }
+}
+
+/** A lone narrow photo with text under it keeps at least this text column. */
+private const val MOSAIC_TEXT_MIN_WIDTH_DP: Int = 200
+
 /** reactions-and-emoji sections 5-10 — what a bubble needs to draw and
  *  answer reactions, provided once by the chat screen. */
 internal class BubbleReactionContext(
@@ -3529,10 +3721,9 @@ internal fun Composer(
     draftRevision: Int = 0,
     sending: Boolean,
     sendError: UiText?,
-    pendingAttachments: List<AttachmentRef>,
-    uploading: Boolean,
-    inFlightUploads: List<UploadProgress>,
-    pendingPreviews: Map<String, ByteArray>,
+    /** docs/ux/media-messages.md section 11 — what is attached to the
+     *  message being written. */
+    tray: ComposerTray,
     onDraftChange: (String) -> Unit,
     onSendClicked: () -> Unit,
     /** ADR-0024 — fired with the composer's focus state. On
@@ -3541,7 +3732,12 @@ internal fun Composer(
     /** UX spec §10 — the gallery pick (photos and videos). */
     onPickMedia: () -> Unit,
     onAttachClicked: () -> Unit,
-    onRemoveAttachment: (Int) -> Unit,
+    /** Section 11 — the (x) on a tray item. */
+    onRemoveTrayItem: (Long) -> Unit,
+    /** Section 11 — tap on a failed tray item. */
+    onRetryTrayItem: (Long) -> Unit = {},
+    /** Section 11 — the prepared bytes of a tray photo or video, for the viewer. */
+    trayLocalFile: (Long) -> java.io.File? = { null },
     /** ADR-0052 / UX 3.1 — the armed reply the strip shows, or `null`. */
     replyStrip: ReplyArmed? = null,
     /** The armed reply quotes this account's own message ("You" here). */
@@ -3639,7 +3835,8 @@ internal fun Composer(
     // tens of milliseconds a tap lasts. The rule is
     // `me.lakko.app.media.showsRecordingUi`.
     val recording = me.lakko.app.media.showsRecordingUi(recState)
-    val showSend = draft.isNotBlank() || pendingAttachments.isNotEmpty() || uploading
+
+    val showSend = draft.isNotBlank() || tray.items.isNotEmpty()
 
     Column {
         HorizontalDivider()
@@ -3715,17 +3912,15 @@ internal fun Composer(
                 }
             }
         }
-        // 1.19c4 — pending-attachments tray. Horizontal scroll
-        // of chips above the text field; each chip shows
-        // `name · size` with a × to drop it. Plus an
-        // "Encrypting…" placeholder chip while [uploading] is
-        // true.
-        if ((pendingAttachments.isNotEmpty() || uploading) && !recording) {
-            PendingAttachmentsTray(
-                attachments = pendingAttachments,
-                inFlight = inFlightUploads,
-                previews = pendingPreviews,
-                onRemove = onRemoveAttachment,
+        // docs/ux/media-messages.md section 11 — the tray directly above the
+        // field: thumbnails and file chips, each with its (x), its upload ring
+        // and, when it failed, a retry glyph. Hidden when empty.
+        if (tray.items.isNotEmpty() && !recording) {
+            ComposerTrayStrip(
+                tray = tray,
+                onRemove = onRemoveTrayItem,
+                onRetry = onRetryTrayItem,
+                localFile = trayLocalFile,
             )
         }
         Row(
@@ -3749,7 +3944,7 @@ internal fun Composer(
                 // ChatScreen; never a stock dropdown.
                 IconButton(
                     onClick = onAttachClicked,
-                    enabled = !sending && !uploading,
+                    enabled = !sending,
                     modifier = Modifier.testTag("composer-attach"),
                 ) {
                     LkIcon(R.drawable.ic_lk_paperclip, contentDescription = t("chat.composer.attach"), size = LkIconSize.Row)
@@ -3782,7 +3977,7 @@ internal fun Composer(
                         // Enter stays a new line.
                         .submitOnHardwareEnter {
                             flushDraft()
-                            if (!sending && !uploading && (fieldState.text.isNotBlank() || pendingAttachments.isNotEmpty())) {
+                            if (!sending && tray.canSend(fieldState.text.toString())) {
                                 onSendClicked()
                             }
                         }
@@ -3809,8 +4004,7 @@ internal fun Composer(
                         flushDraft()
                         onSendClicked()
                     },
-                    enabled = !sending && !uploading
-                        && (draft.isNotBlank() || pendingAttachments.isNotEmpty()),
+                    enabled = !sending && tray.canSend(draft),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -3932,99 +4126,6 @@ private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
             )
         }
     }
-}
-
-@Composable
-private fun PendingAttachmentsTray(
-    attachments: List<AttachmentRef>,
-    inFlight: List<UploadProgress>,
-    previews: Map<String, ByteArray>,
-    onRemove: (Int) -> Unit,
-) {
-    val scrollState = rememberScrollState()
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .horizontalScroll(scrollState),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        attachments.forEachIndexed { index, ref ->
-            val preview = previews[AttachmentBridge.hex(ref.blobId)]
-            AssistChip(
-                onClick = { onRemove(index) },
-                leadingIcon = preview?.let { bytes -> { TrayThumb(bytes, 24) } },
-                label = {
-                    Column {
-                        Text(
-                            text = ref.name ?: t("chat.attachment.unnamed"),
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1,
-                        )
-                        Text(
-                            text = AttachmentBridge.formatSize(ref.size, LocalStrings.current),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                trailingIcon = {
-                    val removeLabel = t("chat.composer.remove_attachment")
-                    Text("×", modifier = Modifier.semantics { contentDescription = removeLabel })
-                },
-                colors = AssistChipDefaults.assistChipColors(),
-            )
-        }
-        // UX spec §10 — one chip per picked item still in flight, shown from
-        // the moment it was picked, with its thumb once one exists.
-        for (item in inFlight) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.semantics(mergeDescendants = true) {},
-            ) {
-                item.previewBytes?.let { bytes ->
-                    TrayThumb(bytes)
-                    Spacer(Modifier.width(6.dp))
-                }
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .height(16.dp)
-                        .width(16.dp),
-                    strokeWidth = 2.dp,
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = t(
-                        when (item.stage) {
-                            null -> "chat.upload.preparing"
-                            UploadStage.Encrypting -> "chat.upload.encrypting"
-                            UploadStage.Uploading -> "chat.upload.uploading"
-                        },
-                        mapOf("name" to item.fileName),
-                    ),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-/** UX spec §10 — the photo / video thumb in a composer chip. */
-@Composable
-private fun TrayThumb(bytes: ByteArray, sizeDp: Int = 32) {
-    val bitmap = remember(bytes) { decodeImageBitmap(bytes) } ?: return
-    androidx.compose.foundation.Image(
-        bitmap = bitmap,
-        contentDescription = null,
-        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-        modifier = Modifier
-            .height(sizeDp.dp)
-            .width(sizeDp.dp)
-            .clip(RoundedCornerShape(6.dp)),
-    )
 }
 
 /** Back-off delay between failed long-poll iterations. 5s

@@ -3,8 +3,9 @@
 
 /**
  * `docs/ux/attachments.md` — the paperclip of a composer and every screen it
- * opens: the system pickers (Photo or Video, File, Audio) behind the send
- * preview, Lakko's camera, and the poll, checklist, location, contact and
+ * opens: the system pickers (Photo or Video, File, Audio) and Lakko's camera,
+ * whose results go into the composer tray (`docs/ux/media-messages.md`
+ * section 11, never a dialog), and the poll, checklist, location, contact and
  * article screens. The conversation that mounts it does the sending; this
  * component only decides which screen is up and hands back drafts.
  *
@@ -21,7 +22,6 @@ import type { Article, MessageContent, SharedContactCard, SharedLocation } from 
 import { AttachMenu } from "./AttachMenu";
 import { pasteBelongsToField, pastedFiles } from "../chat/pasted-files";
 import { deviceHasCamera, deviceHasLocation, menuEntriesOf } from "./attach-menu";
-import { SendPreview } from "./SendPreview";
 import { CameraScreen } from "./CameraScreen";
 import { PollEditor } from "./PollEditor";
 import { ChecklistEditor } from "./ChecklistEditor";
@@ -37,7 +37,6 @@ import type {
   ChecklistDraft,
   PollAnonymityMode,
   PollDraft,
-  PreviewResult,
   ShareableContact,
 } from "./types";
 
@@ -65,24 +64,23 @@ export interface AttachComposerProps {
   readonly contacts: () => readonly ShareableContact[];
   readonly editRequest: () => AttachEditRequest | null;
   readonly clearEditRequest: () => void;
-  sendFiles(r: PreviewResult, mode: "media" | "file" | "audio"): Promise<void>;
+  /** `docs/ux/media-messages.md` section 11 — files picked, captured, pasted
+   *  or dropped go into the composer tray. `media` sends each as a photo or
+   *  video where it can be one; `file` and `audio` send the bytes as a file. */
+  addFiles(files: readonly File[], source: "media" | "file" | "audio"): void;
   sendPoll(d: PollDraft): Promise<void>;
   sendChecklist(d: ChecklistDraft, editTarget: number | undefined): Promise<void>;
   sendLocation(l: SharedLocation): Promise<void>;
   sendContact(c: SharedContactCard): Promise<void>;
   sendArticle(out: ArticleDraftOut, editTarget: number | undefined): Promise<void>;
   /** `docs/ux/attachments.md` section 2.5: when true, files pasted anywhere
-   *  in the page (or into a field marked `data-paste-files`) open the send
-   *  preview, as the paperclip's Photo or Video / File would. */
+   *  in the page (or into a field marked `data-paste-files`) go into the
+   *  composer tray, as the paperclip's Photo or Video / File would. */
   readonly acceptPaste?: () => boolean;
-  /** Hands the owner a function that opens the send preview for files from
-   *  elsewhere (a drop on the conversation). */
-  readonly bindOpenFiles?: (open: (files: readonly File[]) => void) => void;
 }
 
 type Screen =
   | { readonly kind: "none" }
-  | { readonly kind: "preview"; readonly files: readonly File[]; readonly mode: "media" | "file" | "audio"; readonly fromCamera: boolean }
   | { readonly kind: "camera" }
   | { readonly kind: "poll" }
   | { readonly kind: "checklist"; readonly target?: number; readonly initial?: ChecklistDraft }
@@ -196,18 +194,18 @@ export function AttachComposer(props: AttachComposerProps): JSX.Element {
     const input = e.currentTarget as HTMLInputElement;
     const files = input.files === null ? [] : Array.from(input.files);
     input.value = "";
-    if (files.length > 0) setScreen({ kind: "preview", files, mode, fromCamera: false });
+    if (files.length > 0) props.addFiles(files, mode);
   };
   const close = (): void => {
     setScreen({ kind: "none" });
   };
 
   const openFiles = (files: readonly File[]): void => {
-    if (files.length === 0 || screen().kind !== "none" || props.hidden()) return;
-    const media = files.every((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
-    setScreen({ kind: "preview", files, mode: media ? "media" : "file", fromCamera: false });
+    if (files.length === 0 || props.hidden()) return;
+    // Each file takes its own shape in the tray: a photo or video where the
+    // receivers can show it inline, a file chip otherwise.
+    props.addFiles(files, "media");
   };
-  props.bindOpenFiles?.(openFiles);
 
   onMount(() => {
     const onPaste = (e: ClipboardEvent): void => {
@@ -246,21 +244,13 @@ export function AttachComposer(props: AttachComposerProps): JSX.Element {
       <Show when={screen().kind !== "none"}>
         <Portal>
           <Switch>
-            <Match when={screen().kind === "preview" ? (screen() as Extract<Screen, { kind: "preview" }>) : null}>
-              {(s) => (
-                <SendPreview
-                  files={s().files}
-                  mode={s().mode}
-                  onCancel={close}
-                  onSend={(r) => run(() => props.sendFiles(r, s().mode))}
-                  {...(s().fromCamera ? { onRetake: () => setScreen({ kind: "camera" }) } : {})}
-                />
-              )}
-            </Match>
             <Match when={screen().kind === "camera"}>
               <CameraScreen
                 onCancel={close}
-                onCaptured={(files) => setScreen({ kind: "preview", files, mode: "media", fromCamera: true })}
+                onCaptured={(files) => {
+                  close();
+                  props.addFiles(files, "media");
+                }}
               />
             </Match>
             <Match when={screen().kind === "poll"}>

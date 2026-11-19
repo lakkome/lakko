@@ -160,6 +160,12 @@ public data class ProcessedRow(
     val text: String,
     /** Number of attachment refs (chat only). */
     val attachmentCount: Int,
+    /** docs/ux/media-messages.md section 11 — what the attachments are, for
+     *  the row's words (`3 photos`, `File`); empty when not read. */
+    val previewAttachments: List<me.lakko.app.ui.chat.PreviewAttachment> = emptyList(),
+    /** Section 11 — the first photo or video's sent thumbnail, for the
+     *  notification's picture; `null` when there is none. */
+    val previewThumb: uniffi.lakko_ffi_uniffi.ThumbRef? = null,
     /** ADR-0048 — the sender's name, when this device ALREADY knows one
      *  better than a fingerprint (read from the stored profiles; never
      *  fetched or verified here). `null` otherwise. */
@@ -199,6 +205,10 @@ public data class PushPreview(
     /** Notification tag (the group hex — collapses a burst into one
      *  OS notification). */
     val tag: String,
+    /** docs/ux/media-messages.md section 11 — the first photo or video's
+     *  sent thumbnail, fetched for the notification's picture when there is
+     *  time; `null` for a message without one. */
+    val thumb: uniffi.lakko_ffi_uniffi.ThumbRef? = null,
 )
 
 /**
@@ -698,8 +708,8 @@ public suspend fun decryptPushWake(
             // The conversation's name as the title; in a group the sender's
             // name before the text.
             val shape = notificationShape(conversationKind, groupName, processed?.senderName, body)
-            latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
-                ?: unnamedSenderPreview(realGroupHex)
+            latest = (shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
+                ?: unnamedSenderPreview(realGroupHex)).copy(thumb = processed?.previewThumb)
         }
         // `docs/ux/calls.md` section 2.1 — resolved only when this batch
         // actually rings for something, so an ordinary message wake never pays
@@ -755,7 +765,11 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
     return when (row.kind) {
         // A normal chat message → its text (or an attachment hint).
         ProcessedKind.CHAT ->
-            if (row.text.isNotEmpty()) {
+            if (row.previewAttachments.isNotEmpty()) {
+                // Section 11 — the same words and text as the list row.
+                me.lakko.app.ui.chat.messagePreviewBody(row.text, row.previewAttachments)
+                    .takeIf { it.isNotEmpty() }?.let(::truncate)
+            } else if (row.text.isNotEmpty()) {
                 truncate(row.text)
             } else {
                 when {

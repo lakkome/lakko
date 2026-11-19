@@ -8,9 +8,10 @@
  *   * the pixel size a sender attaches (`fitWithin`, the 4096 wire bound);
  *   * the thumb a sender renders (`thumbDimensions`, longest side 320);
  *   * the JPEG quality ladder that keeps a thumb under its budget
- *     (`pickThumbQuality`);
- *   * the fixed box a receiver lays the bubble out in before any byte has
- *     arrived (`bubbleBox`).
+ *     (`pickThumbQuality`).
+ *
+ * Where a received photo or video is drawn is the shared mosaic rule
+ * (`mosaic-layout.ts`, section 11), one item included.
  */
 
 /** The core drops a `width` / `height` outside 1..=4096 (ADR-0047). */
@@ -23,13 +24,6 @@ export const THUMB_TARGET_BYTES = 64 * 1024;
 export const THUMB_HARD_CAP_BYTES = 256 * 1024;
 /** JPEG qualities tried in order until a thumb fits the target. */
 export const THUMB_QUALITY_STEPS: readonly number[] = [0.82, 0.72, 0.62, 0.52, 0.42, 0.32];
-
-/** Web bubble box (spec: native 260 pt/dp, web 320 px wide; 360 high). */
-export const BUBBLE_MAX_WIDTH = 320;
-export const BUBBLE_MAX_HEIGHT = 360;
-/** Shortest side a bubble is ever drawn at, so a tiny image or an extreme
- *  panorama stays a usable tap target. Not in the spec; a layout floor. */
-export const BUBBLE_MIN_SIDE = 64;
 
 export interface Size {
   readonly width: number;
@@ -77,48 +71,6 @@ export async function pickThumbQuality<T>(
   }
   if (best !== null && best.bytes <= THUMB_HARD_CAP_BYTES) return { quality: best.quality, value: best.value };
   return null;
-}
-
-/**
- * The fixed box a photo or video bubble is laid out in before anything is
- * downloaded. In order of preference the aspect comes from the attachment's
- * own `width` / `height`, then from the thumb's, then a 4:3 placeholder.
- *
- * With the attachment's dimensions the box is the media's pixel size scaled
- * down to fit the bubble box (a small image is not blown up). With only a
- * thumb, or nothing, the aspect is fitted to the full bubble width, since a
- * thumb's own pixel size says nothing about the original's.
- */
-export function bubbleBox(
-  media: { readonly width?: number | undefined; readonly height?: number | undefined },
-  thumb?: { readonly width?: number | undefined; readonly height?: number | undefined },
-  maxWidth: number = BUBBLE_MAX_WIDTH,
-  maxHeight: number = BUBBLE_MAX_HEIGHT,
-): Size {
-  let w: number;
-  let h: number;
-  let upscale: boolean;
-  if (validSide(media.width) && validSide(media.height)) {
-    w = media.width;
-    h = media.height;
-    upscale = false;
-  } else if (thumb !== undefined && validSide(thumb.width) && validSide(thumb.height)) {
-    w = thumb.width;
-    h = thumb.height;
-    upscale = true;
-  } else {
-    w = 4;
-    h = 3;
-    upscale = true;
-  }
-  const fit = Math.min(maxWidth / w, maxHeight / h);
-  const scale = upscale ? fit : Math.min(1, fit);
-  const width = Math.round(w * scale);
-  const height = Math.round(h * scale);
-  return {
-    width: Math.min(maxWidth, Math.max(BUBBLE_MIN_SIDE, width)),
-    height: Math.min(maxHeight, Math.max(BUBBLE_MIN_SIDE, height)),
-  };
 }
 
 const EXTENSIONS: Readonly<Record<string, string>> = {

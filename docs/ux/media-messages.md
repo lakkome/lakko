@@ -386,7 +386,7 @@ A photo or a video is shown in the chat window itself, like every mainstream mes
 - **Video bubble**: MIME `video/mp4` and no `kind`.
 - Anything else, including HEIC and SVG, stays a file chip. The iOS photo picker converts
   HEIC to JPEG before sending so an iPhone photo is always a photo bubble everywhere.
-- Several photos sent together still render as separate bubbles in v1.
+- Several photos and videos sent in one message render together in one bubble (section 11).
 
 ### Sending
 
@@ -437,3 +437,107 @@ delete own).
 One mental model on all three: the same allowlist decision (the shared `inlineMediaType`
 FFI call), the same sizing box, the same auto-load rule (photos yes, videos on tap), the
 same viewer. The file chip remains only for non-media files.
+
+## 11. One message with text and several photos and videos
+
+Added 2026-11-19 (maintainer): better than a messenger where a photo is always a message of
+its own with a caption. A message is text plus whatever is attached to it: one photo, ten,
+videos, files, in any mix. The sender sees what is attached before sending, and the
+receiver sees the message as it was composed.
+
+### The composer tray (sender)
+
+- **Ways in:** paste (`Cmd+V` / `Ctrl+V` on web and desktop, Paste or keyboard insertion on
+  iOS and Android), drop on the conversation (web, desktop), the paperclip's Photo or Video,
+  File, Audio and Camera. All of them add to the tray; none opens a dialog. There is no
+  `Send as file` switch anywhere.
+- **Where:** a strip directly above the message field, inside the composer, full composer
+  width, 8 px from the field. Hidden when empty.
+- **Items:** a photo or video is a 64 px square thumbnail (corner radius 8, cropped to fill);
+  a video shows its duration bottom left on a translucent pill; a file is a chip 64 px high
+  with a document icon, the name (one line, ellipsised) and the size. Order: the order they
+  were added, left to right; the strip scrolls sideways past the composer width (web:
+  horizontal wheel and shift-wheel; a fade at the cut edge).
+- **Remove:** an (x) button in each item's top end corner, 20 px, always visible on touch
+  screens, on hover and focus on web and desktop. `Backspace` in an empty field removes the
+  last item (web, desktop).
+- **Look larger:** click or tap a photo or video thumbnail opens the media viewer (section
+  10) on that item, with the tray's other photos and videos to swipe or arrow through.
+  Closing returns to the composer with the text and the tray unchanged.
+- **Upload starts at once** when an item is added: each thumbnail shows a thin progress
+  ring; a failed upload shows a retry glyph on the thumbnail (tap retries) and Send stays
+  off until it is retried or removed.
+- **Limits:** at most 10 photos and videos, and at most 10 files, per message (chosen, not
+  measured). Adding past a limit adds what fits and shows, under the strip, `Up to 10
+  photos and videos in one message.` / `Up to 10 files in one message.` for 4 s.
+- **Send:** enabled when the field has text or the tray has at least one item, and no item
+  is still uploading or failed. Sends ONE message: the text and every item. The field and
+  the tray clear together. Editing a sent message changes its text only.
+- **Draft:** the tray belongs to the conversation's draft on this device: leaving the
+  conversation and coming back keeps it while the app runs (the uploaded items are kept;
+  ones still uploading continue).
+
+### The bubble (receiver and sender)
+
+- **One bubble** holds, top to bottom: the media mosaic, the file chips, the text. A reply
+  quote or a forward label stays at the top as today.
+- **Mosaic** of the photos and videos, in the order sent, 2 px gaps, outer corners rounded
+  with the bubble, inner corners square, total width the media bubble width of section 10
+  (260 pt/dp, web 320 px):
+  - 1 item: as section 10 (its own aspect, within the box: at most the bubble width wide and
+    360 high); an extreme aspect is kept at least 80 high and 80 wide and cropped to that;
+  - 2: side by side, equal width, the height of the shorter at that width, between 80 and 260;
+  - 3: one large on the start side (two thirds of the width less the gap), two stacked on the
+    end side; the block is as tall as the large one at its width, between 162 (two stacked
+    tiles of at least 80 and the gap) and 300, and the two stacked split that height;
+  - 4 to 10: rows of 2 and 3, as even as the count allows (4 = 2+2, 5 = 2+3, 6 = 3+3,
+    7 = 2+2+3, 8 = 3+3+2, 9 = 3+3+3, 10 = 3+2+2+3), equal widths in a row; each row is as
+    tall as its most landscape item at its tile width, between 80 and 200 px. Every tile
+    crops to fill.
+  - Every row fills the width exactly: when it does not divide evenly, the first tiles of
+    the row (start side) are one pixel wider. A photo or video of unknown size is laid out
+    as 4:3; a client with no `width` / `height` but a thumbnail of known size passes the
+    thumbnail's size.
+  - A received message carrying more than 10 photos and videos (a sender cannot attach
+    more) shows the first 10 in the mosaic and the viewer, in the order sent, and nothing
+    of the rest.
+  - The layout is one shared rule, `media_mosaic` in `lakko-ui-rules` (on both FFI
+    surfaces); its numbers are chosen, not measured.
+  - Each tile follows section 10's states (thumb, full, failed, video poster with play
+    glyph and duration) on its own.
+- **Text** below the mosaic and chips, inside the bubble, as an ordinary text message. With
+  text, the time and ticks sit at the end of the text; without text, in the translucent pill
+  bottom end on the mosaic.
+- **Tap** a tile opens the viewer on it with every photo and video of the message to swipe
+  (native) or arrow through (web, desktop), a position line `2 / 5`, Save for the current
+  one. A video tile plays in the viewer.
+- **Chat list row** (added 2026-11-19, maintainer): a message with photos or videos shows,
+  at the start of its preview line, a 20 px thumbnail of the first one (corner radius 4,
+  cropped to fill; a video's thumbnail carries a small play glyph). With several, the
+  thumbnail is drawn as a **stack**: one or two offset edges behind it (2 px right and up
+  each, the row's muted tone), one edge for 2 items, two for 3 or more. Then the message
+  text; without text, the words `Photo`, `3 photos`, `Video`, `2 videos`, `4 photos and
+  videos`. Files only: no thumbnail, the words `File` / `3 files`, then ` · ` and the text when there
+  is text (`2 files · Weekend plans`). The
+  thumbnail is the attachment's own sent thumb (section 10), already decrypted for the
+  timeline or fetched and decrypted when the row is drawn; until it is there the space shows
+  the row's neutral placeholder, never a broken image. A failed fetch keeps the placeholder.
+- **Notifications:** the same words and text as the list row, plus the first item's
+  thumbnail as the notification's picture where the platform takes one (iOS: a notification
+  attachment from the extension; Android: the large icon or a big-picture style; macOS
+  desktop: the notification's content image; web: the notification `image` where the
+  browser shows it). Only the sent thumbnail is fetched, never the full photo or video, and
+  only by the device that already decrypts the message preview for that notification. Where
+  the system hides notification content on the lock screen, it hides the picture with the
+  text; Lakko shows the picture exactly when it shows the text. If the thumbnail cannot be
+  fetched in the time the platform gives, the notification goes out with text only.
+- **Reactions, reply, forward, delete, save** act on the whole message. Forwarding a message
+  with several items forwards them all, re-encrypted (ADR-0052).
+
+### Cross-platform shape
+
+The same tray, mosaic rule and viewer on web and desktop (SolidJS), iOS (SwiftUI) and
+Android (Compose). The mosaic layout is one rule computed the same way on every client.
+Nothing changes on the wire: a chat envelope already carries the text and a list of
+attachment references (`lakko-attachments`), each with its own dimensions and thumbnail.
+

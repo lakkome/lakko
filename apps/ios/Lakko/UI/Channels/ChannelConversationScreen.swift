@@ -229,30 +229,10 @@ struct ChannelConversationScreen: View {
                 isPresented: $audioOpen, allowedContentTypes: [.audio], allowsMultipleSelection: true
             ) { result in
                 guard case .success(let urls) = result else { return }
-                for url in urls {
-                    Task {
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        guard let bytes = try? Data(contentsOf: url) else { return }
-                        // UX section 6 — the same audio upload as in a chat:
-                        // kind audio, duration, cover as the thumb, title and
-                        // artist from the file's own tags.
-                        let tags = await AudioTags.read(url: url)
-                        let limits = contentLimits()
-                        var thumb: ThumbRef?
-                        if let cover = tags.cover {
-                            thumb = try? await AttachmentBridge.encryptAndUploadThumb(
-                                bytes: cover.data, mime: "image/jpeg", width: cover.width, height: cover.height)
-                        }
-                        await model.stageAttachment(
-                            bytes: bytes, mime: UTTypeMime.of(url), name: url.lastPathComponent,
-                            media: MediaAttachmentMeta(
-                                kind: "audio", durationMs: tags.durationMs.map { min($0, limits.maxAudioDurationMs) },
-                                thumb: thumb),
-                            title: AudioTags.bounded(tags.title ?? url.deletingPathExtension().lastPathComponent, limits),
-                            artist: tags.artist.flatMap { AudioTags.bounded($0, limits) })
-                    }
-                }
+                // UX section 6 — the same audio upload as in a chat: kind
+                // audio, duration, cover as the thumb, title and artist from
+                // the file's own tags, through the composer tray.
+                model.tray.add(urls.map { .audio($0) })
             })
             .lakkoDialog(
                 isPresented: Binding(get: { closeConfirm != nil }, set: { if !$0 { closeConfirm = nil } }),
@@ -268,22 +248,27 @@ struct ChannelConversationScreen: View {
                 matching: .any(of: [.images, .videos]))
             .onChange(of: photoItems) { _, items in
                 photoItems = []
-                for item in items { Task { await stagePicked(item) } }
+                guard !items.isEmpty else { return }
+                Task { await addPicked(items, to: model.tray) }
             }
             .fileImporter(
                 isPresented: $fileImporterOpen, allowedContentTypes: [UTType.data],
                 allowsMultipleSelection: true
             ) { result in
                 guard case .success(let urls) = result else { return }
+                var sources: [ComposerTraySource] = []
                 for url in urls {
-                    Task {
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        guard let bytes = try? Data(contentsOf: url) else { return }
-                        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
-                        await model.stageAttachment(bytes: bytes, mime: mime, name: url.lastPathComponent)
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    guard let bytes = try? Data(contentsOf: url) else { continue }
+                    guard bytes.count <= AttachmentBridge.maxAttachmentBytes else {
+                        model.tray.report(.key("attach.preview.file_too_big"))
+                        continue
                     }
+                    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+                    sources.append(.file(bytes, name: url.lastPathComponent, mime: mime))
                 }
+                model.tray.add(sources)
             }
     }
 
@@ -523,26 +508,10 @@ struct ChannelConversationScreen: View {
         case .camera:
             CameraCaptureScreen(onSend: { media in
                 contentScreen = nil
-                Task { await stageCaptured(media) }
+                model.tray.add([ComposerTraySource.captured(media)])
             }, onClose: { contentScreen = nil })
         case .results:
             EmptyView()
-        }
-    }
-
-    private func stageCaptured(_ media: CapturedMedia) async {
-        let stamp = String(UUID().uuidString.prefix(8))
-        switch media {
-        case .photo(let data):
-            if let prepared = PhotoVideoPrep.preparePhoto(data, stamp: stamp), let bytes = prepared.bytes {
-                await model.stageAttachment(bytes: bytes, mime: prepared.mime, name: prepared.name)
-            }
-        case .video(let url):
-            if let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp), let file = prepared.fileURL,
-               let bytes = try? Data(contentsOf: file) {
-                await model.stageAttachment(bytes: bytes, mime: prepared.mime, name: prepared.name)
-            }
-            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -677,34 +646,18 @@ struct ChannelConversationScreen: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if let err = model.sendError {
+            if let err = model.sendError ?? model.tray.problem {
                 Text(err.text)
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if !model.pendingAttachments.isEmpty || model.uploading {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(model.pendingAttachments.enumerated()), id: \.offset) { index, ref in
-                            HStack(spacing: 6) {
-                                Text(ref.name ?? ChannelTimeline.attachmentWord(ref))
-                                    .font(.footnote)
-                                    .lineLimit(1)
-                                Button { model.removePendingAttachment(at: index) } label: {
-                                    LkIconView(.xmarkCircleFill, size: 20)
-                                        .foregroundStyle(Color.lakkoTextMuted)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(l10n.t("chat.composer.remove_attachment"))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(Color.lakkoSurfaceSunken))
-                        }
-                        if model.uploading { ProgressView().controlSize(.small) }
-                    }
-                }
+            // `docs/ux/media-messages.md` section 11 — the tray, directly
+            // above the message field; hidden when empty.
+            if !model.tray.tray.isEmpty || model.tray.limitNotice != nil {
+                ComposerTrayView(
+                    store: model.tray, callActive: media.callActive,
+                    fetchVideo: { [media] ref in try await media.mediaFile(for: ref) })
             }
             if let denied = media.denied {
                 MediaDeniedCard(resource: denied) { media.dismissDenied() }
@@ -715,13 +668,13 @@ struct ChannelConversationScreen: View {
                 } else {
                     Button { attachSheet = true } label: { composerIcon(.paperclip) }
                         .buttonStyle(.plain)
-                        .disabled(model.uploading || model.sending)
+                        .disabled(model.sending)
                         .accessibilityLabel(l10n.t("chat.composer.attach"))
                     ComposerTextField(
                         text: $model.draft, caret: caret, disabled: model.sending,
                         onReturn: { Task { await model.sendDraft() } },
                         focus: $composerFocused,
-                        onPasteMedia: model.uploading ? nil : { providers in
+                        onPasteMedia: { providers in
                             Task { await stagePasted(providers) }
                         })
                     Button { picker = PickerRequest(mode: .compose, item: nil) } label: {
@@ -744,9 +697,12 @@ struct ChannelConversationScreen: View {
         }
     }
 
-    private var hasContent: Bool {
+    private var draftHasText: Bool {
         !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !model.pendingAttachments.isEmpty
+    }
+
+    private var hasContent: Bool {
+        draftHasText || !model.tray.tray.isEmpty
     }
 
     @ViewBuilder
@@ -773,7 +729,7 @@ struct ChannelConversationScreen: View {
             if hasContent, !media.recState.isCapturing {
                 Button { Task { await model.sendDraft() } } label: { sendFace }
                     .buttonStyle(.plain)
-                    .disabled(model.sending || model.uploading)
+                    .disabled(model.sending || !model.tray.tray.canSend(hasText: draftHasText))
                     .accessibilityLabel(l10n.t("channels.compose.publish"))
             } else {
                 RecordButton(media: media)
@@ -843,51 +799,17 @@ struct ChannelConversationScreen: View {
         .presentationDetents([.medium, .large])
     }
 
-    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video is
-    /// staged as a picked one is.
+    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video joins
+    /// the composer tray, as a picked one does.
     private func stagePasted(_ providers: [NSItemProvider]) async {
         for loaded in await PastedMedia.load(providers) {
-            let stamp = String(UUID().uuidString.prefix(8)).lowercased()
             switch loaded {
-            case .photo(let bytes):
-                let prepared = await Task.detached(priority: .userInitiated) {
-                    PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
-                }.value
-                if let prepared {
-                    await model.stagePrepared(prepared)
-                } else {
-                    await model.stageAttachment(
-                        bytes: bytes, mime: PhotoVideoPrep.sniffInlineImageMime(bytes), name: "file-\(stamp)")
-                }
-            case .video(let url):
-                let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp)
-                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-                if let prepared { await model.stagePrepared(prepared) }
-            case .failed:
-                continue
+            case .photo(let bytes): model.tray.add([.photo(bytes)])
+            case .video(let url): model.tray.add([.video(url)])
+            case .failed(let isVideo):
+                model.tray.report(
+                    .key(isVideo ? "chat.attachment.error.open_video" : "chat.attachment.error.open_photo"))
             }
-        }
-    }
-
-    private func stagePicked(_ item: PhotosPickerItem) async {
-        let stamp = String(UUID().uuidString.prefix(8)).lowercased()
-        let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
-        if isVideo {
-            guard let movie = try? await item.loadTransferable(type: PickedMovie.self),
-                  let prepared = await PhotoVideoPrep.prepareVideo(movie.url, stamp: stamp) else { return }
-            try? FileManager.default.removeItem(at: movie.url.deletingLastPathComponent())
-            await model.stagePrepared(prepared)
-            return
-        }
-        guard let bytes = try? await item.loadTransferable(type: Data.self), !bytes.isEmpty else { return }
-        let prepared = await Task.detached(priority: .userInitiated) {
-            PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
-        }.value
-        if let prepared {
-            await model.stagePrepared(prepared)
-        } else {
-            await model.stageAttachment(
-                bytes: bytes, mime: PhotoVideoPrep.sniffInlineImageMime(bytes), name: "file-\(stamp)")
         }
     }
 }

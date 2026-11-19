@@ -494,6 +494,8 @@ enum AccountLocalDataWipe {
         }
         step("decrypted-media") {
             MediaSessionCache.shared.purge()
+            // `docs/ux/media-messages.md` section 11 — the composer trays.
+            ComposerTrays.shared.removeAll()
             MediaTempFiles.sweepStale()
             try removeIfPresent(
                 FileManager.default.temporaryDirectory

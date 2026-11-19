@@ -21,7 +21,14 @@
  * stores call, no more), the service worker's app-shell cache (code, no
  * account data), and the server-side half of Delete account.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The composer tray uploads what it is given at once; here an upload simply
+// stays in flight, which is also the case a wipe has to survive.
+vi.mock("../chat/attachments", async (orig) => ({
+  ...(await orig<typeof import("../chat/attachments")>()),
+  encryptAndUploadBytes: () => new Promise(() => undefined),
+}));
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -58,6 +65,8 @@ import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
 import { recordCursorEpoch } from "../chat/cursor-epoch";
+import { trayFor, trayKeysHeld, type TrayDeps } from "../chat/tray-store";
+import type { StorageClient } from "../storage/client";
 import { saveKnownGroupIds } from "../devices/state-bundle";
 import {
   addRestoredKnownGroups,
@@ -211,8 +220,21 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
 /** Seed every account-scoped store for one account, through the store's own
  *  writer where it has a plain one and in its documented key format where
  *  not. */
+/** A composer tray's dependencies that reach nothing. */
+const trayDeps = (): TrayDeps => ({
+  storage: () => ({}) as StorageClient,
+  inlineType: () => null,
+  discard: () => undefined,
+  onError: () => undefined,
+});
+const smallFile = (name: string): File => new File([new Uint8Array(4)], name, { type: "application/pdf" });
+
 function seedAccount(acct: string, acctUrl: string): void {
   for (const { db, store, row } of idbRows(acct, acctUrl)) idb.seed(db, store, row);
+  // docs/ux/media-messages.md section 11: a file staged in a composer tray
+  // (memory, not storage).
+  const tray = trayFor(`${acct}:${G}`, trayDeps());
+  if (tray.items().length === 0) tray.add([smallFile("staged.pdf")], "file");
 
   const put = (k: string, v: string): void => local.setItem(k, v);
   upsertAccepted(
@@ -373,6 +395,7 @@ function inventory(): { where: string; text: string }[] {
     ...local.entries().map(([k, v]) => ({ where: `localStorage/${k}`, text: `${k} ${v}` })),
     ...session.entries().map(([k, v]) => ({ where: `sessionStorage/${k}`, text: `${k} ${v}` })),
     ...idb.walk(),
+    ...trayKeysHeld().map((k) => ({ where: "memory/composer-tray", text: k })),
   ];
 }
 
@@ -568,6 +591,24 @@ describe("wipeAccountLocalData", () => {
     expect(isBackupRestoreOwed(A)).toBe(false);
     expect(loadRestoredKnownGroups(B)).toEqual([G]);
     expect(isBackupRestoreOwed(B)).toBe(true);
+  });
+
+  it("drops the composer trays of the account; another account keeps its own", async () => {
+    await createSchemas();
+    const deps = trayDeps;
+    // Whatever earlier tests left, each tray holds exactly one file here.
+    await wipeAccountLocalData(A);
+    await wipeAccountLocalData(B);
+    const own = trayFor(`${A}:${G}`, deps());
+    own.add([smallFile("a.pdf")], "file");
+    trayFor(`${B}:${G}`, deps()).add([smallFile("b.pdf")], "file");
+    expect(own.items()).toHaveLength(1);
+    await wipeAccountLocalData(A);
+    // The upload still in flight is dropped with the tray.
+    expect(own.items()).toEqual([]);
+    expect(trayFor(`${A}:${G}`, deps())).not.toBe(own);
+    expect(trayFor(`${A}:${G}`, deps()).items()).toEqual([]);
+    expect(trayFor(`${B}:${G}`, deps()).items().map((i) => i.name)).toEqual(["b.pdf"]);
   });
 
   it("names every step once", () => {

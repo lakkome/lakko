@@ -73,6 +73,9 @@ use lakko_ui_rules::layer_display::{
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
+use lakko_ui_rules::media_mosaic::{
+    media_mosaic as rust_media_mosaic, MediaSize as RustMediaSize, MOSAIC_GAP, MOSAIC_MAX_ITEMS,
+};
 
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
@@ -1170,6 +1173,90 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
         per_page: grid.per_page,
         pages: grid.pages,
     }
+}
+
+/// The pixel size of one photo or video of a message
+/// (`docs/ux/media-messages.md` section 11). `0` in either field means
+/// unknown; the item is then laid out as 4:3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct MediaSize {
+    /// Width in pixels; `0` when unknown.
+    pub width: u32,
+    /// Height in pixels; `0` when unknown.
+    pub height: u32,
+}
+
+/// Where one tile of a message's media mosaic goes. `x` is measured from
+/// the START edge: a right-to-left layout places the tile at
+/// `mosaic.width - x - width`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct MosaicTile {
+    /// Distance from the start edge.
+    pub x: u32,
+    /// Distance from the top edge.
+    pub y: u32,
+    /// Tile width.
+    pub width: u32,
+    /// Tile height.
+    pub height: u32,
+}
+
+/// The laid-out media mosaic of one message.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MediaMosaic {
+    /// One tile per item, in input order, for the first ten items; empty
+    /// when there is nothing to lay out or the width cannot hold the tiles.
+    pub tiles: Vec<MosaicTile>,
+    /// Width of the mosaic: the bubble width, or less for one narrow item.
+    pub width: u32,
+    /// Total height, gaps included.
+    pub height: u32,
+}
+
+/// Lay out the photos and videos of one message in a bubble `bubble_width`
+/// wide with `gap` between tiles (`docs/ux/media-messages.md` section 11).
+/// Every tile is drawn cropped to fill.
+#[uniffi::export]
+#[must_use]
+pub fn media_mosaic(bubble_width: u32, gap: u32, items: Vec<MediaSize>) -> MediaMosaic {
+    let items: Vec<RustMediaSize> = items
+        .into_iter()
+        .map(|s| RustMediaSize {
+            width: s.width,
+            height: s.height,
+        })
+        .collect();
+    let mosaic = rust_media_mosaic(bubble_width, gap, &items);
+    MediaMosaic {
+        tiles: mosaic
+            .tiles
+            .into_iter()
+            .map(|t| MosaicTile {
+                x: t.x,
+                y: t.y,
+                width: t.width,
+                height: t.height,
+            })
+            .collect(),
+        width: mosaic.width,
+        height: mosaic.height,
+    }
+}
+
+/// The gap the spec draws between mosaic tiles. Chosen.
+#[uniffi::export]
+#[must_use]
+pub fn media_mosaic_gap() -> u32 {
+    MOSAIC_GAP
+}
+
+/// The most photos and videos one message carries and its mosaic shows.
+/// Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn media_mosaic_max_items() -> u32 {
+    // Ten; a const that fits in u32 by construction.
+    u32::try_from(MOSAIC_MAX_ITEMS).unwrap_or(u32::MAX)
 }
 
 /// One person, as the stage rule sees them.
@@ -2288,6 +2375,43 @@ pub fn photo_max_longest_side_px() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_media_mosaic_crosses_the_boundary_intact() {
+        let m = media_mosaic(
+            320,
+            media_mosaic_gap(),
+            vec![
+                MediaSize {
+                    width: 1000,
+                    height: 1000,
+                },
+                MediaSize {
+                    width: 1600,
+                    height: 900,
+                },
+            ],
+        );
+        assert_eq!((m.width, m.height), (320, 89));
+        assert_eq!(
+            m.tiles,
+            vec![
+                MosaicTile {
+                    x: 0,
+                    y: 0,
+                    width: 159,
+                    height: 89
+                },
+                MosaicTile {
+                    x: 161,
+                    y: 0,
+                    width: 159,
+                    height: 89
+                },
+            ]
+        );
+        assert_eq!(media_mosaic_max_items(), 10);
+    }
 
     #[test]
     fn the_av_alignment_crosses_the_boundary_intact() {

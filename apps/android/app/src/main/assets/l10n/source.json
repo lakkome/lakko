@@ -3382,6 +3382,10 @@
       "text": "File",
       "comment": "Kind of a message that holds any other attached file; shown in the chat list preview."
     },
+    "chat.media.files": {
+      "text": "{count, plural, =1 {File} one {# file} other {# files}}",
+      "comment": "Chat list preview and notification text for a message with only attached files (no photos or videos) and no text; {count} is how many."
+    },
     "chat.media.gif": {
       "text": "GIF",
       "comment": "Kind of a message that holds an animated GIF; shown in the chat list preview."
@@ -3397,6 +3401,14 @@
     "chat.media.photo": {
       "text": "Photo",
       "comment": "Kind of a message that holds a picture; shown in the chat list preview."
+    },
+    "chat.media.photos": {
+      "text": "{count, plural, =1 {Photo} one {# photo} other {# photos}}",
+      "comment": "Chat list preview and notification text for a message whose attachments are only photos and that has no text; {count} is how many."
+    },
+    "chat.media.photos_and_videos": {
+      "text": "{count, plural, one {# photo and video} other {# photos and videos}}",
+      "comment": "Chat list preview and notification text for a message with both photos and videos and no text; {count} is how many photos and videos together (always at least 2)."
     },
     "chat.media.play_failed": {
       "text": "Couldn't play this message",
@@ -3417,6 +3429,10 @@
     "chat.media.video_message": {
       "text": "Video message",
       "comment": "Kind of a message that holds a round recorded video note; shown in the chat list preview."
+    },
+    "chat.media.videos": {
+      "text": "{count, plural, =1 {Video} one {# video} other {# videos}}",
+      "comment": "Chat list preview and notification text for a message whose attachments are only videos and that has no text; {count} is how many."
     },
     "chat.media.voice_message": {
       "text": "Voice message",
@@ -4315,6 +4331,22 @@
       "text": "Once the change is applied, you can leave the group like any other member.",
       "comment": "Line in the ownership transfer form: after the transfer is applied the reader may leave the group."
     },
+    "chat.tray.limit_files": {
+      "text": "Up to 10 files in one message.",
+      "comment": "Shown for 4 seconds under the composer's attachment strip when the person adds more files than one message holds; the ones that fit were added. The limit is 10."
+    },
+    "chat.tray.limit_media": {
+      "text": "Up to 10 photos and videos in one message.",
+      "comment": "Shown for 4 seconds under the composer's attachment strip when the person adds more photos and videos than one message holds; the ones that fit were added. The limit is 10."
+    },
+    "chat.tray.remove": {
+      "text": "Remove {name}",
+      "comment": "Accessible name of the (x) button on one item in the composer's attachment strip; removes it from the message before sending. {name} is the file name, or the kind (Photo, Video) when it has none."
+    },
+    "chat.tray.retry": {
+      "text": "Retry {name}",
+      "comment": "Accessible name of an item in the composer's attachment strip whose upload failed; activating it uploads again. {name} is the file name, or the kind (Photo, Video) when it has none. Used on web, iOS and Android, so it must not say tap or click."
+    },
     "chat.typing.named": {
       "text": "{name} is typing...",
       "comment": "Under the group name while one member is typing."
@@ -4426,6 +4458,18 @@
     "chat.video_note.tap_sound": {
       "text": "Tap for sound",
       "comment": "iOS: corner label on a round video message playing without sound; tapping it turns the sound on. chat.video_note.sound_on is the web wording."
+    },
+    "chat.viewer.next": {
+      "text": "Next",
+      "comment": "Accessible name of the media viewer button that shows the next photo or video of the same message."
+    },
+    "chat.viewer.position": {
+      "text": "{n} / {total}",
+      "comment": "Position line at the top of the full-screen photo and video viewer when a message holds several: {n} is the one shown, {total} how many photos and videos the message holds. Example: 2 / 5. Keep it short."
+    },
+    "chat.viewer.previous": {
+      "text": "Previous",
+      "comment": "Accessible name of the media viewer button that shows the previous photo or video of the same message."
     },
     "chat.voice.change_speed": {
       "text": "Change playback speed",

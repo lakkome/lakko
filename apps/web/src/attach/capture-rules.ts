@@ -2,12 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `docs/ux/attachments.md` sections 3-5 — the pure rules of the camera and the
- * send preview: which recording format a browser may use, and which picked
- * items can be sent as what.
+ * `docs/ux/attachments.md` section 5 — the pure rules of the camera: which
+ * recording format a browser may use and which camera opens. What a picked
+ * item becomes in the composer tray is `chat/compose-tray.ts`.
  */
-import { MAX_ATTACHMENT_BYTES } from "../chat/attachments";
-
 /** A captured video is at most this long (UX 5, chosen). */
 export const CAMERA_VIDEO_MAX_MS = 60_000;
 
@@ -79,20 +77,4 @@ export function isPhoneClassBrowser(nav: {
 }): boolean {
   if (nav.userAgentData?.mobile === true) return true;
   return /\b(Android|iPhone|iPod|iPad)\b/.test(nav.userAgent);
-}
-
-export type PreviewVerdict = "photo" | "video" | "video-refused" | "file" | "too-big";
-
-/** What one picked item becomes on the send preview. */
-export function previewVerdict(
-  file: { readonly type: string; readonly size: number },
-  mode: "media" | "file" | "audio",
-  asFile: boolean,
-): PreviewVerdict {
-  if (file.size > MAX_ATTACHMENT_BYTES) return mode === "media" && !asFile && file.type.startsWith("video/") ? "video-refused" : "too-big";
-  if (mode !== "media" || asFile) return "file";
-  const type = file.type.toLowerCase();
-  if (type.startsWith("image/")) return "photo";
-  if (type.startsWith("video/")) return type === "video/mp4" ? "video" : "video-refused";
-  return "file";
 }

@@ -31,7 +31,7 @@ import { base64Encode } from "../auth/account-id";
 import { contentPreviewOf } from "../attach/preview";
 import { authorIdentityToPersisted } from "./author-identity";
 import type { IncomingChatEvent } from "./client";
-import { attachmentsPreviewLabel } from "./list-preview";
+import { messagePreviewWords, previewMediaOf, type PreviewMedia } from "./list-preview";
 import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
 import { persistedFromMembership } from "./membership-rows";
@@ -278,6 +278,9 @@ export interface ChatListSummary {
   /** ADR-0087 section 14 — the newest message's channel invitation card
    *  (base64), when it carried one; the row reads the invitation from it. */
   readonly previewChannelInviteB64?: string;
+  /** `docs/ux/media-messages.md` section 11 — the newest message's first
+   *  photo or video, for the row's thumbnail; absent when it has none. */
+  readonly previewMedia?: PreviewMedia;
 }
 
 /**
@@ -352,6 +355,11 @@ export function summarizeGroupSlot(
     ...(last !== undefined && last.deleted !== true && typeof last.channelInviteB64 === "string"
       ? { previewChannelInviteB64: last.channelInviteB64 }
       : {}),
+    ...(() => {
+      if (last === undefined || last.deleted === true || contentPreviewOf(last.content) !== null) return {};
+      const media = previewMediaOf(last.attachments);
+      return media === null ? {} : { previewMedia: media };
+    })(),
   };
 }
 
@@ -369,12 +377,10 @@ function previewText(m: PersistedMessage): string {
   // ADR-0092 — a poll, checklist, location, contact card or article.
   const contentLine = contentPreviewOf(m.content);
   if (contentLine !== null) return contentLine;
-  const text = m.text.replace(/\s+/g, " ").trim();
-  if (text.length > 0) {
-    return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;
-  }
-  // docs/ux/client-redesign.md section 5.1 — a media message shows its kind.
-  return attachmentsPreviewLabel(m.attachments);
+  // docs/ux/media-messages.md section 11 — the text, after the count words
+  // when the message carries files only; with no text, the words alone.
+  const line = messagePreviewWords(m.text.replace(/\s+/g, " ").trim(), m.attachments);
+  return line.length > PREVIEW_MAX_CHARS ? `${line.slice(0, PREVIEW_MAX_CHARS - 1)}…` : line;
 }
 
 /**

@@ -71,9 +71,6 @@ public struct ChatScreen: View {
     /// ADR-0092 — the editor or reader on screen.
     @State private var contentScreen: ContentScreenRequest?
     @State private var audioImporterPresented = false
-    /// UX sections 3 and 4 — the send preview's items, when it is open.
-    @State private var previewItems: [SendPreviewItem]?
-    @State private var previewRetake = false
     /// UX 7.3 / 8.2 — `Close this poll?` / `Close this checklist?`.
     @State private var closeConfirm: ContentCloseConfirm?
     /// ADR-0092 section 7 — what each contact card's button says after a tap.
@@ -635,28 +632,6 @@ public struct ChatScreen: View {
         .fullScreenCover(item: $contentScreen) { request in
             contentScreenView(request)
         }
-        .fullScreenCover(isPresented: Binding(
-            get: { previewItems != nil }, set: { if !$0 { previewItems = nil } })
-        ) {
-            if let items = previewItems {
-                SendPreviewScreen(
-                    items: items,
-                    onRetake: previewRetake ? {
-                        previewItems = nil
-                        previewRetake = false
-                        Task {
-                            try? await Task.sleep(nanoseconds: 400_000_000)
-                            contentScreen = .camera
-                        }
-                    } : nil,
-                    onSend: { picked, caption, asFile in
-                        previewItems = nil
-                        previewRetake = false
-                        Task { await viewModel.sendPreviewItems(picked, caption: caption, asFile: asFile) }
-                    },
-                    onCancel: { previewItems = nil; previewRetake = false })
-            }
-        }
         .lakkoDialog(item: $closeConfirm) { confirm in
             LakkoDialogContent(
                 title: l10n.t(confirm.isPoll ? "poll.close_confirm" : "checklist.close_confirm"),
@@ -676,7 +651,7 @@ public struct ChatScreen: View {
                 allowsMultipleSelection: true
             ) { result in
                 guard case .success(let urls) = result else { return }
-                for url in urls { Task { await viewModel.onAudioPicked(url: url) } }
+                viewModel.tray.add(urls.map { .audio($0) })
             }
         )
         // PhotosPicker — multi-select, resolved on `.onChange`.
@@ -693,11 +668,12 @@ public struct ChatScreen: View {
             // after kicking off the work so the same photo can
             // be re-picked later if the user wants to attach it
             // again.
-            // UX section 3 — the picked items open the send preview.
+            // `docs/ux/media-messages.md` section 11 — the picked items join
+            // the composer tray, in the order picked.
             let items = newItems
             photoPickerItems = []
             guard !items.isEmpty else { return }
-            Task { previewItems = await loadPreviewItems(items) }
+            Task { await addPicked(items, to: viewModel.tray) }
         }
         // File importer for arbitrary files.
         .fileImporter(
@@ -707,19 +683,18 @@ public struct ChatScreen: View {
         ) { result in
             switch result {
             case .success(let urls):
-                // UX section 4 — the picked files open the send preview; a
-                // file over the cap is not added and says so.
-                var items: [SendPreviewItem] = []
+                // Attachments UX section 4 — the picked files join the tray
+                // as file chips; a file over the cap is not added and says so.
+                var sources: [ComposerTraySource] = []
                 for url in urls {
                     guard let payload = readFileURL(url) else { continue }
-                    guard SendPreviewRules.fileAcceptable(bytes: payload.bytes.count) else {
-                        viewModel.reportAttachmentProblem(.key("attach.preview.file_too_big"))
+                    guard payload.bytes.count <= AttachmentBridge.maxAttachmentBytes else {
+                        viewModel.tray.report(.key("attach.preview.file_too_big"))
                         continue
                     }
-                    items.append(SendPreviewItem(
-                        source: .file(payload.bytes, name: payload.name ?? "file", mime: payload.mime)))
+                    sources.append(.file(payload.bytes, name: payload.name ?? "file", mime: payload.mime))
                 }
-                if !items.isEmpty { previewItems = items }
+                viewModel.tray.add(sources)
             case .failure:
                 // Cancelled or denied — silent.
                 break
@@ -1613,7 +1588,7 @@ public struct ChatScreen: View {
         VStack(spacing: 8) {
             // Reactions-and-emoji spec section 13 — `:word` suggestions.
             colonStrip
-            if let err = viewModel.sendError {
+            if let err = viewModel.sendError ?? viewModel.tray.problem {
                 Text(err.text)
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
@@ -1624,16 +1599,6 @@ public struct ChatScreen: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            // 1.19c3 — pending-attachments tray. Renders only
-            // when ≥1 file is staged or an upload is in
-            // flight. Each chip shows `name · size` with a ×
-            // to drop it; the chips don't preview locally
-            // because the picked bytes were freed after encrypt
-            // (re-decrypt would round-trip through storage,
-            // overkill for a composer scratch row).
-            if !viewModel.pendingAttachments.isEmpty || viewModel.uploading {
-                pendingAttachmentsTray
             }
             // ADR-0047 §6 — the permission-denied card, above the composer.
             if let denied = media.denied {
@@ -1651,6 +1616,13 @@ public struct ChatScreen: View {
             if let armed = viewModel.replyingTo {
                 ReplyStrip(reply: armed.shown) { viewModel.cancelReply() }
             }
+            // `docs/ux/media-messages.md` section 11 — the tray, directly
+            // above the message field; hidden when empty.
+            if !viewModel.tray.tray.isEmpty || viewModel.tray.limitNotice != nil {
+                ComposerTrayView(
+                    store: viewModel.tray, callActive: media.callActive,
+                    fetchVideo: { [media] ref in try await media.mediaFile(for: ref) })
+            }
             // UX spec section 5.2: attach, the growing field, the emoji / GIF
             // picker, then a trailing button that is the microphone with an
             // empty draft and the send arrow otherwise.
@@ -1666,24 +1638,19 @@ public struct ChatScreen: View {
                     Button {
                         attachActionSheetPresented = true
                     } label: {
-                        if viewModel.uploading {
-                            ProgressView().controlSize(.small)
-                                .frame(width: 40, height: 40)
-                        } else {
-                            composerIcon(.paperclip)
-                        }
+                        composerIcon(.paperclip)
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.uploading || viewModel.sending)
+                    .disabled(viewModel.sending)
                     .accessibilityLabel(l10n.t("chat.composer.attach"))
                     ComposerTextField(
                         text: $viewModel.draft, caret: caret, disabled: viewModel.sending,
                         onReturn: {
-                            guard !viewModel.uploading, !media.recState.isCapturing else { return }
+                            guard !media.recState.isCapturing else { return }
                             viewModel.onSendClicked()
                         },
                         focus: $composerFocused,
-                        onPasteMedia: viewModel.uploading ? nil : { openPastedMedia($0) })
+                        onPasteMedia: { openPastedMedia($0) })
                     // ADR-0047 §4 — the smiley opens the picker on Emoji.
                     Button {
                         picker = PickerRequest(mode: .compose, message: nil)
@@ -1777,7 +1744,7 @@ public struct ChatScreen: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(viewModel.sending || viewModel.uploading)
+                .disabled(viewModel.sending || !viewModel.tray.tray.canSend(hasText: draftHasText))
                 .accessibilityLabel(l10n.t("chat.composer.send"))
             } else {
                 RecordButton(media: media)
@@ -1785,182 +1752,29 @@ public struct ChatScreen: View {
         }
     }
 
-    private var composerHasContent: Bool {
+    private var draftHasText: Bool {
         !viewModel.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !viewModel.pendingAttachments.isEmpty
-            || viewModel.uploading
     }
 
-    @ViewBuilder
-    private var pendingAttachmentsTray: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(
-                    Array(viewModel.pendingAttachments.enumerated()),
-                    id: \.offset
-                ) { idx, ref in
-                    HStack(spacing: 6) {
-                        if let thumb = ref.thumb.flatMap({
-                            MediaSessionCache.shared.cachedData(MediaSessionCache.key(for: $0))
-                        }), let image = UIImage(data: thumb) {
-                            TrayThumbnail(image: image)
-                        } else {
-                            LkIconView(pendingChipIcon(ref), size: 20)
-                                .foregroundStyle(.secondary)
-                        }
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(ref.name ?? l10n.t("chat.attachment.unnamed"))
-                                .font(.caption)
-                                .lineLimit(1)
-                            Text(AttachmentBridge.formatSize(ref.size))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button {
-                            viewModel.onRemovePendingAttachment(at: idx)
-                        } label: {
-                            LkIconView(.xmarkCircleFill, size: 20)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(l10n.t("chat.composer.remove_attachment"))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-                if viewModel.uploading {
-                    HStack(spacing: 6) {
-                        if let data = viewModel.uploadingThumbnail, let image = UIImage(data: data) {
-                            TrayThumbnail(image: image)
-                        }
-                        ProgressView().controlSize(.small)
-                        // Polish 1.x — surface the active pick's
-                        // file name + stage instead of a generic
-                        // "Encrypting…" caption. Falls back to
-                        // the generic copy when the stage hasn't
-                        // landed yet (the brief race between
-                        // setting `uploading = true` and the
-                        // first `uploadStage` mutation).
-                        Text(uploadCaption(viewModel.uploadStage))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                }
-            }
-            .padding(.horizontal, 2)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    private var composerHasContent: Bool {
+        draftHasText || !viewModel.tray.tray.isEmpty
     }
 
-    private func pendingChipIcon(_ ref: AttachmentRef) -> LkIcon {
-        switch InlineMedia.decision(for: ref).bubble {
-        case .video: return .video
-        case .photo: return .photo
-        default: return AttachmentBridge.isInlinePreviewable(ref) ? .photo : .doc
-        }
-    }
-
-    /// Map [``ChatViewModel/UploadStage``] to the caption shown
-    /// in the composer tray's progress chip. `nil` collapses to
-    /// a generic "Encrypting…" — matches the pre-polish copy so
-    /// the brief race window doesn't show an empty caption.
-    private func uploadCaption(_ stage: ChatViewModel.UploadStage?) -> String {
-        switch stage {
-        case .none:
-            return l10n.t("chat.upload.working")
-        case .encrypting(let fileName):
-            return l10n.t("chat.upload.encrypting", texts: ["name": fileName])
-        case .uploading(let fileName):
-            return l10n.t("chat.upload.uploading", texts: ["name": fileName])
-        }
-    }
-
-    /// UX spec section 10 — a picked library item becomes a photo or video
-    /// bubble: the video is exported to MP4 and the photo converted to an
-    /// inline format (HEIC to JPEG) off the main actor, each with its size and
-    /// a preview. An image ImageIO cannot decode is sent as a plain file.
-    private func sendPicked(_ item: PhotosPickerItem) async {
-        let stamp = Self.pickStamp()
-        let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
-        if isVideo {
-            guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
-                viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_video"))
-                return
-            }
-            let prepared = await PhotoVideoPrep.prepareVideo(movie.url, stamp: stamp)
-            try? FileManager.default.removeItem(at: movie.url.deletingLastPathComponent())
-            guard let prepared else {
-                viewModel.reportAttachmentProblem(
-                    .key(
-                        "chat.attachment.error.prepare_video",
-                        texts: ["limit": AttachmentBridge.formatSize(50_000_000)]))
-                return
-            }
-            await viewModel.onMediaPrepared(prepared)
-            return
-        }
-        guard let bytes = try? await item.loadTransferable(type: Data.self), !bytes.isEmpty else {
-            viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_photo"))
-            return
-        }
-        let prepared = await Task.detached(priority: .userInitiated) {
-            PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
-        }.value
-        if let prepared {
-            await viewModel.onMediaPrepared(prepared)
-        } else {
-            let mime = PhotoVideoPrep.sniffInlineImageMime(bytes)
-            await viewModel.onAttachmentPicked(bytes: bytes, mime: mime, name: "file-\(stamp)")
-        }
-    }
-
-    /// Load picked library items for the send preview: a photo's bytes and
-    /// picture, a video's file, poster and whether it may be sent as it is.
-    private func loadPreviewItems(_ picked: [PhotosPickerItem]) async -> [SendPreviewItem] {
-        var out: [SendPreviewItem] = []
-        for item in picked {
-            if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
-                guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
-                    viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_video"))
-                    continue
-                }
-                out.append(await SendPreviewItem.previewVideo(at: movie.url))
-            } else if let data = try? await item.loadTransferable(type: Data.self), !data.isEmpty {
-                out.append(SendPreviewItem.previewPhoto(data))
-            } else {
-                viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_photo"))
-            }
-        }
-        return out
-    }
-
-    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video opens
-    /// the same send preview a picked one does.
+    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video joins
+    /// the composer tray, as a picked one does.
     private func openPastedMedia(_ providers: [NSItemProvider]) {
+        let tray = viewModel.tray
         Task {
-            var items: [SendPreviewItem] = []
             for loaded in await PastedMedia.load(providers) {
                 switch loaded {
-                case .photo(let data): items.append(SendPreviewItem.previewPhoto(data))
-                case .video(let url): items.append(await SendPreviewItem.previewVideo(at: url))
+                case .photo(let data): tray.add([.photo(data)])
+                case .video(let url): tray.add([.video(url)])
                 case .failed(let isVideo):
-                    viewModel.reportAttachmentProblem(
+                    tray.report(
                         .key(isVideo ? "chat.attachment.error.open_video" : "chat.attachment.error.open_photo"))
                 }
             }
-            if !items.isEmpty { previewItems = items }
         }
-    }
-
-    private static func pickStamp() -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        return f.string(from: Date()) + "-" + String(UUID().uuidString.prefix(4)).lowercased()
     }
 
     /// File-importer handoff — read the URL's bytes + sniff
@@ -2084,14 +1898,10 @@ public struct ChatScreen: View {
             }
         case .camera:
             CameraCaptureScreen(onSend: { media in
-                // UX section 5 — what was captured opens the send preview,
-                // with Retake in place of the strip.
+                // `docs/ux/media-messages.md` section 11 — what was captured
+                // joins the composer tray.
                 contentScreen = nil
-                Task {
-                    try? await Task.sleep(nanoseconds: 400_000_000)
-                    previewItems = [await SendPreviewItem.captured(media)]
-                    previewRetake = true
-                }
+                viewModel.tray.add([ComposerTraySource.captured(media)])
             }, onClose: { contentScreen = nil })
         }
     }
@@ -2144,30 +1954,6 @@ public struct ChatScreen: View {
             break
         }
         return items
-    }
-
-    /// UX section 5 — what the camera took goes the photo / video way.
-    private func sendCaptured(_ media: CapturedMedia) async {
-        let stamp = Self.pickStamp()
-        switch media {
-        case .photo(let data):
-            let prepared = await Task.detached(priority: .userInitiated) {
-                PhotoVideoPrep.preparePhoto(data, stamp: stamp)
-            }.value
-            if let prepared {
-                await viewModel.onMediaPrepared(prepared)
-            } else {
-                viewModel.reportAttachmentProblem(.key("attach.preview.photo_unreadable"))
-            }
-        case .video(let url):
-            let prepared = await PhotoVideoPrep.prepareVideo(url, stamp: stamp)
-            try? FileManager.default.removeItem(at: url)
-            if let prepared {
-                await viewModel.onMediaPrepared(prepared)
-            } else {
-                viewModel.reportAttachmentProblem(.key("attach.preview.video_refused"))
-            }
-        }
     }
 
     /// UX section 10.1 — the person's contacts, with the username their own
@@ -2288,21 +2074,6 @@ public struct ChatScreen: View {
                 print("preview download failed: \(error)")
             }
         }
-    }
-}
-
-/// UX spec section 10 — the preview of a photo or video in the composer's
-/// attachment tray.
-private struct TrayThumbnail: View {
-    let image: UIImage
-
-    var body: some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFill()
-            .frame(width: 32, height: 32)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .accessibilityHidden(true)
     }
 }
 
@@ -2533,6 +2304,8 @@ struct MessageRow: View {
     /// (`.publisher`) rather than to its author.
     var channelPost: ChannelPostRole? = nil
 
+    /// The width of the column a media bubble sits in, when narrower.
+    @Environment(\.mediaColumnWidth) private var mediaColumnWidth
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
     @Environment(\.messageMenuPresenter) private var menuPresenter
@@ -2569,33 +2342,32 @@ struct MessageRow: View {
         return InlineMedia.decision(for: ref).bubble == .videoNote
     }
 
-    /// UX spec section 10 — a message that is exactly one photo or video
-    /// renders as the media itself, the time in a pill on top of it.
+    /// `docs/ux/media-messages.md` sections 10 and 11 — a message that is
+    /// only photos and videos renders as the mosaic itself, the time in a
+    /// pill on top of it.
     ///
     /// ADR-0052 — never for a reply, for the same reason as ``isBareVideoNote``.
-    private var bareVisualMedia: AttachmentRef? {
-        guard !message.deleted, message.reply == nil, message.forward == nil, message.text.isEmpty,
-              message.attachments.count == 1,
-              let ref = message.attachments.first else { return nil }
-        switch InlineMedia.decision(for: ref).bubble {
-        case .photo, .video: return ref
-        default: return nil
+    private var bareVisualMedia: [AttachmentRef]? {
+        guard !message.deleted, message.unsupportedVersion == nil, message.content == nil,
+              message.reply == nil, message.forward == nil, message.text.isEmpty,
+              !message.attachments.isEmpty else { return nil }
+        let media = mosaicItems(message.attachments)
+        let allMedia = message.attachments.allSatisfy {
+            let bubble = InlineMedia.decision(for: $0).bubble
+            return bubble == .photo || bubble == .video
         }
+        return allMedia && !media.isEmpty ? media : nil
+    }
+
+    /// Section 11 — the photos and videos a bubble draws as its mosaic.
+    private var mosaicRefs: [AttachmentRef] {
+        guard !message.deleted, message.unsupportedVersion == nil, message.content == nil else { return [] }
+        return mosaicItems(message.attachments)
     }
 
     @ViewBuilder
-    private func visualMedia(_ ref: AttachmentRef) -> some View {
-        menuTarget(visualMediaContent(ref))
-    }
-
-    private func visualMediaContent(_ ref: AttachmentRef) -> some View {
-        Group {
-            if InlineMedia.decision(for: ref).bubble == .video {
-                VideoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
-            } else {
-                PhotoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
-            }
-        }
+    private func visualMedia(_ refs: [AttachmentRef]) -> some View {
+        menuTarget(MediaMosaicView(refs: refs, rounded: true, overlay: AnyView(mediaMetaPill)))
     }
 
     /// The bare video note plus its time, which is the whole bubble for that
@@ -2695,8 +2467,8 @@ struct MessageRow: View {
                 bubbleColumn(alignment: .trailing) {
                     if isBareVideoNote {
                         menuTarget(videoNoteColumn(alignment: .trailing))
-                    } else if let ref = bareVisualMedia {
-                        visualMedia(ref)
+                    } else if let refs = bareVisualMedia {
+                        visualMedia(refs)
                     } else {
                         bubble
                     }
@@ -2728,8 +2500,8 @@ struct MessageRow: View {
                     }
                     if isBareVideoNote {
                         menuTarget(videoNoteColumn(alignment: .leading))
-                    } else if let ref = bareVisualMedia {
-                        visualMedia(ref)
+                    } else if let refs = bareVisualMedia {
+                        visualMedia(refs)
                     } else {
                         bubble
                     }
@@ -3068,6 +2840,77 @@ struct MessageRow: View {
 
     @ViewBuilder
     private var bubbleContent: some View {
+        let mosaic = mosaicRefs
+        if mosaic.isEmpty {
+            plainBubbleContent
+        } else {
+            mosaicBubbleContent(mosaic)
+        }
+    }
+
+    /// `docs/ux/media-messages.md` section 11 — one bubble, top to bottom:
+    /// a forward or reply line, the mosaic (flush with the bubble's edges, so
+    /// its outer corners are the bubble's), the file chips, the text. With
+    /// text the time sits at the end of the text; without, in the pill on the
+    /// mosaic.
+    private func mosaicBubbleContent(_ mosaic: [AttachmentRef]) -> some View {
+        let hasText = !message.text.isEmpty
+        let others = message.attachments.contains {
+            let bubble = InlineMedia.decision(for: $0).bubble
+            return bubble != .photo && bubble != .video
+        }
+        return VStack(alignment: .leading, spacing: 0) {
+            if message.forward != nil || message.reply != nil {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let forward = message.forward {
+                        ForwardedLine(forward: forward, outgoing: isOutgoing) {
+                            onForwardTap(forward)
+                        }
+                    }
+                    if let reply = message.reply {
+                        ReplyQuoteBlock(
+                            reply: quotesOwnMessage ? ReplySnapshot.shownAsOwn(reply) : reply,
+                            outgoing: isOutgoing
+                        ) {
+                            onQuoteTap(reply.target)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+            }
+            MediaMosaicView(refs: mosaic, overlay: hasText ? nil : AnyView(mediaMetaPill))
+            if others {
+                attachmentChips
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, hasText ? 0 : 8)
+            }
+            if hasText {
+                HStack(alignment: .bottom, spacing: 8) {
+                    TranslatableMessageText(
+                        message: message,
+                        outgoing: isOutgoing,
+                        linkColor: isOutgoing ? Color.lakkoAccentForeground : Color.lakkoAccent,
+                        onOwnLink: onOpenOwnLink
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    metaRow
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 8)
+            }
+        }
+        .frame(width: CGFloat(mosaicLayout(mosaic, column: mediaColumnWidth).width), alignment: .leading)
+        .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
+        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var plainBubbleContent: some View {
         // Beside short content the time sits on the last line; under a GIF,
         // photo or video it goes below, or the picture squeezed it into two
         // lines ("22:" / "04", seen on an iPhone 2026-11-10).
@@ -3172,13 +3015,11 @@ struct MessageRow: View {
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
     }
 
-    /// The bubble holds a GIF, photo or video drawn inline.
+    /// The bubble holds a GIF drawn inline (photos and videos take the
+    /// mosaic's layout).
     private var hasVisualAttachment: Bool {
         !message.deleted && message.attachments.contains { ref in
-            switch InlineMedia.decision(for: ref).bubble {
-            case .photo, .video, .gif: return true
-            default: return false
-            }
+            InlineMedia.decision(for: ref).bubble == .gif
         }
     }
 
@@ -3244,7 +3085,10 @@ struct MessageRow: View {
                 // other ref (no kind, unknown kind, mismatched or refused MIME)
                 // stays a file chip.
                 let decision = InlineMedia.decision(for: ref)
-                if ref.kind == "audio", decision.inline == .audio {
+                if decision.bubble == .photo || decision.bubble == .video {
+                    // Section 11 — drawn in the mosaic above.
+                    EmptyView()
+                } else if ref.kind == "audio", decision.inline == .audio {
                     // ADR-0092 section 2 / UX section 6 — an audio file.
                     AudioBubble(ref: ref)
                 } else if decision.bubble == .file {

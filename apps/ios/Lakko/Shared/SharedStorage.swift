@@ -148,6 +148,12 @@ public enum SharedStorage {
     /// English.
     public static let notificationCountedWordKeys: [String] = [
         "notification.message.attachments",
+        // `docs/ux/media-messages.md` section 11 — the words of a message of
+        // photos, videos or files.
+        "chat.media.photos",
+        "chat.media.videos",
+        "chat.media.photos_and_videos",
+        "chat.media.files",
     ]
 
     /// The largest count the app renders a counted word for.

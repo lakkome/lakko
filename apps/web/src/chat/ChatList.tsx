@@ -52,6 +52,7 @@ import { useLineage } from "./use-lineage";
 import { uiRules } from "./ui-rules";
 import { formatListTime } from "./list-time";
 import { rowMatchesQuery } from "./list-preview";
+import { ListThumb } from "./ListThumb";
 import { showsEmptyState } from "./list-empty-state";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -192,6 +193,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     summaryFor,
     endedLine,
     subOf,
+    previewMediaFor,
     clock,
     orderedRows,
     groupById,
@@ -744,6 +746,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     </div>
                     <div class="lk-row-line">
                       <span class="lk-row-sub" data-testid="chat-preview">
+                        {/* Section 11 of media-messages — the last message's
+                            first photo or video, at the start of the line. */}
+                        <Show when={previewMediaFor(g)}>{(m) => <ListThumb media={m()} />}</Show>
                         {/* An empty line while the previews are read still
                             takes a line's height, so no row moves. */}
                         {sub().length > 0 ? sub() : "\u00a0"}

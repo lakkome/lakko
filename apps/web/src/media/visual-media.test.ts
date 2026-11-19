@@ -4,13 +4,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  BUBBLE_MAX_HEIGHT,
-  BUBBLE_MAX_WIDTH,
-  BUBBLE_MIN_SIDE,
   THUMB_HARD_CAP_BYTES,
   THUMB_QUALITY_STEPS,
   THUMB_TARGET_BYTES,
-  bubbleBox,
   fitWithin,
   pickThumbQuality,
   saveNameFor,
@@ -66,36 +62,6 @@ describe("pickThumbQuality", () => {
   it("gives up when nothing fits the hard cap or encoding yields nothing", async () => {
     expect(await pickThumbQuality(async () => ({ bytes: THUMB_HARD_CAP_BYTES + 1, value: 0 }))).toBeNull();
     expect(await pickThumbQuality(async () => ({ bytes: 0, value: 0 }))).toBeNull();
-  });
-});
-
-describe("bubbleBox", () => {
-  it("scales a large photo down to the width bound", () => {
-    expect(bubbleBox({ width: 4000, height: 3000 })).toEqual({ width: 320, height: 240 });
-  });
-
-  it("scales a tall photo down to the height bound", () => {
-    expect(bubbleBox({ width: 1080, height: 1920 })).toEqual({ width: 203, height: 360 });
-  });
-
-  it("does not upscale a small photo that has dimensions", () => {
-    expect(bubbleBox({ width: 200, height: 150 })).toEqual({ width: 200, height: 150 });
-  });
-
-  it("uses the thumb's aspect when the media has no dimensions", () => {
-    expect(bubbleBox({}, { width: 180, height: 320 })).toEqual({ width: 203, height: 360 });
-    expect(bubbleBox({ width: 100 }, { width: 320, height: 160 })).toEqual({ width: 320, height: 160 });
-  });
-
-  it("falls back to 4:3 without dimensions or a thumb", () => {
-    expect(bubbleBox({})).toEqual({ width: 320, height: 240 });
-  });
-
-  it("clamps an extreme aspect to the minimum side", () => {
-    const box = bubbleBox({ width: 4096, height: 10 });
-    expect(box.width).toBe(BUBBLE_MAX_WIDTH);
-    expect(box.height).toBe(BUBBLE_MIN_SIDE);
-    expect(bubbleBox({ width: 10, height: 4096 }).height).toBe(BUBBLE_MAX_HEIGHT);
   });
 });
 

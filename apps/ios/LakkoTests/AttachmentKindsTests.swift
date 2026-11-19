@@ -338,10 +338,10 @@ final class AttachmentKindsTests: XCTestCase {
     // MARK: Send preview, article, admitters
 
     func testTheVideoRuleIsMp4H264UnderTheCap() {
-        XCTAssertTrue(SendPreviewRules.videoAcceptable(isMP4: true, isH264: true, bytes: 1_000))
-        XCTAssertFalse(SendPreviewRules.videoAcceptable(isMP4: false, isH264: true, bytes: 1_000))
-        XCTAssertFalse(SendPreviewRules.videoAcceptable(isMP4: true, isH264: false, bytes: 1_000))
-        XCTAssertFalse(SendPreviewRules.videoAcceptable(
+        XCTAssertTrue(ComposerTrayUpload.videoAcceptable(isMP4: true, isH264: true, bytes: 1_000))
+        XCTAssertFalse(ComposerTrayUpload.videoAcceptable(isMP4: false, isH264: true, bytes: 1_000))
+        XCTAssertFalse(ComposerTrayUpload.videoAcceptable(isMP4: true, isH264: false, bytes: 1_000))
+        XCTAssertFalse(ComposerTrayUpload.videoAcceptable(
             isMP4: true, isH264: true, bytes: AttachmentBridge.maxAttachmentBytes + 1))
     }
 

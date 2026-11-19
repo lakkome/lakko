@@ -32,6 +32,11 @@ export const NOTIFICATION_STRINGS_URL = "/__lakko/l10n/notification-strings.json
  */
 export const NOTIFICATION_ATTACHMENT_COUNTS = 99;
 
+/** How many counts of the section 11 words are rendered (one message carries
+ *  at most ten photos and videos, and ten files); must equal
+ *  `NOTIFICATION_MEDIA_COUNTS` in the worker. */
+export const NOTIFICATION_MEDIA_COUNTS = 10;
+
 /** The words the worker reads. The field names are the worker's. */
 export interface NotificationWords {
   voiceCall: string;
@@ -44,6 +49,12 @@ export interface NotificationWords {
   unsupportedMessage: string;
   /** Entry `i` is the attachment-only preview line for `i + 1` attachments. */
   attachments: string[];
+  /** `docs/ux/media-messages.md` section 11 — entry `i` is the line for
+   *  `i + 1` photos, videos, photos and videos together, and files. */
+  photos: string[];
+  videos: string[];
+  photosAndVideos: string[];
+  files: string[];
   /** Reactions section 12 — "{name} reacted {emoji} to your message", with
    *  U+0001 where the name goes and U+0002 where the emoji goes (the worker
    *  cannot run the formatter). */
@@ -74,7 +85,19 @@ export function renderNotificationStrings(): NotificationWords {
   for (let count = 1; count <= NOTIFICATION_ATTACHMENT_COUNTS; count++) {
     attachments.push(t("notification.message.attachments", { count }));
   }
+  const counted = (key: string, from: number): string[] => {
+    const out: string[] = [];
+    for (let count = 1; count <= NOTIFICATION_MEDIA_COUNTS; count++) {
+      out.push(count < from ? "" : t(key, { count }));
+    }
+    return out;
+  };
   return {
+    photos: counted("chat.media.photos", 1),
+    videos: counted("chat.media.videos", 1),
+    // Photos and videos together are always at least two.
+    photosAndVideos: counted("chat.media.photos_and_videos", 2),
+    files: counted("chat.media.files", 1),
     voiceCall: t("call.kind.voice"),
     videoCall: t("call.kind.video"),
     accept: t("call.incoming.accept"),

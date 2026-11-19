@@ -167,6 +167,8 @@ describe("summarizeGroupSlot (the chat list row)", () => {
       previewIsOwn: true,
       lastAt: photo.createdAt,
       lastAuthorKeyB64: null,
+      // docs/ux/media-messages.md section 11 — the row's thumbnail.
+      previewMedia: { thumb: null, video: false, count: 1 },
     });
     const long = msg(2, "incoming", "x".repeat(200));
     const p = summarizeGroupSlot({ cursor: "2", messages: [long] }, null).preview ?? "";

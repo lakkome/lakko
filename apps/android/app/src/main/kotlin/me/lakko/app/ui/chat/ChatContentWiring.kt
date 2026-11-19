@@ -232,19 +232,8 @@ internal fun AttachmentSurfaces(
     }
     if (cameraOpen) {
         CameraCaptureScreen(
-            onCaptured = { uri -> viewModel.openSendPreview(listOf(uri), filesOnly = false) },
+            onCaptured = { uri -> viewModel.addToTray(listOf(uri), filesOnly = false) },
             onClose = { cameraOpen = false },
-        )
-    }
-    val preview by viewModel.sendPreview.collectAsState()
-    preview?.let { p ->
-        SendPreviewScreen(
-            preview = p,
-            onCaption = viewModel::onPreviewCaption,
-            onSendAsFile = viewModel::onPreviewSendAsFile,
-            onRemove = viewModel::onPreviewRemove,
-            onSend = viewModel::sendPreviewNow,
-            onClose = viewModel::closeSendPreview,
         )
     }
     val close = { onScreen(null) }

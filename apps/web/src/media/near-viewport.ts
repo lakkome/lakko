@@ -10,8 +10,9 @@
  * first press paid a whole storage round trip plus an AEAD open before a
  * single sample was decoded (`MediaBubbles.tsx`, `VoiceBubble`).
  *
- * Lifted out of `VisualBubbles.tsx` so both files ask the same question with
- * the same margin, rather than one of them growing a second answer.
+ * Shared by `MediaMosaic.tsx` and `MediaBubbles.tsx` so both ask the same
+ * question with the same margin, rather than one of them growing a second
+ * answer.
  *
  * Without an `IntersectionObserver` (an older engine, a test environment) it
  * runs immediately: eager is the safe direction here, since the alternative is

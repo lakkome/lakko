@@ -124,6 +124,13 @@ internal fun PhotoBubble(
     onSave: (AttachmentRef) -> Unit,
     onLongPress: (() -> Unit)?,
     overlay: (@Composable BoxScope.() -> Unit)?,
+    /** Section 11 — a mosaic tile's size, from the shared rule; `null` sizes
+     *  the bubble by section 10's box. */
+    tileSize: androidx.compose.ui.unit.DpSize? = null,
+    shape: androidx.compose.ui.graphics.Shape = MEDIA_SHAPE,
+    /** Section 11 — open the message's viewer at this item, in place of the
+     *  bubble's own single viewer. */
+    onOpen: (() -> Unit)? = null,
 ) {
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     val box = remember(ref.width, ref.height, ref.thumb) {
@@ -175,8 +182,8 @@ internal fun PhotoBubble(
     }
     Box(
         modifier = Modifier
-            .size(box.widthDp.dp, box.heightDp.dp)
-            .clip(MEDIA_SHAPE)
+            .size(tileSize?.width ?: box.widthDp.dp, tileSize?.height ?: box.heightDp.dp)
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .mediaGestures(
                 label = t(if (failed) "common.retry" else "chat.photo.open"),
@@ -188,7 +195,7 @@ internal fun PhotoBubble(
                         full = null
                         attempt += 1
                     } else if (ready) {
-                        viewer = true
+                        if (onOpen != null) onOpen() else viewer = true
                     }
                 },
                 onLongPress = onLongPress,
@@ -259,6 +266,9 @@ internal fun VideoBubble(
     onSave: (AttachmentRef) -> Unit,
     onLongPress: (() -> Unit)?,
     overlay: (@Composable BoxScope.() -> Unit)?,
+    tileSize: androidx.compose.ui.unit.DpSize? = null,
+    shape: androidx.compose.ui.graphics.Shape = MEDIA_SHAPE,
+    onOpen: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
@@ -288,6 +298,10 @@ internal fun VideoBubble(
         if (loading) return
         if (failed && !mediaRetryOffered(hub.failureFor(key))) return
         failed = false
+        if (onOpen != null) {
+            onOpen()
+            return
+        }
         if (file != null) {
             player = true
             return
@@ -317,8 +331,8 @@ internal fun VideoBubble(
     }
     Box(
         modifier = Modifier
-            .size(box.widthDp.dp, box.heightDp.dp)
-            .clip(MEDIA_SHAPE)
+            .size(tileSize?.width ?: box.widthDp.dp, tileSize?.height ?: box.heightDp.dp)
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .mediaGestures(
                 label = t(if (failed) "common.retry" else "chat.video.open"),
@@ -337,11 +351,12 @@ internal fun VideoBubble(
                 modifier = Modifier.fillMaxSize(),
             )
         }
+        val compact = tileSize != null && minOf(tileSize.width, tileSize.height) < 140.dp
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .align(Alignment.Center)
-                .size(52.dp)
+                .size(if (compact) 36.dp else 52.dp)
                 .clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.45f)),
         ) {
@@ -352,7 +367,7 @@ internal fun VideoBubble(
                     icon = R.drawable.ic_lk_play_fill,
                     contentDescription = null,
                     tint = Color.White,
-                    size = LkIconSize.Call,
+                    size = if (compact) LkIconSize.Row else LkIconSize.Call,
                 )
             }
         }
@@ -363,7 +378,7 @@ internal fun VideoBubble(
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
             )
         }
-        Text(
+        if (!compact) Text(
             text = sizeLabel,
             style = MaterialTheme.typography.labelSmall,
             color = Color.White,

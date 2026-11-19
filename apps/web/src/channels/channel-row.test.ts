@@ -111,6 +111,14 @@ describe("channelRowPreview", () => {
     expect(channelRowPreview({ text: "   " }, "@news")).toBe("@news");
   });
 
+  it("reads like a chat row for the three cases of media-messages section 11", async () => {
+    const { channelRowPreview } = await import("./channel-row");
+    const files = [{ mime: "application/pdf", kind: null }, { mime: "text/plain", kind: null }];
+    expect(channelRowPreview({ text: "Weekend plans", media: files }, "@x")).toBe("2 files \u00b7 Weekend plans");
+    expect(channelRowPreview({ text: "The trip", media: [{ mime: "image/jpeg", kind: null }] }, "@x")).toBe("The trip");
+    expect(channelRowPreview({ text: "", media: files }, "@x")).toBe("2 files");
+  });
+
   it("names a caption-less post's attachment the way a group row does, not the @name", async () => {
     const { channelRowPreview } = await import("./channel-row");
     const { attachmentsPreviewLabel } = await import("../chat/list-preview");

@@ -43,6 +43,7 @@ pub mod initials;
 pub mod language_detect;
 pub mod layer_display;
 pub mod lookup;
+pub mod media_mosaic;
 pub mod message_links;
 pub mod reaction;
 pub mod ring;

@@ -19,7 +19,7 @@ import UIKit
 
 private let mediaCorner = LakkoRadius.bubble
 
-private struct MediaFailedLabel: View {
+struct MediaFailedLabel: View {
     let text: String
 
     var body: some View {
@@ -37,7 +37,7 @@ private struct MediaFailedLabel: View {
 
 /// ADR-0065 / UX 4.1, 4.2 — what a photo or video shows when it did not
 /// open: the gone notice, the limit line, or the kind's own failure.
-private struct MediaFailureOverlay: View {
+struct MediaFailureOverlay: View {
     let failure: MediaLoadFailure
     let genericText: String
 
@@ -57,7 +57,7 @@ private struct MediaFailureOverlay: View {
     }
 }
 
-private struct CornerSpinner: View {
+struct CornerSpinner: View {
     var body: some View {
         ProgressView()
             .controlSize(.small)
@@ -334,7 +334,7 @@ struct VideoBubble: View {
 /// sheet recognises ("Save Image" / "Save Video" need the right extension).
 /// The name is derived from the sender-chosen `name` through
 /// ``AttachmentBridge/safeFileName(_:fallback:)``.
-private enum MediaShareCopy {
+enum MediaShareCopy {
     static func extensionFor(mime: String?) -> String {
         switch (mime ?? "").lowercased().split(separator: ";").first.map(String.init) ?? "" {
         case "image/png": return "png"
@@ -629,7 +629,7 @@ struct VideoPlayerScreen: View {
 }
 
 /// The platform's standard video controls.
-private struct PlayerControllerView: UIViewControllerRepresentable {
+struct PlayerControllerView: UIViewControllerRepresentable {
     let player: AVPlayer
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {

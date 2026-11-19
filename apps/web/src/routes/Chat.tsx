@@ -35,6 +35,9 @@ import { contentFromPersisted } from "../attach/preview";
 import { Portal } from "solid-js/web";
 import { openMessageMenu } from "../chat/message-menu-registry";
 import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
+import { ComposerTray } from "../chat/ComposerTray";
+import { backspaceRemovesLast, traySendable, type TrayStatus } from "../chat/compose-tray";
+import { release as releaseTrayItem, trayFor, type TrayStore } from "../chat/tray-store";
 import type { ContentHost } from "../attach/ContentBubble";
 import { ArticleReader } from "../attach/ArticleReader";
 import { checklistContentOf, contentRetryAllowed, pollContentOf } from "../attach/actions";
@@ -43,9 +46,8 @@ import { loadContent as loadAttachContent, updateContent as updateAttachContent,
 import { heldOpOf } from "../attach/receive";
 import { persistedFromAttachmentRef as persistedAttachmentOf } from "../chat/persisted-attachment";
 import { reencodePhoto } from "../attach/photo-encode";
-import { readAudioTags } from "../attach/audio-tags";
 import { addContactFromCard } from "../attach/contact-card-add";
-import type { ArticleDraftOut, ChecklistDraft, PollDraft, PreviewResult, ShareableContact } from "../attach/types";
+import type { ArticleDraftOut, ChecklistDraft, PollDraft, ShareableContact } from "../attach/types";
 import type { Article, ContentState, MessageContent, SharedContactCard } from "../../wasm/lakko_ffi_wasm";
 import { loadWasm as loadAttachWasm } from "../wasm";
 import { openHostUrl } from "../platform/host";
@@ -118,6 +120,7 @@ import {
 } from "../chat/saved-messages";
 import type { ConversationRef } from "../chat/folders/folder-model";
 import { deleteBlobs } from "../storage/blob-deletes";
+import { StorageClient } from "../storage/client";
 import {
   persistedFromReplyRef,
   replyRefFromPersisted,
@@ -1925,14 +1928,6 @@ function ChatView(props: {
       draftBroadcastTimer = null;
     }
   });
-  // 1.19c2 — attachments staged in the composer. The user picks
-  // file(s); each gets encrypt+upload immediately so the ref is
-  // ready by the time they hit Send. Cleared on Send, on
-  // explicit per-chip remove, and on navigation away.
-  const [pendingAttachments, setPendingAttachments] = createSignal<
-    AttachmentRefBytes[]
-  >([]);
-
   // ----- ADR-0065: file lifetime and saved messages ---------------------
 
   /** The signed-in account, for the blob deletes it owes. */
@@ -1968,27 +1963,6 @@ function ChatView(props: {
     return target !== null && savedKeys().has(savedEntryKey(blobHex(target.groupId), target.messageId));
   };
   const [uploading, setUploading] = createSignal(false);
-  /** Per-file upload-progress snapshot — drives the
-   *  "Uploading hello.png (2/5)…" indicator in the composer
-   *  tray. `null` when no upload is in flight. The granularity
-   *  is one entry per file × two stages (encrypt → upload);
-   *  byte-level progress within a single PUT would need a
-   *  fetch-stream rewrite (`fetch` doesn't expose upload
-   *  progress; XHR does, but the trade-off in code complexity
-   *  beats the marginal UX win for sub-MAX_ATTACHMENT_BYTES
-   *  files). */
-  const [uploadProgress, setUploadProgress] = createSignal<
-    | {
-        fileIndex: number;
-        total: number;
-        fileName: string;
-        stage: "encrypting" | "uploading";
-        /** UX spec section 10 — the local thumb shown while a photo or
-         *  video uploads, filed in the media hub under this key. */
-        previewKey?: string;
-      }
-    | null
-  >(null);
   // ADR-0047 — the media runtime every bubble shares: decrypted media as
   // object URLs (revoked when this view unmounts — before this, every
   // previewed image stayed in memory for the life of the tab), the
@@ -2016,6 +1990,20 @@ function ChatView(props: {
         ];
       }),
   });
+  // `docs/ux/media-messages.md` section 11 — the composer tray: what the next
+  // message carries, uploaded as it is added. It belongs to this
+  // conversation's draft on this device, so it outlives this view
+  // (`chat/tray-store.ts`) and is found again when the conversation reopens.
+  const tray: TrayStore = trayFor(
+    `${auth.state().kind === "session" ? (auth.state() as { account: { accountId: string } }).account.accountId : "none"}:${props.entry.groupIdB64}`,
+    {
+      storage: () => new StorageClient(),
+      inlineType: (mime) => hub.inlineType(mime),
+      discard: (refs) => deleteUnsent(refs),
+      onError: (text) => setError(() => text),
+    },
+  );
+  const trayStatuses = (): TrayStatus[] => tray.items().map((i) => i.status);
   onCleanup(() => hub.dispose());
   // ADR-0051 — the `Group name` row of the group info (UX spec §3.1.2 / §5).
   const [groupNameInput, setGroupNameInput] = createSignal("");
@@ -4898,12 +4886,25 @@ function ChatView(props: {
   async function onSend(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const text = input();
-    const attached = pendingAttachments();
-    // 1.19c2: attachment-only messages are valid (empty text +
-    // ≥1 attachment); pre-1.19 text-only messages still valid
-    // (≥1 char text + zero attachments). The only invalid
-    // input is the all-empty composer.
-    if (text.length === 0 && attached.length === 0) return;
+    // `docs/ux/media-messages.md` section 11 — one message carries the text
+    // and every item of the tray; Send waits until each item is uploaded.
+    if (!traySendable(text, trayStatuses())) return;
+    const items = tray.take();
+    const attached: AttachmentRefBytes[] = [];
+    for (const item of items) {
+      if (item.ref === null) continue;
+      attached.push(item.ref);
+      // The sender's own bubble shows the local bytes rather than downloading
+      // its own upload.
+      if (item.kind !== "file") {
+        hub.fileLocal(mediaKey(item.ref.blobId), item.file, item.ref.mime);
+        const thumb = item.ref.thumb;
+        if (thumb !== undefined && item.thumbBlob !== null) {
+          hub.fileLocal(`thumb:${mediaKey(thumb.blobId)}`, item.thumbBlob, "image/jpeg");
+        }
+      }
+      releaseTrayItem(item);
+    }
     setError(null);
     draftSeed.touched();
 
@@ -4934,7 +4935,6 @@ function ChatView(props: {
       },
     ]);
     setInput("");
-    setPendingAttachments([]);
     await publishOutgoing(tempId, text, attached, reply);
   }
 
@@ -5591,97 +5591,6 @@ function ChatView(props: {
   });
 
   /**
-   * Encrypt + upload an iterable of files sequentially (so a
-   * slow user-stream doesn't fan out N parallel storage PUTs),
-   * appending the resulting refs to the pending list. Failed
-   * uploads surface a per-file error and stop the loop.
-   *
-   * Shared between the `<input type="file">` Change handler and
-   * the drag-drop handler — both surface a `FileList`-ish
-   * iterable; this helper is the one place we own the upload
-   * loop.
-   */
-  async function processFiles(files: ArrayLike<File>): Promise<void> {
-    if (files.length === 0) return;
-    setError(null);
-    setUploading(true);
-    const list = Array.from(files);
-    try {
-      for (let i = 0; i < list.length; i += 1) {
-        const file = list[i];
-        if (file === undefined) continue;
-        try {
-          // Polish 1.x: drive `uploadProgress` so the composer
-          // tray can render "Uploading <file> (i/n)…" with a
-          // stage indicator. The encrypt-vs-upload split lets
-          // the user see the slow phase (network) separately
-          // from the fast one (in-memory AEAD).
-          // UX spec section 10 — a photo or video carries its pixel size
-          // and a JPEG thumb so the receiver can lay the bubble out before
-          // downloading. Produced before the upload so the composer shows
-          // the thumb meanwhile; any failure sends the file without them.
-          const inline = hub.inlineType(file.type.length > 0 ? file.type : undefined);
-          let preview: VisualPreview | null = null;
-          let previewKey: string | undefined;
-          if (inline === "image" || inline === "video") {
-            preview = inline === "image" ? await describeImage(file) : await describeVideo(file);
-            if (preview.thumb !== null) {
-              previewKey = `compose-preview:${nextTempId++}`;
-              hub.fileLocal(previewKey, preview.thumb.blob, "image/jpeg");
-            }
-          }
-          let ref: AttachmentRefBytes;
-          try {
-            ref = await encryptAndUploadFile(
-              file,
-              undefined,
-              (stage) => {
-                setUploadProgress({
-                  fileIndex: i,
-                  total: list.length,
-                  fileName: file.name,
-                  stage,
-                  ...(previewKey === undefined ? {} : { previewKey }),
-                });
-              },
-            );
-            if (preview !== null) ref = await withVisualPreview(ref, file, preview);
-          } finally {
-            if (previewKey !== undefined) hub.revoke(previewKey);
-          }
-          setPendingAttachments([...pendingAttachments(), ref]);
-        } catch (err) {
-          if (err instanceof AttachmentSizeError) {
-            const { got, max } = err;
-            const name = file.name;
-            setError(() =>
-              t("chat.attachment.error.too_large_named", {
-                name,
-                size: formatAttachmentSize(got),
-                limit: formatAttachmentSize(max),
-              }),
-            );
-          } else if (isSendLimit(err)) {
-            // UX 4.2 — the text stays in the composer.
-            setError(() => sendLimitText());
-          } else {
-            const name = file.name;
-            console.warn("[chat] attachment upload failed", err);
-            setError(() => t("chat.attachment.error.upload", { name }));
-          }
-          // Stop the loop on the first failure — a network
-          // outage isn't going to be fixed by trying the next
-          // file. The user picks again after surfacing.
-          break;
-        }
-      }
-    } finally {
-      setUploading(false);
-      setUploadProgress(null);
-    }
-  }
-
-  /**
    * UX spec section 10 — attach the pixel size and upload the thumb of a
    * photo or video, then file the local bytes in the media hub so this
    * device's own bubble shows them without downloading its own upload. A
@@ -5763,19 +5672,9 @@ function ChatView(props: {
     setIsDragOver(false);
     const files = e.dataTransfer?.files;
     if (files === undefined || files.length === 0) return;
-    // Like the paperclip and a paste: the send preview, not straight in.
-    if (openAttachFiles !== null) openAttachFiles(Array.from(files));
-    else await processFiles(files);
-  }
-  let openAttachFiles: ((files: readonly File[]) => void) | null = null;
-
-  function removePendingAttachment(index: number): void {
-    const removed = pendingAttachments()[index];
-    setPendingAttachments(
-      pendingAttachments().filter((_, i) => i !== index),
-    );
-    // ADR-0065 section 6 — removed from the composer: never sent, so gone.
-    if (removed !== undefined) deleteUnsent([removed]);
+    // Like the paperclip and a paste: into the composer tray (section 11).
+    if (editingId() !== null) return;
+    tray.add(Array.from(files), "media");
   }
 
   // ----- ADR-0092 attachment kinds ---------------------------------------
@@ -5838,18 +5737,14 @@ function ChatView(props: {
     await publishOutgoing(tempId, "", refs, reply);
   }
 
-  /** Upload one file and return its ref (media preview and audio tags
+  /** Upload one image of an article and return its ref (dimensions and thumb
    *  included). `null` when it could not be sent; the error is shown. */
-  async function uploadForSend(
-    original: File,
-    mode: "media" | "file" | "audio",
-    asFile: boolean,
-  ): Promise<AttachmentRefBytes | null> {
+  async function uploadForSend(original: File): Promise<AttachmentRefBytes | null> {
     let file = original;
     const wasm = await loadAttachWasm();
     // UX section 3 — a photo is re-encoded (longest side at most the core's
     // constant, metadata dropped); GIFs keep their animation.
-    if (mode === "media" && !asFile && file.type.startsWith("image/") && file.type !== "image/gif") {
+    if (file.type.startsWith("image/") && file.type !== "image/gif") {
       try {
         file = await reencodePhoto(file, wasm.photoMaxLongestSidePx());
       } catch {
@@ -5858,34 +5753,13 @@ function ChatView(props: {
       }
     }
     try {
-      const inline = asFile ? null : hub.inlineType(file.type.length > 0 ? file.type : undefined);
+      const inline = hub.inlineType(file.type.length > 0 ? file.type : undefined);
       let preview: VisualPreview | null = null;
       if (inline === "image" || inline === "video") {
         preview = inline === "image" ? await describeImage(file) : await describeVideo(file);
       }
       let ref = await encryptAndUploadFile(file);
       if (preview !== null) ref = await withVisualPreview(ref, file, preview);
-      if (mode === "audio") {
-        const tags = await readAudioTags(file);
-        let thumb: ThumbRefBytes | undefined;
-        if (tags.cover !== undefined) {
-          try {
-            const bytes = new Uint8Array(await tags.cover.arrayBuffer());
-            const up = await encryptAndUploadBytes(bytes, { mime: "image/jpeg", name: undefined });
-            thumb = { blobId: up.blobId, key: up.key, nonce: up.nonce, mime: "image/jpeg", size: bytes.length, width: undefined, height: undefined };
-          } catch {
-            thumb = undefined;
-          }
-        }
-        ref = {
-          ...ref,
-          kind: "audio",
-          title: tags.title,
-          ...(tags.artist === undefined ? {} : { artist: tags.artist }),
-          ...(tags.durationMs === undefined ? {} : { durationMs: tags.durationMs }),
-          ...(thumb === undefined ? {} : { thumb }),
-        };
-      }
       return ref;
     } catch (err) {
       if (err instanceof AttachmentSizeError) {
@@ -5897,39 +5771,6 @@ function ChatView(props: {
         setError(() => t("chat.attachment.error.upload", { name: file.name }));
       }
       return null;
-    }
-  }
-
-  /** UX sections 3, 4, 6 — the send preview's result: one message per item,
-   *  in the order shown, the caption on the first. */
-  async function sendPreviewFiles(r: PreviewResult, mode: "media" | "file" | "audio"): Promise<void> {
-    setError(null);
-    setUploading(true);
-    try {
-      let first = true;
-      for (const file of r.files) {
-        const ref = await uploadForSend(file, mode, r.asFile);
-        if (ref === null) continue;
-        const text = first ? r.caption : "";
-        first = false;
-        const reply = takeArmedReply();
-        const tempId = nextTempId++;
-        setRows([
-          ...rows(),
-          {
-            kind: "outgoing",
-            tempId,
-            plaintext: text,
-            attachments: [ref],
-            ack: "pending",
-            authorKey: ownSignatureKeyB64(),
-            ...(reply === undefined ? {} : { reply }),
-          },
-        ]);
-        await publishOutgoing(tempId, text, [ref], reply);
-      }
-    } finally {
-      setUploading(false);
     }
   }
 
@@ -5984,7 +5825,7 @@ function ChatView(props: {
       const refs: AttachmentRefBytes[] = [];
       for (const image of out.images) {
         const asFile = image instanceof File ? image : new File([image], "image.jpg", { type: image.type || "image/jpeg" });
-        const ref = await uploadForSend(asFile, "media", false);
+        const ref = await uploadForSend(asFile);
         if (ref === null) return;
         refs.push(ref);
       }
@@ -6159,7 +6000,9 @@ function ChatView(props: {
   // ADR-0065 section 6 — leaving the chat abandons what was uploaded and not
   // sent: the composer's staged files and media takes that never went out.
   onCleanup(() => {
-    const unsent: AttachmentRefBytes[] = [...pendingAttachments()];
+    // The composer tray is not here: it is the conversation's draft and
+    // outlives this view (section 11).
+    const unsent: AttachmentRefBytes[] = [];
     for (const job of mediaJobs.values()) {
       if (job.uploaded === undefined) continue;
       unsent.push(job.uploaded);
@@ -8699,127 +8542,6 @@ function ChatView(props: {
         )}
       </Show>
 
-      {/* 1.19c2 — pending-attachments tray. Renders above the
-         text composer when ≥1 file is staged; each chip shows
-         the filename + size with a × to drop it. A photo or
-         video chip shows its thumb (UX spec section 10), filed
-         in the media hub from the local bytes before upload. */}
-      <Show when={pendingAttachments().length > 0 || uploading()}>
-        <div
-          style={{
-            display: "flex",
-            "flex-wrap": "wrap",
-            gap: "0.4rem",
-            padding: "0.5rem",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-md)",
-            background: "var(--surface-elevated)",
-          }}
-        >
-          <For each={pendingAttachments()}>
-            {(ref, i) => (
-              <span
-                style={{
-                  display: "inline-flex",
-                  "align-items": "center",
-                  gap: "0.35rem",
-                  padding: "0.2rem 0.5rem",
-                  background: "var(--surface-bg)",
-                  border: "1px solid var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  "font-size": "0.8rem",
-                }}
-              >
-                <Show
-                  when={
-                    ref.thumb !== undefined
-                      ? hub.urlFor(`thumb:${mediaKey(ref.thumb.blobId)}`)
-                      : null
-                  }
-                >
-                  {(url) => (
-                    <img
-                      src={url()}
-                      alt=""
-                      style={{
-                        width: "28px",
-                        height: "28px",
-                        "object-fit": "cover",
-                        "border-radius": "4px",
-                      }}
-                    />
-                  )}
-                </Show>
-                <span>{ref.name ?? t("chat.attachment.unnamed")}</span>
-                <span style={{ color: "var(--surface-muted)" }}>
-                  · {formatAttachmentSize(ref.size)}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removePendingAttachment(i())}
-                  disabled={busy()}
-                  aria-label={t("chat.composer.remove_attachment")}
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    cursor: "pointer",
-                    "font-size": "1rem",
-                    "line-height": 1,
-                    padding: 0,
-                  }}
-                >
-                  ×
-                </button>
-              </span>
-            )}
-          </For>
-          <Show when={uploading()}>
-            <Show
-              when={(() => {
-                const key = uploadProgress()?.previewKey;
-                return key === undefined ? null : hub.urlFor(key);
-              })()}
-            >
-              {(url) => (
-                <img
-                  src={url()}
-                  alt=""
-                  style={{
-                    width: "36px",
-                    height: "36px",
-                    "object-fit": "cover",
-                    "border-radius": "var(--radius-sm)",
-                    "align-self": "center",
-                  }}
-                />
-              )}
-            </Show>
-            <span
-              style={{
-                color: "var(--surface-muted)",
-                "font-size": "0.8rem",
-                "align-self": "center",
-              }}
-            >
-              {(() => {
-                const p = uploadProgress();
-                if (p === null) return t("chat.upload.working");
-                const name = p.fileName;
-                if (p.total > 1) {
-                  const args = { name, index: p.fileIndex + 1, total: p.total };
-                  return p.stage === "encrypting"
-                    ? t("chat.upload.encrypting_of", args)
-                    : t("chat.upload.uploading_of", args);
-                }
-                return p.stage === "encrypting"
-                  ? t("chat.upload.encrypting", { name })
-                  : t("chat.upload.uploading", { name });
-              })()}
-            </span>
-          </Show>
-        </div>
-      </Show>
-
       {/* ADR-0024 — typing indicator. Sits just above the compose
           bar; auto-hides when nobody is typing (the memo returns
           null) and after the ~6 s expiry sweep.
@@ -9006,7 +8728,8 @@ function ChatView(props: {
           </For>
         </div>
       </Show>
-      <form onSubmit={onSend} class="lk-composer">
+      <form onSubmit={onSend} class="lk-composer" classList={{ "with-tray": tray.items().length > 0 || tray.notice() !== null }}>
+        <ComposerTray tray={tray} />
         <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
           <EmojiPicker
             mode="compose"
@@ -9035,10 +8758,7 @@ function ChatView(props: {
           editRequest={attachEdit}
           clearEditRequest={() => setAttachEdit(null)}
           acceptPaste={() => true}
-          bindOpenFiles={(open) => {
-            openAttachFiles = open;
-          }}
-          sendFiles={sendPreviewFiles}
+          addFiles={(files, source) => tray.add(files, source)}
           sendPoll={sendPollDraft}
           sendChecklist={sendChecklistDraft}
           sendLocation={(l) => sendContentMessage({ kind: "location", location: l })}
@@ -9125,6 +8845,21 @@ function ChatView(props: {
               }
             }
             if (e.key === " ") setColonQuery(null);
+            // Section 11 — Backspace in an empty field removes the tray's
+            // last item.
+            if (
+              backspaceRemovesLast({
+                key: e.key,
+                fieldEmpty: e.currentTarget.value.length === 0,
+                modified: e.altKey || e.ctrlKey || e.metaKey || e.shiftKey,
+                composing: e.isComposing,
+                items: tray.items().length,
+              })
+            ) {
+              e.preventDefault();
+              tray.removeLast();
+              return;
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
@@ -9137,7 +8872,7 @@ function ChatView(props: {
                 key: e.key,
                 modified: e.altKey || e.ctrlKey || e.metaKey || e.shiftKey,
                 composing: e.isComposing,
-                empty: input().length === 0 && pendingAttachments().length === 0,
+                empty: input().length === 0 && tray.items().length === 0,
                 editing: editingId() !== null,
                 actionsAvailable: messageActionsAvailable(),
               })
@@ -9187,7 +8922,7 @@ function ChatView(props: {
             on. */}
         <Show
           when={
-            (input().length > 0 || pendingAttachments().length > 0 || uploading()) &&
+            (input().length > 0 || tray.items().length > 0 || uploading()) &&
             !recorderBusy(recorder)
           }
           fallback={<RecordButton recorder={recorder} />}
@@ -9197,10 +8932,7 @@ function ChatView(props: {
           type="submit"
           aria-label={t("chat.composer.send")}
           title={t("chat.composer.send")}
-          disabled={
-            uploading() ||
-            (input().length === 0 && pendingAttachments().length === 0)
-          }
+          disabled={uploading() || !traySendable(input(), trayStatuses())}
         >
           <Icon name="send-fill" size={20} />
         </button>

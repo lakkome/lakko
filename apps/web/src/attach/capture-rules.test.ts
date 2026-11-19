@@ -8,10 +8,7 @@ import {
   isPhoneClassBrowser,
   nextCameraId,
   pickVideoMime,
-  previewVerdict,
 } from "./capture-rules";
-
-const MiB = 1024 * 1024;
 
 describe("capture rules", () => {
   it("records only MP4", () => {
@@ -22,20 +19,6 @@ describe("capture rules", () => {
         throw new Error("no");
       }),
     ).toBeNull();
-  });
-  it("sends photos and MP4 videos as media", () => {
-    expect(previewVerdict({ type: "image/heic", size: 10 }, "media", false)).toBe("photo");
-    expect(previewVerdict({ type: "video/mp4", size: 10 }, "media", false)).toBe("video");
-  });
-  it("refuses another video format or one over the cap, unless sent as a file", () => {
-    expect(previewVerdict({ type: "video/quicktime", size: 10 }, "media", false)).toBe("video-refused");
-    expect(previewVerdict({ type: "video/mp4", size: 51 * MiB }, "media", false)).toBe("video-refused");
-    expect(previewVerdict({ type: "video/quicktime", size: 10 }, "media", true)).toBe("file");
-  });
-  it("removes a file over the cap", () => {
-    expect(previewVerdict({ type: "application/pdf", size: 51 * MiB }, "file", false)).toBe("too-big");
-    expect(previewVerdict({ type: "video/mp4", size: 51 * MiB }, "media", true)).toBe("too-big");
-    expect(previewVerdict({ type: "audio/mpeg", size: 1 }, "audio", false)).toBe("file");
   });
   it("opens the chosen camera by id, a phone's front camera by facing mode, otherwise the default device", () => {
     expect(cameraVideoConstraint({ deviceId: "cam-2", phoneClass: false }).deviceId).toEqual({ exact: "cam-2" });

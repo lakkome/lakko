@@ -98,6 +98,7 @@ import { clearSelectedTab } from "../chat/folders/selected-tab";
 import { deleteCallLogRow } from "../calls/call-log-idb";
 import { deleteBackgroundPhotos } from "../calls/background-photos";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
+import { dropTraysForAccount } from "../chat/tray-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearClaimedHandles } from "../channels/claimed-handles";
 import { clearClaimedGroupHandles } from "../chat/claimed-group-handles";
@@ -462,6 +463,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     // --- sessionStorage -----------------------------------------------------
     { name: "group-calls", run: () => clearGroupCallsForAccount(accountIdB64) },
+    // --- memory --------------------------------------------------------------
+    // docs/ux/media-messages.md section 11: the composer trays (files staged
+    // for the next messages, kept in memory while the app runs).
+    { name: "composer-trays", run: () => dropTraysForAccount(accountIdB64) },
     // --- last: the plaintext restore marker (see the module doc) -----------
     { name: "restore-marker", run: () => clearPersistedAccountFor(accountIdB64) },
   ];

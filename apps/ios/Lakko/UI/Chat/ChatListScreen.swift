@@ -385,8 +385,28 @@ public struct ChatListScreen: View {
                 markedUnread: flags?.unreadOverride == true,
                 personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex),
                 photoGroupIdHex: kind == .group ? thread.groupIdHex : nil,
-                hasUnseenReactions: viewModel.hasUnseenReactions(groupIdHex: thread.groupIdHex))
+                hasUnseenReactions: viewModel.hasUnseenReactions(groupIdHex: thread.groupIdHex),
+                previewMedia: thread.leaveRequested || thread.membershipEnded ? nil : viewModel.previewMedia(thread: thread))
         }
+    }
+
+    /// The line a channel's row shows for its newest post: its words, else
+    /// `docs/ux/media-messages.md` section 11's words for its photos, videos
+    /// or files, else the post's own line.
+    static func channelPostLine(_ post: PersistedChannelPost) -> String {
+        if post.content == nil, let caption = post.caption {
+            let trimmed = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return ChatListFormatting.textWithFileWords(
+                    trimmed.replacingOccurrences(of: "\n", with: " "), refs: post.attachmentRefs)
+            }
+            if let words = ChatListFormatting.attachmentWords(
+                ChatListFormatting.attachmentCounts(post.attachmentRefs)) {
+                return words
+            }
+        }
+        return post.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
     }
 
     /// A subscribed channel, in the shape the ordering takes.
@@ -435,10 +455,7 @@ public struct ChatListScreen: View {
                 // the @name and role only while no post can be read here.
                 preview: channels.orphanedByReset(channelId: channel.id)
                     ? Localization.text("channels.keys_reset.row_sub")
-                    : (lastPost.map {
-                        $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .replacingOccurrences(of: "\n", with: " ")
-                    } ?? model.secondLine),
+                    : (lastPost.map(Self.channelPostLine) ?? model.secondLine),
                 lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
                 unread: channelUnread[channel.id] ?? 0,
                 // UX group-and-channel-privacy 12 — pinned, muted and archived
@@ -446,7 +463,11 @@ public struct ChatListScreen: View {
                 // the channel id (``ChannelFlags``).
                 pinned: flags?.pinned == true,
                 muted: flags?.muted == true,
-                archived: flags?.archived == true)
+                archived: flags?.archived == true,
+                // `docs/ux/media-messages.md` section 11 — the post's first
+                // photo or video, as in a chat's row.
+                previewMedia: channels.orphanedByReset(channelId: channel.id)
+                    ? nil : lastPost.flatMap { ChatListFormatting.previewMedia($0.attachmentRefs) })
         }
     }
 
@@ -1121,6 +1142,9 @@ struct ConversationRowView: View {
                     }
                 }
                 HStack(alignment: .center, spacing: 6) {
+                    if row.endedLine == nil, let media = row.previewMedia {
+                        PreviewMediaThumbnail(media: media)
+                    }
                     Text(row.secondLine)
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -1372,16 +1396,27 @@ public final class ChatListViewModel: ObservableObject {
             // secret (``BareGroupLink``; seen live 2026-11-13).
             text = BareGroupLink.rowLine(text: text, opening: BareGroupLinks.shared.opening(link)) ?? text
         }
+        // `docs/ux/media-messages.md` section 11 — files only: the words, then
+        // the text ("2 files · Weekend plans").
+        if !last.deleted, last.content == nil, CallTranscriptRow.parse(text) == nil {
+            text = ChatListFormatting.textWithFileWords(text, refs: last.attachments)
+        }
         return ChatListFormatting.preview(
             text: text,
-            attachmentLabels: last.content != nil ? [] : last.attachments.map {
-                ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
-            },
+            attachmentLabels: last.content != nil ? [] : ChatListFormatting.attachmentLabels(last.attachments),
             direction: last.direction,
             deleted: last.deleted,
             unsupported: last.unsupportedVersion != nil,
             isGroup: isGroup,
             senderName: senderName)
+    }
+
+    /// `docs/ux/media-messages.md` section 11 — the row's thumbnail of the
+    /// last message's first photo or video.
+    func previewMedia(thread: ChatThread) -> ConversationPreviewMedia? {
+        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }),
+              !last.deleted, last.content == nil, last.unsupportedVersion == nil else { return nil }
+        return ChatListFormatting.previewMedia(last.attachments)
     }
 
     /// The server time of the last drawn message, for the row's time and the

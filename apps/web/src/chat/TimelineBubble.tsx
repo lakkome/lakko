@@ -81,8 +81,10 @@ import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
 import { EmojiPicker } from "../media/EmojiPicker";
 import { MediaAttachment, type MediaUpload } from "../media/MediaBubbles";
+import { MediaMosaic } from "../media/MediaMosaic";
 import {
   bubbleMetaSlot,
+  onlyVisualMedia,
   soleMediaBubble,
   type BubbleMetaSlot,
   type MediaBubble,
@@ -849,6 +851,14 @@ function ChatBubbleBody(
     plainRefs().filter((a) => props.hub.decision(a).bubble !== "file");
   const fileRefs = (): AttachmentRefBytes[] =>
     plainRefs().filter((a) => props.hub.decision(a).bubble === "file");
+  // Section 11 — every photo and video of the message is one mosaic; voice
+  // messages, video notes and GIFs keep their own bubbles.
+  const isMosaicRef = (a: AttachmentRefBytes): boolean => {
+    const b = props.hub.decision(a).bubble;
+    return b === "photo" || b === "video";
+  };
+  const mosaicRefs = (): AttachmentRefBytes[] => mediaRefs().filter(isMosaicRef);
+  const otherMediaRefs = (): AttachmentRefBytes[] => mediaRefs().filter((a) => !isMosaicRef(a));
   /**
    * The bubble of a message that is nothing but one piece of media, and where
    * its meta line goes — ONE rule, in `inline-media.ts`, rather than the
@@ -880,7 +890,17 @@ function ChatBubbleBody(
           // never be made against two different answers.
           allowlist,
         );
-  const metaSlot = (): BubbleMetaSlot => bubbleMetaSlot(sole());
+  // Section 11 — a message of nothing but photos and videos (one or ten) has
+  // its time on the mosaic, in the translucent pill.
+  const mosaicOnly = (): boolean =>
+    props.reply === undefined &&
+    props.forward === undefined &&
+    props.content === undefined &&
+    onlyVisualMedia(
+      { deleted: isDeleted() || isEditing(), text: displayText(), attachments: props.attachments },
+      allowlist,
+    );
+  const metaSlot = (): BubbleMetaSlot => (mosaicOnly() ? "media-pill" : bubbleMetaSlot(sole()));
   // UX spec section 3 — a video note is a circle with no bubble chrome.
   // UX spec section 10 — a lone photo or video fills its bubble, and the time
   // and ticks sit on the media in a translucent pill.
@@ -919,7 +939,7 @@ function ChatBubbleBody(
           before it, a plain text message that did not send showed the
           words "Not sent" and no way to act on them. */}
       <Show
-        when={props.ack === "failed" && mediaRefs().length === 0}
+        when={props.ack === "failed" && otherMediaRefs().length === 0}
         fallback={<span>{props.time}</span>}
       >
         <NotSent onRetry={() => props.onRetrySend()} />
@@ -1031,6 +1051,7 @@ function ChatBubbleBody(
           "emoji-only": emojiOnly() > 0,
           [`emoji-only-${emojiOnly()}`]: emojiOnly() > 0,
           "media-only": mediaOnly(),
+          "has-mosaic": mosaicRefs().length > 0 && !isDeleted() && !isEditing(),
           pending: pending(),
           "run-start": props.startsRun,
           "run-end": props.endsRun,
@@ -1148,61 +1169,20 @@ function ChatBubbleBody(
                     );
                   }}
                 </Show>
-                <Show when={props.unsupported === true}>
-                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                {/* Section 11 — the photos and videos of the message, laid
+                    out together by the shared mosaic rule. */}
+                <Show when={mosaicRefs().length > 0}>
+                  <MediaMosaic
+                    refs={mosaicRefs()}
+                    hub={props.hub}
+                    keyFor={keyFor}
+                    pending={typeof props.mediaUpload === "number"}
+                  />
                 </Show>
-                <Show when={callInvite()}>
-                  {(invite) => (
-                    <div class="lk-bubble-call-invite">
-                      <span class="lk-bubble-call-invite-icon" aria-hidden="true">
-                        <Icon name="phone-fill" size={20} />
-                      </span>
-                      <span class="lk-bubble-call-invite-title">
-                        {t("chat.call_invite.title")}
-                      </span>
-                      <A class="lk-button-link primary" href={invite().href}>
-                        {t("chat.call.join_short")}
-                      </A>
-                    </div>
-                  )}
-                </Show>
-                <Show when={callInvite() === null ? storedInvite() : null}>
-                  {(o) => <ChannelInviteCard opened={o()} />}
-                </Show>
-                <Show when={callInvite() === null && storedInvite() === null ? groupLink() : null}>
-                  {(link) => <ChannelInviteCard link={link()} onResolved={setIsChannelCard} />}
-                </Show>
-                <Show
-                  when={
-                    displayText().length > 0 && callInvite() === null && !isChannelCard() && storedInvite() === null
-                  }
-                >
-                  <div class="lk-bubble-text" dir="auto">
-                    <Show when={linkText()} fallback={<MessageText text={shownText()} />}>
-                      {(words) => <span>{words()}</span>}
-                    </Show>
-                    <Show when={isEdited()}>
-                      <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
-                    </Show>
-                  </div>
-                  {/* UX 3.2 — machine output is always marked, and the
-                      original is one tap away on this line. */}
-                  <Show when={translation !== undefined && messageRef()}>
-                    {(ref) => (
-                      <TranslationLine
-                        controller={translation!}
-                        slot="text"
-                        messageRef={ref()}
-                        text={displayText()}
-                        view={lineView()}
-                      />
-                    )}
-                  </Show>
-                </Show>
-                <Show when={mediaRefs().length > 0}>
+                <Show when={otherMediaRefs().length > 0}>
                   <div
                     class="lk-bubble-media"
-                    classList={{ "after-text": displayText().length > 0 }}
+                    classList={{ "after-text": mosaicRefs().length > 0 }}
                   >
                     {/* `Index`, not `For`, and it is the media bubble's
                         lifetime that turns on it. A message's attachments are
@@ -1213,7 +1193,7 @@ function ChatBubbleBody(
                         ref). `For` reconciles by reference, so that replacement
                         discarded the bubble and, with it, the element playing
                         the message the person was listening to. */}
-                    <Index each={mediaRefs()}>
+                    <Index each={otherMediaRefs()}>
                       {(ref) => (
                         <MediaAttachment
                           attachment={ref()}
@@ -1296,6 +1276,59 @@ function ChatBubbleBody(
                     getCachedUrl={props.getCachedUrl}
                     tone={props.tone}
                   />
+                </Show>
+                {/* `docs/ux/media-messages.md` section 11 — the text sits below
+                    the mosaic and the file chips. */}
+                <Show when={props.unsupported === true}>
+                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                </Show>
+                <Show when={callInvite()}>
+                  {(invite) => (
+                    <div class="lk-bubble-call-invite">
+                      <span class="lk-bubble-call-invite-icon" aria-hidden="true">
+                        <Icon name="phone-fill" size={20} />
+                      </span>
+                      <span class="lk-bubble-call-invite-title">
+                        {t("chat.call_invite.title")}
+                      </span>
+                      <A class="lk-button-link primary" href={invite().href}>
+                        {t("chat.call.join_short")}
+                      </A>
+                    </div>
+                  )}
+                </Show>
+                <Show when={callInvite() === null ? storedInvite() : null}>
+                  {(o) => <ChannelInviteCard opened={o()} />}
+                </Show>
+                <Show when={callInvite() === null && storedInvite() === null ? groupLink() : null}>
+                  {(link) => <ChannelInviteCard link={link()} onResolved={setIsChannelCard} />}
+                </Show>
+                <Show
+                  when={
+                    displayText().length > 0 && callInvite() === null && !isChannelCard() && storedInvite() === null
+                  }
+                >
+                  <div class="lk-bubble-text" dir="auto">
+                    <Show when={linkText()} fallback={<MessageText text={shownText()} />}>
+                      {(words) => <span>{words()}</span>}
+                    </Show>
+                    <Show when={isEdited()}>
+                      <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
+                    </Show>
+                  </div>
+                  {/* UX 3.2 — machine output is always marked, and the
+                      original is one tap away on this line. */}
+                  <Show when={translation !== undefined && messageRef()}>
+                    {(ref) => (
+                      <TranslationLine
+                        controller={translation!}
+                        slot="text"
+                        messageRef={ref()}
+                        text={displayText()}
+                        view={lineView()}
+                      />
+                    )}
+                  </Show>
                 </Show>
               </>
             }

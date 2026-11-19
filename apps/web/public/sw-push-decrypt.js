@@ -80,7 +80,13 @@ export {
   CALL_ACTION_MESSAGE,
 } from "./sw-call-notification.js";
 
-import { attachmentsLine, notificationStrings as readWords } from "./sw-call-notification.js";
+import {
+  PREVIEW_WORDS_SEPARATOR,
+  attachmentsLine,
+  filesOnlyLine,
+  mediaWordsLine,
+  notificationStrings as readWords,
+} from "./sw-call-notification.js";
 
 /** Max characters of decrypted text shown in the notification body. */
 const PREVIEW_MAX_CHARS = 140;
@@ -2457,9 +2463,15 @@ function previewFromProcessed(wasm, processed, words) {
       const card = parsed.channelInvite;
       if (card instanceof Uint8Array && card.length > 0) return channelInvitePreview(wasm, card, words);
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      if (text.length > 0) return truncate(withoutGroupLinkSecret(text));
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
-      if (count > 0) return attachmentsLine(words, count);
+      if (text.length > 0) {
+        // Section 11 — a message of files only reads `2 files · <text>`; any
+        // other message with text reads as its text.
+        const files = count > 0 ? attachmentsWords(parsed, count, words, filesOnlyLine) : null;
+        const shown = withoutGroupLinkSecret(text);
+        return truncate(files === null ? shown : `${files}${PREVIEW_WORDS_SEPARATOR}${shown}`);
+      }
+      if (count > 0) return attachmentsWords(parsed, count, words, mediaWordsLine) ?? attachmentsLine(words, count);
       return null;
     }
     // ADR-0092 — a poll, checklist, location, contact card or article: its
@@ -2479,6 +2491,40 @@ function previewFromProcessed(wasm, processed, words) {
   } finally {
     freeQuietly(parsed);
   }
+}
+
+/**
+ * `docs/ux/media-messages.md` section 11 — the count words for a message's
+ * attachments as `line` gives them from their types (`Photo`, `3 photos`,
+ * `2 files`), or `null` when the attachments cannot be read here or `line`
+ * does not decide.
+ *
+ * @param {any} parsed
+ * @param {number} count
+ * @param {any} words
+ * @param {(words: any, attachments: { mime: string | null, kind: string | null }[]) => string | null} line
+ * @returns {string | null}
+ */
+function attachmentsWords(parsed, count, words, line) {
+  if (typeof parsed.attachment !== "function") return null;
+  /** @type {{ mime: string | null, kind: string | null }[]} */
+  const seen = [];
+  try {
+    for (let i = 0; i < count; i += 1) {
+      const a = parsed.attachment(i);
+      try {
+        seen.push({
+          mime: typeof a.mime === "string" ? a.mime : null,
+          kind: typeof a.kind === "string" ? a.kind : null,
+        });
+      } finally {
+        freeQuietly(a);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return line(words, seen);
 }
 
 /**

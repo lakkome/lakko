@@ -49,7 +49,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
-import uniffi.lakko_ffi_uniffi.AttachmentRef
 
 /**
  * `docs/ux/client-redesign.md` UX 5.2 — the composer row: "attach, text field
@@ -153,16 +152,13 @@ class ComposerUiTest {
                         draftRevision = draftRevision,
                         sending = false,
                         sendError = null,
-                        pendingAttachments = emptyList<AttachmentRef>(),
-                        uploading = false,
-                        inFlightUploads = emptyList(),
-                        pendingPreviews = emptyMap(),
+                        tray = ComposerTray(),
                         onDraftChange = {},
                         onSendClicked = { sendClicks += 1 },
                         onFocusChanged = {},
                         onPickMedia = {},
                         onAttachClicked = { attachMenuPicks += 1 },
-                        onRemoveAttachment = {},
+                        onRemoveTrayItem = {},
                         replyStrip = replyStrip,
                         onCancelReply = { cancelReplies += 1 },
                         onPasteMedia = if (takesMedia) { items -> pasted += items } else null,

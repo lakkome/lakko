@@ -64,8 +64,6 @@ import kotlinx.coroutines.launch
 import me.lakko.app.channels.ChannelFeedback
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.ChannelPostItem
-import me.lakko.app.ui.chat.withSendAsFile
-import me.lakko.app.ui.chat.without
 import me.lakko.app.channels.ChannelPublisherLoop
 import me.lakko.app.channels.ChannelPublisherSigners
 import me.lakko.app.channels.ChannelReader
@@ -94,7 +92,6 @@ import me.lakko.app.ui.chat.Composer
 import me.lakko.app.ui.chat.EditMessageDialog
 import me.lakko.app.ui.chat.OwnReadState
 import me.lakko.app.ui.chat.PendingMediaBubble
-import me.lakko.app.ui.chat.UploadProgress
 import me.lakko.app.ui.chat.VideoNoteOverlay
 import me.lakko.app.ui.chat.copyMessageText
 import me.lakko.app.ui.chat.rememberRecordController
@@ -501,8 +498,11 @@ private fun ChannelTimelineView(
     var draftRevision by remember { mutableIntStateOf(0) }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<UiText?>(null) }
-    val pending = remember { mutableStateOf<List<AttachmentRef>>(emptyList()) }
-    val inFlight = remember { mutableStateOf<List<UploadProgress>>(emptyList()) }
+    // docs/ux/media-messages.md section 11 — the publisher's tray, kept while
+    // the app runs like a chat's.
+    val trayKey = me.lakko.app.ui.chat.ComposerTrays.key(state.boundAccount, "channel:$channelId")
+    val trays by me.lakko.app.ui.chat.ComposerTrays.trays.collectAsState()
+    val tray = trays[trayKey] ?: me.lakko.app.ui.chat.ComposerTray()
     var emojiInsert by remember { mutableStateOf<Pair<Long, String>?>(null) }
     var emojiSeq by remember { mutableStateOf(0L) }
     var pickerOpen by remember { mutableStateOf(false) }
@@ -582,110 +582,21 @@ private fun ChannelTimelineView(
         )
     }
 
-    fun uploadPicked(uris: List<android.net.Uri>, audio: Boolean = false, visual: Boolean = false) {
-        for (uri in uris) {
-            scope.launch {
-                val id = System.nanoTime()
-                val fileName = uri.lastPathSegment ?: "file"
-                inFlight.value = inFlight.value + UploadProgress(id = id, fileName = fileName, stage = null)
-                try {
-                    val resolver = context.contentResolver
-                    val mime = resolver.getType(uri)
-                    val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        resolver.openInputStream(uri)?.use { it.readBytes() }
-                    } ?: throw java.io.IOException("unreadable")
-                    val ref = if (audio) {
-                        // ADR-0092 / UX 6 — the file's own tags, read here.
-                        val tags = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            me.lakko.app.media.readAudioTags(context, uri)
-                        }
-                        val cover = tags.cover?.let { art ->
-                            runCatching {
-                                AttachmentBridge.encryptAndUploadThumb(art.bytes, "image/jpeg", art.width.toUInt(), art.height.toUInt())
-                            }.getOrNull()
-                        }
-                        AttachmentBridge.encryptAndUpload(
-                            bytes = bytes,
-                            mime = mime,
-                            name = fileName,
-                            media = me.lakko.app.chat.AttachmentMediaMeta(kind = "audio", durationMs = tags.durationMs, thumb = cover),
-                            idleDays = CHANNEL_FILE_IDLE_DAYS,
-                        ).copy(title = tags.title ?: fileName.substringBeforeLast('.'), artist = tags.artist)
-                    } else if (visual && mime?.startsWith("image/") == true && mime != "image/gif") {
-                        // ADR-0092 / UX 3 — a photo re-encoded, its metadata dropped.
-                        val max = runCatching { uniffi.lakko_ffi_uniffi.photoMaxLongestSidePx().toInt() }.getOrDefault(2560)
-                        val jpeg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                            me.lakko.app.media.reencodePhoto(bytes, max)
-                        } ?: throw java.io.IOException("unreadable photo")
-                        AttachmentBridge.encryptAndUpload(bytes = jpeg, mime = "image/jpeg", name = fileName.substringBeforeLast('.') + ".jpg", idleDays = CHANNEL_FILE_IDLE_DAYS)
-                    } else {
-                        AttachmentBridge.encryptAndUpload(bytes = bytes, mime = mime, name = fileName, idleDays = CHANNEL_FILE_IDLE_DAYS)
-                    }
-                    pending.value = pending.value + ref
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    Log.w(TAG, "attachment upload failed", e)
-                    sendError = UiText("channels.publish.error.generic")
-                } finally {
-                    inFlight.value = inFlight.value.filterNot { it.id == id }
-                }
-            }
-        }
-    }
-    // ADR-0092 / attachments UX 3-4 — the same send preview as a chat: each
-    // item its own post, the caption on the first, `Send as file`, the
-    // video rule; a channel file lives CHANNEL_FILE_IDLE_DAYS idle days.
-    var channelPreview by remember { mutableStateOf<me.lakko.app.ui.chat.SendPreview?>(null) }
-    val previewIds = remember { java.util.concurrent.atomic.AtomicLong(1) }
-    fun openPreview(uris: List<android.net.Uri>, filesOnly: Boolean, mimeHints: List<String?> = emptyList()) {
+    // Section 11 — Photo or Video, File, Audio, the camera and a paste all go
+    // into the tray; a channel file lives CHANNEL_FILE_IDLE_DAYS idle days.
+    fun addToTray(uris: List<android.net.Uri>, filesOnly: Boolean, mimeHints: List<String?> = emptyList(), audio: Boolean = false) {
         if (uris.isEmpty()) return
-        // `scope.launch` dispatches on the main thread; buildPreviewItems moves
-        // to IO at once, so a pasted URI is read while its grant still holds.
-        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
-            val items = me.lakko.app.ui.chat.buildPreviewItems(context, uris, filesOnly, mimeHints) { previewIds.getAndIncrement() }
-            val tooBig = items.filter { it.problemKey == "attach.preview.file_too_big" }
-            if (tooBig.isNotEmpty()) sendError = UiText("attach.preview.file_too_big")
-            val kept = items - tooBig.toSet()
-            if (kept.isNotEmpty()) channelPreview = me.lakko.app.ui.chat.SendPreview(kept, filesOnly = filesOnly)
-        }
-    }
-    fun sendPreview(p: me.lakko.app.ui.chat.SendPreview) {
-        channelPreview = null
-        val maxSide = runCatching { uniffi.lakko_ffi_uniffi.photoMaxLongestSidePx().toInt() }.getOrDefault(2560)
-        scope.launch {
-            for ((item, caption) in me.lakko.app.ui.chat.previewSendOrder(p.items.filter { it.problemKey == null }, p.caption)) {
-                try {
-                    val ref = me.lakko.app.ui.chat.uploadPreviewItem(context, item, p.sendAsFile, maxSide, CHANNEL_FILE_IDLE_DAYS) ?: continue
-                    publish(uniffi.lakko_ffi_uniffi.composeEnvelope(caption, listOf(ref)))
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    Log.w(TAG, "preview item not published", e)
-                    sendError = channelsErrorText(e, "channels.publish.error.generic", "channels.publish.error.prefix")
-                }
-            }
-            readNow()
-        }
-    }
-    channelPreview?.let { p ->
-        me.lakko.app.ui.chat.SendPreviewScreen(
-            preview = p,
-            onCaption = { channelPreview = p.copy(caption = it) },
-            onSendAsFile = { channelPreview = p.withSendAsFile(it) },
-            onRemove = { channelPreview = p.without(it) },
-            onSend = { sendPreview(p) },
-            onClose = { channelPreview = null },
-        )
+        sendError = null
+        me.lakko.app.ui.chat.ComposerTrays.add(context, trayKey, uris, filesOnly, mimeHints, audio, CHANNEL_FILE_IDLE_DAYS)
     }
     val pickVisual = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
-        openPreview(uris, filesOnly = false)
+        addToTray(uris, filesOnly = false)
     }
     val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uploadPicked(uris, audio = true)
+        addToTray(uris, filesOnly = true, audio = true)
     }
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        openPreview(uris, filesOnly = true)
+        addToTray(uris, filesOnly = true)
     }
     // ADR-0092 / attachments UX section 2 — the publisher's one menu.
     var attachMenuOpen by remember { mutableStateOf(false) }
@@ -723,7 +634,7 @@ private fun ChannelTimelineView(
         },
         onPickFiles = { pickFiles.launch(arrayOf("*/*")) },
         onPickAudio = { pickAudio.launch(arrayOf("audio/*")) },
-        onCaptured = { uri -> openPreview(listOf(uri), filesOnly = false) },
+        onCaptured = { uri -> addToTray(listOf(uri), filesOnly = false) },
         onPublish = ::publishContent,
         draftKey = channelId,
     )
@@ -1022,15 +933,14 @@ private fun ChannelTimelineView(
                     draftRevision = draftRevision,
                     sending = sending,
                     sendError = sendError,
-                    pendingAttachments = pending.value,
-                    uploading = inFlight.value.isNotEmpty(),
-                    inFlightUploads = inFlight.value,
-                    pendingPreviews = emptyMap(),
+                    tray = tray,
                     onDraftChange = { draft = it },
                     onSendClicked = {
                         val text = draft.trim()
-                        val refs = pending.value
-                        if (sending || (text.isEmpty() && refs.isEmpty())) return@Composer
+                        // Section 11 — one post: the text and every item.
+                        val sentTray = me.lakko.app.ui.chat.ComposerTrays.tray(trayKey)
+                        if (sending || !sentTray.canSend(text)) return@Composer
+                        val refs = sentTray.refs()
                         sending = true
                         sendError = null
                         scope.launch {
@@ -1038,7 +948,7 @@ private fun ChannelTimelineView(
                                 publish(uniffi.lakko_ffi_uniffi.composeEnvelope(text, refs))
                                 draft = ""
                                 draftRevision += 1
-                                pending.value = emptyList()
+                                me.lakko.app.ui.chat.ComposerTrays.sent(trayKey, sentTray.items.map { it.id })
                                 readNow()
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
@@ -1061,13 +971,13 @@ private fun ChannelTimelineView(
                         )
                     },
                     onAttachClicked = { attachMenuOpen = true },
-                    onRemoveAttachment = { index ->
-                        pending.value = pending.value.filterIndexed { i, _ -> i != index }
-                    },
+                    onRemoveTrayItem = { id -> me.lakko.app.ui.chat.ComposerTrays.remove(trayKey, id) },
+                    onRetryTrayItem = { id -> me.lakko.app.ui.chat.ComposerTrays.retry(trayKey, id) },
+                    trayLocalFile = me.lakko.app.ui.chat.ComposerTrays::localFile,
                     // docs/ux/attachments.md 2.5 — a pasted or keyboard-inserted
-                    // photo or video opens this screen's send preview.
+                    // photo or video goes into the tray.
                     onPasteMedia = channelPasteHandler(isPublisher) { uris, filesOnly, mimes ->
-                        openPreview(uris, filesOnly, mimes)
+                        addToTray(uris, filesOnly, mimes)
                     },
                 )
             }

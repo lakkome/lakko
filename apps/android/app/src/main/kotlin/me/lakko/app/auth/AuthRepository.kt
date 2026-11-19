@@ -6909,6 +6909,8 @@ public class AuthRepository(
         // The account's tokens stay on disk for its next sign-in; only the
         // memory goes (the unregister draws its token from disk).
         me.lakko.app.anon.AnonTokens.releaseSession()
+        // media-messages section 11 — no tray outlives its session.
+        me.lakko.app.ui.chat.ComposerTrays.clearAll()
         me.lakko.app.storage.BlobAccess.clear()
         // ADR-0017: drop any parked fresh-device fail-safe context
         // (a NeedsRecoveryPhrase user who backed out via Sign out).
@@ -6975,6 +6977,8 @@ public class AuthRepository(
         // The wipe above removed this account's tokens; this drops only what
         // memory still holds (nothing on disk, no other account's tokens).
         me.lakko.app.anon.AnonTokens.releaseSession()
+        // media-messages section 11 — no tray outlives its session.
+        me.lakko.app.ui.chat.ComposerTrays.clearAll()
         me.lakko.app.storage.BlobAccess.clear()
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
@@ -8147,6 +8151,8 @@ public class AuthRepository(
         clearIdentitySecrets()
         sessionTokenProvider.clear()
         me.lakko.app.anon.AnonTokens.releaseSession()
+        // media-messages section 11 — no tray outlives its session.
+        me.lakko.app.ui.chat.ComposerTrays.clearAll()
         me.lakko.app.storage.BlobAccess.clear()
         clearPendingRecovery()
         pendingFreshPhrase.getAndSet(null)?.seed?.fill(0)

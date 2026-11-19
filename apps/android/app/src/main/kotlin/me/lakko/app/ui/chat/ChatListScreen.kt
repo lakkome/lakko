@@ -79,6 +79,7 @@ import me.lakko.app.chat.membershipToggleBlocked
 import me.lakko.app.chat.rowsMatching
 import me.lakko.app.chat.searchFoundNoRow
 import me.lakko.app.chat.selectedTabIndex
+import me.lakko.app.chat.toAttachmentRef
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.ConversationListRow
@@ -738,6 +739,9 @@ internal fun rememberConversationRows(
                     own = channelKeys.containsKey(channel.id),
                 ),
                 handle = channel.handle,
+                previewThumb = newest?.takeIf { newestLine != null }?.let { post ->
+                    me.lakko.app.chat.previewThumbOf(post.media.mapNotNull { m -> m.ref?.toAttachmentRef() })
+                },
             ).withChannelFlags(me.lakko.app.channels.ChannelFlags.of(flagsMap, channel.id))
         }
     }
@@ -1072,6 +1076,10 @@ internal fun threadConversationRows(
         } else {
             null
         },
+        // media-messages section 11 — the first photo or video's thumbnail.
+        previewThumb = last?.takeIf {
+            !it.deleted && it.content == null && it.direction != Direction.System && !thread.membershipEnded
+        }?.let { me.lakko.app.chat.previewThumbOf(it.attachments) },
         // ADR-0087 — a group's verified @name, so the local search finds it.
         handle = if (kind == ConversationKind.Group) {
             runCatching {
@@ -1600,6 +1608,10 @@ internal fun ConversationRowBody(
             }
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                row.previewThumb?.let { thumb ->
+                    RowPreviewThumb(thumb)
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(
                     text = row.preview,
                     style = MaterialTheme.typography.bodyMedium,

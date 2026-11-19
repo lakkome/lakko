@@ -124,7 +124,97 @@ export const NOTIFICATION_STRINGS_EN = Object.freeze({
   articlePreview: "Article: \u0001",
   /** @type {readonly string[]} */
   attachments: Object.freeze([]),
+  /** `docs/ux/media-messages.md` section 11 — entry `i` is the line for
+   *  `i + 1` photos / videos / photos and videos / files. */
+  /** @type {readonly string[]} */
+  photos: Object.freeze([]),
+  /** @type {readonly string[]} */
+  videos: Object.freeze([]),
+  /** @type {readonly string[]} */
+  photosAndVideos: Object.freeze([]),
+  /** @type {readonly string[]} */
+  files: Object.freeze([]),
 });
+
+/** How many counts of the section 11 words the page renders: one message
+ *  carries at most ten photos and videos and ten files. */
+export const NOTIFICATION_MEDIA_COUNTS = 10;
+
+/** English fallbacks of the section 11 words. */
+function mediaWordEn(group, count) {
+  if (group === "photos") return count === 1 ? "Photo" : `${count} photos`;
+  if (group === "videos") return count === 1 ? "Video" : `${count} videos`;
+  if (group === "photosAndVideos") return `${count} photos and videos`;
+  return count === 1 ? "File" : `${count} files`;
+}
+
+/** Between the count words and the text of a message that carries files
+ *  only (section 11: `2 files · Weekend plans`). */
+export const PREVIEW_WORDS_SEPARATOR = " \u00b7 ";
+
+/**
+ * `docs/ux/media-messages.md` section 11 — the count words of a message whose
+ * attachments are all plain files (`File`, `3 files`), or `null` when one is a
+ * photo, a video, a recording or an audio file, or there are none.
+ *
+ * @param {{ files?: readonly string[] }} strings
+ * @param {readonly { mime?: string | null, kind?: string | null }[]} attachments
+ * @returns {string | null}
+ */
+export function filesOnlyLine(strings, attachments) {
+  if (attachments.length === 0) return null;
+  for (const a of attachments) {
+    if (typeof a.kind === "string" && a.kind.length > 0) return null;
+    const mime = typeof a.mime === "string" ? a.mime.toLowerCase() : "";
+    if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")) return null;
+  }
+  return mediaWordsLine(strings, attachments);
+}
+
+/**
+ * `docs/ux/media-messages.md` section 11 — the words for a message with no
+ * text, from its attachments' types (the list row's rule): `Photo`,
+ * `3 photos`, `Video`, `2 videos`, `4 photos and videos`, or for files only
+ * `File`, `3 files`. `null` when the rule does not decide (a voice message,
+ * a video note, a GIF or an audio file is among them), so the caller keeps
+ * its older line.
+ *
+ * @param {{ photos?: readonly string[], videos?: readonly string[], photosAndVideos?: readonly string[], files?: readonly string[] }} strings
+ * @param {readonly { mime?: string | null, kind?: string | null }[]} attachments
+ * @returns {string | null}
+ */
+export function mediaWordsLine(strings, attachments) {
+  let photos = 0;
+  let videos = 0;
+  let files = 0;
+  for (const a of attachments) {
+    if (typeof a.kind === "string" && a.kind.length > 0) return null;
+    const mime = typeof a.mime === "string" ? a.mime.toLowerCase() : "";
+    if (mime.startsWith("image/")) photos += 1;
+    else if (mime.startsWith("video/")) videos += 1;
+    else if (mime.startsWith("audio/")) return null;
+    else files += 1;
+  }
+  /** @type {"photos" | "videos" | "photosAndVideos" | "files" | null} */
+  let group = null;
+  let count = 0;
+  if (photos > 0 && videos > 0) {
+    group = "photosAndVideos";
+    count = photos + videos;
+  } else if (photos > 0) {
+    group = "photos";
+    count = photos;
+  } else if (videos > 0) {
+    group = "videos";
+    count = videos;
+  } else if (files > 0) {
+    group = "files";
+    count = files;
+  }
+  if (group === null) return null;
+  const stored = strings[group]?.[count - 1];
+  return typeof stored === "string" && stored.length > 0 ? stored : mediaWordEn(group, count);
+}
 
 /**
  * How many attachment counts the page renders ahead of time. The line
@@ -180,6 +270,16 @@ function plainWord(v, fallback) {
   return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING ? v : fallback;
 }
 
+/** A stored list of section 11 words, each kept when it is a sensible
+ *  string, else an empty string (read as English). */
+function wordList(v) {
+  return Array.isArray(v)
+    ? v
+        .slice(0, NOTIFICATION_MEDIA_COUNTS)
+        .map((w) => (typeof w === "string" && w.length <= MAX_NOTIFICATION_STRING ? w : ""))
+    : [];
+}
+
 export function notificationStrings(raw) {
   /** @type {Record<string, unknown>} */
   const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
@@ -227,6 +327,10 @@ export function notificationStrings(raw) {
           .slice(0, NOTIFICATION_ATTACHMENT_COUNTS)
           .map((v) => (typeof v === "string" && v.length <= MAX_NOTIFICATION_STRING ? v : ""))
       : [],
+    photos: wordList(source.photos),
+    videos: wordList(source.videos),
+    photosAndVideos: wordList(source.photosAndVideos),
+    files: wordList(source.files),
   };
 }
 
