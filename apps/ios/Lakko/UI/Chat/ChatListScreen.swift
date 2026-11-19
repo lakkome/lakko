@@ -1372,7 +1372,7 @@ public final class ChatListViewModel: ObservableObject {
     /// Only messages the timeline draws count (a bookkeeping system row is
     /// not a last message).
     func preview(thread: ChatThread, isGroup: Bool) -> String {
-        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
+        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }) else {
             return Localization.text("chats.row.no_messages")
         }
         let senderName = last.authorKeyB64.flatMap {
@@ -1414,7 +1414,7 @@ public final class ChatListViewModel: ObservableObject {
     /// `docs/ux/media-messages.md` section 11 — the row's thumbnail of the
     /// last message's first photo or video.
     func previewMedia(thread: ChatThread) -> ConversationPreviewMedia? {
-        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }),
+        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }),
               !last.deleted, last.content == nil, last.unsupportedVersion == nil else { return nil }
         return ChatListFormatting.previewMedia(last.attachments)
     }
@@ -1422,7 +1422,7 @@ public final class ChatListViewModel: ObservableObject {
     /// The server time of the last drawn message, for the row's time and the
     /// list order; `nil` when there is none or it does not parse.
     func lastMessageMs(thread: ChatThread) -> Int64? {
-        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
+        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }) else {
             return nil
         }
         return ChatRepository.parseDsTimestampMs(last.createdAt)

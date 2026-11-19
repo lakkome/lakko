@@ -127,7 +127,28 @@ public final class ChatViewModel: ObservableObject {
 
     /// §6.2.5 — what occupies the composer's slot. The draft is read live so a
     /// commit landing mid-sentence preserves what was actually typed.
-    public var composerSlot: ComposerState { composerState(membership, draft: draft) }
+    public var composerSlot: ComposerState {
+        // ADR-0091 phase 2, `docs/ux/conversation-rejoin.md` 2.2 — while this
+        // device waits to be brought back, the waiting note takes the
+        // composer's slot (the draft kept, selectable).
+        if !membershipHasEnded, let note = reentryNote {
+            let worthKeeping = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return .withdrawn(
+                notice: note.joined(separator: "\n"),
+                draft: worthKeeping ? draft : nil,
+                draftLabel: worthKeeping ? unsentDraftLabel : nil)
+        }
+        return composerState(membership, draft: draft)
+    }
+
+    /// ADR-0091 phase 2 — the waiting note's lines while this device is out
+    /// of date in this chat (UX 2.2), else `nil`. Refreshed with the
+    /// membership (every poll).
+    @Published public private(set) var reentryNote: [String]?
+
+    /// UX 2.2 — a waiting chat: what it cannot do is absent (no composer, no
+    /// call buttons, no member changes, no Edit / Delete / React).
+    public var reentryWaiting: Bool { reentryNote != nil && !membershipHasEnded }
 
     /// ADR-0045 UX §6.2.5 — whether a message still carries Edit / Delete /
     /// React. The composer's own question, answered by the same predicate: all
@@ -833,7 +854,8 @@ public final class ChatViewModel: ObservableObject {
     /// What the toolbar call buttons do right now.
     var chatCallAction: GroupCallHostRules.ChatCallAction {
         GroupCallHostRules.chatCallAction(
-            membershipEnded: membershipHasEnded,
+            // ADR-0091 phase 2 UX 2.6 — a waiting chat places no call.
+            membershipEnded: membershipHasEnded || reentryWaiting,
             callInProgress: anyCallInProgress,
             affordance: groupCallAffordance(),
             isGroup: isGroupChat,
@@ -1042,7 +1064,7 @@ public final class ChatViewModel: ObservableObject {
         // inactive group, and one gate cannot be partly applied. Note the
         // difference from role-gating, which hides what SOMEONE ELSE may do —
         // this hides what nobody in this group may do any more.
-        canManageMembers = role != .member && !membershipHasEnded
+        canManageMembers = role != .member && !membershipHasEnded && !reentryWaiting
         // The owner cannot reach the terminal state at all (§6.2.9 — the core
         // refuses a `Remove` targeting the owner and refuses an owner's own
         // leave), so this conjunction is unreachable rather than load-bearing.
@@ -1050,7 +1072,7 @@ public final class ChatViewModel: ObservableObject {
         // cannot be partly applied, and the per-member admin toggle this flag
         // drives would otherwise be the one membership control in the panel
         // that survived on an argument about a different rule.
-        isOwner = role == .owner && !membershipHasEnded
+        isOwner = role == .owner && !membershipHasEnded && !reentryWaiting
         // ADR-0045 — whether this group routes membership through proposals at
         // all. Read here rather than at each use so the `Leave group` gate and
         // the action behind it see one answer from one roster refresh, instead
@@ -2633,6 +2655,9 @@ public final class ChatViewModel: ObservableObject {
     /// (`membershipRotationDecision`'s `selfEvicted`) and the exporter-backed
     /// call buttons (`ChatScreen`'s toolbar).
     private func refreshMembership() {
+        // ADR-0091 phase 2 — the waiting note (UX 2.2).
+        let note = repository.reentryWaitingNote(groupIdHex: groupIdHex)
+        if note != reentryNote { reentryNote = note }
         let read = repository.membershipStateNow(groupIdHex: groupIdHex)
         // Once the group is wiped there is no handle, and no handle reads as
         // still a member. The state this screen reached does not reverse.

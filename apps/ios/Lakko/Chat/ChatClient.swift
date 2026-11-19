@@ -63,6 +63,8 @@ public final class ChatClient {
     /// fails: process-wide by default, replaceable by tests. The repository
     /// reads the same instance for its poll gate and journal repair guard.
     var registeredCommitHold: RegisteredCommitHold = .shared
+    /// ADR-0091 phase 2 — the evidence a poll collects for the behind verdict.
+    var reentryObservations: ReentryObservations = .shared
 
     /// Fail-closed MLS-ratchet persister wired by ``ChatRepository``.
     ///
@@ -561,7 +563,8 @@ public final class ChatClient {
                 if failedRowIsHeld(
                     groupIdHex: groupIdHex, rowId: message.id, payload: message.payload,
                     localEpoch: localEpoch, latestEpoch: raw.latestEpoch,
-                    registeredCommits: raw.registeredCommits, error: error
+                    registeredCommits: raw.registeredCommits, error: error,
+                    createdAt: message.createdAt
                 ) {
                     cursor = cursorBeforeRow
                     held = true
@@ -570,6 +573,12 @@ public final class ChatClient {
                 continue
             }
             registeredCommitHold.recordApplied(groupIdHex: groupIdHex, rowId: message.id)
+            // ADR-0091 phase 2 — evidence for the behind verdict and the
+            // re-admitter's "the leaf is writing" rule.
+            reentryObservations.noteApplied(groupIdHex: groupIdHex)
+            if case .application(_, let senderLeaf?, _) = processed, let localEpoch {
+                reentryObservations.noteLeafActivity(groupIdHex: groupIdHex, leaf: senderLeaf, epoch: localEpoch)
+            }
             if let origin = Self.resendOrigin(of: processed) {
                 resendOrigins[message.id] = origin
             }
@@ -628,12 +637,15 @@ public final class ChatClient {
         localEpoch: UInt64?,
         latestEpoch: UInt64?,
         registeredCommits: [UInt64: Int64]?,
-        error: Error
+        error: Error,
+        createdAt: String? = nil
     ) -> Bool {
         let kind = FailedApplyKind.of(error)
-        // `sealed` / `after` / `latest` feed the log line only.
+        // `sealed` / `after` / `latest` feed the log line (and, since ADR-0091
+        // phase 2, the behind verdict's evidence).
         let sealed = epochOfMessage(bytes: payload)
         let after = epochAfterMessage(bytes: payload)
+        let createdAtMs = createdAt.flatMap(ChatRepository.parseDsTimestampMs).map { UInt64(max(0, $0)) }
         let verdict = RegisteredCommitVerdict.of(
             isOwnEcho: kind == FailedApplyKind.ownMessage,
             rowId: rowId, localEpoch: localEpoch, registeredCommits: registeredCommits)
@@ -644,6 +656,11 @@ public final class ChatClient {
             RegisteredCommitLog.emit(.notice, RegisteredCommitLog.failedRow(
                 kind: kind, sealed: sealed, after: after, local: localEpoch,
                 latest: latestEpoch, verdict: .skip, attempt: nil))
+            // An own echo is not a row this device could not read.
+            if kind != FailedApplyKind.ownMessage {
+                reentryObservations.noteFailedRow(
+                    groupIdHex: groupIdHex, sealed: sealed, local: localEpoch, createdAtMs: createdAtMs)
+            }
             return false
         }
         let outcome = registeredCommitHold.recordFailure(
@@ -661,6 +678,8 @@ public final class ChatClient {
         }
         if case .exhausted = outcome {
             RegisteredCommitLog.emit(.error, RegisteredCommitLog.exhausted(local: localEpoch, latest: latestEpoch))
+            reentryObservations.noteFailedRow(
+                groupIdHex: groupIdHex, sealed: sealed, local: localEpoch, createdAtMs: createdAtMs)
             return false
         }
         return true
@@ -1317,6 +1336,10 @@ public final class ChatClient {
         if bytes.count == Int(knockSeedEnvelopeLen()),
            (try? decodeKnockSeedEnvelope(plaintext: bytes)) != nil {
             return .knockSeed(bytes)
+        }
+        if bytes.count == Int(knockKeyEnvelopeLen()),
+           let key = try? decodeKnockKeyEnvelope(plaintext: bytes) {
+            return .knockKey(key)
         }
         return nil
     }

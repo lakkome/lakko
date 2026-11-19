@@ -85,6 +85,7 @@ pub mod circle;
 pub mod contacts;
 pub mod content;
 pub mod conversation_meta;
+pub mod conversation_reentry;
 pub mod device_card;
 pub mod device_link;
 pub mod discover;

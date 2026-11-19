@@ -359,6 +359,34 @@ public class ChatViewModel(
                 initialValue = me.lakko.app.chat.membershipEnded(mutableMembership.value),
             )
 
+    /**
+     * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.2 — this device
+     * missed an update to this chat and waits to be brought back (confirmed
+     * behind): the composer gives way to the waiting note. `null` otherwise,
+     * including while only suspected (nothing is shown yet).
+     */
+    internal val reentryWaiting: StateFlow<me.lakko.app.chat.ReentryWaitingNote?> =
+        repo.conversationBehind.state
+            .map { all ->
+                all[groupIdHex.lowercase()]
+                    ?.takeIf { it.level == me.lakko.app.chat.BehindLevel.CONFIRMED }
+                    ?.let { me.lakko.app.chat.ReentryWaitingNote(it.sinceMs, repo.reentryHelper(groupIdHex)) }
+            }
+            .distinctUntilChanged()
+            .stateIn(scope = viewModelScope, started = SharingStarted.Eagerly, initialValue = null)
+
+    /** UX 2.4 — the gap lines of this chat ("Messages sent between ... can't
+     *  be shown on this device."). */
+    internal val reentryGaps: StateFlow<List<me.lakko.app.chat.ReentryGap>> =
+        repo.reentryGaps
+            .map { it[groupIdHex.lowercase()].orEmpty() }
+            .distinctUntilChanged()
+            .stateIn(scope = viewModelScope, started = SharingStarted.Eagerly, initialValue = emptyList())
+
+    init {
+        runCatching { repo.loadReentryGaps(groupIdHex) }
+    }
+
     /** The hex ids of the groups this device holds. */
     public fun joinedGroupIdsHex(): Set<String> = repo.joinedGroupIdsHex()
 

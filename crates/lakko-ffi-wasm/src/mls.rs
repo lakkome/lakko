@@ -370,6 +370,31 @@ impl Identity {
         key_package::serialize(&kp).map_err(mls_err)
     }
 
+    /// Mint a re-entry KeyPackage for the conversation `groupId`, naming
+    /// `epochLeft`, the `latest_epoch` this device read (ADR-0091 M1), in TLS
+    /// wire form. Record it durably BEFORE sending the request:
+    /// `Group.joinReentry` takes the recorded packages. Keep the last two per
+    /// conversation and `forgetKeyPackage` older ones. Never published.
+    #[wasm_bindgen(js_name = createReentryKeyPackage)]
+    pub fn create_reentry_key_package(
+        &self,
+        group_id: &[u8],
+        epoch_left: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let kp = self
+            .inner
+            .create_reentry_key_package(group_id, epoch_left)
+            .map_err(mls_err)?;
+        key_package::serialize(&kp).map_err(mls_err)
+    }
+
+    /// Delete the private keys of a KeyPackage this identity minted (wire
+    /// form). Persist the snapshot afterwards.
+    #[wasm_bindgen(js_name = forgetKeyPackage)]
+    pub fn forget_key_package(&self, key_package: &[u8]) -> Result<(), JsValue> {
+        self.inner.forget_key_package(key_package).map_err(mls_err)
+    }
+
     /// Create an external-join proposal — the joiner side of ADR-0027 (G-3).
     ///
     /// A non-member crafts an external Add proposal for a group's current
@@ -1040,6 +1065,72 @@ impl From<lakko_mls::GroupKind> for GroupKind {
     }
 }
 
+/// What `Group.reentryRequestTarget` found (ADR-0091 section 4).
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReentryTarget {
+    replaced_leaf: u32,
+    signature_key: Vec<u8>,
+    account_key: Vec<u8>,
+    epoch_left: u64,
+}
+
+#[wasm_bindgen]
+impl ReentryTarget {
+    /// The current leaf the re-entry KeyPackage replaces.
+    #[wasm_bindgen(getter, js_name = replacedLeaf)]
+    #[must_use]
+    pub fn replaced_leaf(&self) -> u32 {
+        self.replaced_leaf
+    }
+
+    /// That leaf's 32-byte signature key.
+    #[wasm_bindgen(getter, js_name = signatureKey)]
+    #[must_use]
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.signature_key.clone()
+    }
+
+    /// The account the leaf belongs to.
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    #[must_use]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account_key.clone()
+    }
+
+    /// The epoch the marker names (this group's current epoch).
+    #[wasm_bindgen(getter, js_name = epochLeft)]
+    #[must_use]
+    pub fn epoch_left(&self) -> u64 {
+        self.epoch_left
+    }
+}
+
+/// The two proposals of a re-entry replacement, in publishing order.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReentryProposals {
+    add: Vec<u8>,
+    remove: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl ReentryProposals {
+    /// The `Add(K)` proposal: publish first.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn add(&self) -> Vec<u8> {
+        self.add.clone()
+    }
+
+    /// The `Remove(L)` proposal: publish second.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn remove(&self) -> Vec<u8> {
+        self.remove.clone()
+    }
+}
+
 /// Lakko MLS conversation group. Mirror of UniFFI's `Group`.
 #[wasm_bindgen]
 pub struct Group {
@@ -1085,6 +1176,52 @@ impl Group {
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// Join a conversation over the stale active group this device holds,
+    /// from the Welcome of the commit that replaced its leaf (ADR-0091 M3).
+    /// `recordedKeyPackages` are the re-entry packages this device recorded
+    /// before sending its requests. Otherwise throws a
+    /// `reentryWelcomeRefused` refusal and nothing changes. Persist the
+    /// snapshot after a join.
+    #[wasm_bindgen(js_name = joinReentry)]
+    pub fn join_reentry(
+        welcome: &[u8],
+        identity: &Identity,
+        recorded_key_packages: Vec<js_sys::Uint8Array>,
+    ) -> Result<Group, JsValue> {
+        let recorded: Vec<Vec<u8>> = recorded_key_packages
+            .into_iter()
+            .map(|a| a.to_vec())
+            .collect();
+        Self::join_reentry_core(welcome, identity, &recorded).map_err(MlsFailure::into_js)
+    }
+
+    /// Check a re-entry request's KeyPackage against this group (ADR-0091
+    /// section 4). Throws a `reentryPairInvalid` refusal when it is not a
+    /// re-entry for this group at this epoch. The rest of the decision is
+    /// `reentryAdmissionVerdict`.
+    #[wasm_bindgen(js_name = reentryRequestTarget)]
+    pub fn reentry_request_target(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryTarget, JsValue> {
+        self.reentry_request_target_core(identity, key_package)
+            .map_err(MlsFailure::into_js)
+    }
+
+    /// Propose the replacement a re-entry request asks for: `Add(K)` then
+    /// `Remove(L)` from this device (ADR-0091 section 4). Publish `add`
+    /// first. Nothing is proposed when it throws.
+    #[wasm_bindgen(js_name = proposeReentryReplacement)]
+    pub fn propose_reentry_replacement(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryProposals, JsValue> {
+        self.propose_reentry_replacement_core(identity, key_package)
+            .map_err(MlsFailure::into_js)
     }
 
     /// Load a previously persisted MLS group from `identity`'s
@@ -2246,6 +2383,50 @@ impl Group {
     }
 
     /// Core of [`Self::delete_locally`].
+    /// Core of [`Self::join_reentry`].
+    fn join_reentry_core(
+        welcome: &[u8],
+        identity: &Identity,
+        recorded: &[Vec<u8>],
+    ) -> Result<Self, MlsFailure> {
+        let inner = MlsGroup::join_reentry(welcome, &identity.inner, recorded)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Core of [`Self::reentry_request_target`].
+    fn reentry_request_target_core(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryTarget, MlsFailure> {
+        let t = self
+            .locked()?
+            .reentry_request_target(&identity.inner, key_package)?;
+        Ok(ReentryTarget {
+            replaced_leaf: t.replaced_leaf,
+            signature_key: t.signature_key,
+            account_key: t.account_key,
+            epoch_left: t.epoch_left,
+        })
+    }
+
+    /// Core of [`Self::propose_reentry_replacement`].
+    fn propose_reentry_replacement_core(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryProposals, MlsFailure> {
+        let p = self
+            .locked()?
+            .propose_reentry_replacement(&identity.inner, key_package)?;
+        Ok(ReentryProposals {
+            add: p.add,
+            remove: p.remove,
+        })
+    }
+
     fn delete_locally_core(&self, identity: &Identity) -> Result<(), MlsFailure> {
         Ok(self.locked()?.delete(&identity.inner)?)
     }
@@ -6789,6 +6970,74 @@ mod tests {
     /// `groupStillActive` is the one refusal that names something, and what it
     /// names has to reach the failure the JS error is built from: the caller
     /// reads the journal of exactly that group.
+    #[test]
+    fn a_behind_device_comes_back_through_the_wasm_surface() {
+        let alice = Identity::from_seed(&[0xA2u8; 64]).unwrap();
+        let bob = Identity::from_seed(&[0xB2u8; 64]).unwrap();
+        let dave = Identity::from_seed(&[0xD2u8; 64]).unwrap();
+        let a = Group::new(&alice, GroupKind::Group).unwrap();
+        let bob_kp = bob.inner.create_key_package().unwrap();
+        let add = a
+            .locked()
+            .unwrap()
+            .add_member(&alice.inner, bob_kp)
+            .unwrap();
+        let b = Group::join_reentry_core(
+            &lakko_mls::group::encode_message(&add.welcome).unwrap(),
+            &bob,
+            &[],
+        );
+        assert_eq!(
+            b.err().and_then(|f| f.reason),
+            Some(lakko_mls::RefusalReason::ReentryWelcomeRefused),
+            "a first join is not a re-entry",
+        );
+        let b = lakko_mls::Group::join_from_welcome(
+            &lakko_mls::group::encode_message(&add.welcome).unwrap(),
+            &bob.inner,
+        )
+        .unwrap();
+        let _ = b;
+        // bob falls behind: alice adds dave and bob never applies it.
+        a.locked()
+            .unwrap()
+            .add_member(&alice.inner, dave.inner.create_key_package().unwrap())
+            .unwrap();
+        let gid = a.locked().unwrap().group_id();
+        let epoch = a.locked().unwrap().epoch();
+        let k = bob
+            .inner
+            .create_reentry_key_package(&gid, epoch)
+            .map(|kp| lakko_mls::key_package::serialize(&kp).unwrap())
+            .unwrap();
+        let target = a.reentry_request_target_core(&alice, &k).unwrap();
+        assert_eq!(target.signature_key, bob.inner.signature_public_key());
+        let wrong = a
+            .reentry_request_target_core(
+                &alice,
+                &bob.inner
+                    .create_key_package()
+                    .map(|kp| lakko_mls::key_package::serialize(&kp).unwrap())
+                    .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            wrong.reason,
+            Some(lakko_mls::RefusalReason::ReentryPairInvalid)
+        );
+        let props = a.propose_reentry_replacement_core(&alice, &k).unwrap();
+        assert!(!props.add.is_empty() && !props.remove.is_empty());
+        let swept = a
+            .locked()
+            .unwrap()
+            .commit_pending_proposals(&alice.inner)
+            .unwrap()
+            .unwrap();
+        let welcome = lakko_mls::group::encode_message(&swept.welcome.unwrap()).unwrap();
+        let b2 = Group::join_reentry_core(&welcome, &bob, &[k]).unwrap();
+        assert_eq!(b2.locked().unwrap().epoch(), a.locked().unwrap().epoch());
+    }
+
     #[test]
     fn a_group_still_active_refusal_carries_the_group_id() {
         let alice = Identity::from_seed(&[0xE0u8; 64]).unwrap();

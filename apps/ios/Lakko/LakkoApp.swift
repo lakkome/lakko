@@ -496,6 +496,14 @@ struct LakkoApp: App {
         sync.onKeyRotationEnvelope = { [weak auth] envelope in
             auth?.receiveKeyRotationEnvelope(envelope, arrival: .ownDeviceGroup)
         }
+        // ADR-0091 phase 2 route 1 — a re-entry request between this
+        // account's own devices rides the DeviceGroup both ways.
+        sync.onConversationReentry = { [weak chat] envelope in
+            Task { @MainActor in await chat?.receiveConversationReentry(envelope: envelope, route: .ownDevice) }
+        }
+        chat.reentryOwnDeviceSender = { [weak sync] envelope in
+            await sync?.sendServiceEnvelope(envelope)
+        }
         // ADR-0081 decision 4 — a device that lost or fell behind its
         // DeviceGroup knocks under this account's login handle, after its own
         // directory KeyPackage (the signed device binding a sibling checks)

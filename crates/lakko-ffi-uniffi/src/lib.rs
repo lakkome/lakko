@@ -54,6 +54,7 @@ pub mod circle;
 pub mod contacts;
 pub mod content;
 pub mod conversation_meta;
+pub mod conversation_reentry;
 pub mod device_card;
 pub mod device_link;
 pub mod discover;
@@ -865,6 +866,23 @@ pub enum FfiError {
     /// `lakko_open_items::BuildError` / `AdoptError`, or `badLength`.
     #[error("{0}")]
     OpenItems(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0091 phase 2 re-entry refusals. APPENDED last: a `flat_error`
+    // lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// An `Add` whose signature key is a current member's is not a valid
+    /// re-entry for this group and epoch, or a `Remove` that only a
+    /// re-entry could authorise has no re-entry `Add` by the same sender
+    /// beside it ([`lakko_mls::RefusalReason::ReentryPairInvalid`]).
+    #[error("{0}")]
+    MembershipReentryPairInvalid(String),
+
+    /// A Welcome offered to `Group.joinReentry` is not this device's
+    /// re-entry; nothing changed
+    /// ([`lakko_mls::RefusalReason::ReentryWelcomeRefused`]).
+    #[error("{0}")]
+    MembershipReentryWelcomeRefused(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -979,6 +997,10 @@ impl FfiError {
             MlsRefusalReason::OneToOneHasNoRoles => Self::MembershipOneToOneHasNoRoles(detail),
             MlsRefusalReason::GroupKindChanged => Self::MembershipGroupKindChanged(detail),
             MlsRefusalReason::GroupStillActive => Self::MembershipGroupStillActive(detail),
+            MlsRefusalReason::ReentryPairInvalid => Self::MembershipReentryPairInvalid(detail),
+            MlsRefusalReason::ReentryWelcomeRefused => {
+                Self::MembershipReentryWelcomeRefused(detail)
+            },
         }
     }
 
@@ -1018,6 +1040,8 @@ impl FfiError {
             Self::MembershipOneToOneHasNoRoles(_) => FfiRefusalReason::OneToOneHasNoRoles,
             Self::MembershipGroupKindChanged(_) => FfiRefusalReason::GroupKindChanged,
             Self::MembershipGroupStillActive(_) => FfiRefusalReason::GroupStillActive,
+            Self::MembershipReentryPairInvalid(_) => FfiRefusalReason::ReentryPairInvalid,
+            Self::MembershipReentryWelcomeRefused(_) => FfiRefusalReason::ReentryWelcomeRefused,
             _ => return None,
         })
     }
@@ -1093,6 +1117,12 @@ pub enum FfiRefusalReason {
     /// This device still holds the group as active, so a Welcome into it
     /// cannot land (C-88). Appended: a uniffi enum lowers by ordinal.
     GroupStillActive,
+    /// A colliding `Add` is not a valid re-entry, or a re-entry `Remove` has
+    /// no pair (ADR-0091). Appended.
+    ReentryPairInvalid,
+    /// A Welcome offered as a re-entry is not this device's (ADR-0091).
+    /// Appended.
+    ReentryWelcomeRefused,
 }
 
 impl From<MlsRefusalReason> for FfiRefusalReason {
@@ -1122,6 +1152,8 @@ impl From<MlsRefusalReason> for FfiRefusalReason {
             MlsRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
             MlsRefusalReason::GroupKindChanged => Self::GroupKindChanged,
             MlsRefusalReason::GroupStillActive => Self::GroupStillActive,
+            MlsRefusalReason::ReentryPairInvalid => Self::ReentryPairInvalid,
+            MlsRefusalReason::ReentryWelcomeRefused => Self::ReentryWelcomeRefused,
         }
     }
 }
@@ -1153,6 +1185,8 @@ impl From<FfiRefusalReason> for MlsRefusalReason {
             FfiRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
             FfiRefusalReason::GroupKindChanged => Self::GroupKindChanged,
             FfiRefusalReason::GroupStillActive => Self::GroupStillActive,
+            FfiRefusalReason::ReentryPairInvalid => Self::ReentryPairInvalid,
+            FfiRefusalReason::ReentryWelcomeRefused => Self::ReentryWelcomeRefused,
         }
     }
 }
@@ -1879,6 +1913,39 @@ impl Identity {
         Ok(key_package::serialize(&kp)?)
     }
 
+    /// Mint a re-entry KeyPackage for the conversation `group_id`, naming
+    /// `epoch_left`, the `latest_epoch` this device read (ADR-0091 M1), in TLS
+    /// wire form. Same signature key and device binding as this device's
+    /// leaf; never published to the directory. Record it durably BEFORE
+    /// sending the request: `Group.joinReentry` takes the recorded packages.
+    /// Keep the last two per conversation and `forgetKeyPackage` older ones.
+    ///
+    /// # Errors
+    ///
+    /// `FfiError::Group` for a group id that is not 32 bytes,
+    /// `FfiError::KeyPackage` on an OpenMLS failure.
+    pub fn create_reentry_key_package(
+        &self,
+        group_id: Vec<u8>,
+        epoch_left: u64,
+    ) -> Result<Vec<u8>, FfiError> {
+        let kp = self
+            .inner
+            .create_reentry_key_package(&group_id, epoch_left)?;
+        Ok(key_package::serialize(&kp)?)
+    }
+
+    /// Delete the private keys of a KeyPackage this identity minted (wire
+    /// form), so it can no longer open a Welcome. Persist the snapshot
+    /// afterwards. Deleting one that is not stored changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// `FfiError::KeyPackage` for bytes that are not a valid KeyPackage.
+    pub fn forget_key_package(&self, key_package: Vec<u8>) -> Result<(), FfiError> {
+        Ok(self.inner.forget_key_package(&key_package)?)
+    }
+
     /// Create an external-join proposal — the joiner side of ADR-0027 (G-3).
     ///
     /// A non-member crafts an external Add proposal for a group's current
@@ -2027,6 +2094,28 @@ impl From<lakko_mls::GroupKind> for GroupKind {
     }
 }
 
+/// What `Group.reentryRequestTarget` found (ADR-0091 section 4).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiReentryTarget {
+    /// The current leaf the re-entry KeyPackage replaces.
+    pub replaced_leaf: u32,
+    /// That leaf's (and the package's) 32-byte signature key.
+    pub signature_key: Vec<u8>,
+    /// The account the leaf belongs to.
+    pub account_key: Vec<u8>,
+    /// The epoch the marker names (this group's current epoch).
+    pub epoch_left: u64,
+}
+
+/// The two proposals of a re-entry replacement, in publishing order.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiReentryProposals {
+    /// The `Add(K)` proposal: publish first.
+    pub add: Vec<u8>,
+    /// The `Remove(L)` proposal: publish second.
+    pub remove: Vec<u8>,
+}
+
 /// Lakko MLS conversation group.
 #[derive(uniffi::Object)]
 pub struct Group {
@@ -2064,6 +2153,73 @@ impl Group {
         let inner = MlsGroup::join_from_welcome(&welcome, &identity.inner)?;
         Ok(Self {
             inner: Mutex::new(inner),
+        })
+    }
+
+    /// Join a conversation over the stale active group this device holds,
+    /// from the Welcome of the commit that replaced its leaf (ADR-0091 M3).
+    /// `recorded_key_packages` are the re-entry KeyPackages this device
+    /// recorded before sending its requests. Replaces the stored group only
+    /// when the Welcome adds one of them, is newer, is for the same group and
+    /// kind, and comes from an account in the stored roster; otherwise
+    /// refused with `MembershipReentryWelcomeRefused` and nothing changes.
+    /// Persist the snapshot after a join.
+    #[uniffi::constructor]
+    pub fn join_reentry(
+        welcome: Vec<u8>,
+        identity: &Identity,
+        recorded_key_packages: Vec<Vec<u8>>,
+    ) -> Result<Self, FfiError> {
+        let inner = MlsGroup::join_reentry(&welcome, &identity.inner, &recorded_key_packages)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Check a re-entry request's KeyPackage against this group (ADR-0091
+    /// section 4): a valid package whose marker names this group and its
+    /// current epoch, carrying a current leaf's signature key and that leaf's
+    /// account. The rest of the decision is `reentryAdmissionVerdict`.
+    ///
+    /// # Errors
+    ///
+    /// `MembershipReentryPairInvalid` when it is not a re-entry for this group
+    /// at this epoch; `FfiError::KeyPackage` for an invalid package.
+    pub fn reentry_request_target(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<FfiReentryTarget, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let t = g.reentry_request_target(&identity.inner, &key_package)?;
+        Ok(FfiReentryTarget {
+            replaced_leaf: t.replaced_leaf,
+            signature_key: t.signature_key,
+            account_key: t.account_key,
+            epoch_left: t.epoch_left,
+        })
+    }
+
+    /// Propose the replacement a re-entry request asks for: `Add(K)` then
+    /// `Remove(L)` from this device (ADR-0091 section 4). Publish `add`
+    /// first, then `remove`; whichever device sweeps commits the pair
+    /// through the ADR-0081 commit route. Nothing is proposed when it
+    /// refuses.
+    ///
+    /// # Errors
+    ///
+    /// `MembershipReentryPairInvalid`, `MembershipNoRoleTable`,
+    /// `MembershipPendingSetFull`, or the ordinary refusal of the removal.
+    pub fn propose_reentry_replacement(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<FfiReentryProposals, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let p = g.propose_reentry_replacement(&identity.inner, &key_package)?;
+        Ok(FfiReentryProposals {
+            add: p.add,
+            remove: p.remove,
         })
     }
 

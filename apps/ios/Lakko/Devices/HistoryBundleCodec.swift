@@ -68,57 +68,11 @@ public enum HistoryBundleCodec {
 
         for hex in groupHexes {
             guard let slot = log.groups[hex] else { continue }
-            guard let groupIdBytes = Self.hexToBytes(hex) else { continue }
-            // The MLS bookkeeping rows (a commit, an external-join request)
-            // are never carried: this client hides them, and a receiver that
-            // draws them as "Members changed" showed one per device commit.
-            let carried = bundledMessages(slot.messages)
-            let trimmed = Array(carried.suffix(perGroupCap))
-            let capped = trimmed.count < carried.count
-            var messages: [StructuredHistoryMessage] = []
-            for m in trimmed {
-                // G-6 step 2: encode the canonical cross-platform
-                // placeholder via the shared Rust core. Web /
-                // Android call the SAME codec, so the bytes agree
-                // on the wire (replacing the iOS-only JSONEncoder
-                // shape that did not interoperate with web).
-                let placeholder: Data
-                do {
-                    // ADR-0087 section 14 — the invitation card lives beside
-                    // the log, keyed on (conversation, message id); without it
-                    // the new device draws the bare `/g/` link.
-                    let card = m.deleted ? nil : cards.card(
-                        conversationIdHex: hex, messageId: m.messageId, accountIdB64: accountIdB64)
-                    placeholder = try Self.encodePlaceholder(m, channelInvite: card)
-                } catch {
-                    continue
-                }
-                let createdMs = Self.parseIsoMs(m.createdAt)
-                // `messageId` is the HLC-derived Int64 the chat
-                // pipeline assigns; serialise it big-endian for
-                // the structured-history wire so the joining
-                // device sees the same numeric value back.
-                var idBE = m.messageId.bigEndian
-                let idBytes = withUnsafeBytes(of: &idBE) { Data($0) }
-                messages.append(
-                    StructuredHistoryMessage(
-                        payloadBytes: placeholder,
-                        senderLeaf: 0,
-                        messageId: idBytes,
-                        receivedAtMs: createdMs
-                    )
-                )
-                if m.messageId > 0, UInt64(m.messageId) > maxHlc {
-                    maxHlc = UInt64(m.messageId)
-                }
-            }
-            groupInputs.append(
-                StructuredHistoryGroup(
-                    groupId: groupIdBytes,
-                    messages: messages,
-                    countCapped: capped
-                )
-            )
+            guard let projected = projectGroup(
+                hex: hex, rows: bundledMessages(slot.messages), cap: perGroupCap,
+                accountIdB64: accountIdB64, cards: cards) else { continue }
+            groupInputs.append(projected.group)
+            maxHlc = max(maxHlc, projected.maxHlc)
         }
         if groupInputs.isEmpty { return nil }
 
@@ -127,6 +81,80 @@ public enum HistoryBundleCodec {
             groups: groupInputs,
             maxHlc: maxHlc
         )
+    }
+
+    /// ADR-0091 phase 2 section 7 — one conversation's `rows` (already the
+    /// gap's, bookkeeping rows left out) sealed under `secret`, or `nil` when
+    /// none of them projects.
+    static func buildForGroup(
+        hex: String,
+        rows: [PersistedMessage],
+        accountIdB64: String,
+        secret: Data,
+        cards: ChannelInviteCardStore = .shared
+    ) throws -> Data? {
+        guard let projected = projectGroup(
+            hex: hex, rows: rows, cap: Self.maxBundleMessages,
+            accountIdB64: accountIdB64, cards: cards),
+              !projected.group.messages.isEmpty else { return nil }
+        return try sealHistoryBundleStructured(
+            secret: secret, groups: [projected.group], maxHlc: projected.maxHlc)
+    }
+
+    /// One group's rows projected onto the structured history wire: the
+    /// newest `cap` of `carried`, each as the canonical placeholder.
+    private static func projectGroup(
+        hex: String,
+        rows carried: [PersistedMessage],
+        cap: Int,
+        accountIdB64: String,
+        cards: ChannelInviteCardStore
+    ) -> (group: StructuredHistoryGroup, maxHlc: UInt64)? {
+        guard let groupIdBytes = Self.hexToBytes(hex) else { return nil }
+        // The MLS bookkeeping rows (a commit, an external-join request)
+        // are never carried: this client hides them, and a receiver that
+        // draws them as "Members changed" showed one per device commit.
+        let trimmed = Array(carried.suffix(cap))
+        let capped = trimmed.count < carried.count
+        var maxHlc: UInt64 = 0
+        var messages: [StructuredHistoryMessage] = []
+        for m in trimmed {
+            // G-6 step 2: encode the canonical cross-platform
+            // placeholder via the shared Rust core. Web /
+            // Android call the SAME codec, so the bytes agree
+            // on the wire (replacing the iOS-only JSONEncoder
+            // shape that did not interoperate with web).
+            let placeholder: Data
+            do {
+                // ADR-0087 section 14 — the invitation card lives beside
+                // the log, keyed on (conversation, message id); without it
+                // the new device draws the bare `/g/` link.
+                let card = m.deleted ? nil : cards.card(
+                    conversationIdHex: hex, messageId: m.messageId, accountIdB64: accountIdB64)
+                placeholder = try Self.encodePlaceholder(m, channelInvite: card)
+            } catch {
+                continue
+            }
+            let createdMs = Self.parseIsoMs(m.createdAt)
+            // `messageId` is the HLC-derived Int64 the chat
+            // pipeline assigns; serialise it big-endian for
+            // the structured-history wire so the joining
+            // device sees the same numeric value back.
+            var idBE = m.messageId.bigEndian
+            let idBytes = withUnsafeBytes(of: &idBE) { Data($0) }
+            messages.append(
+                StructuredHistoryMessage(
+                    payloadBytes: placeholder,
+                    senderLeaf: 0,
+                    messageId: idBytes,
+                    receivedAtMs: createdMs
+                )
+            )
+            if m.messageId > 0, UInt64(m.messageId) > maxHlc {
+                maxHlc = UInt64(m.messageId)
+            }
+        }
+        return (StructuredHistoryGroup(groupId: groupIdBytes, messages: messages, countCapped: capped), maxHlc)
     }
 
     // MARK: - Joining side

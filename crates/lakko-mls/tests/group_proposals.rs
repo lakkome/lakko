@@ -1701,7 +1701,7 @@ fn the_pending_set_is_capped_and_the_late_proposer_pays() {
 
     // Fill alice's set with CAP distinct authorised requests.
     for i in 0..CAP {
-        let newcomer = Identity::from_seed(&[0xE0u8 ^ u8::try_from(i).expect("cap < 256"); 64])
+        let newcomer = Identity::from_seed(&[0x10u8 ^ u8::try_from(i).expect("cap < 256"); 64])
             .expect("newcomer");
         let proposal = s
             .bob_g

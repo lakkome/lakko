@@ -404,3 +404,52 @@ public fun buildTimeline(
     }
     return out
 }
+
+/**
+ * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.4 — [items] with one
+ * line per gap, styled as a date separator: after the row of the gap's
+ * anchor message (the last message held before the device came back), else
+ * before the first row from the gap's end on, else at the end. Local to this
+ * device: never a message, never unread.
+ */
+internal fun withReentryGapLines(
+    items: List<TimelineItem>,
+    gaps: List<me.lakko.app.chat.ReentryGap>,
+    label: (me.lakko.app.chat.ReentryGap) -> String,
+): List<TimelineItem> {
+    if (gaps.isEmpty()) return items
+    val out = items.toMutableList()
+    for (gap in gaps.sortedBy { it.toMs }) {
+        val line = TimelineItem.DateSeparator(key = "gap-${gap.fromMs}-${gap.toMs}", label = label(gap))
+        val anchorAt = if (gap.anchorMessageId > 0) {
+            out.indexOfFirst { it is TimelineItem.Row && it.message.messageId == gap.anchorMessageId }
+        } else {
+            -1
+        }
+        val at = when {
+            anchorAt >= 0 -> anchorAt + 1
+            else -> out.indexOfFirst {
+                it is TimelineItem.Row && (parseMessageTimeMs(it.message.createdAt) ?: Long.MIN_VALUE) >= gap.toMs
+            }.takeIf { it >= 0 } ?: out.size
+        }
+        out.add(at, line)
+    }
+    return out
+}
+
+/** The gap line's text in [strings], times in the device's clock format. */
+internal fun reentryGapLabel(
+    gap: me.lakko.app.chat.ReentryGap,
+    zone: ZoneId,
+    use24h: Boolean,
+    locale: Locale,
+    strings: Strings,
+): String =
+    me.lakko.app.chat.gapLineText(
+        gap = gap,
+        dayOf = { ms -> dateOf(ms, zone).toEpochDay() },
+        dateText = { ms ->
+            java.time.format.DateTimeFormatter.ofPattern("d MMM", locale).format(dateOf(ms, zone))
+        },
+        timeText = { ms -> formatClockTime(ms, zone, use24h, locale) },
+    ).renderWith(strings)

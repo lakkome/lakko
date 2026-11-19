@@ -2025,6 +2025,11 @@ public class ContactsRepository(
                     for (refusal in result.events.filterIsInstance<IncomingMailboxEvent.LinkRefusal>()) {
                         applyLinkRefusal(refusal.refusal, sender.signaturePubkey)
                     }
+                    // ADR-0091 phase 2 route 2 — a one-to-one's other person
+                    // asks to be brought back; the chat layer decides.
+                    for (row in result.events.filterIsInstance<IncomingMailboxEvent.ConversationReentry>()) {
+                        chatRepo?.receiveConversationReentry(row.envelope, me.lakko.app.chat.ReentryRouteKind.MAILBOX)
+                    }
                     // ADR-0060 §6 — a request's reply key is kept for the
                     // accept and the ack (bound to the signature-verified
                     // sender). This device's own reply key is NOT retired on

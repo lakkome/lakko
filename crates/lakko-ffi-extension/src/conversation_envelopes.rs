@@ -10,7 +10,10 @@
 //! amended 2026-11-08), a publisher's request that the owner rotate
 //! (section 15, amended 2026-11-08), a co-publisher's step-down (section
 //! 15, phase B), and the ADR-0090 publisher bookkeeping: a co-publisher
-//! device's admit / retire request and a publishing device's admission mark.
+//! device's admit / retire request and a publishing device's admission mark,
+//! and ADR-0091 phase 2: a device's request to come back into a conversation
+//! (route 1, a DeviceGroup service envelope) and the group's knock key handed
+//! to members.
 //!
 //! ## Why the NSE needs this
 //!
@@ -43,12 +46,17 @@ use lakko_contacts::conversation_handle::{
     decode_conversation_handle, CONVERSATION_HANDLE_ENVELOPE_MAX_LEN,
     CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::conversation_reentry::{
+    decode_conversation_reentry, CONVERSATION_REENTRY_ENVELOPE_MAX_LEN,
+    CONVERSATION_REENTRY_ENVELOPE_MIN_LEN,
+};
 use lakko_contacts::group_photo::{
     decode_group_photo, GROUP_PHOTO_ENVELOPE_MAX_LEN, GROUP_PHOTO_ENVELOPE_MIN_LEN,
 };
 use lakko_contacts::group_reactions::{
     decode_group_reactions, GROUP_REACTIONS_ENVELOPE_MAX_LEN, GROUP_REACTIONS_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::knock_key::{decode_knock_key, KNOCK_KEY_ENVELOPE_LEN};
 use lakko_contacts::knock_seed::{decode_knock_seed, KNOCK_SEED_ENVELOPE_LEN};
 use lakko_contacts::publisher_device_request::{
     decode_publisher_device_request, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN,
@@ -256,6 +264,42 @@ pub fn channel_admission_mark_envelope_len() -> u32 {
     len_u32(CHANNEL_ADMISSION_MARK_ENVELOPE_LEN)
 }
 
+/// Whether `plaintext` is a request to be brought back into a conversation
+/// (ADR-0091 phase 2, any conversation).
+#[uniffi::export]
+#[must_use]
+pub fn is_conversation_reentry_envelope(plaintext: Vec<u8>) -> bool {
+    decode_conversation_reentry(&plaintext).is_ok()
+}
+
+/// The shortest re-entry request envelope.
+#[uniffi::export]
+#[must_use]
+pub fn conversation_reentry_envelope_min_len() -> u32 {
+    len_u32(CONVERSATION_REENTRY_ENVELOPE_MIN_LEN)
+}
+
+/// The longest re-entry request envelope.
+#[uniffi::export]
+#[must_use]
+pub fn conversation_reentry_envelope_max_len() -> u32 {
+    len_u32(CONVERSATION_REENTRY_ENVELOPE_MAX_LEN)
+}
+
+/// Whether `plaintext` is a group's knock-key envelope (ADR-0091 phase 2).
+#[uniffi::export]
+#[must_use]
+pub fn is_knock_key_envelope(plaintext: Vec<u8>) -> bool {
+    decode_knock_key(&plaintext).is_ok()
+}
+
+/// The one length of a knock-key envelope.
+#[uniffi::export]
+#[must_use]
+pub fn knock_key_envelope_len() -> u32 {
+    len_u32(KNOCK_KEY_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,8 +391,29 @@ mod tests {
         )
     }
 
+    fn reentry() -> Vec<u8> {
+        lakko_contacts::conversation_reentry::compose_conversation_reentry(
+            &lakko_contacts::conversation_reentry::ConversationReentry {
+                group_id: [0x0D; 32],
+                epoch_left: 16,
+                gap_from_ms: 1,
+                key_package: vec![0x55],
+            },
+        )
+        .unwrap()
+    }
+
+    fn knock_key() -> Vec<u8> {
+        lakko_contacts::knock_key::compose_knock_key(&lakko_contacts::knock_key::KnockKey {
+            knock_version: 2,
+            knock_pk: [0x4B; 32],
+        })
+    }
+
     #[test]
     fn recognises_each_envelope_and_refuses_chat() {
+        assert!(is_conversation_reentry_envelope(reentry()));
+        assert!(is_knock_key_envelope(knock_key()));
         assert!(is_group_photo_envelope(photo()));
         assert!(is_group_reactions_envelope(reactions()));
         assert!(is_conversation_handle_envelope(handle()));
@@ -371,6 +436,8 @@ mod tests {
         assert!(!is_channel_rotate_request_envelope(chat.clone()));
         assert!(!is_publisher_device_request_envelope(chat.clone()));
         assert!(!is_channel_admission_mark_envelope(chat.clone()));
+        assert!(!is_conversation_reentry_envelope(chat.clone()));
+        assert!(!is_knock_key_envelope(chat.clone()));
         assert!(!is_publisher_step_down_envelope(chat));
     }
 
@@ -388,6 +455,8 @@ mod tests {
             step_down(),
             device_request(),
             admission_mark(),
+            reentry(),
+            knock_key(),
         ] {
             assert_eq!(
                 lakko_attachments::parse_body(&w),
@@ -417,6 +486,17 @@ mod tests {
         assert_eq!(publisher_device_request_envelope_min_len(), 84);
         assert_eq!(publisher_device_request_envelope_max_len(), 7208);
         assert_eq!(channel_admission_mark_envelope_len(), 57);
+        assert_eq!(conversation_reentry_envelope_min_len(), 82);
+        assert_eq!(conversation_reentry_envelope_max_len(), 4177);
+        assert_eq!(knock_key_envelope_len(), 60);
+        let re = reentry();
+        assert_eq!(&re[..30], b"lakko/conversation-reentry/v1\x00");
+        assert_eq!(re.len(), 82);
+        let kk = knock_key();
+        assert_eq!(&kk[..25], b"lakko/group-knock-key/v1\x00");
+        assert_eq!(kk.len(), 60);
+        assert_eq!(re[0], 0x6c);
+        assert_eq!(kk[0], 0x6c);
         let p = photo();
         assert_eq!(&p[..21], b"lakko/group-photo/v1\x00");
         assert_eq!(p.len(), 31);
@@ -469,8 +549,10 @@ mod tests {
             step_down(),
             device_request(),
             admission_mark(),
+            reentry(),
+            knock_key(),
         ];
-        let tests: [fn(Vec<u8>) -> bool; 11] = [
+        let tests: [fn(Vec<u8>) -> bool; 13] = [
             is_group_photo_envelope,
             is_group_reactions_envelope,
             is_conversation_handle_envelope,
@@ -482,6 +564,8 @@ mod tests {
             is_publisher_step_down_envelope,
             is_publisher_device_request_envelope,
             is_channel_admission_mark_envelope,
+            is_conversation_reentry_envelope,
+            is_knock_key_envelope,
         ];
         for (i, w) in all.iter().enumerate() {
             for (j, t) in tests.iter().enumerate() {

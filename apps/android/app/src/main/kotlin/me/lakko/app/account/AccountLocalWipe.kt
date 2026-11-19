@@ -234,6 +234,14 @@ public object AccountLocalWipe {
         // kept for a group this device still held.
         Step("membership-ends") { ctx, acct -> me.lakko.app.chat.SharedPrefsMembershipEndStore(ctx).clearForAccount(acct) },
         Step("held-welcomes") { ctx, acct -> me.lakko.app.chat.SharedPrefsHeldWelcomeStore(ctx).clearForAccount(acct) },
+        // ADR-0091 phase 2 - the behind state, the re-entry requests sent,
+        // the knock keys held and the gap lines of every conversation.
+        Step("conversation-behind") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsConversationBehindStore(ctx).clearForAccount(acct)
+        },
+        Step("reentry-records") { ctx, acct -> me.lakko.app.chat.SharedPrefsReentryRecordStore(ctx).clearForAccount(acct) },
+        Step("knock-keys") { ctx, acct -> me.lakko.app.chat.SharedPrefsKnockKeyStore(ctx).clearForAccount(acct) },
+        Step("reentry-gaps") { ctx, acct -> me.lakko.app.chat.SharedPrefsReentryGapStore(ctx).clearForAccount(acct) },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },

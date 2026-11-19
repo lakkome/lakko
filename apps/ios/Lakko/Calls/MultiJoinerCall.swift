@@ -863,6 +863,11 @@ final class MultiJoinerCall {
             // ADR-0092 — the open-items hand-over and old ballot rows ride the
             // group journal, never the SFU signal-relay; dropped.
             break
+        case .conversationReentry, .knockKey:
+            // ADR-0091 phase 2 — a re-entry request rides the DeviceGroup, a
+            // mailbox or a knock queue, and the knock key the group journal;
+            // never the SFU signal-relay. Dropped.
+            break
         }
     }
 

@@ -147,6 +147,106 @@ public object HistoryBundleCodec {
     }
 
     /**
+     * ADR-0091 phase 2 section 7 — the gap bundle a device that brings
+     * another back sends: ONE conversation's rows from [fromMs] on (at most
+     * [MAX_BUNDLE_MESSAGES], the newest kept), sealed under [secret]. `null`
+     * when there is nothing in the gap.
+     */
+    public fun buildGroupSince(
+        context: Context,
+        accountIdB64: String,
+        secret: ByteArray,
+        groupIdHex: String,
+        fromMs: Long,
+    ): ByteArray? {
+        val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
+        val slot = log.groups[groupIdHex] ?: log.groups[groupIdHex.lowercase()] ?: return null
+        val groupIdBytes = hexToBytes(groupIdHex) ?: return null
+        val (kept, capped) = me.lakko.app.chat.gapRows(
+            bundledMessages(slot.messages),
+            fromMs,
+            MAX_BUNDLE_MESSAGES,
+        ) { m -> parseIsoMs(m.createdAt).toLong().takeIf { it > 0 } }
+        if (kept.isEmpty()) return null
+        var maxHlc: ULong = 0u
+        val messages = kept.mapNotNull { m ->
+            val placeholder = try {
+                encodePlaceholder(m)
+            } catch (_: Throwable) {
+                return@mapNotNull null
+            }
+            if (m.messageId > 0 && m.messageId.toULong() > maxHlc) maxHlc = m.messageId.toULong()
+            StructuredHistoryMessage(
+                payloadBytes = placeholder,
+                senderLeaf = 0u,
+                messageId = java.nio.ByteBuffer.allocate(8)
+                    .order(java.nio.ByteOrder.BIG_ENDIAN)
+                    .putLong(m.messageId)
+                    .array(),
+                receivedAtMs = parseIsoMs(m.createdAt),
+            )
+        }
+        if (messages.isEmpty()) return null
+        return sealHistoryBundleStructured(
+            secret = secret,
+            groups = listOf(StructuredHistoryGroup(groupId = groupIdBytes, messages = messages, countCapped = capped)),
+            maxHlc = maxHlc,
+        )
+    }
+
+    /** What [applyReentryBundle] took in. */
+    public class ReentryBundleApplied(
+        /** Rows added to the log. */
+        public val applied: Int,
+        /** The bundle rows' times (ms), for the gap line. */
+        public val rowTimesMs: List<Long>,
+        /** The sender cut the bundle to its size cap. */
+        public val capped: Boolean,
+    )
+
+    /**
+     * ADR-0091 phase 2 section 7 — take in a gap bundle for [groupIdHex]
+     * only (any other group in it is ignored). A placeholder carries no
+     * author, so [direction] maps the SENDER's direction to this device's:
+     * the same account keeps it, a one-to-one's other person swaps it, a
+     * group's re-admitter reads everything as incoming.
+     */
+    public fun applyReentryBundle(
+        context: Context,
+        accountIdB64: String,
+        secret: ByteArray,
+        sealedBytes: ByteArray,
+        groupIdHex: String,
+        direction: (String) -> String,
+    ): ReentryBundleApplied {
+        val opened = openHistoryBundleStructured(secret = secret, sealedBytes = sealedBytes)
+        val group = opened.groups.firstOrNull { bytesToHex(it.groupId).equals(groupIdHex, ignoreCase = true) }
+            ?: return ReentryBundleApplied(0, emptyList(), false)
+        val rows = group.messages.mapNotNull { m ->
+            try {
+                decodePlaceholder(m.payloadBytes).let { it.copy(direction = direction(it.direction)) }
+            } catch (cause: Throwable) {
+                Log.v(LOG_TAG, "decode placeholder failed", cause)
+                null
+            }
+        }
+        val existing = MessageLogStore.getLog(context, accountIdB64)
+            ?: MessageLogPayload(version = 1, groups = emptyMap())
+        val merged = mergeBundle(existing.groups, mapOf(groupIdHex.lowercase() to rows))
+        MessageLogStore.putLog(
+            context = context,
+            accountIdB64 = accountIdB64,
+            payload = MessageLogPayload(version = existing.version, groups = merged.groups),
+        )
+        liveLogSink?.invoke(accountIdB64, merged.opened)
+        return ReentryBundleApplied(
+            applied = merged.applied,
+            rowTimesMs = rows.mapNotNull { parseIsoMs(it.createdAt).toLong().takeIf { t -> t > 0 } },
+            capped = group.countCapped,
+        )
+    }
+
+    /**
      * Open the sealed bytes + project rows into the joining
      * device's persistent message log. Returns the number of
      * rows applied across all groups.

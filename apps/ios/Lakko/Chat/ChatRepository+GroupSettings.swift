@@ -89,6 +89,9 @@ extension ChatRepository {
                 NSLog("[knock] WARN a knock seed for this account's devices was not sent; retried later")
             }
         }
+        // ADR-0091 phase 2 route 3 — the knock key goes to every member, once
+        // per version.
+        await publishKnockKeyIfOwed(groupIdHex: groupIdHex)
     }
 
     /// The owner's knock seed of `version`: the one another device of this
@@ -843,6 +846,8 @@ extension ChatRepository {
         case .knockSeed(let plaintext):
             receiveKnockSeed(accountIdB64: accountIdB64, record: record, groupIdHex: groupIdHex,
                              plaintext: plaintext, senderLeaf: senderLeaf)
+        case .knockKey(let key):
+            receiveKnockKey(groupIdHex: groupIdHex, key: key, senderLeaf: senderLeaf)
         }
     }
 

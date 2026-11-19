@@ -122,3 +122,10 @@ path = "fuzz_targets/wrapped_entry_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "reentry_marker_decode"
+path = "fuzz_targets/reentry_marker_decode.rs"
+test = false
+doc = false
+bench = false

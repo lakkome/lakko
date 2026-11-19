@@ -88,6 +88,8 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
 import { clearCursorEpochsForAccount } from "../chat/cursor-epoch";
+import { conversationBehind } from "../chat/conversation-behind";
+import { clearReentryRowsForAccount } from "../chat/reentry-store";
 import { deleteMembershipEndRow } from "../chat/membership-end-idb";
 import { deleteGroupClosedRow } from "../chat/group-closed-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
@@ -451,6 +453,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "backup-restored-marker", run: () => clearRestoreMarker(accountIdB64) },
     { name: "knock-cursors", run: () => clearKnockCursorsForAccount(accountIdB64) },
     { name: "cursor-epochs", run: () => clearCursorEpochsForAccount(accountIdB64) },
+    { name: "conversation-behind", run: () => conversationBehind.forgetAccount(accountIdB64) },
+    { name: "reentry-rows", run: () => clearReentryRowsForAccount(accountIdB64) },
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },
     { name: "unconfirmed-foundings", run: () => clearUnconfirmedFoundingsForAccount(accountIdB64) },

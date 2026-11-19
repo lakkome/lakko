@@ -442,6 +442,8 @@ public class ChatClient(
         readFrom: Long = after,
     ): PollMessagesResult {
         val events = mutableListOf<IncomingChatEvent>()
+        val skipped = mutableListOf<SkippedRow>()
+        var lastRowApplied = false
         // ADR-0091 phase 1 — a failed row is classified before it is skipped:
         // the commit the DS registered as this device's next epoch is HELD
         // (the batch stops at it, the cursor stays before it, it is retried
@@ -497,7 +499,12 @@ public class ChatClient(
             },
             isOwnEchoFailure = { cause -> me.lakko.app.push.isOwnMessageEcho(cause) },
             log = failedRowLog,
+            onSkipped = { row, sealed, local ->
+                skipped.add(SkippedRow(sealed, local, row.createdAt))
+                lastRowApplied = false
+            },
         ) { message, processed ->
+            lastRowApplied = true
             // The roster is read HERE, one line after the apply, because that
             // is the epoch this row decrypted at — a leaf resolved any later
             // can name whoever was added into a vacated slot since. Read PER
@@ -536,6 +543,9 @@ public class ChatClient(
             // when the row is read again.
             hasMore = raw.hasMore && !applied.held,
             touchedMlsState = applied.touchedMlsState,
+            held = applied.held,
+            skipped = skipped,
+            lastRowApplied = lastRowApplied,
         )
     }
 }
@@ -707,6 +717,34 @@ internal fun registrarSeedArm(bytes: ByteArray): Boolean {
 }
 
 /**
+ * ADR-0091 phase 2 — the frozen knock-key envelope domain separator,
+ * `lakko/group-knock-key/v1` followed by one NUL byte (built programmatically:
+ * a raw NUL makes git treat the file as binary). The NUL makes the prefix a
+ * complete classification: no chat envelope (`{`) and no typed text opens
+ * with it, so a plaintext that does is a knock-key envelope whether or not it
+ * decodes, and one that does not decode is dropped, never rendered.
+ */
+private val KNOCK_KEY_ENVELOPE_DOMAIN: ByteArray =
+    "lakko/group-knock-key/v1".toByteArray(Charsets.US_ASCII) + byteArrayOf(0)
+
+/** Does [bytes] open with the knock-key domain? Pure, host-testable. */
+internal fun looksLikeKnockKeyEnvelope(bytes: ByteArray): Boolean {
+    if (bytes.size < KNOCK_KEY_ENVELOPE_DOMAIN.size) return false
+    for (i in KNOCK_KEY_ENVELOPE_DOMAIN.indices) {
+        if (bytes[i] != KNOCK_KEY_ENVELOPE_DOMAIN[i]) return false
+    }
+    return true
+}
+
+/** The authoritative, fail-closed knock-key decode, or `null`. */
+internal fun decodeKnockKeyOrNull(bytes: ByteArray): uniffi.lakko_ffi_uniffi.FfiKnockKey? =
+    try {
+        uniffi.lakko_ffi_uniffi.decodeKnockKeyEnvelope(bytes)
+    } catch (_: Throwable) {
+        null
+    }
+
+/**
  * ADR-0048 — the frozen profile-envelope domain separator,
  * `lakko/profile/v1` followed by one NUL byte. Built programmatically: a raw
  * NUL in a source file makes git treat it as binary.
@@ -861,6 +899,7 @@ internal fun toEvent(
     decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
     decodeSharedChannels: (ByteArray) -> me.lakko.app.discover.SharedList? = ::decodeSharedListOrNull,
     isRegistrarSeed: (ByteArray) -> Boolean = ::registrarSeedArm,
+    decodeKnockKey: (ByteArray) -> uniffi.lakko_ffi_uniffi.FfiKnockKey? = ::decodeKnockKeyOrNull,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -1085,6 +1124,18 @@ internal fun toEvent(
                 IncomingChatEvent.ProfileRequest(
                     messageId = messageId,
                     wellFormed = isProfileRequest(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeKnockKeyEnvelope(processed.data)) {
+                // ADR-0091 phase 2 — the owner handing every member the
+                // group's knock key (route 3 of a request to come back). Never
+                // a timeline bubble; the sink keeps it only from the owner or
+                // an admin resolved here, at receipt (C-68), and only when
+                // strictly newer.
+                IncomingChatEvent.KnockKey(
+                    messageId = messageId,
+                    knock = decodeKnockKey(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1850,6 +1901,18 @@ public sealed interface IncomingChatEvent {
         public val createdAt: String,
     ) : IncomingChatEvent
 
+    /** ADR-0091 phase 2 — the group's knock public key, handed to every member
+     *  by the owner so a member that falls behind can ask to come back. Never
+     *  a timeline bubble. [knock] is `null` when the plaintext opened with the
+     *  knock-key domain but the core refused it (dropped, never rendered);
+     *  [senderKey] is the sender's account key resolved at receipt (C-68). */
+    public class KnockKey(
+        public val messageId: Long,
+        public val knock: uniffi.lakko_ffi_uniffi.FfiKnockKey?,
+        public val senderKey: MemberIdentity?,
+        public val createdAt: String,
+    ) : IncomingChatEvent
+
     /** ADR-0048 trigger 4 — a member's "introduce yourselves" request. Never a
      *  timeline bubble. Consumes a DS [messageId] like any other application
      *  row so the poll cursor advances past it.
@@ -1955,7 +2018,18 @@ public data class PollMessagesResult(
      * provider snapshot has durably landed — see [DurableCursorGate].
      */
     val touchedMlsState: Boolean = false,
+    /** `true` when the batch stopped at a held registered commit. */
+    val held: Boolean = false,
+    /** ADR-0091 phase 2 — the rows this batch skipped, for the behind
+     *  bookkeeping (framed epoch, local epoch before the row, row time). */
+    val skipped: List<SkippedRow> = emptyList(),
+    /** ADR-0091 phase 2 — the batch's last MLS row applied (nothing failed
+     *  since the last applied row). */
+    val lastRowApplied: Boolean = false,
 )
+
+/** ADR-0091 phase 2 — one skipped row: no identifier, epochs and time only. */
+public data class SkippedRow(val sealedEpoch: ULong?, val localEpoch: ULong?, val createdAt: String)
 
 // =============================================================================
 // Errors

@@ -825,6 +825,12 @@ class MultiJoinerCall private constructor(
             // `docs/ux/who-can-find-me.md` 6.4 - a contact request sealed to
             // one member rides a GROUP JOURNAL; on the relay it is dropped.
             FfiIncomingEnvelopeKind.GROUP_CONTACT_REQUEST -> Unit
+            // ADR-0091 phase 2 - a conversation re-entry request rides the
+            // DeviceGroup, a mailbox or a knock queue, and a knock key rides a
+            // GROUP JOURNAL; neither means anything on the SFU relay. Dropped.
+            FfiIncomingEnvelopeKind.CONVERSATION_REENTRY,
+            FfiIncomingEnvelopeKind.KNOCK_KEY,
+            -> Unit
         }
     }
 

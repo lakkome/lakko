@@ -9315,6 +9315,25 @@ button.lk-card-row-button {
   justify-content: center;
 }
 
+/* ADR-0091 / UX conversation-rejoin 2.2 - the waiting note stands where the
+   composer is while this device is out of date in a chat: no spinner, no
+   progress, the same muted text as the solo-group note. */
+.lk-waiting-note {
+  padding: 12px 16px;
+  border-top: 1px solid var(--surface-border, transparent);
+  color: var(--surface-muted);
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+.lk-waiting-note p {
+  margin: 0;
+}
+.lk-waiting-note .lk-waiting-note-second {
+  margin-top: 4px;
+  font-size: 0.8125rem;
+}
+
 /* ----- ADR-0082: translation and transcription -------------------------- */
 
 /* UX 3.2 - the one quiet line under a translated bubble, in the bubble's

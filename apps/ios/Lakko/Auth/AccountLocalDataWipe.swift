@@ -283,6 +283,14 @@ enum AccountLocalDataWipe {
         step("unseen-reactions") { UnseenReactionsStore().clear(accountIdB64: accountIdB64) }
         step("recent-reactions") { standard.removeObject(forKey: RecentReactions.key(accountIdB64)) }
         step("knock-versions") { standard.removeObject(forKey: KnockVersionStore.key(accountIdB64)) }
+        // ADR-0091 phase 2 — the behind records, the re-admitter's memory,
+        // the members' knock keys and the owed gap histories.
+        step("conversation-reentry") {
+            standard.removeObject(forKey: ConversationReentryStore.key(accountIdB64))
+            standard.removeObject(forKey: ReentryAdmissionMemory.key(accountIdB64))
+            standard.removeObject(forKey: ReentryKnockKeyStore.key(accountIdB64))
+            standard.removeObject(forKey: ReentryHistoryOwed.key(accountIdB64))
+        }
         step("requests-sent") { standard.removeObject(forKey: RequestsSentStore.key(accountIdB64)) }
         step("shared-pins") { SharedPinStore().clear(accountIdB64: accountIdB64) }
         step("personal-pins") { PersonalPinStore().clear(accountIdB64: accountIdB64) }

@@ -1416,6 +1416,11 @@ public final class ContactsClient {
                 events.append(.publisherWelcome(messageId: message.id, welcomeBytes: body))
             case .linkRefusal:
                 events.append(.linkRefusal(body))
+            case .conversationReentry:
+                // ADR-0091 phase 2 route 2 — the other person's device of a
+                // one-to-one fell behind and asks to be brought back. Decoded
+                // and judged by the chat repository; nothing is trusted here.
+                events.append(.conversationReentry(messageId: message.id, envelope: body))
             case .welcome:
                 events.append(
                     .welcome(
@@ -1665,6 +1670,10 @@ public enum IncomingMailboxEvent: Equatable {
     /// the receiver checks it against each pending contact
     /// (`verifyLinkRefusal`) before it removes anything.
     case linkRefusal(Data)
+    /// ADR-0091 phase 2 route 2 — a re-entry request from the other person
+    /// of a one-to-one whose device fell behind; the whole envelope, NOT yet
+    /// checked (`ChatRepository.receiveConversationReentry`).
+    case conversationReentry(messageId: Int64, envelope: Data)
 }
 
 /// Result of ``ContactsClient/pollStrangerInbox(...)``.

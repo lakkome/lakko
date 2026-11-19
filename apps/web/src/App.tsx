@@ -61,6 +61,7 @@ import { OwedKeyRotation } from "./devices/OwedKeyRotation";
 import { AccountNotices } from "./auth/protect/AccountNotices";
 import { RenameResume } from "./auth/rename-runtime";
 import { GroupHandleRuntime } from "./chat/GroupHandleRuntime";
+import { ConversationRejoinRuntime } from "./chat/ConversationRejoinRuntime";
 import { BlobAccessRuntime } from "./storage/BlobAccessRuntime";
 import { AttachRuntime } from "./attach/AttachRuntime";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
@@ -292,6 +293,9 @@ const App: Component = () => (
           {/* ADR-0087 sections 3 to 5 - owed @name writes, lease renewal,
               and the public record published again when the knock key moves. */}
           <GroupHandleRuntime />
+          {/* ADR-0091 phase 2 - a device that fell behind a conversation
+              asks to come back, and this device brings back another. */}
+          <ConversationRejoinRuntime />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

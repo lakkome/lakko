@@ -200,7 +200,7 @@ fn forged_credential_key_package() -> Vec<u8> {
 fn a_member_adds_its_own_device_without_a_role_and_a_stranger_only_with_one() {
     let mut s = scene(0x03);
     // charlie (plain member) proposes adding charlie's second device.
-    let c2 = device(&s.c, 0xC2);
+    let c2 = device(&s.c, 0xD7);
     let proposal = s
         .c1_g
         .propose_add_member_from_wire(&s.c1, &kp_wire(&c2))
@@ -263,7 +263,7 @@ fn a_member_re_admits_a_bound_device_of_an_account_already_in_the_group() {
 #[test]
 fn a_member_removes_its_own_device_without_a_role() {
     let mut s = scene(0x05);
-    let c2 = device(&s.c, 0xC2);
+    let c2 = device(&s.c, 0xD7);
     // Admit c2 via the owner.
     let p = s
         .c1_g
@@ -438,7 +438,7 @@ fn a_self_service_only_pending_set_is_sweepable_by_its_own_account() {
     let mut s = scene(0x09);
     // charlie is a plain member: no rank while the set is empty.
     assert_eq!(s.c1_g.own_committer_rank(&s.c1), None);
-    let c2 = device(&s.c, 0xC2);
+    let c2 = device(&s.c, 0xD7);
     let p = s
         .c1_g
         .propose_add_member_from_wire(&s.c1, &kp_wire(&c2))

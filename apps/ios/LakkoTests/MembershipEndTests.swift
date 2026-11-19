@@ -722,6 +722,160 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(f.repo.groups[f.groupIdHex]).group.isActive())
     }
 
+    // MARK: - ADR-0091 phase 2 — a device that fell behind comes back
+
+    func testADeviceThatFellBehindComesBackOnItsOwnReentryWelcome() async throws {
+        let third = try Identity.fromSeed(seed: Data(repeating: 0x66, count: 32))
+        let f = try fixture(addAlso: third)
+        let hex = f.groupIdHex
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        record.appendLocalRow(text: "before", messageId: 1, createdAt: "")
+        let leafKey = f.identity.signaturePublicKey()
+
+        // The owner commits a change this device never applies: it is behind.
+        let fourth = try Identity.fromSeed(seed: Data(repeating: 0x67, count: 32))
+        _ = try f.ownerGroup.addMemberFromWire(identity: f.owner, keyPackage: try fourth.createKeyPackage())
+        let epochLeft = try f.ownerGroup.epoch()
+        XCTAssertGreaterThan(epochLeft, try record.group.epoch())
+
+        // Its request, recorded the way the pipeline records it.
+        let keyPackage = try f.identity.createReentryKeyPackage(groupId: f.groupId, epochLeft: epochLeft)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        behind.gapFromMs = 1_000
+        behind.requests = [ReentrySentRequest(
+            keyPackage: keyPackage, epochLeft: epochLeft, sentAtMs: 1, route: "knock", cursorAtSend: 0)]
+        behind.lastRoute = "knock"
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        XCTAssertTrue(f.repo.reentryStopsActing(groupIdHex: hex))
+        XCTAssertNotNil(f.repo.reentryWaitingNote(groupIdHex: hex))
+        XCTAssertTrue(f.repo.reentryBlocksRepair(groupIdHex: hex) == false, "no evidence recorded")
+
+        // Waiting, nothing is sent: a typing signal is refused before the network.
+        do {
+            try await f.repo.sendTyping(groupIdHex: hex, isTyping: true)
+            XCTFail("a waiting chat sends nothing")
+        } catch is ChatRepository.BehindInConversation {
+        }
+        if case .notCommitter = await f.repo.sweepIfCommitter(groupIdHex: hex) {} else {
+            XCTFail("a behind device never sweeps")
+        }
+
+        // The owner brings it back: the pair, then its own sweep.
+        _ = try f.ownerGroup.proposeReentryReplacement(identity: f.owner, keyPackage: keyPackage)
+        let swept = try XCTUnwrap(try f.ownerGroup.commitPendingProposals(identity: f.owner))
+        let welcome = try XCTUnwrap(swept.welcome)
+
+        // The ordinary join refuses it (still active here); the held pass
+        // takes it as this device's re-entry.
+        var refusal: Error?
+        do {
+            _ = try await f.repo.joinGroupFromWelcome(welcomeBytes: welcome)
+        } catch {
+            refusal = error
+        }
+        XCTAssertEqual(try MembershipEndRules.stillActiveGroupIdHex(XCTUnwrap(refusal)), hex)
+        XCTAssertTrue(f.repo.holdWelcomeForActiveGroup(groupIdHex: hex, welcome: welcome))
+        f.repo.reentryHistoryWaitSeconds = 0
+        await f.repo.resolveHeldWelcomes()
+
+        let back = try XCTUnwrap(f.repo.groups[hex])
+        XCTAssertTrue(try back.group.isActive())
+        XCTAssertEqual(try back.group.epoch(), try f.ownerGroup.epoch())
+        XCTAssertTrue(back.messages.contains { $0.text == "before" }, "the history stays")
+        XCTAssertTrue(back.messages.contains { ConversationReentryRules.parseGap($0.text)?.fromMs == 1_000 },
+                      "the gap line is written")
+        XCTAssertEqual(f.repo.reentryBehind(groupIdHex: hex), .inStep)
+        XCTAssertNil(f.repo.reentryWaitingNote(groupIdHex: hex))
+        XCTAssertTrue(f.endStore.heldWelcomes(accountIdB64: f.accountIdB64).isEmpty)
+        let ownLeaf = try back.group.ownLeafIndex()
+        XCTAssertEqual(
+            try back.group.members().first { $0.leafIndex == ownLeaf }?.signaturePublicKey, leafKey,
+            "the same signature key: the person and authorship are unchanged")
+
+        // It reads what is sent next.
+        let next = try f.ownerGroup.createApplicationMessage(identity: f.owner, plaintext: Data("hello".utf8))
+        guard case .application(let data, _, _) = try back.group.processIncomingVerifyingRoles(
+            identity: f.identity, bytes: next) else {
+            return XCTFail("an application message")
+        }
+        XCTAssertEqual(data, Data("hello".utf8))
+    }
+
+    func testAWelcomeForAnotherKeyPackageIsNotAReentryAndIsKeptWhileARequestIsOut() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        let epochLeft = try f.ownerGroup.epoch()
+        let keyPackage = try f.identity.createReentryKeyPackage(groupId: f.groupId, epochLeft: epochLeft)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        behind.requests = [ReentrySentRequest(
+            keyPackage: keyPackage, epochLeft: epochLeft, sentAtMs: 1, route: "knock", cursorAtSend: 0)]
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        let other = try f.ownerGroup.addMemberFromWire(
+            identity: f.owner, keyPackage: try Identity.fromSeed(
+                seed: Data(repeating: 0x78, count: 32)).createKeyPackage())
+        XCTAssertTrue(f.repo.holdWelcomeForActiveGroup(groupIdHex: hex, welcome: other.welcome))
+        await f.repo.resolveHeldWelcomes()
+        XCTAssertEqual(f.endStore.heldWelcomes(accountIdB64: f.accountIdB64).count, 1,
+                       "never dropped while a re-entry record exists")
+        XCTAssertTrue(f.repo.reentryStopsActing(groupIdHex: hex), "nothing changed")
+    }
+
+    /// An admin of the group: the owner's role commit, applied on the
+    /// person's handle before the repository starts.
+    private func adminFixture() throws -> Fixture {
+        try fixture { ownerGroup, owner, personGroup, person in
+            let commit = try ownerGroup.setGroupRoles(
+                identity: owner, owner: owner.signaturePublicKey(), admins: [person.signaturePublicKey()])
+            _ = try personGroup.processIncomingVerifyingRoles(identity: person, bytes: commit)
+        }
+    }
+
+    func testTheAdminWhoBringsADeviceBackHoldsTheKnockKeyToResend() throws {
+        let f = try adminFixture()
+        let hex = f.groupIdHex
+        XCTAssertEqual(f.repo.ownRole(groupIdHex: hex), .admin)
+        // No seed handed over yet: nothing to send.
+        XCTAssertNil(f.repo.knockKeyEnvelopeForResend(groupIdHex: hex))
+        let seed = Data(repeating: 0x5A, count: 32)
+        f.repo.groupSettingsStore.keepKnockSeed(
+            accountIdB64: f.accountIdB64, groupIdHex: hex, version: 2, seed: seed)
+        let envelope = try XCTUnwrap(f.repo.knockKeyEnvelopeForResend(groupIdHex: hex),
+                                     "an admin re-sends the knock key it holds")
+        let key = try decodeKnockKeyEnvelope(plaintext: envelope)
+        XCTAssertEqual(key.knockVersion, 2)
+        XCTAssertEqual(key.knockPk, try groupKnockPublicKey(knockSeed: seed))
+        f.repo.groupSettingsStore.removeGroup(accountIdB64: f.accountIdB64, groupIdHex: hex)
+    }
+
+    func testAPlainMemberResendsNoKnockKey() throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        f.repo.groupSettingsStore.keepKnockSeed(
+            accountIdB64: f.accountIdB64, groupIdHex: hex, version: 0, seed: Data(repeating: 1, count: 32))
+        XCTAssertEqual(f.repo.ownRole(groupIdHex: hex), .member)
+        XCTAssertNil(f.repo.knockKeyEnvelopeForResend(groupIdHex: hex))
+        f.repo.groupSettingsStore.removeGroup(accountIdB64: f.accountIdB64, groupIdHex: hex)
+    }
+
+    func testAWaitingChatOffersNoSharedPin() throws {
+        let f = try adminFixture()
+        let hex = f.groupIdHex
+        XCTAssertTrue(f.repo.maySetSharedPin(groupIdHex: hex), "an admin may pin for everyone")
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        XCTAssertFalse(f.repo.maySetSharedPin(groupIdHex: hex), "only Pin for me while waiting")
+        let options = PinSheet.options(
+            sharedPinned: false, personalPinned: false,
+            maySetShared: f.repo.maySetSharedPin(groupIdHex: hex), oneToOne: false)
+        XCTAssertEqual(options.map(\.choice), [.pinForMe])
+    }
+
     // MARK: - The handle
 
     func testAWelcomeReplacesTheEndedHandle() async throws {

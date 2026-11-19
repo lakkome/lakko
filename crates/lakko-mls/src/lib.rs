@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ciphersuite;
+pub mod conversation_behind;
 pub mod device_binding;
 pub mod device_group;
 pub mod device_group_sync;
@@ -31,10 +32,17 @@ pub mod identity;
 pub mod key_package;
 pub mod pairing;
 pub mod publisher_group;
+pub mod reentry;
 pub mod refusal;
 pub mod self_removal;
 pub mod welcome_rendezvous;
 
+pub use conversation_behind::{
+    conversation_behind_verdict, reentry_admission_verdict, reentry_request_due, reentry_route,
+    BehindObservation, BehindState, ReentryAdmission, ReentryAdmissionFacts, ReentryRoute,
+    REENTRY_LEAF_COOLDOWN_MS, REENTRY_RECENT_WRITE_WINDOW_MS, REENTRY_REQUESTS_KEPT,
+    REENTRY_REQUEST_INTERVAL_MS, REFUSED_READS_TO_SUSPECT, SUSPICION_CONFIRM_AFTER_MS,
+};
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
 pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
 pub use entry_wrap::{
@@ -44,8 +52,8 @@ pub use entry_wrap::{
 pub use error::{group_id_hex, Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
-    JoinRequest, JoinRequestOutcome, MemberAddition, MemberRecord, ProposalCommit, WelcomeFounder,
-    GROUP_ID_LEN, MAX_PENDING_JOIN_REQUESTS,
+    JoinRequest, JoinRequestOutcome, MemberAddition, MemberRecord, ProposalCommit,
+    ReentryProposals, ReentryTarget, WelcomeFounder, GROUP_ID_LEN, MAX_PENDING_JOIN_REQUESTS,
 };
 pub use group_kind::{GroupKind, GROUP_KIND_BODY_LEN};
 pub use group_proposals::{ProposalKind, ProposalRecord};
@@ -57,6 +65,10 @@ pub use publisher_group::{
     ChannelId, MemberAdditionBytes, PublisherCommit, PublisherCommitEffects, PublisherEntry,
     PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN, PUBLISHER_GROUP_OWNER_ROW_DOMAIN,
     PUBLISHER_STEP_DOWN_DOMAIN_V1, PUBLISHER_STEP_DOWN_LEN,
+};
+pub use reentry::{
+    marker_of_key_package, ReentryMarker, ReentryMarkerError, REENTRY_MARKER_EXTENSION_TYPE,
+    REENTRY_MARKER_LEN,
 };
 pub use refusal::{RefusalDisposition, RefusalReason};
 pub use self_removal::{sign_self_removal, SelfRemovalProof, SELF_REMOVAL_PROOF_LEN};
@@ -112,6 +124,27 @@ pub mod fuzz_api {
             &[proof.key_package_ref.to_vec()],
         );
         true
+    }
+
+    /// Decode an ADR-0091 re-entry marker body (the `0xFF04` KeyPackage
+    /// extension a peer reads from every `Add` it gates). Returns `true`
+    /// when it decoded.
+    ///
+    /// # Panics
+    ///
+    /// When a decoded marker does not re-encode to its input (a codec bug).
+    #[must_use]
+    pub fn decode_reentry_marker(bytes: &[u8]) -> bool {
+        match crate::reentry::fuzz_decode(bytes) {
+            None => false,
+            Some(round_trips) => {
+                assert!(
+                    round_trips,
+                    "a decoded re-entry marker re-encodes to its input"
+                );
+                true
+            },
+        }
     }
 
     /// Try to parse and validate a wire-format `KeyPackage`. Returns `true`

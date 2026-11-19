@@ -303,9 +303,11 @@ pub struct Group {
 }
 
 mod external_entry;
+mod reentry_join;
 pub(crate) use external_entry::ExternalEntryView;
 #[cfg(test)]
 pub(crate) use external_entry::{builds_with_lifetime_check, forge_external_commit};
+pub use reentry_join::{ReentryProposals, ReentryTarget};
 
 /// The provider row key for `group_id`'s retained external-join requests.
 fn pending_external_joins_row_key(group_id: &[u8]) -> Vec<u8> {
@@ -348,14 +350,19 @@ fn stage_welcome(welcome_bytes: &[u8], identity: &Identity) -> Result<StagedWelc
     let MlsMessageBodyIn::Welcome(welcome) = mls_in.extract() else {
         return Err(Error::Unsupported("expected Welcome message"));
     };
-    let cfg = MlsGroupJoinConfig::builder()
-        .use_ratchet_tree_extension(true)
-        .build();
-    StagedWelcome::build_from_welcome(&identity.provider, &cfg, welcome)
+    StagedWelcome::build_from_welcome(&identity.provider, &welcome_join_config(), welcome)
         .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?
         .replace_old_group()
         .build()
         .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))
+}
+
+/// The join config every Welcome is staged with: the ratchet tree rides in
+/// the Welcome, and the joined group's own Welcomes carry it too.
+fn welcome_join_config() -> MlsGroupJoinConfig {
+    MlsGroupJoinConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .build()
 }
 
 fn delete_stored_group(identity: &Identity, stored: &mut MlsGroup) -> Result<()> {
@@ -719,6 +726,28 @@ impl Group {
     ///
     /// [ADR-0062]: ../../../docs/adr/0062-conversation-kind.md
     pub fn create(identity: &Identity, kind: GroupKind) -> Result<Self> {
+        // Mint the group id ourselves rather than letting OpenMLS pick one:
+        // `MlsGroup::new` falls through to `GroupId::random`, which is only
+        // **16** bytes (openmls-0.8.1 `group/mod.rs`, via `builder.rs`
+        // `.unwrap_or_else(|| GroupId::random(provider.rand()))`). The group
+        // id is the DS journal routing key and the DS requires exactly
+        // `GROUP_ID_LEN` — see that constant for the full coupling.
+        //
+        // Randomness goes through `lakko_crypto::random` per that module's
+        // policy ("all randomness ... MUST come through this module").
+        let mut group_id = [0u8; GROUP_ID_LEN];
+        lakko_crypto::random::fill(&mut group_id);
+        Self::create_conversation_at(identity, kind, &group_id)
+    }
+
+    /// The body of [`Group::create`] at a given group id. Private: a
+    /// conversation's id is always random; tests use it to build two
+    /// conversations under one id.
+    fn create_conversation_at(
+        identity: &Identity,
+        kind: GroupKind,
+        group_id: &[u8; GROUP_ID_LEN],
+    ) -> Result<Self> {
         // ADR-0022 (owner-bootstrap option A) — a conversation group is
         // role-enabled from creation with the creator as owner. The initial
         // GroupContext carries the `0xFF02` role table (owner = creator, no
@@ -757,19 +786,7 @@ impl Group {
             .with_group_context_extensions(exts)
             .build();
 
-        // Mint the group id ourselves rather than letting OpenMLS pick one:
-        // `MlsGroup::new` falls through to `GroupId::random`, which is only
-        // **16** bytes (openmls-0.8.1 `group/mod.rs`, via `builder.rs`
-        // `.unwrap_or_else(|| GroupId::random(provider.rand()))`). The group
-        // id is the DS journal routing key and the DS requires exactly
-        // `GROUP_ID_LEN` — see that constant for the full coupling.
-        //
-        // Randomness goes through `lakko_crypto::random` per that module's
-        // policy ("all randomness ... MUST come through this module").
-        let mut group_id = [0u8; GROUP_ID_LEN];
-        lakko_crypto::random::fill(&mut group_id);
-
-        Self::create_inner(identity, &cfg, &group_id, "create")
+        Self::create_inner(identity, &cfg, group_id, "create")
     }
 
     /// Shared tail of [`Group::create`] and [`Group::create_with_id`]: build
@@ -2707,6 +2724,18 @@ impl Group {
     /// caller sees is unchanged; the reserve only widens the capacity for a
     /// proposal `authorise` was going to accept anyway.
     fn authorise_own_proposal(&self, identity: &Identity, kind: &ProposalKind) -> Result<()> {
+        self.authorise_own_proposal_with(identity, kind, false)
+    }
+
+    /// [`Self::authorise_own_proposal`], with the device-limit check skipped
+    /// for an ADR-0091 re-entry `Add`, which replaces a leaf the account
+    /// already holds.
+    fn authorise_own_proposal_with(
+        &self,
+        identity: &Identity,
+        kind: &ProposalKind,
+        replaces_a_leaf: bool,
+    ) -> Result<()> {
         let table = self.role_table_or_refuse("proposal")?;
         let members = self.members();
         let proposer = Proposer {
@@ -2718,7 +2747,9 @@ impl Group {
         // its roles is not permitted at all, so saying "the queue is full" or
         // "you are not an admin" instead would invite a pointless retry.
         one_to_one_allows(self.group_kind(), &members, Some(proposer), kind)?;
-        self.refuse_if_device_limit_reached(&members, kind)?;
+        if !replaces_a_leaf {
+            self.refuse_if_device_limit_reached(&members, kind)?;
+        }
         let capacity = pending_capacity(is_owner_response(&table, Some(proposer), kind));
         if self.inner.pending_proposals().count() >= capacity {
             return Err(Error::refused(
@@ -2730,6 +2761,36 @@ impl Group {
             ));
         }
         authorise(&table, &members, Some(proposer), kind)
+    }
+
+    /// `true` when this device's own pending store holds a valid ADR-0091
+    /// re-entry `Add` replacing `target_leaf` that this device proposed.
+    fn own_reentry_add_pending_for(&self, target_leaf: u32) -> bool {
+        let members = self.members();
+        let group_id = self.group_id();
+        let scope = crate::reentry::ReentryScope {
+            group_id: &group_id,
+            epoch: self.epoch(),
+            members: &members,
+        };
+        let own = Sender::Member(self.inner.own_leaf_index());
+        crate::reentry::remove_is_paired(scope, &own, target_leaf, self.inner.pending_proposals())
+    }
+
+    /// The pending-set cap for an ordinary (non-owner-response) proposal of
+    /// this device, the same bound the peers' receipt gate applies.
+    fn refuse_if_pending_set_full(&self) -> Result<()> {
+        let capacity = pending_capacity(false);
+        if self.inner.pending_proposals().count() >= capacity {
+            return Err(Error::refused(
+                RefusalReason::PendingSetFull,
+                format!(
+                    "proposal refused: this group already holds {capacity} pending proposals — a \
+                     committer must sweep them first"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Propose adding a member by their published [`KeyPackage`] (ADR-0045).
@@ -2759,7 +2820,29 @@ impl Group {
             .map(|k| k.to_vec()),
             signature_key,
         };
-        self.authorise_own_proposal(identity, &kind)?;
+        // ADR-0091 M2: an Add colliding with a current leaf's signature key is
+        // only ever a re-entry, and then it replaces a leaf rather than adding
+        // one to the account's count.
+        let members = self.members();
+        let group_id = self.group_id();
+        let scope = crate::reentry::ReentryScope {
+            group_id: &group_id,
+            epoch: self.epoch(),
+            members: &members,
+        };
+        let replaces_a_leaf = match crate::reentry::reentry_add_of_key_package(scope, &key_package)
+        {
+            crate::reentry::ReentryAdd::NotColliding => false,
+            crate::reentry::ReentryAdd::Valid { .. } => true,
+            crate::reentry::ReentryAdd::Invalid => {
+                return Err(Error::refused(
+                    RefusalReason::ReentryPairInvalid,
+                    "add proposal refused: that device is already a member, and this is not \
+                         its re-entry for this group and epoch",
+                ));
+            },
+        };
+        self.authorise_own_proposal_with(identity, &kind, replaces_a_leaf)?;
         let (proposal, _proposal_ref) = self
             .inner
             .propose_add_member(&identity.provider, &identity.signature_keys, &key_package)
@@ -2804,7 +2887,20 @@ impl Group {
         let kind = ProposalKind::Remove {
             target_leaf: leaf.u32(),
         };
-        self.authorise_own_proposal(identity, &kind)?;
+        match self.authorise_own_proposal(identity, &kind) {
+            Ok(()) => {},
+            // ADR-0091 M2, the pair rule: a removal the ordinary rules refuse
+            // only to keep an account in the group stands on this device's
+            // own re-entry Add for that leaf, already in the store.
+            Err(e)
+                if e.refusal_reason()
+                    .is_some_and(crate::reentry::refusal_lifted_by_pair)
+                    && self.own_reentry_add_pending_for(leaf.u32()) =>
+            {
+                self.refuse_if_pending_set_full()?;
+            },
+            Err(e) => return Err(e),
+        }
         let (proposal, _proposal_ref) = self
             .inner
             .propose_remove_member(&identity.provider, &identity.signature_keys, leaf)
@@ -3344,9 +3440,32 @@ impl Group {
             }
             Some(own_account)
         };
+        let pending: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
+        let group_id = self.group_id();
+        let epoch = self.epoch();
+        let kind_before = self.kind_state();
+        let scope = crate::reentry::ReentryScope {
+            group_id: &group_id,
+            epoch,
+            members: &members,
+        };
         let in_scope = |qp: &QueuedProposal| match member_scope.as_ref() {
             None => true,
-            Some(account) => member_may_sweep(&members, account, qp),
+            Some(account) => member_may_sweep_with_pairs(&members, account, qp, scope, &pending),
+        };
+        // ADR-0091: the ordinary rule and the re-entry arm, the same decision
+        // `sweep_keeps` takes.
+        let authorised = |qp: &QueuedProposal| {
+            crate::reentry::judge(
+                scope,
+                &table,
+                kind_before.kind(),
+                false,
+                qp.sender(),
+                qp.proposal(),
+                &pending,
+            )
+            .is_ok()
         };
 
         // Would the role change this sweep is about to carry leave the group
@@ -3360,11 +3479,7 @@ impl Group {
         // Excluding a role change changes nobody's membership, so it cannot
         // change the answer: one pass suffices, with no fixpoint to iterate.
         // Neither can excluding a duplicate `Add` — see `sweep_keeps` clause 3.
-        let effects = commit_effects(
-            self.inner
-                .pending_proposals()
-                .filter(|qp| in_scope(qp) && proposal_is_authorised(&table, &members, qp)),
-        );
+        let effects = commit_effects(pending.iter().filter(|qp| in_scope(qp) && authorised(qp)));
         let role_change_survives = owner_survives(&effects, &members, table.owner()).is_ok();
         // Removes and leaves are never excluded by the filter beyond the
         // member scope this set is already restricted to, so the in-scope
@@ -3377,7 +3492,6 @@ impl Group {
         // owned by this frame, which is why `SweepContext` holds no reference
         // into `self`.
         let admission = self.admission_requirements(&removed_leaves);
-        let kind_before = self.kind_state();
         let ctx = SweepContext {
             table: &table,
             members: &members,
@@ -3387,6 +3501,9 @@ impl Group {
             admission: &admission,
             identity,
             member_scope,
+            group_id: &group_id,
+            epoch,
+            pending: &pending,
         };
 
         // The enumeration's verdict, taken ONCE and recorded as the set of
@@ -3704,14 +3821,42 @@ impl Group {
         members: &[MemberRecord],
     ) -> bool {
         let owner = self.group_roles().map(|t| *t.owner()).unwrap_or_default();
-        let effects = commit_effects(
-            queued
-                .iter()
-                .filter(|qp| selection.contains(qp.proposal_reference_ref())),
-        );
+        let chosen: Vec<&QueuedProposal> = queued
+            .iter()
+            .filter(|qp| selection.contains(qp.proposal_reference_ref()))
+            .collect();
+        let effects = commit_effects(chosen.iter().copied());
         owner_survives(&effects, members, &owner).is_ok()
             && group_kind_unchanged(&effects, &self.kind_state()).is_ok()
             && one_to_one_holds(&effects, members, self.group_kind()).is_ok()
+            && self.reentry_pairs_hold(&chosen, members)
+    }
+
+    /// ADR-0091 M2 over a whole selection, the rule a peer's commit gate
+    /// applies: every proposal stands with its pairs drawn from the selection
+    /// itself, so a re-entry `Remove` is never carried without its `Add`.
+    fn reentry_pairs_hold(&self, chosen: &[&QueuedProposal], members: &[MemberRecord]) -> bool {
+        let Some(table) = self.group_roles() else {
+            return true;
+        };
+        let group_id = self.group_id();
+        let scope = crate::reentry::ReentryScope {
+            group_id: &group_id,
+            epoch: self.epoch(),
+            members,
+        };
+        chosen.iter().all(|qp| {
+            crate::reentry::judge(
+                scope,
+                &table,
+                self.group_kind(),
+                false,
+                qp.sender(),
+                qp.proposal(),
+                chosen.iter().copied(),
+            )
+            .is_ok()
+        })
     }
 
     /// `true` when a commit is staged and still awaiting its verdict: a sweep
@@ -3963,7 +4108,13 @@ impl Group {
                 // an open (legacy) group, no enforcement.
                 if let Some(table) = self.group_roles() {
                     let members = self.members();
-                    authorise_role_commit(&table, &members, &self.kind_state(), &staged)?;
+                    let group_id = self.group_id();
+                    let scope = crate::reentry::ReentryScope {
+                        group_id: &group_id,
+                        epoch: self.epoch(),
+                        members: &members,
+                    };
+                    authorise_role_commit(&table, scope, &self.kind_state(), &staged)?;
                 }
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
@@ -4018,20 +4169,40 @@ impl Group {
         };
         let members = self.members();
         let proposer = sender_leaf.and_then(|leaf| proposer_at(&members, leaf));
-        // ADR-0062: the early one-to-one answer, and no rewrite that changes
-        // the kind, in either kind of conversation. Neither is ever stored, so
-        // neither can sit in the pending set or reach a sweep.
-        if one_to_one_allows(self.group_kind(), &members, proposer, &kind).is_err()
-            || !proposal_keeps_group_kind(qp.proposal(), &self.kind_state())
-        {
+        // ADR-0062: no rewrite that changes the kind, in either kind of
+        // conversation. Never stored, so it can never sit in the pending set
+        // or reach a sweep.
+        if !proposal_keeps_group_kind(qp.proposal(), &self.kind_state()) {
             return refused(kind);
         }
-        if authorise(&table, &members, proposer, &kind).is_err() {
+        // The early one-to-one answer, the ordinary rule, and the ADR-0091
+        // re-entry arm (a colliding Add must be a valid re-entry; a Remove
+        // the ordinary rules refuse may stand on the same sender's re-entry
+        // Add already in the store), all in one place.
+        let group_id = self.group_id();
+        let scope = crate::reentry::ReentryScope {
+            group_id: &group_id,
+            epoch: self.epoch(),
+            members: &members,
+        };
+        let Ok(standing) = crate::reentry::judge(
+            scope,
+            &table,
+            self.group_kind(),
+            true,
+            qp.sender(),
+            qp.proposal(),
+            self.inner.pending_proposals(),
+        ) else {
             return refused(kind);
-        }
-        if self
-            .refuse_if_device_limit_reached(&members, &kind)
-            .is_err()
+        };
+        // A re-entry replaces a leaf the account already holds, so it never
+        // raises the account's leaf count.
+        let replaces_a_leaf = matches!(standing, crate::reentry::Standing::ReentryAdd { .. });
+        if !replaces_a_leaf
+            && self
+                .refuse_if_device_limit_reached(&members, &kind)
+                .is_err()
         {
             return refused(kind);
         }
@@ -4798,6 +4969,33 @@ fn member_may_sweep(members: &[MemberRecord], own_account: &[u8; 32], qp: &Queue
     }
 }
 
+/// [`member_may_sweep`], plus an ADR-0091 re-entry `Remove` standing on a
+/// re-entry `Add` by the same sender that is itself in scope: a member that
+/// may carry a device's re-entry may carry the removal of the leaf it
+/// replaces.
+fn member_may_sweep_with_pairs(
+    members: &[MemberRecord],
+    own_account: &[u8; 32],
+    qp: &QueuedProposal,
+    scope: crate::reentry::ReentryScope<'_>,
+    pending: &[QueuedProposal],
+) -> bool {
+    if member_may_sweep(members, own_account, qp) {
+        return true;
+    }
+    let ProposalKind::Remove { target_leaf } = classify(qp.proposal()) else {
+        return false;
+    };
+    crate::reentry::remove_is_paired(
+        scope,
+        qp.sender(),
+        target_leaf,
+        pending
+            .iter()
+            .filter(|p| member_may_sweep(members, own_account, p)),
+    )
+}
+
 /// `true` when `qp` is authorised for the member that **authored** it, judged
 /// against `table` as it stands now.
 ///
@@ -4805,6 +5003,7 @@ fn member_may_sweep(members: &[MemberRecord], own_account: &[u8; 32], qp: &Queue
 /// two cannot answer the question differently — a disagreement there would mean
 /// emitting a commit that carries nothing, or skipping one that would have
 /// carried something.
+#[cfg(test)]
 fn proposal_is_authorised(
     table: &RoleTable,
     members: &[MemberRecord],
@@ -4907,6 +5106,23 @@ struct SweepContext<'a> {
     /// committer, so the scope narrows what one committer carries without
     /// changing what any peer accepts.
     member_scope: Option<[u8; 32]>,
+    /// The group id, for the ADR-0091 re-entry marker check.
+    group_id: &'a [u8],
+    /// The pre-merge epoch: the epoch the sweep's commit leaves.
+    epoch: u64,
+    /// The whole pending set, what a re-entry `Remove` may be paired with.
+    pending: &'a [QueuedProposal],
+}
+
+impl SweepContext<'_> {
+    /// The ADR-0091 scope this sweep judges re-entries in.
+    const fn reentry_scope(&self) -> crate::reentry::ReentryScope<'_> {
+        crate::reentry::ReentryScope {
+            group_id: self.group_id,
+            epoch: self.epoch,
+            members: self.members,
+        }
+    }
 }
 
 /// What a group demands of a prospective leaf, snapshotted at one epoch.
@@ -4957,6 +5173,10 @@ struct SweepState {
     /// HPKE **init** keys of the `Add` proposals this pass has taken, held as
     /// [`EncryptionKey`] so the two sets are directly comparable.
     kept_init_keys: Vec<EncryptionKey>,
+    /// ADR-0091: the re-entry `Add`s this pass has taken, as (sender, leaf
+    /// replaced). A `Remove` that stands only on the pair rule is kept only
+    /// when its `Add` is, so the sweep keeps a pair together or drops both.
+    kept_reentry: Vec<(Sender, u32)>,
 }
 
 /// `true` when the ADR-0045 sweep should carry `qp`.
@@ -5053,13 +5273,29 @@ struct SweepState {
 /// so its author must re-propose. The caller learns what survived from
 /// [`ProposalCommit::swept`], which is read back off the staged commit.
 fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedProposal) -> bool {
-    if !proposal_is_authorised(ctx.table, ctx.members, qp) {
+    let Ok(standing) = crate::reentry::judge(
+        ctx.reentry_scope(),
+        ctx.table,
+        ctx.kind_before.kind(),
+        false,
+        qp.sender(),
+        qp.proposal(),
+        ctx.pending,
+    ) else {
         return false;
-    }
+    };
     if let Some(account) = ctx.member_scope.as_ref() {
-        if !member_may_sweep(ctx.members, account, qp) {
+        if !member_may_sweep_with_pairs(ctx.members, account, qp, ctx.reentry_scope(), ctx.pending)
+        {
             return false;
         }
+    }
+    if let crate::reentry::Standing::PairedRemove { target_leaf } = standing {
+        // The pair stays together: this removal stands only on its re-entry
+        // Add, so it is carried only when that Add was.
+        return state
+            .kept_reentry
+            .contains(&(qp.sender().clone(), target_leaf));
     }
     match classify(qp.proposal()) {
         ProposalKind::Add {
@@ -5133,6 +5369,11 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
             state.kept_added_keys.push(signature_key);
             state.kept_encryption_keys.push(encryption_key);
             state.kept_init_keys.push(init_key);
+            if let crate::reentry::Standing::ReentryAdd { replaced_leaf } = standing {
+                state
+                    .kept_reentry
+                    .push((qp.sender().clone(), replaced_leaf));
+            }
             true
         },
         ProposalKind::RoleChange => {
@@ -5432,10 +5673,11 @@ fn proposal_type_is_default(proposal_type: ProposalType) -> bool {
 /// leaf.
 fn authorise_role_commit(
     table: &RoleTable,
-    members: &[MemberRecord],
+    scope: crate::reentry::ReentryScope<'_>,
     kind_before: &KindState,
     staged: &StagedCommit,
 ) -> Result<()> {
+    let members = scope.members;
     let effects = commit_effects(staged.queued_proposals());
     // The rules that are about the commit rather than about any one proposal.
     // First: whatever else this commit does, it must not leave the group with
@@ -5452,17 +5694,24 @@ fn authorise_role_commit(
         // by-value proposal carries the committer; a by-reference one carries
         // whoever broadcast it. Anything that is not a resolvable member leaf
         // (an external sender, a leaf not in the pre-merge roster) yields no
-        // `Proposer`, and `authorise` refuses every kind in that case.
-        let author_leaf = match qp.sender() {
-            Sender::Member(idx) => Some(idx.u32()),
-            // An external sender (`NewMemberCommit` on an external commit,
-            // `External`, `NewMemberProposal`) resolves to no member leaf, so
-            // `authorise` refuses — which is what the pre-ADR-0045 gate did
-            // with an unresolvable committer too.
-            _ => None,
-        };
-        let author = author_leaf.and_then(|leaf| proposer_at(members, leaf));
-        authorise(table, members, author, &classify(qp.proposal()))?;
+        // `Proposer`, and `authorise` refuses every kind in that case: an
+        // external sender (`NewMemberCommit` on an external commit,
+        // `External`, `NewMemberProposal`) resolves to no member leaf, which
+        // is what the pre-ADR-0045 gate did with an unresolvable committer
+        // too.
+        //
+        // ADR-0091 M2: the ordinary rule (an unresolvable author is refused
+        // there), the collision rule for an Add, and the pair rule for a
+        // Remove, its pair drawn from THIS commit's proposals.
+        crate::reentry::judge(
+            scope,
+            table,
+            kind_before.kind(),
+            false,
+            qp.sender(),
+            qp.proposal(),
+            staged.queued_proposals(),
+        )?;
     }
     Ok(())
 }
@@ -6729,13 +6978,24 @@ mod proposal_gate_tests {
     /// is refused while proposals are pending, so an unbuildable sweep is not a
     /// lost round: it is a permanent membership wedge, and it takes the owner's
     /// removal and role change with it just as the flood does.
+    ///
+    /// Since ADR-0091 M2 such an `Add` is refused before it is ever stored: a
+    /// colliding `Add` must be a re-entry for this group and epoch. The
+    /// proposer refuses it locally, and an ungated one is refused at receipt.
     #[test]
     fn a_single_add_of_an_existing_member_cannot_wedge_the_sweep() {
         let mut s = scene(0x3e);
+        assert_eq!(
+            s.bob_g
+                .propose_add_member(&s.bob, kp(&s.charlie))
+                .expect_err("a colliding add is refused at the proposer")
+                .refusal_reason(),
+            Some(RefusalReason::ReentryPairInvalid),
+        );
         let readd = s
             .bob_g
-            .propose_add_member(&s.bob, kp(&s.charlie))
-            .expect("an admin may ask to add somebody");
+            .ungated_propose_add(&s.bob, kp(&s.charlie))
+            .expect("a modified admin emits it anyway");
         let Incoming::Proposal(record) = s
             .alice_g
             .process_incoming_verifying_roles(&s.alice, &readd)
@@ -6743,7 +7003,10 @@ mod proposal_gate_tests {
         else {
             panic!("expected a proposal");
         };
-        assert!(record.stored, "it is authorised, so it is retained");
+        assert!(
+            !record.stored,
+            "it collides with a member, so it is dropped"
+        );
 
         // The sweep must still build, and must simply carry nothing.
         assert!(
@@ -6814,16 +7077,23 @@ mod proposal_gate_tests {
     /// that keeps the fix from being written too broadly, and it fails against
     /// the obvious wrong version of clause 3 — the one that drops an `Add`
     /// colliding with *any* current member.
+    ///
+    /// Since ADR-0091 M2 the re-add of a current member's key must be a
+    /// re-entry KeyPackage, so the re-add here is charlie's re-entry package.
     #[test]
     fn a_removal_and_a_re_add_of_one_key_still_compose() {
         let mut s = scene(0x40);
         let charlie_leaf = s.charlie_g.own_leaf_index();
+        let reentry = s
+            .charlie
+            .create_reentry_key_package(&s.alice_g.group_id(), s.alice_g.epoch())
+            .expect("charlie mints a re-entry package");
         s.alice_g
             .propose_remove_member(&s.alice, charlie_leaf)
             .expect("alice removes charlie");
         let readd = s
             .bob_g
-            .propose_add_member(&s.bob, kp(&s.charlie))
+            .propose_add_member(&s.bob, reentry)
             .expect("bob re-adds charlie");
         s.alice_g
             .process_incoming_verifying_roles(&s.alice, &readd)
@@ -6865,7 +7135,7 @@ mod proposal_gate_tests {
         // named owner.
         let readd = s
             .bob_g
-            .propose_add_member(&s.bob, kp(&s.charlie))
+            .ungated_propose_add(&s.bob, kp(&s.charlie))
             .expect("bob re-adds charlie");
         s.alice_g
             .process_incoming_verifying_roles(&s.alice, &readd)
@@ -6969,6 +7239,9 @@ mod proposal_gate_tests {
             admission,
             identity,
             member_scope: None,
+            group_id: &[],
+            epoch: 0,
+            pending: &[],
         }
     }
 
@@ -7520,13 +7793,17 @@ mod proposal_gate_tests {
     fn the_fallback_rescues_a_wedge_the_enumeration_cannot_see() {
         let mut s = scene(0x52);
         let dave = Identity::from_seed(&[0x6cu8; 64]).expect("dave");
-        let readd = s
-            .bob_g
-            .propose_add_member(&s.bob, kp(&s.charlie))
-            .expect("bob re-adds charlie, who is already a member");
+        // Since ADR-0091 a re-add of a current member is refused before it is
+        // stored, so the stand-in is an add clause 4 catches and the blind
+        // filter does not.
         s.alice_g
-            .process_incoming_verifying_roles(&s.alice, &readd)
-            .expect("alice takes it");
+            .propose_add_member(
+                &s.alice,
+                joiner(0x6c)
+                    .key_package_without_ciphersuite_capability()
+                    .expect("a conformant client may mint this"),
+            )
+            .expect("alice asks for an unusable package");
         s.alice_g
             .propose_add_member(&s.alice, kp(&dave))
             .expect("alice asks for dave");
@@ -7539,7 +7816,7 @@ mod proposal_gate_tests {
         assert_eq!(
             swept.swept.len(),
             1,
-            "dave's add lands; the duplicate is found by exclusion",
+            "dave's add lands; the unusable one is found by exclusion",
         );
         assert!(
             s.alice_g
@@ -7548,7 +7825,7 @@ mod proposal_gate_tests {
                 .any(|m| m.signature_public_key == dave.signature_public_key()),
             "dave joined",
         );
-        assert_eq!(s.alice_g.members().len(), 4, "and charlie is in it once");
+        assert_eq!(s.alice_g.members().len(), 4, "and only dave joined");
     }
 
     /// Several independent offenders in one pending set: each is excluded, and
@@ -7559,14 +7836,15 @@ mod proposal_gate_tests {
     fn several_offenders_are_all_excluded_and_the_rest_commits() {
         let mut s = scene(0x53);
         let dave = Identity::from_seed(&[0x6du8; 64]).expect("dave");
-        for _ in 0..3 {
-            let readd = s
-                .bob_g
-                .propose_add_member(&s.bob, kp(&s.charlie))
-                .expect("bob re-adds charlie again");
+        for i in 0..3 {
             s.alice_g
-                .process_incoming_verifying_roles(&s.alice, &readd)
-                .expect("alice takes it");
+                .propose_add_member(
+                    &s.alice,
+                    joiner(0x530 + i)
+                        .key_package_without_ciphersuite_capability()
+                        .expect("a conformant client may mint this"),
+                )
+                .expect("alice asks for an unusable package");
         }
         s.alice_g
             .propose_add_member(&s.alice, kp(&dave))
@@ -7597,14 +7875,15 @@ mod proposal_gate_tests {
     #[test]
     fn a_wholly_uncommittable_set_yields_no_commit_and_no_wedge() {
         let mut s = scene(0x54);
-        for _ in 0..2 {
-            let readd = s
-                .bob_g
-                .propose_add_member(&s.bob, kp(&s.charlie))
-                .expect("bob re-adds charlie");
+        for i in 0..2 {
             s.alice_g
-                .process_incoming_verifying_roles(&s.alice, &readd)
-                .expect("alice takes it");
+                .propose_add_member(
+                    &s.alice,
+                    joiner(0x540 + i)
+                        .key_package_without_ciphersuite_capability()
+                        .expect("a conformant client may mint this"),
+                )
+                .expect("alice asks for an unusable package");
         }
         let epoch_before = s.alice_g.epoch();
 
@@ -7767,9 +8046,14 @@ mod proposal_gate_tests {
         let charlie_leaf = s.charlie_g.own_leaf_index();
 
         // Deliberately the awkward order: the re-add lands in the store BEFORE
-        // the removal that makes it committable.
+        // the removal that makes it committable. Since ADR-0091 a re-add of a
+        // current member is charlie's re-entry package.
+        let reentry = s
+            .charlie
+            .create_reentry_key_package(&s.alice_g.group_id(), s.alice_g.epoch())
+            .expect("charlie mints a re-entry package");
         s.alice_g
-            .propose_add_member(&s.alice, kp(&s.charlie))
+            .propose_add_member(&s.alice, reentry)
             .expect("alice re-adds charlie");
         s.alice_g
             .propose_remove_member(&s.alice, charlie_leaf)
@@ -7827,10 +8111,15 @@ mod proposal_gate_tests {
         let mut s = scene(0x5a);
         let dave = Identity::from_seed(&[0x72u8; 64]).expect("dave");
         let erin = Identity::from_seed(&[0x73u8; 64]).expect("erin");
-        for _ in 0..2 {
+        for i in 0..2 {
             s.alice_g
-                .propose_add_member(&s.alice, kp(&s.charlie))
-                .expect("alice re-adds charlie");
+                .propose_add_member(
+                    &s.alice,
+                    joiner(0x5a0 + i)
+                        .key_package_without_ciphersuite_capability()
+                        .expect("a conformant client may mint this"),
+                )
+                .expect("alice asks for an unusable package");
         }
         s.alice_g
             .propose_add_member(&s.alice, kp(&dave))
@@ -7855,7 +8144,7 @@ mod proposal_gate_tests {
         let second = s
             .alice_g
             .narrow_sweep_by_exclusion(&s.alice, &queued, &members, &candidates);
-        assert_eq!(first.len(), 2, "dave and erin; neither re-add of charlie");
+        assert_eq!(first.len(), 2, "dave and erin; neither unusable package");
         assert_eq!(first, second, "the search is a pure function of its inputs");
     }
 
@@ -7931,10 +8220,15 @@ mod proposal_gate_tests {
     #[test]
     fn the_worst_case_build_count_is_two_probes_per_candidate() {
         let mut s = scene(0x57);
-        for _ in 0..MAX_PENDING_PROPOSALS {
+        for i in 0..MAX_PENDING_PROPOSALS {
             s.bob_g
-                .propose_add_member(&s.bob, kp(&s.charlie))
-                .expect("bob re-adds charlie");
+                .propose_add_member(
+                    &s.bob,
+                    joiner(0x570 + i)
+                        .key_package_without_ciphersuite_capability()
+                        .expect("a conformant client may mint this"),
+                )
+                .expect("bob asks for an unusable package");
         }
         assert_eq!(s.bob_g.pending_proposals().len(), MAX_PENDING_PROPOSALS);
 

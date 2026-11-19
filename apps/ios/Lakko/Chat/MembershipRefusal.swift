@@ -341,7 +341,10 @@ private func refusalCopy(_ reason: FfiRefusalReason) -> RefusalCopy {
     // so that adding a reason to the core forces a decision here.
     case .notAMember, .leafUpdateRefused, .unsupportedProposal, .noRoleTable,
         .roleTableWouldVanish, .notACommitter, .proposalsPending, .sweepAlreadyStaged,
-        .groupStillActive:
+        .groupStillActive,
+        // ADR-0091 phase 2 — refusals of the automatic re-entry; no person
+        // action reaches them.
+        .reentryPairInvalid, .reentryWelcomeRefused:
         return RefusalCopy(membershipRefusalFallbackMessage)
     }
 }
@@ -434,6 +437,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .MembershipOneToOneHasNoRoles: return .oneToOneHasNoRoles
             case .MembershipGroupKindChanged: return .groupKindChanged
             case .MembershipGroupStillActive: return .groupStillActive
+            // ADR-0091 phase 2 — the re-entry refusals.
+            case .MembershipReentryPairInvalid: return .reentryPairInvalid
+            case .MembershipReentryWelcomeRefused: return .reentryWelcomeRefused
 
             // Everything that is NOT a membership refusal. Enumerated rather
             // than defaulted, so a new `FfiError` variant has to be classified

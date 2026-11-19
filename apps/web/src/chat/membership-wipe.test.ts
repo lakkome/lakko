@@ -149,6 +149,8 @@ describe("the list", () => {
       "readmission-removed",
       "knock-cursor",
       "cursor-epoch",
+      "conversation-behind",
+      "reentry-rows",
       "continuity",
       "member-baseline",
       "profile-request",

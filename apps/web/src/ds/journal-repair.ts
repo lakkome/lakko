@@ -39,6 +39,7 @@
  */
 import { journalHex } from "./access";
 import { base64Encode } from "../auth/account-id";
+import { conversationBehind } from "../chat/conversation-behind";
 import { registeredCommitHolds } from "../chat/registered-commit-hold";
 import {
   RANK_ADMIN,
@@ -246,7 +247,10 @@ export class JournalRepair {
     try {
       known =
         ports.registeredCommitKnown?.(groupId, epoch) ??
-        registeredCommitHolds.blocksRepair(base64Encode(groupId), epoch);
+        (registeredCommitHolds.blocksRepair(base64Encode(groupId), epoch) ||
+          // ADR-0091 section 2 — confirmed behind is evidence that the epochs
+          // above are real: a Replace would cut them.
+          conversationBehind.isConfirmed(base64Encode(groupId)));
     } catch {
       // Unknown is not "nothing above": no Replace.
       known = true;

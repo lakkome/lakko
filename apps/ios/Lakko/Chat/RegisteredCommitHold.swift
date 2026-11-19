@@ -111,6 +111,8 @@ enum FailedApplyKind {
         case .oneToOneHasNoRoles: return "oneToOneHasNoRoles"
         case .groupKindChanged: return "groupKindChanged"
         case .groupStillActive: return "groupStillActive"
+        case .reentryPairInvalid: return "reentryPairInvalid"
+        case .reentryWelcomeRefused: return "reentryWelcomeRefused"
         }
     }
 }

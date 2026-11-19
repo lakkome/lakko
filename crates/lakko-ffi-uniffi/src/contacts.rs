@@ -2582,6 +2582,17 @@ pub enum FfiIncomingEnvelopeKind {
     /// `decodePollBallotsEnvelope` and treat each row like a journal ballot
     /// row. Never render it. Appended last.
     PollBallots,
+    /// ADR-0091 phase 2 — a device of this account that fell behind a
+    /// conversation asks to be brought back (route 1). `payload` is the
+    /// whole envelope; decode it with `decodeConversationReentryEnvelope`,
+    /// check it with `Group.reentryRequestTarget` and
+    /// `reentryAdmissionVerdict`. Never render it. Appended last.
+    ConversationReentry,
+    /// ADR-0091 phase 2 — the group's knock public key (route 3). `payload`
+    /// is the whole envelope; decode it with `decodeKnockKeyEnvelope` and
+    /// keep it only from the owner or an admin resolved at receipt, when
+    /// `knockKeyIsNewer`. Never render it. Appended last.
+    KnockKey,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2839,6 +2850,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ChannelAdmissionMark(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::ChannelAdmissionMark)
+        },
+        IncomingEnvelope::ConversationReentry(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ConversationReentry)
+        },
+        IncomingEnvelope::KnockKey(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::KnockKey)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),

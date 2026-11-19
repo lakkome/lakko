@@ -15,7 +15,9 @@
  *   2. Refused: read that group's journal to its head, let any end the read
  *      set off run, and try again.
  *   3. Refused again with the journal read to its head: the group really is
- *      still active, and the Welcome goes. A read that did not get there
+ *      still active, and the Welcome goes - unless this device recorded a
+ *      re-entry request for that group (ADR-0091 section 5): it then stays,
+ *      since the open (which tries it as a re-entry first) decides. A read that did not get there
  *      keeps it for the next pass: a refused read proves nothing.
  *
  * Anything but a refusal ends the Welcome's stay, whether it joined or not.
@@ -38,6 +40,9 @@ export interface HeldWelcomePort<J> {
   /** Run whatever ends are owed. */
   settle(): Promise<void>;
   drop(messageId: number): Promise<void>;
+  /** ADR-0091 section 5 - a Welcome whose group this device recorded a
+   *  re-entry request for is never dropped: it may be the answer. */
+  keepForReentry?(groupIdB64: string): boolean;
   /** A Welcome could not be opened: the person is told, as for any other. */
   noteFailed(): void;
   /** Whether the session this pass was started for still runs. */
@@ -58,7 +63,9 @@ export async function runHeldWelcomePass<J>(port: HeldWelcomePort<J>): Promise<J
       await port.settle();
       opened = await port.open(held);
       if (opened.kind === "still-active") {
-        if (heldWelcomeStep(read) === "drop") await port.drop(held.messageId);
+        if (heldWelcomeStep(read) === "drop" && port.keepForReentry?.(held.groupIdB64) !== true) {
+          await port.drop(held.messageId);
+        }
         continue;
       }
     }

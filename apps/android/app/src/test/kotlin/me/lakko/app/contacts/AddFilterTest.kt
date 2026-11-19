@@ -149,7 +149,7 @@ class AddFilterTest {
             .filter { (_, l) -> l.contains("discovery.fetchKeyPackages(") }
             .filterNot { (i, _) -> lines.subList(i, minOf(lines.size, i + 16)).any { l -> filters.any { l.contains(it) } } }
             .map { (i, _) -> enclosingFunction(lines, i) }
-        assertEquals(listOf("ownOtherDevices"), unfiltered)
+        assertEquals(listOf("ownOtherDevices", "directoryDeviceKeysOf"), unfiltered)
 
         // And the paths that add ANOTHER person all take their devices from
         // the one function that runs the gate first.

@@ -590,8 +590,18 @@ internal enum class HeldWelcomeVerdict {
     DROP,
 }
 
-/** [groupActive] is `null` when this device no longer holds the group. */
-internal fun heldWelcomeVerdict(journalDrained: Boolean, groupActive: Boolean?): HeldWelcomeVerdict = when {
+/**
+ * [groupActive] is `null` when this device no longer holds the group.
+ * [reentryRecorded]: ADR-0091 phase 2 section 5 — this device holds a
+ * re-entry record for the group, so a Welcome for the active group is tried
+ * as a re-entry and never dropped while the record exists.
+ */
+internal fun heldWelcomeVerdict(
+    journalDrained: Boolean,
+    groupActive: Boolean?,
+    reentryRecorded: Boolean = false,
+): HeldWelcomeVerdict = when {
+    groupActive == true && reentryRecorded -> HeldWelcomeVerdict.RETRY
     !journalDrained -> HeldWelcomeVerdict.KEEP
     groupActive == true -> HeldWelcomeVerdict.DROP
     else -> HeldWelcomeVerdict.RETRY

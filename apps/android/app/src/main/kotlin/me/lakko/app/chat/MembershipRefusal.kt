@@ -302,6 +302,10 @@ internal val MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK: Set<FfiRefusalReason> = 
     // ADR-0045: a Welcome for a group this device still holds. It answers no
     // action of the person's.
     FfiRefusalReason.GROUP_STILL_ACTIVE,
+    // ADR-0091 phase 2: a re-entry pair or Welcome this device's own recovery
+    // produced or received; it answers no action of the person's either.
+    FfiRefusalReason.REENTRY_PAIR_INVALID,
+    FfiRefusalReason.REENTRY_WELCOME_REFUSED,
 )
 
 /**
@@ -352,6 +356,8 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.PROPOSALS_PENDING,
     FfiRefusalReason.SWEEP_ALREADY_STAGED,
     FfiRefusalReason.GROUP_STILL_ACTIVE,
+    FfiRefusalReason.REENTRY_PAIR_INVALID,
+    FfiRefusalReason.REENTRY_WELCOME_REFUSED,
     -> RefusalCopy(MEMBERSHIP_REFUSAL_FALLBACK)
 }
 
@@ -487,6 +493,10 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                     FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES
                 is FfiException.MembershipGroupKindChanged -> FfiRefusalReason.GROUP_KIND_CHANGED
                 is FfiException.MembershipGroupStillActive -> FfiRefusalReason.GROUP_STILL_ACTIVE
+                // ADR-0091 phase 2 — the re-entry refusals.
+                is FfiException.MembershipReentryPairInvalid -> FfiRefusalReason.REENTRY_PAIR_INVALID
+                is FfiException.MembershipReentryWelcomeRefused ->
+                    FfiRefusalReason.REENTRY_WELCOME_REFUSED
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null

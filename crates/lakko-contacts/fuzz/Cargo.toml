@@ -383,3 +383,17 @@ path = "fuzz_targets/poll_ballots_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "conversation_reentry_decode"
+path = "fuzz_targets/conversation_reentry_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "knock_key_decode"
+path = "fuzz_targets/knock_key_decode.rs"
+test = false
+doc = false
+bench = false

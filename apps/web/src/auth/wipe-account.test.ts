@@ -347,6 +347,10 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.backup.auto.${acct}`, JSON.stringify({ lastUploadAtMs: 1, dirtySinceMs: null, groupsKey: null }));
   writeKnockCursor(G, 7, acct);
   recordCursorEpoch(G, 7n, acct);
+  // ADR-0091 phase 2: the behind state and the re-entry rows.
+  put(`lakko.chat.behind.v1:${acct}:${G}`, JSON.stringify({ v: 1, kind: "confirmed", since: 1 }));
+  put(`lakko.chat.reentry.v1:${acct}`, JSON.stringify({ v: 1, records: [] }));
+  put(`lakko.chat.reentry-gap.v1:${acct}:${G}`, "[]");
   saveKnownGroupIds([G], acct);
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
@@ -747,6 +751,13 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.restore-answer.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.chat.cursor-epoch.v1:": "account",
+  // ADR-0091 phase 2 (`chat/conversation-behind.ts`, `chat/reentry-store.ts`).
+  "lakko.chat.behind.v1:": "account",
+  "lakko.chat.reentry.v1:": "account",
+  "lakko.chat.reentry-read-from.v1:": "account",
+  "lakko.chat.reentry-gap.v1:": "account",
+  "lakko.chat.knock-key.v1:": "account",
+  "lakko.chat.knock-key-sent.v1:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
   "lakko.channels.publish-counter.v2.": "account",

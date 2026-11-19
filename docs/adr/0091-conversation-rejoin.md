@@ -14,7 +14,10 @@
   cursor reads the commit again, the web DeviceGroup loop holds its commit,
   identifier-free log lines) was built the same day on `services/ds` and the
   three clients, host-tested only (section "Phase 1b, as built"); phase 2
-  (recovery) is not built.
+  (recovery) S0 (spike), S1 (core) and S2 (both FFI surfaces and the NSE
+  surface) were built on 2026-11-19, host-tested only (section "Phase 2
+  S0-S2, as built"); S3 (web and desktop), S4 (iOS and Android) and S5 (live)
+  are not built, so no client drives the recovery yet.
 - **Date:** 2026-11-18
 - **Context:** proposal-based membership (ADR-0045), per-device leaves
   (ADR-0050), journal authorisation and ownership (ADR-0053, ADR-0057),
@@ -360,6 +363,44 @@ its old leaf with that KeyPackage. It keeps its signature key, so the person,
 their role and their authorship are unchanged. The device that brings it
 back also sends it the messages of the gap that it holds.**
 
+### S0 result (2026-11-19)
+
+A scratch crate outside the workspace, on OpenMLS 0.8.1 as pinned in
+`Cargo.lock` (three members, one misses a self-update commit, a plain member
+re-adds it). Observed:
+
+- **M1 as written works.** A KeyPackage carrying `Extension::Unknown(0xFF04)`
+  in its KeyPackage extensions builds, and an `Add` proposal carries it to
+  every peer: the receiving member reads the marker from the queued `Add`
+  (`add.key_package().extensions().unknown(0xFF04)`) at receipt and again
+  from the staged commit. One requirement: `KeyPackageIn::validate` refuses
+  the package (`UnsupportedExtension`) unless its own leaf advertises
+  `0xFF04` in its capabilities. Nothing else is needed: the group's
+  `required_capabilities` need not list it, and the other leaves need not
+  advertise it. The fallback (a proof carried as a LeafNode extension) is
+  not needed.
+- **A colliding `Add` alone.** OpenMLS accepts a received `Add` whose
+  signature key equals a current leaf's into the proposal store (key
+  uniqueness is not checked at receipt), and refuses any commit carrying it
+  without the matching `Remove`:
+  `ProposalValidationError(DuplicateSignatureKey)` from
+  `CommitBuilder::build`. So the Lakko gates must refuse it themselves, or
+  it wedges the sweep (the existing `sweep_keeps` clause 3 already excludes
+  it while the leaf stays).
+- **The pair builds in one sweep.** `Add(K)` and then `Remove(L)`, both by
+  reference from one plain member, commit in one `CommitBuilder::build`
+  (`validate_key_uniqueness` seeds its sets from the roster minus the
+  commit's removals). The peer sees both proposals with the proposer as
+  sender. `K` took `L`'s leaf index.
+- **Joining over the stale group.** Staging the Welcome over the stored
+  active group fails with `GroupAlreadyExists` unless `replace_old_group` is
+  set; with it, the staged roster shows exactly one leaf with the device's
+  signature key, whose encryption key is `K`'s, and the Welcome's
+  `EncryptedGroupSecrets` name `K`'s `KeyPackageRef`. After deleting the old
+  group the device joins at the new epoch and decrypts the next message. A
+  last-resort `K` stays in storage after the join (a one-time package is
+  deleted while the Welcome is staged, before any check could refuse it).
+
 ### 1. Detection: suspected and confirmed
 
 Two levels, because the cost of acting on each differs.
@@ -644,6 +685,36 @@ sends them.
 4. What none of them holds (older than the DS retention, or not on the
    re-adder): the gap line (UX 2.4).
 
+**As built (2026-11-19, S3 web and desktop, S4 iOS and Android): one carrier
+for all three routes.** The request names no rendezvous and the mailbox has
+no history kind, so items 1 and 2 above are replaced by one carrier, the same
+on every client:
+
+- **secret** = `Group.exportSecret(label "lakko/conversation-reentry/history/v1",
+  context = the returning leaf's 32-byte signature key, length 32)`, exported
+  at epoch `epoch_left + 1` (the epoch the replacement commit created) by the
+  re-admitter and by the returning device (right after its join);
+- **rendezvous id** = `SHA-256("lakko/conversation-reentry/history-rendezvous/v1"
+  ‖ secret)`, no separator byte; the bundle is posted to that DS rendezvous;
+- **payload** = the history bundle (`sealHistoryBundleStructured`, the
+  pairing bundle's format) sealed under the secret, holding the re-admitter's
+  rows of that conversation with `createdAt >= gap_from_ms` (on web, its
+  `countCapped` flag is set when the cap trimmed the rows or the sender holds
+  no row older than `gap_from_ms`, and a receiver whose bundle is not capped
+  drops its gap line);
+- the re-admitter posts only while its own group is at exactly
+  `epoch_left + 1` (a later commit changes the exporter; then nothing is sent
+  and the gap line stays);
+- **golden vector**: a secret of 32 bytes `0x42` gives the rendezvous id
+  `8b4c89a03f20c038dfe71cf88eeee780a4be0af619b852cedbc63ad0dc6eb7dd`
+  (web `chat/reentry-history.test.ts`).
+
+Only the members after the replacement hold the secret. When the replacement
+lands, the re-admitter also re-sends the group state a newcomer receives on
+growth (name, photo, pins, profile, push routing secret, and, when it is the
+owner or an admin, the knock key), since a replacement changes no member set
+and no member sees growth.
+
 ### 8. Server
 
 No further DS, discovery or auth change (phase 1b already added `commits`
@@ -651,6 +722,85 @@ to signed reads). The DS already returns `latest_epoch` on
 signed reads, keeps read access for 30 days or 64 epochs, accepts knocks with
 a token, and takes one commit per epoch. The new knock kind and the new
 mailbox kind are inside sealed payloads the servers do not read.
+
+## Phase 2 S0-S2, as built (2026-11-19)
+
+Built in `lakko-mls`, `lakko-contacts`, `lakko-ffi-uniffi`, `lakko-ffi-wasm`
+and `lakko-ffi-extension`; bindings regenerated and the native libraries
+rebuilt. Host-tested only: no client calls any of it, nothing was walked,
+nothing is deployed, `lakko-security` has not run. The S0 result is above
+(section "S0 result"). Where the build departs from sections 3 to 6:
+
+1. **The request carries `gap_from_ms`.** Section 7 says the request states
+   when the device first failed to read a row; section 3's wire had no such
+   field. The envelope is `"lakko/conversation-reentry/v1\0" ‖ 0x01 ‖
+   group_id(32) ‖ epoch_left(8, BE) ‖ gap_from_ms(8, BE) ‖ kp_len(2, BE) ‖ K`,
+   82 to 4177 bytes (`K` 1 to 4096 bytes, the knock bound; chosen, not
+   measured), exact, version checked before any length
+   (`lakko-contacts::conversation_reentry`). Dispatched as
+   `IncomingEnvelope::ConversationReentry`; mailbox kind
+   `ConversationReentry` = `0x06` (route 2).
+2. **Route 3's kind is in the associated data, not a plaintext byte.** A
+   re-entry knock row has the join row's version byte, knock version and
+   both sizes (4 KiB / 16 KiB); its plaintext is `len(2) ‖ envelope ‖ zeros`
+   sealed with the knock labels under the AAD domain
+   `lakko/group/reentry-knock-row/v1\0`. A join opener refuses it and a
+   re-entry opener refuses a join row (`seal_reentry_knock` /
+   `open_reentry_knock`), so the DS sees the same row either way and the join
+   row's format is unchanged.
+3. **The knock-key envelope** is `"lakko/group-knock-key/v1\0" ‖ 0x01 ‖
+   knock_version(2, BE) ‖ knock_pk(32)`, 60 bytes
+   (`lakko-contacts::knock_key`), dispatched as `IncomingEnvelope::KnockKey`;
+   a receiver keeps a strictly newer version (`knock_key_is_newer`) from the
+   owner or an admin resolved at receipt.
+4. **M1.** `K`'s leaf advertises `0xFF04` beside the ordinary capabilities
+   (S0), and `K` is a **last-resort** package: OpenMLS deletes a one-time
+   package while it stages a Welcome, before any check, so a refused
+   `join_reentry` would otherwise consume it. `Identity::forget_key_package`
+   (new) deletes the private keys of a superseded request.
+5. **M2 is one function, `reentry::judge`, at four call sites:** the
+   proposer's own check (`propose_add_member`, `propose_remove_member`), the
+   receipt gate, the sweep (`sweep_keeps`, the emptiness prediction, and
+   `selection_is_admissible` for the exclusion search) and the peer commit
+   gate. The marker must name the group's CURRENT epoch at every gate (the
+   proposal store empties on every merged commit, so that is the epoch the
+   commit leaves). A valid re-entry `Add` skips the per-account device limit
+   (it replaces a leaf). `member_may_sweep` admits a re-entry `Remove` when
+   its paired `Add` is itself in the sweeper's scope. The pair must come from
+   the same sender, so the re-admitter proposes both
+   (`Group::propose_reentry_replacement`, `Add` first: a `Remove` that stands
+   on the pair is refused at receipt unless the `Add` is already stored).
+   `Group::reentry_request_target` is the core half of section 4 (valid
+   package, marker for this group and epoch, a current leaf with its
+   signature key and account).
+6. **M3 takes the record from the caller.** `Group::join_reentry(welcome,
+   identity, recorded_key_packages)`: the core cannot see the client's
+   durable record, so the client passes the wire KeyPackages it recorded.
+   A recorded `K` matches when the Welcome's secrets name its
+   `KeyPackageRef`, its leaf's encryption key is the new tree's leaf with
+   this device's signature key, and the Welcome's epoch is its marker's
+   `epoch_left + 1` (an addition to section 5's list). The stored group's
+   own leaf must carry this identity's signature key. Every refusal is the
+   one typed reason `ReentryWelcomeRefused` (`DoNotRetry`) with a distinct
+   sentence; the M2 refusals are `ReentryPairInvalid` (`NotPermitted`).
+   Both are appended to `RefusalReason`, `FfiError` and `FfiRefusalReason`.
+7. **M4** is `lakko-mls::conversation_behind`: `conversation_behind_verdict`
+   folds one observation into the previous state (an observation that
+   neither suspects nor clears keeps it; confirmed never goes back to
+   suspected; a drained read at or below the local epoch clears),
+   `reentry_admission_verdict`, plus `reentry_request_due` (a request goes
+   out as soon as the device is suspected, then every 30 minutes) and
+   `reentry_route`, written once instead of three times. The numbers are
+   section 1's and open question 5's, chosen, not measured.
+8. **Tests changed by the collision rule.** Nine sweep tests used "re-add a
+   current member" as their stand-in for an uncommittable proposal; that
+   `Add` is now refused at authorisation, so they use a KeyPackage without
+   the group's ciphersuite capability, or a re-entry package where the test
+   is about a remove-and-re-add. Two test fixtures had minted a "new" device
+   or newcomer with the same seed as an existing member; their seeds were
+   changed.
+9. **A refused join changes nothing** is pinned by comparing the identity's
+   whole storage snapshot before and after each refused case.
 
 ## Abuse
 
@@ -773,13 +923,15 @@ like the group name. Nothing grows with contacts times contacts.
   exact hold rule; the cursor epoch and the rewind; the DeviceGroup loops on
   the exact rule (web aligned); identifier-free log lines. No `lakko-mls`
   change.
-- **S0, spike (core, scratch):** OpenMLS 0.8.1 behaviour for a private
-  KeyPackage extension through an `Add`; a pending `Add` whose signature key
-  collides with a current leaf; the pair building in one sweep.
-- **S1, core:** M1-M4, property tests, fuzz targets; `lakko-contacts`
-  `conversation_reentry` and the knock-key envelope; the new mailbox kind.
-- **S2, FFI:** UniFFI and wasm; the NSE surface recognises the new envelopes
-  to suppress them.
+- **S0, spike (core, scratch) (done 2026-11-19):** OpenMLS 0.8.1 behaviour
+  for a private KeyPackage extension through an `Add`; a pending `Add` whose
+  signature key collides with a current leaf; the pair building in one
+  sweep.
+- **S1, core (built 2026-11-19, host-tested):** M1-M4, property tests, fuzz
+  targets; `lakko-contacts` `conversation_reentry` and the knock-key
+  envelope; the new mailbox kind.
+- **S2, FFI (built 2026-11-19, host-tested):** UniFFI and wasm; the NSE
+  surface recognises the new envelopes to suppress them.
 - **S3, web (and desktop):** detection, the stop list, routes 1-3, the
   re-admitter, `join_reentry`, the held-Welcome change, the JournalRepair
   gate, the UX.

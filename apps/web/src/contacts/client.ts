@@ -151,9 +151,12 @@ import {
   consumeKnockSeed,
   consumeRegistrarSeed,
   ChatClient,
+  ConversationBehindError,
   rosterOf,
   toEvent,
 } from "../chat/client";
+import { conversationBehind } from "../chat/conversation-behind";
+import { consumeKnockKeyRow } from "../chat/knock-key";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import { keepFoundGrant } from "../reach/found-grant";
 import {
@@ -455,7 +458,10 @@ export type IncomingMailboxEvent =
   /** ADR-0079 amendment of 2026-10-19: a link refusal, NOT yet verified.
    *  The receiver checks it against each pending contact
    *  (`verifyLinkRefusal`) before it removes anything. */
-  | { kind: "link-refusal"; refusal: Uint8Array };
+  | { kind: "link-refusal"; refusal: Uint8Array }
+  /** ADR-0091 section 3, route 2: a request to be brought back into a
+   *  one-to-one, the envelope still undecoded. The re-admitter judges it. */
+  | { kind: "conversation-reentry"; envelope: Uint8Array; reachPk?: Uint8Array };
 
 /** One account-mailbox row as the DS served it. `payload` is the envelope
  *  (kind byte + wire bytes): a signed ContactRequest whose intro and profile
@@ -846,7 +852,23 @@ export function noRoleTableRefusal(op: string): ContactsError {
 /** Refuse ({@link noRoleTableRefusal}) unless `group` carries a role table. A
  *  torn read refuses too: fail closed. */
 function requireRoleTable(group: WasmGroup, op: string): void {
+  refuseWhileBehind(group);
   if (!usesProposalPath(group)) throw noRoleTableRefusal(op);
+}
+
+/**
+ * ADR-0091 section 2 (C-93) — a device behind in a conversation proposes,
+ * commits and sweeps nothing there: what it built would be against an epoch
+ * the others left. Thrown before anything is built.
+ */
+function refuseWhileBehind(group: WasmGroup): void {
+  let key: string;
+  try {
+    key = base64Encode(group.groupId);
+  } catch {
+    return;
+  }
+  if (conversationBehind.stopsActing(key)) throw ContactsError.wrap(new ConversationBehindError());
 }
 
 /**
@@ -967,6 +989,8 @@ function sweepPortsFor(
           // The roster is read HERE, one line after the apply, because that
           // is the epoch this row decrypted at — a leaf resolved any later
           // can name whoever was added into a vacated slot since.
+          // ADR-0091 section 3 — the group's knock key, at receipt, never shown.
+          if (await consumeKnockKeyRow(group, processed, (leaf) => resolveMemberIdentity(rosterOf(group), leaf))) return;
           const event = await toEvent(
             row.id,
             row.createdAt,
@@ -1539,6 +1563,9 @@ export class ContactsClient {
     actingCommitter: ActingCommitterPort,
     onSweptEvent: (event: IncomingChatEvent) => void,
   ): Promise<SweepOutcome> {
+    // ADR-0091 section 2 (C-93) — a device behind in this conversation does
+    // not sweep: its commit would be against an epoch the others left.
+    if (conversationBehind.stopsActing(base64Encode(group.groupId))) return { kind: "not-committer", rank: undefined };
     // A group with no role table has no committer to be, and the core refuses
     // a sweep on it outright. Short-circuit before resolving an identity or
     // loading wasm, so the poll tail costs nothing at all on a legacy group.
@@ -3053,6 +3080,75 @@ export class ContactsClient {
   }
 
   /**
+   * ADR-0091 section 3, route 2 — send a request to be brought back into a
+   * one-to-one to the other person's account mailbox, sealed (ADR-0078), under
+   * a grant held for them (their contact grant first).
+   */
+  async sendConversationReentry(otherAccountKey: Uint8Array, envelope: Uint8Array, groupId: Uint8Array): Promise<void> {
+    const wasm = await loadWasm();
+    try {
+      await writeToPerson(otherAccountKey, { scope: groupId, explicit: null }, (target, auth) =>
+        this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "conversation-reentry", envelope), auth),
+      );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+  }
+
+  /**
+   * ADR-0091 section 4 — propose the replacement a re-entry request asks for:
+   * `Add(K)` then `Remove(L)`, both from this device, by reference. The sweep
+   * (this device's, its account's or the acting committer's) commits them
+   * through the ADR-0081 commit route. A refused persist publishes nothing.
+   */
+  async proposeReentryReplacement(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    keyPackage: Uint8Array,
+    markOwnPublished: (messageId: number) => void,
+  ): Promise<void> {
+    const myIdentity = await this.resolveIdentity(identity);
+    await withGroupMlsLock(base64Encode(group.groupId), async () => {
+      let pair;
+      try {
+        pair = group.proposeReentryReplacement(myIdentity, keyPackage);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      try {
+        const add = pair.add;
+        const remove = pair.remove;
+        await this.persistProposalOrThrow();
+        try {
+          markOwnPublished((await this.ds.publishGroup(group.groupId, add)).id);
+          markOwnPublished((await this.ds.publishGroup(group.groupId, remove)).id);
+        } catch (err) {
+          throw ContactsError.wrap(err);
+        }
+      } finally {
+        pair.free();
+      }
+    });
+  }
+
+  /**
+   * ADR-0091 section 5 — join over the stale active group this device holds,
+   * from the Welcome of the commit that replaced its leaf. `recorded` are the
+   * re-entry KeyPackages this device recorded before sending its requests.
+   * Throws (a `reentryWelcomeRefused` refusal) when the Welcome is not the
+   * answer to one of them; nothing changes then. The caller persists.
+   */
+  async joinReentry(identity: IdentitySecrets | null, welcome: Uint8Array, recorded: readonly Uint8Array[]): Promise<WasmGroup> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+    try {
+      return wasm.Group.joinReentry(welcome, myIdentity, [...recorded]);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+  }
+
+  /**
    * Send a Welcome (MLS group-join blob) to the recipient via
    * their stranger-inbox mailbox. Used by `startGroupWith`
    * once the sender has called `Group.addMember(recipientKp)`
@@ -4500,6 +4596,7 @@ export class ContactsClient {
   ): Promise<MembershipOutcome> {
     const myIdentity = await this.resolveIdentity(identity);
     const wasm = await loadWasm();
+    refuseWhileBehind(group);
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       // C-65, and it collides in BOTH directions: a pending role change refuses
       // a transfer, and a pending transfer refuses a role change. It falls out
@@ -4586,6 +4683,7 @@ export class ContactsClient {
     // SERIALIZED per group, like every other path that reads group state and
     // writes a snapshot — a proposal grows the pending set, so two approves
     // taken at once are still a read-modify-write on the same MLS store.
+    refuseWhileBehind(group);
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       let proposalBytes: Uint8Array;
       try {
@@ -5308,6 +5406,10 @@ export function dispatchMailboxRows(
     if (options.welcomesOnly === true) continue;
     if (row.kind === "link-refusal") {
       events.push({ kind: "link-refusal", refusal: row.body });
+      continue;
+    }
+    if (row.kind === "conversation-reentry") {
+      events.push({ kind: "conversation-reentry", envelope: row.body, ...reach });
       continue;
     }
     if (row.kind === "contact-ack") {

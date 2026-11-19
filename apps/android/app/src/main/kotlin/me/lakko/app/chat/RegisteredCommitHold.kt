@@ -323,6 +323,9 @@ internal fun <T> applyJournalRowsHolding(
     isOwnEchoFailure: (Throwable) -> Boolean,
     classify: (Throwable) -> String = ::failedRowKind,
     log: (FailedRowLogLevel, String) -> Unit,
+    /** ADR-0091 phase 2 — a row was skipped: its framed epoch and the local
+     *  epoch before it, for the behind bookkeeping. */
+    onSkipped: (row: MailboxMessage, sealedEpoch: ULong?, localEpoch: ULong?) -> Unit = { _, _, _ -> },
     onApplied: (MailboxMessage, T) -> Unit,
 ): JournalRowsApplied {
     var cursor = readFrom
@@ -377,6 +380,12 @@ internal fun <T> applyJournalRowsHolding(
                 )
             }
             // Skipped: a row that can never apply must not wedge the poll.
+            // An own echo is not a row this device failed to read.
+            try {
+                if (!isOwnEchoFailure(failure)) onSkipped(row, sealed, local)
+            } catch (_: Throwable) {
+                // bookkeeping only
+            }
             cursor = row.id
             continue
         }

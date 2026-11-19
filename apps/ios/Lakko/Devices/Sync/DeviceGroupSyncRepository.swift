@@ -214,6 +214,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     var onKeyRotationEnvelope: @MainActor (Data) -> Void = { _ in
         NSLog("ADR-0074: a key-rotation envelope arrived with no receiver wired; dropped")
     }
+    /// ADR-0091 phase 2 route 1 — where a conversation re-entry request from
+    /// another device of this account goes (the chat repository judges it).
+    /// The default drops it.
+    var onConversationReentry: @MainActor (Data) -> Void = { _ in
+        NSLog("ADR-0091: a conversation re-entry request arrived with no receiver wired; dropped")
+    }
+
+    /// Whether `envelope` dispatches as a conversation re-entry request.
+    static func isConversationReentry(_ envelope: Data) -> Bool {
+        (try? dispatchIncomingEnvelope(plaintext: envelope).kind) == .conversationReentry
+    }
     /// UX second-device.md section 3 — an open Devices screen hears of a
     /// received commit once its snapshot is on disk.
     private var rosterChange = RosterChangeAfterPersist()
@@ -895,6 +906,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isDeviceAckEnvelope(bytes: envelope) { return "device-ack:" + envelope.base64EncodedString() }
         // ADR-0079 — every link record is its own slot.
         if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
+        // ADR-0091 phase 2 — a re-entry request per conversation: one never
+        // replaces another's.
+        if isConversationReentry(envelope) { return "conversation-reentry:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
             return envelope.base64EncodedString()
         }
@@ -2364,6 +2378,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // the reach / profile adopters.
             if Self.isKeyRotation(envelope) {
                 onKeyRotationEnvelope(envelope)
+                return
+            }
+            // ADR-0091 phase 2 route 1 — a device of this account fell behind
+            // a conversation and asks to be brought back.
+            if Self.isConversationReentry(envelope) {
+                onConversationReentry(envelope)
                 return
             }
             // ADR-0060 section 7 — the Visibility setting and the ReachState

@@ -2613,6 +2613,16 @@ pub enum WasmIncomingEnvelopeKind {
     /// `payload` is the whole envelope; read it with
     /// `decodePollBallotsEnvelope`. Never render it.
     PollBallots = 34,
+    /// ADR-0091 phase 2 — a device of this account that fell behind a
+    /// conversation asks to be brought back (route 1). `payload` is the
+    /// whole envelope; decode it with `decodeConversationReentryEnvelope`.
+    /// Never render it.
+    ConversationReentry = 35,
+    /// ADR-0091 phase 2 — the group's knock public key (route 3). `payload`
+    /// is the whole envelope; decode it with `decodeKnockKeyEnvelope`, keep
+    /// it only from the owner or an admin, when `knockKeyIsNewer`. Never
+    /// render it.
+    KnockKey = 36,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2990,6 +3000,14 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::PollBallots(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::PollBallots)
+        },
+        IncomingEnvelope::ConversationReentry(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ConversationReentry)
+        },
+        IncomingEnvelope::KnockKey(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::KnockKey)
         },
         IncomingEnvelope::GroupReactions(value) => WasmIncomingEnvelope {
             group_reactions: Some(value.into()),

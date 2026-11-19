@@ -162,6 +162,8 @@ public enum ChatTimeline {
     public static func isHiddenSystemRow(_ message: ChatMessage, isGroup: Bool = false) -> Bool {
         guard message.direction == .system else { return false }
         if message.text == MembershipRow.plainCommitText || message.text == "[mls external join]" { return true }
+        // ADR-0091 phase 2 UX 2.4 — the gap line is drawn in every chat.
+        if ConversationReentryRules.parseGap(message.text) != nil { return false }
         if message.text.hasPrefix("[mls ") {
             return !(isGroup && MembershipRow.parse(message.text) != nil)
         }
@@ -178,6 +180,19 @@ public enum ChatTimeline {
     public static func membershipRow(_ message: ChatMessage) -> MembershipRow? {
         guard message.direction == .system else { return nil }
         return MembershipRow.parse(message.text)
+    }
+
+    /// Whether a row can be the chat list's last message: a drawn row, and
+    /// never the ADR-0091 gap line (local to the open chat, UX 2.1 / 2.4).
+    public static func isListPreviewRow(_ message: ChatMessage) -> Bool {
+        !isHiddenSystemRow(message) && reentryGapRow(message) == nil
+    }
+
+    /// ADR-0091 phase 2 — the gap a re-entry left, or `nil` when the row is
+    /// not a gap line.
+    public static func reentryGapRow(_ message: ChatMessage) -> (fromMs: UInt64, toMs: UInt64)? {
+        guard message.direction == .system else { return nil }
+        return ConversationReentryRules.parseGap(message.text)
     }
 
     /// The finished call this row records, or `nil` when it is not a call row.

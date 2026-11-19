@@ -399,6 +399,11 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                     // admission mark ride PublisherGroup journals too.
                     || isPublisherDeviceRequestEnvelope(plaintext: bytes)
                     || isChannelAdmissionMarkEnvelope(plaintext: bytes)
+                    // ADR-0091 phase 2 — the group's knock key (group
+                    // journal) and a re-entry request: never shown, never
+                    // acted on here (C-59).
+                    || isKnockKeyEnvelope(plaintext: bytes)
+                    || isConversationReentryEnvelope(plaintext: bytes)
                     // ADR-0092 sections 3.6 and 3.9 — the open-items
                     // hand-over, the old-ballot rows and the own poll-choice
                     // register: never shown.

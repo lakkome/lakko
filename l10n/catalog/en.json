@@ -4084,6 +4084,26 @@
       "text": "Record voice message: hold to record, click to switch to video",
       "comment": "Web: mouse-hover tooltip of the record button in voice mode. Holding the button records; a click switches to video messages."
     },
+    "chat.reentry.gap": {
+      "text": "Messages sent between {from} and {to} can't be shown on this device.",
+      "comment": "ADR-0091: a line in the chat, styled as a date separator, after this device came back up to date. {from} is the date and time of the first message it could not read, {to} the time it came back (the date is left out when both are on the same day). Local to this device. Needs native review."
+    },
+    "chat.reentry.second.group": {
+      "text": "This finishes when the group's owner or an admin next opens Lakko.",
+      "comment": "ADR-0091: second line of the waiting note in a group, shown after 30 seconds. Needs native review."
+    },
+    "chat.reentry.second.own_device": {
+      "text": "Open Lakko on one of your other devices if this takes long.",
+      "comment": "ADR-0091: second line of the waiting note when another of the person's own devices is in this chat, shown after 30 seconds. Needs native review."
+    },
+    "chat.reentry.second.person": {
+      "text": "This finishes when {name} next opens Lakko.",
+      "comment": "ADR-0091: second line of the waiting note in a one-to-one chat, shown after 30 seconds. {name} is the other person. Needs native review."
+    },
+    "chat.reentry.waiting": {
+      "text": "This device missed an update to this chat. It is coming back up to date by itself; you can read earlier messages meanwhile.",
+      "comment": "ADR-0091: shown where the message field would be while this device is out of date in this chat and waits to be brought back automatically. Never mention protocol terms. Needs native review."
+    },
     "chat.refusal.add_not_admin": {
       "text": "Only the group owner or an admin can add members.",
       "comment": "Refusal: the reader tried to add someone to a group but is neither its owner nor an admin."

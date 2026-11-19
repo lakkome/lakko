@@ -2574,6 +2574,19 @@ public class DeviceGroupSyncRepository(
                                 // BEFORE the lakko-contacts dispatcher: it is
                                 // a `lakko-sync` envelope, not one of those.
                                 applyLineage(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope && isConversationReentry(body.envelope)) {
+                                // ADR-0091 phase 2 route 1 - another device of
+                                // this account fell behind in a conversation
+                                // and asks to be brought back. The chat layer
+                                // runs every check; the sender is resolved
+                                // here, against the roster this row was sealed
+                                // under (C-68).
+                                val senderKey = processed.senderLeaf?.let { leaf ->
+                                    runCatching {
+                                        g.devices().firstOrNull { it.leafIndex == leaf }?.signaturePublicKey
+                                    }.getOrNull()
+                                }
+                                conversationReentrySink?.invoke(body.envelope, senderKey)
                             } else if (body is DeviceGroupBody.ServiceEnvelope && isKeyRotation(body.envelope)) {
                                 // ADR-0074 section 3.3 - the account's new
                                 // keys from the device that changed them.
@@ -3532,6 +3545,23 @@ public class DeviceGroupSyncRepository(
             }
         }
 
+    private fun isConversationReentry(envelope: ByteArray): Boolean =
+        try {
+            uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope(envelope).kind ==
+                uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind.CONVERSATION_REENTRY
+        } catch (_: Throwable) {
+            false
+        }
+
+    /**
+     * ADR-0091 phase 2 route 1 — send a conversation re-entry request to
+     * this account's other devices as a DeviceGroup `ServiceEnvelope`. Throws
+     * when it was not sent.
+     */
+    public suspend fun sendConversationReentry(envelope: ByteArray) {
+        sendServiceEnvelope(envelope)
+    }
+
     private fun isKeyRotation(envelope: ByteArray): Boolean =
         try {
             uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope(envelope).kind ==
@@ -3829,6 +3859,13 @@ public class DeviceGroupSyncRepository(
          *  stores it as pending). Set by the app root. */
         @Volatile
         public var keyRotationSink: ((ByteArray) -> Unit)? = null
+
+        /** ADR-0091 phase 2 route 1 — a conversation re-entry request from
+         *  another device of this account (the envelope, and the sender's
+         *  DeviceGroup leaf key resolved at receipt). Set by the chat layer;
+         *  `null` drops it. Never rendered. */
+        @Volatile
+        public var conversationReentrySink: ((envelope: ByteArray, senderLeafKey: ByteArray?) -> Unit)? = null
 
         /** ADR-0081 decision 4 — this account's login handle (the knock
          *  payload names it; a sibling admits only a knock naming it). Set by

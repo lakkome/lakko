@@ -125,6 +125,7 @@ pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
 pub mod conversation_handle;
+pub mod conversation_reentry;
 pub mod device_card;
 pub mod envelope;
 pub mod error;
@@ -143,6 +144,7 @@ pub mod invite;
 pub mod journal_epoch;
 pub mod key_rotation;
 pub mod knock;
+pub mod knock_key;
 pub mod knock_seed;
 pub mod link_claim;
 pub mod link_founded;
@@ -246,6 +248,13 @@ pub use conversation_handle::{
     CONVERSATION_HANDLE_ENVELOPE_MAX_LEN, CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
     CONVERSATION_HANDLE_VERSION_V1,
 };
+pub use conversation_reentry::{
+    compose_conversation_reentry, decode_conversation_reentry, open_reentry_knock,
+    seal_reentry_knock, try_unwrap_conversation_reentry, ConversationReentry,
+    ConversationReentryError, CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1,
+    CONVERSATION_REENTRY_ENVELOPE_MAX_LEN, CONVERSATION_REENTRY_ENVELOPE_MIN_LEN,
+    CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN,
+};
 pub use device_card::{
     compose_device_card, decode_device_card, device_card_is_newer, try_unwrap_device_card,
     DeviceCard, DeviceCardError, DeviceCardField, DeviceCardFieldError, DevicePlatform,
@@ -335,6 +344,10 @@ pub use key_rotation::{
 pub use knock::{
     is_knock_row_len, knock_public_key, knock_row_version, knock_seed, open_knock, seal_knock,
     KnockError, KnockRequest, KNOCK_LARGE_ROW_LEN, KNOCK_SMALL_ROW_LEN,
+};
+pub use knock_key::{
+    compose_knock_key, decode_knock_key, knock_key_is_newer, try_unwrap_knock_key, KnockKey,
+    KnockKeyError, KNOCK_KEY_ENVELOPE_DOMAIN_V1, KNOCK_KEY_ENVELOPE_LEN,
 };
 pub use knock_seed::{
     compose_knock_seed, decode_knock_seed, try_unwrap_knock_seed, KnockSeedEnvelope,
@@ -738,6 +751,37 @@ pub mod fuzz_api {
         let dispatched = matches!(
             crate::incoming_envelope::dispatch_incoming_envelope(bytes),
             Ok(crate::incoming_envelope::IncomingEnvelope::AdmissionSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a conversation re-entry request (ADR-0091 phase 2)
+    /// and check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-composes to the same bytes within the
+    /// advertised bounds and dispatches as the same request. The opened
+    /// knock-row plaintext parser is driven on the same bytes.
+    #[must_use]
+    pub fn conversation_reentry_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::conversation_reentry::fuzz_decode(bytes)?;
+        let request = crate::conversation_reentry::decode_conversation_reentry(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ConversationReentry(r)) if r == request
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a knock-key envelope (ADR-0091 phase 2, route 3)
+    /// and check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-composes to the same bytes at the fixed length
+    /// and dispatches as the same key.
+    #[must_use]
+    pub fn knock_key_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::knock_key::fuzz_decode(bytes)?;
+        let key = crate::knock_key::decode_knock_key(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::KnockKey(k)) if k == key
         );
         Some(ok && dispatched)
     }

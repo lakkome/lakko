@@ -232,6 +232,109 @@ export async function applyHistoryBundleToLog(args: {
   return applied;
 }
 
+// ---- ADR-0091 section 7: the messages of a re-entry's gap --------
+
+/** When a row was written, unix ms; `NaN` when unknown. */
+function rowMs(m: PersistedMessage): number {
+  if (m.createdAt === undefined || m.createdAt === null) return Number.NaN;
+  const v = Date.parse(m.createdAt);
+  return Number.isFinite(v) ? v : Number.NaN;
+}
+
+/**
+ * ADR-0091 section 7 - the device that brought another one back sends the
+ * messages of ONE conversation it holds from `fromMs` on, sealed under
+ * `secret` (an exporter secret of the epoch the replacement created, which
+ * only the members after it hold). `null` when it holds none.
+ *
+ * The group's `countCapped` flag means "not everything": set when the cap
+ * trimmed the list, and when this device holds no row older than `fromMs`
+ * (it cannot vouch that it saw the start of the gap). A receiver whose
+ * bundle is not capped drops its gap line (UX 2.4).
+ */
+export async function buildGapHistoryBundle(args: {
+  readonly accountIdB64: string;
+  readonly deviceKey: DeviceCipher;
+  readonly secret: Uint8Array;
+  readonly slotHex: string;
+  readonly fromMs: number;
+}): Promise<Uint8Array | null> {
+  const log = await loadMessageLog(args.accountIdB64, args.deviceKey);
+  const slot = log?.groups[args.slotHex];
+  if (slot === undefined) return null;
+  const groupIdBytes = hexToBytes(args.slotHex);
+  if (groupIdBytes === null) return null;
+  const carried = slot.messages.filter((m) => !isBookkeepingSystemRow(m));
+  const inGap = carried.filter((m) => {
+    const t = rowMs(m);
+    return Number.isFinite(t) && t >= args.fromMs;
+  });
+  if (inGap.length === 0) return null;
+  const trimmed = inGap.slice(-MAX_BUNDLE_MESSAGES);
+  const heldBefore = carried.some((m) => {
+    const t = rowMs(m);
+    return Number.isFinite(t) && t < args.fromMs;
+  });
+  const capped = trimmed.length < inGap.length || !heldBefore;
+  const wasm = await loadWasm();
+  const groupIdB64 = base64Encode(groupIdBytes);
+  let maxHlc = 0n;
+  const messages: HistoryMessageInput[] = [];
+  for (const m of trimmed) {
+    const t = rowMs(m);
+    messages.push(
+      new wasm.HistoryMessageInput(
+        encodeMessagePlaceholder(wasm, m, groupIdB64),
+        0,
+        messageIdToBeBytes(m.messageId),
+        BigInt(Number.isFinite(t) && t > 0 ? t : 0),
+      ),
+    );
+    const cur = safeBigInt(m.messageId);
+    if (cur !== null && cur > maxHlc) maxHlc = cur;
+  }
+  return wasm.sealHistoryBundleStructured(args.secret, [new wasm.HistoryGroupInput(groupIdBytes, messages, capped)], maxHlc);
+}
+
+/**
+ * The receiving half: open a gap bundle and file its rows into this device's
+ * log (the same filing as a pairing bundle). Returns how many rows were
+ * added, whether the sender held the whole gap (`complete`), and the time of
+ * the earliest row it carried.
+ */
+export async function applyGapHistoryBundle(args: {
+  readonly accountIdB64: string;
+  readonly deviceKey: DeviceCipher;
+  readonly secret: Uint8Array;
+  readonly sealedBytes: Uint8Array;
+}): Promise<{
+  readonly applied: number;
+  readonly complete: boolean;
+  readonly earliestMs: number | undefined;
+  /** The rows the bundle carried (bookkeeping rows left out), for an open
+   *  chat to show at once. */
+  readonly rows: readonly PersistedMessage[];
+}> {
+  const wasm = await loadWasm();
+  const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
+  let complete = true;
+  let earliestMs: number | undefined;
+  const rows: PersistedMessage[] = [];
+  for (const g of opened.groups() as unknown[]) {
+    const group = g as OpenedHistoryGroup;
+    if (group.countCapped) complete = false;
+    for (const m of group.messages() as unknown[]) {
+      const decoded = decodeMessagePlaceholder(wasm, m as OpenedHistoryMessage);
+      if (decoded === null) continue;
+      const t = rowMs(decoded);
+      if (Number.isFinite(t) && (earliestMs === undefined || t < earliestMs)) earliestMs = t;
+      if (!isBookkeepingSystemRow(decoded)) rows.push(decoded);
+    }
+  }
+  const applied = await applyHistoryBundleToLog(args);
+  return { applied, complete, earliestMs, rows };
+}
+
 // ---- placeholder encode / decode (G-6 step 2) -------------------
 
 // `payload_bytes` is the canonical cross-platform placeholder

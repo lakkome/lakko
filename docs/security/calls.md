@@ -6034,3 +6034,110 @@ sees one more opaque track. In a group call the share media is sealed with
 SFrame under stream indices 2 (picture) and 5 (sound); in a one-to-one call it
 travels as the camera does there. Invariants **#4** (a group share that cannot
 be sealed is not sent); **#2**, **#3** and **#5** untouched.
+
+
+## A device that fell behind a conversation notices it and comes back (C-92, C-93)
+
+[ADR-0091](../adr/0091-conversation-rejoin.md). Phase 1 and 1b (prevention)
+built 2026-11-18 on `services/ds` and the web, iOS and Android clients,
+host-tested only. Phase 2 (recovery) core and both FFI surfaces built
+2026-11-19 in `lakko-mls`, `lakko-contacts`, `lakko-ffi-uniffi`,
+`lakko-ffi-wasm` and the NSE extension surface, host-tested only; no client
+drives it yet, nothing walked, nothing deployed; `lakko-security` not run.
+
+### C-92: the commit the DS names as leaving the device's epoch is never skipped on a first failure
+
+**The rule.** A signed read of a claimed conversation journal names, beside
+`latest_epoch`, the registered commit row of every epoch above the epoch the
+read was signed at (`commits`, ADR-0081 stores a commit row with each
+registration). A row that fails to apply is held, not skipped, exactly when
+it is not this device's own echo and it is the commit the DS names as moving
+the journal from the device's epoch to the next: the cursor stays before it
+and the apply is retried with a bounded backoff (2 s to 300 s, 8 attempts;
+chosen, not measured). After the attempts the row is skipped, the device is
+marked behind, and phase 2 takes over. Every other failing row is skipped at
+once, so a row that can never apply still never wedges the poll. A group
+loaded below the epoch recorded with its cursor reads that commit again.
+Every failed apply is logged on the three clients as one line with no group
+id, row id, key, account, name or text.
+
+**Why it is indexed.** Before it, a device that failed one commit skipped it
+like any other row and could never read the conversation again while
+believing it was still a member (live on 2026-11-18, the desktop group of
+ADR-0091 "What happened").
+
+**Where it is enforced.** `services/ds/src/journal.rs`
+(`registered_commits_above`); web `chat/registered-commit-hold.ts` and
+`chat/cursor-epoch.ts`, iOS `Chat/RegisteredCommitHold.swift` and
+`Chat/CursorEpoch.swift`, Android `chat/RegisteredCommitHold.kt` and
+`chat/CursorEpoch.kt`. Pinned by the DS test
+`a_signed_read_names_the_registered_commit_rows_above_its_epoch` (DB-gated)
+and the client unit suites.
+
+**What this does NOT do.** It does not bring back a device whose retries were
+spent: that is C-93. Invariants **#4** (a held row is never applied unread);
+**#2**, **#3** and **#5** untouched.
+
+### C-93: a device behind in a conversation never commits, sweeps, registers or repairs there, and is replaced only by a commit adding a KeyPackage it minted for that conversation and epoch
+
+**The rule.** A device is behind in a conversation when a drained read names
+a `latest_epoch` above its own and it owes no commit, or after three refused
+reads at its current key (`lakko_mls::conversation_behind_verdict`, ADR-0091
+section 1). While behind it takes no membership or repair action there. It
+comes back by one commit that replaces its leaf `L` with a re-entry
+KeyPackage `K` it minted under its own device identity: same signature key,
+same device binding, and a KeyPackage extension `0xFF04`
+(`version ‖ group_id ‖ epoch_left`) signed with the leaf key.
+
+Every gate (the proposer's own check, the receipt gate, the sweep and the
+peer commit gate) applies two rules in `lakko-mls::reentry::judge`:
+
+- an `Add` whose signature key is a current leaf's is admissible only when
+  its marker names this group and the epoch the commit leaves and its account
+  is that leaf's account; any other colliding `Add` is refused
+  (`RefusalReason::ReentryPairInvalid`), so a replayed directory KeyPackage
+  cannot swap a device out;
+- a `Remove(L)` the ordinary rules refuse only as `OwnerUnremovable`,
+  `RemoveNotOwnerOrAdmin` or `OneToOneMembershipFixed` is authorised when an
+  `Add` by the SAME sender is a valid re-entry for `L` (in the store at
+  receipt, in the selection at the sweep, in the commit at the commit gate);
+  the sweep carries the pair together or drops both. `owner_survives` and
+  `one_to_one_holds` are unchanged and pass, because the account keeps a
+  leaf.
+
+The returning device joins over its stale active group only through
+`Group::join_reentry`, and only when the Welcome adds one of the re-entry
+KeyPackages it recorded (by its `KeyPackageRef` and the new leaf's
+encryption key), is one epoch above that KeyPackage's marker and above the
+stored group, is for the same group and kind, passes the ordinary
+conversation admission, comes from an account in the stored roster, and its
+new leaf carries the stored own leaf's signature key. A refused join changes
+nothing. `Group::join_from_welcome` still refuses an active stored group
+(C-88).
+
+**Why it is indexed.** It is the second way into a conversation over an
+active group, and it lifts the owner's and a one-to-one person's
+last-leaf protection for exactly one replacement; a mistake in either
+removes a person or lets a stranger's commit replace a device.
+
+**Where it is enforced.** `crates/lakko-mls/src/reentry.rs` (marker codec,
+`judge`, the collision and pair rules),
+`crates/lakko-mls/src/group/reentry_join.rs` (`reentry_request_target`,
+`propose_reentry_replacement`, `join_reentry`), the call sites in
+`crates/lakko-mls/src/group.rs` (`gate_incoming_proposal`,
+`propose_add_member`, `propose_remove_member`, `stage_pending_proposals`,
+`sweep_keeps`, `selection_is_admissible`, `authorise_role_commit`), and
+`crates/lakko-mls/src/conversation_behind.rs` (the shared rules). Pinned by
+the ADR-0091 section 6 tests in `group/reentry_join.rs` (`reentry_tests`)
+and `conversation_behind.rs`, and the fuzz target `reentry_marker_decode`;
+the request envelope by `conversation_reentry_decode` and the knock-key
+envelope by `knock_key_decode` in `lakko-contacts`.
+
+**What this does NOT do.** The core cannot see the client's stop list; that
+the device stops acting while behind is client work (ADR-0091 phase 2 S3/S4,
+unbuilt). It does not decide whether a request's device is still the
+account's or whether its leaf is writing; that is
+`reentry_admission_verdict` over facts the client supplies. It does not
+bring back a device whose account no longer has a leaf in the group.
+Invariants **#3** (an MLS state-machine change; external review under G-39)
+and **#4** (refuse, never fall back); **#2** and **#5** untouched.

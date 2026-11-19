@@ -57,6 +57,19 @@ describe("a held Welcome", () => {
     expect(p.log).toEqual(["settle", "open", "read", "settle", "open", "drop 1"]);
   });
 
+  it("ADR-0091 section 5: never goes while a re-entry record names its group", async () => {
+    const p = port([REFUSED, REFUSED], { keepForReentry: (g) => g === "g" });
+    await runHeldWelcomePass(p);
+    expect(p.log.some((l) => l.startsWith("drop"))).toBe(false);
+    expect(p.held()).toEqual([WELCOME]);
+  });
+
+  it("ADR-0091 section 5: joined as a re-entry, it goes like any join", async () => {
+    const p = port([{ kind: "joined", entry: "back" }], { keepForReentry: () => true });
+    expect(await runHeldWelcomePass(p)).toEqual(["back"]);
+    expect(p.log).toEqual(["settle", "open", "drop 1"]);
+  });
+
   it("stays when the read did not reach the head: a refused read proves nothing", async () => {
     const p = port([REFUSED, REFUSED], { readJournal: async () => false });
     await runHeldWelcomePass(p);

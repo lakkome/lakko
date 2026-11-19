@@ -342,7 +342,7 @@ public struct ChatScreen: View {
             // joinable after a minute, any call after four hours), so the
             // banner re-evaluates on a timer rather than only on a new
             // journal row.
-            if !viewModel.membershipHasEnded {
+            if !viewModel.membershipHasEnded, !viewModel.reentryWaiting {
                 GroupCallBanner(
                     affordance: viewModel.groupCallAffordance(
                         nowMs: Int64(now.timeIntervalSince1970 * 1000)
@@ -563,7 +563,7 @@ public struct ChatScreen: View {
             //
             // `docs/ux/group-and-channel-privacy.md` section 10 — and absent
             // in a group of one: there is nobody to call.
-            if !viewModel.membershipHasEnded, viewModel.hasSomeoneToCall {
+            if !viewModel.membershipHasEnded, !viewModel.reentryWaiting, viewModel.hasSomeoneToCall {
             ToolbarItem(placement: .navigationBarTrailing) {
                 // No `TimelineView` in a toolbar item, ever: one inside a bar
                 // item host re-rendered on every layout pass and dirtied the
@@ -932,6 +932,8 @@ public struct ChatScreen: View {
                                 // ADR-0045 UX §6.2.5 — the same predicate the
                                 // composer is gated on.
                                 actionsAvailable: viewModel.messageActionsAvailable,
+                                // ADR-0091 phase 2 UX 2.2.
+                                waitingForReentry: viewModel.reentryWaiting,
                                 // ADR-0024 — "Sent" / "Read" glyph on our own
                                 // messages, derived from the other members'
                                 // read watermarks.
@@ -2224,6 +2226,10 @@ struct MessageRow: View {
     /// refuses Send. Passed in rather than read here so the row stays a pure
     /// renderer of what `MembershipEnded.swift` decided.
     let actionsAvailable: Bool
+    /// ADR-0091 phase 2, UX 2.2 — this device waits to be brought back into
+    /// the chat: the menu offers Copy, Forward, Save and Pin for me only, and
+    /// nothing that would change the chat or send.
+    var waitingForReentry: Bool = false
     /// ADR-0024 — read state for our OWN outgoing messages
     /// (sent / read). `nil` for incoming / system rows and
     /// pre-ack outgoing rows (no glyph rendered).
@@ -2393,6 +2399,7 @@ struct MessageRow: View {
     /// already deleted (the receive-side author gate is the real
     /// enforcement — this is just the affordance).
     private var canEditOrDelete: Bool {
+        if waitingForReentry { return false }
         if let channelPost {
             return actionsAvailable && channelPost == .publisher && message.messageId > 0 && !message.deleted
         }
@@ -2404,6 +2411,13 @@ struct MessageRow: View {
 
     /// React is offered on any non-system message with an id.
     private var canReact: Bool {
+        !waitingForReentry && readable
+    }
+
+    /// Not a system row, landed, not a tombstone, readable here: the facts
+    /// React, Forward and Pin share (React additionally needs to be able to
+    /// send).
+    private var readable: Bool {
         actionsAvailable
             && message.direction != .system
             && message.messageId > 0
@@ -2429,7 +2443,7 @@ struct MessageRow: View {
     /// Landed, readable and not a tombstone: the gate Forward and Pin share
     /// (section 4.1).
     private var sendLanded: Bool {
-        canReact && message.ack == .sent && message.unsupportedVersion == nil
+        readable && message.ack == .sent && message.unsupportedVersion == nil
     }
 
     private var canForward: Bool {
@@ -2512,6 +2526,15 @@ struct MessageRow: View {
         case .system:
             if let call = ChatTimeline.callRow(message) {
                 callRow(call)
+            } else if let gap = ChatTimeline.reentryGapRow(message) {
+                // ADR-0091 phase 2, `docs/ux/conversation-rejoin.md` 2.4 —
+                // styled as the date separators, local to this device.
+                Text(ConversationReentryRules.gapSentence(fromMs: gap.fromMs, toMs: gap.toMs))
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
             } else if let membership = ChatTimeline.membershipRow(message) {
                 // `docs/ux/second-device.md` section 4 — one sentence per
                 // person, the name resolved now, never stored.
@@ -2685,7 +2708,8 @@ struct MessageRow: View {
         }
         let at = actions.firstIndex { $0 == .edit || $0 == .delete } ?? actions.count
         actions.insert(contentsOf: contentActions, at: at)
-        return actions
+        // ADR-0091 phase 2, UX 2.2 — a waiting chat offers what it lists.
+        return waitingForReentry ? ConversationReentryRules.waitingMenu(actions) : actions
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -3666,7 +3690,7 @@ struct GroupInfoScreen: View {
         // membership that ended here (a retired leaf, ADR-0050) is outside
         // what that record expresses and keeps the older rule.
         if !viewModel.membershipHasEnded {
-            return conversationInfoSections(caps: ConversationInfoCapabilities(
+            let sections = conversationInfoSections(caps: ConversationInfoCapabilities(
                 kind: .group,
                 role: {
                     switch viewModel.ownRole {
@@ -3679,6 +3703,9 @@ struct GroupInfoScreen: View {
                 canTransfer: viewModel.isOwner && !viewModel.isAloneInGroup,
                 canLeave: viewModel.usesProposalPath && viewModel.ownLeafIndex != nil,
                 hasHandle: viewModel.groupHandle != nil))
+            // ADR-0091 phase 2, UX 2.2 — a waiting chat hides every control
+            // that would change it.
+            return viewModel.reentryWaiting ? ConversationReentryRules.waitingInfoSections(sections) : sections
         }
         return groupInfoSections(
             caps: GroupInfoCapabilities(

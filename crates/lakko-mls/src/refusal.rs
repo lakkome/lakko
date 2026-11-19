@@ -274,6 +274,21 @@ pub enum RefusalReason {
     /// Carried by [`crate::Error::GroupStillActive`], which names the group, so
     /// the caller knows which journal to read.
     GroupStillActive,
+
+    // ---- Re-entry (ADR-0091 phase 2) ----------------------------------------
+    /// An `Add` whose signature key is a current member's is not a valid
+    /// re-entry (no marker for this group and the epoch the commit leaves, or
+    /// another account), or a `Remove` that only a re-entry could authorise
+    /// has no valid re-entry `Add` by the same sender beside it.
+    ReentryPairInvalid,
+
+    /// A Welcome offered as a re-entry ([`crate::Group::join_reentry`]) is
+    /// not one: it adds none of this device's recorded re-entry KeyPackages,
+    /// it is for another group or kind, it is not newer than the stored
+    /// group, its sender is not in the stored roster, or no active group is
+    /// stored. Nothing changed. Not retried: the device waits for the next
+    /// re-entry Welcome.
+    ReentryWelcomeRefused,
 }
 
 impl RefusalReason {
@@ -283,7 +298,7 @@ impl RefusalReason {
     /// Exists so a test can assert over the whole set — adding a variant without
     /// classifying it deliberately then fails a test rather than defaulting
     /// silently — and so an FFI surface can enumerate without re-listing.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::NotAMember,
         Self::AddNotOwnerOrAdmin,
         Self::RemoveNotOwnerOrAdmin,
@@ -308,6 +323,8 @@ impl RefusalReason {
         Self::OneToOneHasNoRoles,
         Self::GroupKindChanged,
         Self::GroupStillActive,
+        Self::ReentryPairInvalid,
+        Self::ReentryWelcomeRefused,
     ];
 
     /// What the caller should do about this refusal.
@@ -351,7 +368,8 @@ impl RefusalReason {
             | Self::JoinerAlreadyAMember
             | Self::DeviceLimitReached
             | Self::GroupKindChanged
-            | Self::GroupStillActive => RefusalDisposition::DoNotRetry,
+            | Self::GroupStillActive
+            | Self::ReentryWelcomeRefused => RefusalDisposition::DoNotRetry,
 
             // An authority answer.
             Self::NotAMember
@@ -363,7 +381,8 @@ impl RefusalReason {
             | Self::NotACommitter
             | Self::DeviceBindingInvalid
             | Self::OneToOneMembershipFixed
-            | Self::OneToOneHasNoRoles => RefusalDisposition::NotPermitted,
+            | Self::OneToOneHasNoRoles
+            | Self::ReentryPairInvalid => RefusalDisposition::NotPermitted,
         }
     }
 
@@ -415,6 +434,8 @@ impl RefusalReason {
             Self::OneToOneHasNoRoles => "oneToOneHasNoRoles",
             Self::GroupKindChanged => "groupKindChanged",
             Self::GroupStillActive => "groupStillActive",
+            Self::ReentryPairInvalid => "reentryPairInvalid",
+            Self::ReentryWelcomeRefused => "reentryWelcomeRefused",
         }
     }
 }

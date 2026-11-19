@@ -821,6 +821,17 @@ public final class ContactsRepository: ObservableObject {
                     guard boundAccountIdB64 == pollAccountIdB64 else { continue }
                     applyLinkRefusal(refusal)
                     continue
+                case .conversationReentry(_, let envelope):
+                    // ADR-0091 phase 2 route 2 — judged by the repository
+                    // (the core checks the KeyPackage, the admission rule
+                    // the rest); a row that fails any check is dropped.
+                    guard boundAccountIdB64 == pollAccountIdB64 else { continue }
+                    if let chatRepository {
+                        Task { @MainActor [weak chatRepository] in
+                            await chatRepository?.receiveConversationReentry(envelope: envelope, route: .mailbox)
+                        }
+                    }
+                    continue
                 case .contactAck(let ack):
                     // The session ended (or changed account) while this
                     // batch was in flight: the ack belongs to the old
@@ -958,7 +969,7 @@ public final class ContactsRepository: ObservableObject {
                         } catch {
                             NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
                         }
-                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome:
+                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome, .conversationReentry:
                         // Rule 5 — a predecessor mailbox carries Welcomes
                         // only. A request sent here was sealed to the old
                         // key and its sender still addresses the old
@@ -1008,7 +1019,7 @@ public final class ContactsRepository: ObservableObject {
             guard let proving = reachKeys[messageId] else { return (.process, nil) }
             let founder = welcomeFounder(welcomeBytes)
             return (verdict(proving, founder.map(isContact) ?? false), founder)
-        case .linkRefusal, .publisherWelcome:
+        case .linkRefusal, .publisherWelcome, .conversationReentry:
             return (.process, nil)
         }
     }

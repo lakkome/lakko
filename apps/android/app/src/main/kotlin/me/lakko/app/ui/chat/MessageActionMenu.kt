@@ -237,6 +237,24 @@ internal fun messageActionsFor(
 )
 
 /**
+ * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.2 — the menu of a
+ * chat this device waits to be brought back into: Copy, Forward, Save and
+ * Pin (the screen offers it for this device only) and nothing else. Edit,
+ * Delete, Reply, Select, Translate, Ban and a content message's own rows go:
+ * each either sends into the chat, which a waiting device does not do, or is
+ * not on UX 2.2's list.
+ */
+internal fun waitingChatActions(actions: MessageActions): MessageActions = actions.copy(
+    canEdit = false,
+    canDelete = false,
+    canReply = false,
+    canSelect = false,
+    canTranslate = false,
+    canBan = false,
+    contentRows = emptyList(),
+)
+
+/**
  * Put [text] on the system clipboard. Section 3: "Nothing leaves the device."
  *
  * The clip label is what the OS shows in its own paste UI; the message text is

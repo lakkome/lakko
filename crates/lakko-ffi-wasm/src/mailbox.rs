@@ -76,6 +76,8 @@ pub enum MailboxKind {
     WelcomeRendezvous = 4,
     /// A signed link refusal (ADR-0079, 2026-10-19).
     LinkRefusal = 5,
+    /// A conversation re-entry request (ADR-0091 phase 2, route 2).
+    ConversationReentry = 6,
 }
 
 impl From<MailboxKind> for core::MailboxKind {
@@ -86,6 +88,7 @@ impl From<MailboxKind> for core::MailboxKind {
             MailboxKind::ContactAck => Self::ContactAck,
             MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             MailboxKind::LinkRefusal => Self::LinkRefusal,
+            MailboxKind::ConversationReentry => Self::ConversationReentry,
         }
     }
 }
@@ -98,6 +101,7 @@ impl From<core::MailboxKind> for MailboxKind {
             core::MailboxKind::ContactAck => Self::ContactAck,
             core::MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             core::MailboxKind::LinkRefusal => Self::LinkRefusal,
+            core::MailboxKind::ConversationReentry => Self::ConversationReentry,
         }
     }
 }

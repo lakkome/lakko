@@ -80,6 +80,7 @@ entry's status line, not a mechanical fact.
 | [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Closed in code (2026-11-14) | per-device PublisherGroup leaves (ADR-0090) on web, iOS and Android; walked on web only; an owner's channels from before the flag day stay read-only on its own device and show no line; see the entry |
 | [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
 | [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Closed in code (2026-11-15; ADR-0074 amendment), host-tested only | join routes, pairing recovery row, DeviceGroup lineage on web, iOS, Android |
+| [G-58](./known-gaps.md#g-58) | A device behind a conversation: what recovery cannot reach | Open | a fake epoch from a member registrar; a removed single-device account; a group whose only owner or admin is the behind device |
 
 ## MLS state machine
 
@@ -3452,3 +3453,30 @@ account's lineage seed, which every device of the account holds.
   and verify statements against the key built into the app (the desktop
   app's bundled build already holds); a browser visit to
   `lakko.me/donations` keeps the residual.
+
+
+<a id="g-58"></a>
+### G-58: A device behind a conversation: what recovery cannot reach
+
+- Status: open (proposed with [ADR-0091](../adr/0091-conversation-rejoin.md),
+  2026-11-18). Phase 1 and 1b (prevention, C-92) built 2026-11-18 on
+  `services/ds` and the three clients; phase 2 core and both FFI surfaces
+  (recovery, C-93) built 2026-11-19; nothing walked, nothing deployed.
+- A member registrar (ADR-0057) can append an epoch with a garbage commit
+  row. Every honest device then reads a `latest_epoch` above its own and is
+  suspected: it stops acting in that conversation and asks to come back, and
+  nobody can answer (no re-admitter is at the fake epoch). Nothing is
+  deleted; the suspicion is shown only after 10 minutes without other
+  evidence; the owner's or an admin's journal repair removes the fake epoch
+  (it is allowed exactly when there is no evidence of real progress), and
+  the suspicion clears everywhere.
+- A single-device account removed from a group while its device was behind
+  waits with no end: its removal is the commit it cannot apply, no
+  re-admitter acts (its leaf is gone from their roster), and the maintainer
+  chose no time limit (ADR-0091 decision 2).
+- A group whose only owner or admin is the behind device recovers on route 3
+  only once the owner opens another device there (an ADR-0050 admission by
+  any member brings that device in, then route 1 applies).
+- Closed in phase 1b: a commit-shaped garbage row a member posted through the
+  plain publish route used to hold devices until their attempts were spent;
+  the DS now names the registered commit row, so it holds nobody.

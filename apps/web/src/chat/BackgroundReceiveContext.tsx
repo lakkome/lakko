@@ -133,6 +133,7 @@ import {
   type AccountDevices,
   type RosterLeafKeys,
 } from "./device-readmission";
+import { conversationBehind } from "./conversation-behind";
 import { markOwnPublished } from "./own-published";
 import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
 import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
@@ -1446,6 +1447,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const secrets = auth.identitySecrets();
     if (secrets === null) return;
     if (readIsActive(entry.group) === false) return;
+    // ADR-0091 section 2 (C-93) — no ADR-0050 arm while this device is behind.
+    if (conversationBehind.stopsActing(entry.groupIdB64)) return;
     if (!takeReadmissionSlot(entry.groupIdB64, Date.now())) return;
     const s = auth.state();
     if (s.kind !== "session") return;

@@ -144,6 +144,9 @@ use crate::committer_delegation::{
 use crate::conversation_handle::{
     try_unwrap_conversation_handle, ConversationHandle, ConversationHandleError,
 };
+use crate::conversation_reentry::{
+    try_unwrap_conversation_reentry, ConversationReentry, ConversationReentryError,
+};
 use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_contact_request::{
@@ -157,6 +160,7 @@ use crate::introduction::{
     IntroductionsBundle,
 };
 use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
+use crate::knock_key::{try_unwrap_knock_key, KnockKey, KnockKeyError};
 use crate::knock_seed::{try_unwrap_knock_seed, KnockSeedEnvelope, KnockSeedError};
 use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
 use crate::link_founded::{try_unwrap_link_founded, LinkFounded, LinkFoundedError};
@@ -489,6 +493,17 @@ pub enum IncomingEnvelope<'a> {
     /// senders as [`IncomingEnvelope::OpenItems`]; each row is opened and
     /// verified like a ballot read from the journal.
     PollBallots(PollBallots),
+    /// A device that fell behind the conversation asks to be brought back
+    /// (ADR-0091 phase 2, route 1: a DeviceGroup service envelope from
+    /// another device of this account). Never a chat bubble. Handled under
+    /// the re-admitter rules of `lakko_mls::Group::reentry_request_target`
+    /// and `lakko_mls::reentry_admission_verdict`.
+    ConversationReentry(ConversationReentry),
+    /// The group's knock public key and version (ADR-0091 phase 2, route 3).
+    /// Never a chat bubble. Kept only from the owner or an admin resolved at
+    /// receipt (C-68), and only when strictly newer
+    /// ([`crate::knock_key::knock_key_is_newer`]).
+    KnockKey(KnockKey),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -618,6 +633,12 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     PollBallots(#[from] PollBallotsError),
+    /// The conversation re-entry domain (ADR-0091) with a malformed payload.
+    #[error(transparent)]
+    ConversationReentry(#[from] ConversationReentryError),
+    /// The knock-key domain (ADR-0091) with a malformed payload.
+    #[error(transparent)]
+    KnockKey(#[from] KnockKeyError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -759,6 +780,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n6. A publishing device's admission mark — ADR-0090 section 6.
     if let Some(mark) = try_unwrap_channel_admission_mark(plaintext)? {
         return Ok(IncomingEnvelope::ChannelAdmissionMark(mark));
+    }
+    // 7n7. A device asks to come back — ADR-0091 phase 2.
+    if let Some(request) = try_unwrap_conversation_reentry(plaintext)? {
+        return Ok(IncomingEnvelope::ConversationReentry(request));
+    }
+    // 7n8. The group's knock public key — ADR-0091 phase 2.
+    if let Some(key) = try_unwrap_knock_key(plaintext)? {
+        return Ok(IncomingEnvelope::KnockKey(key));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
     if let Some(items) = try_unwrap_open_items(plaintext)? {

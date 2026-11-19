@@ -170,6 +170,8 @@ import {
   writeChannelSubscription,
 } from "../../channels/channel-subscription-wasm";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
+import { deliverReentryRequest } from "../../chat/reentry-admit";
+import { isConversationReentryEnvelope } from "../../chat/reentry-envelope";
 import {
   bindDeviceCards,
   noteDeviceAction,
@@ -2485,6 +2487,37 @@ export function DeviceGroupSyncProvider(props: {
                     parsed.kind === "serviceEnvelope" &&
                     receiveDeviceCardEnvelope(wasm, parsed.serviceEnvelope, processed.senderLeaf, membersOf(g))
                   ) {
+                    return;
+                  }
+                  // ADR-0091 section 3, route 1: another device of this
+                  // account asks to be brought back into a conversation it
+                  // fell behind in. Only from a sender the roster resolves at
+                  // receipt (C-68); the roster's keys go with it, since the
+                  // re-admitter admits only a device the DeviceGroup holds.
+                  if (
+                    parsed.kind === "serviceEnvelope" &&
+                    isConversationReentryEnvelope(wasm, parsed.serviceEnvelope)
+                  ) {
+                    const roster = membersOf(g);
+                    if (roster === null || senderKeyAtReceipt(processed.senderLeaf, roster) === null) return;
+                    let req;
+                    try {
+                      req = wasm.decodeConversationReentryEnvelope(parsed.serviceEnvelope);
+                    } catch {
+                      return;
+                    }
+                    try {
+                      deliverReentryRequest({
+                        route: "own-device",
+                        groupId: req.groupId,
+                        epochLeft: req.epochLeft,
+                        gapFromMs: req.gapFromMs,
+                        keyPackage: req.keyPackage,
+                        deviceGroupKeysHex: new Set(roster.map((m) => m.key.toLowerCase())),
+                      });
+                    } finally {
+                      req.free();
+                    }
                     return;
                   }
                   // ADR-0079 (order of 2026-10-17): another device's

@@ -55,6 +55,8 @@ import { clearRemovedDevicesForGroup } from "./device-readmission";
 import { heldSends, persistHeldSends } from "./held-send-queue";
 import { clearKnockCursorForGroup } from "./knock-cursor";
 import { clearCursorEpochForGroup } from "./cursor-epoch";
+import { conversationBehind } from "./conversation-behind";
+import { clearReentryRowsForGroup } from "./reentry-store";
 import { clearLeaveRequested } from "./membership-ended";
 import { clearArmedRetries, clearOwnRequestsForGroup, retryScopeKey } from "./membership-retry";
 import { deleteGroupFromMessageLog } from "./message-log-store";
@@ -134,6 +136,10 @@ export function groupWipeSteps(target: GroupWipeTarget, contexts: GroupWipeConte
     { name: "readmission-removed", run: () => clearRemovedDevicesForGroup(accountIdB64, groupIdB64) },
     { name: "knock-cursor", run: () => clearKnockCursorForGroup(groupIdB64, accountIdB64) },
     { name: "cursor-epoch", run: () => clearCursorEpochForGroup(groupIdB64, accountIdB64) },
+    // ADR-0091 phase 2 - the behind state, the re-entry record, the gap
+    // lines and the knock key held for the group.
+    { name: "conversation-behind", run: () => conversationBehind.forgetGroup(groupIdB64, accountIdB64) },
+    { name: "reentry-rows", run: () => clearReentryRowsForGroup(groupIdB64, accountIdB64) },
     { name: "continuity", run: () => clearContinuityStateForGroup(accountIdB64, groupIdB64) },
     { name: "member-baseline", run: () => clearMemberBaselineForGroup(accountIdB64, groupIdB64) },
     { name: "profile-request", run: () => clearProfileRequestForGroup(accountIdB64, groupIdB64) },

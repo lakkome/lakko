@@ -13,6 +13,9 @@ public enum GroupSettingEnvelope: Equatable {
     case handle(FfiConversationHandle)
     /// The whole envelope; opened only by the addressee (sealed to its key).
     case knockSeed(Data)
+    /// ADR-0091 phase 2 route 3 — the group's knock public key, sent by the
+    /// owner to every member.
+    case knockKey(FfiKnockKey)
 }
 
 /// Reactions-and-emoji spec section 9 — the reactions a group takes, as this
