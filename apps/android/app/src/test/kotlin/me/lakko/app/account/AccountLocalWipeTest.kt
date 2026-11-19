@@ -640,6 +640,9 @@ class AccountLocalWipeTest {
             "push-routing-secrets", "session-token", "account-identity-seed", "device-identity-seed", "export-key",
             "recovery-phrase", "guest-phrase", "backup-floor", "journal-ownership", "reach", "identity-pins",
             "channel-log-and-keys",
+            // ADR-0091 phase 2 section 7 - the returning device's gap looks
+            // (their history secret is sealed under the Keystore key).
+            "reentry-gap-looks",
         )
     }
 }

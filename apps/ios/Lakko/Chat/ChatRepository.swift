@@ -591,12 +591,11 @@ public final class ChatRepository: ObservableObject {
     @Published public internal(set) var reentryRevision: Int = 0
     /// The groups a request is being sent for now (one at a time per group).
     var reentrySending: Set<String> = []
-    /// The groups whose gap history this device is reading for now.
+    /// The gap histories this device, back after a re-entry, still looks for
+    /// (durable; the secret sealed at rest).
+    let reentryGapLooks = ReentryGapLookStore()
+    /// The groups a gap look is in flight for now (one at a time per group).
     var reentryHistoryReading: Set<String> = []
-    /// How long a device that came back waits for its gap history. Chosen,
-    /// not measured: the re-admitter sends it when its own poll reaches the
-    /// new epoch. Replaceable by tests.
-    var reentryHistoryWaitSeconds: TimeInterval = 600
     /// Route 1: send an envelope to this account's other devices as a
     /// DeviceGroup service envelope. Wired by the composition root to the
     /// DeviceGroup sync runtime; `nil` until then (route 1 then cannot send).
@@ -2953,7 +2952,11 @@ public final class ChatRepository: ObservableObject {
         }
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
         sharedChannels.noteGrowth(groupIdHex: groupIdHex)
-        redistributePushRoutingSecret(groupIdHex: groupIdHex)
+        // The routing secret only from an owner or an admin: a plain member
+        // (the other person of a one-to-one, a route-1 sibling) does not.
+        if ConversationReentryRules.resendsPushRoutingSecret(ownRole: ownRole(groupIdHex: groupIdHex)) {
+            redistributePushRoutingSecret(groupIdHex: groupIdHex)
+        }
     }
 
     /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
@@ -5678,6 +5681,8 @@ public final class ChatRepository: ObservableObject {
         // it owes once it holds the epoch the replacement created.
         noteReentryAfterRead(groupIdHex: groupIdHex, raw: raw)
         Task { @MainActor [weak self] in await self?.sendOwedReentryHistory(groupIdHex: groupIdHex) }
+        // A device that came back keeps looking for its gap history (throttled).
+        Task { @MainActor [weak self] in await self?.lookForReentryGapHistory(groupIdHex: groupIdHex) }
         if reentryStopsActing(groupIdHex: groupIdHex) { return }
         // ADR-0057, live walk 2026-09-29 — the owner claims the journal on
         // open, once per session, then re-checks its registrars against the
@@ -5711,6 +5716,11 @@ public final class ChatRepository: ObservableObject {
         // itself). A sweep failure is not a poll failure, so it never throws
         // out of here.
         await sweepIfCommitter(groupIdHex: groupIdHex)
+        guard bound.isCurrent else { return }
+        // ADR-0091 section 7 — a replacement merged by the sweep just above
+        // owes its gap history at exactly the epoch it created: sent in this
+        // poll, before anything moves the group on.
+        await sendOwedReentryHistory(groupIdHex: groupIdHex)
         guard bound.isCurrent else { return }
         // ADR-0050 2.5a — a commit applied by this poll (or merged by the sweep
         // just above) may have dropped an own request. Only schedules; does
@@ -8046,7 +8056,7 @@ public final class ChatRepository: ObservableObject {
                 plaintextBytes: composeCommitterBeacon()
             )
         } catch {
-            NSLog("ADR-0045 committer beacon not emitted: \(error)")
+            if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0045 committer beacon not emitted: \(error)") }
         }
         return .emit
     }
@@ -8934,8 +8944,10 @@ public final class ChatRepository: ObservableObject {
                     return true
                 }))
         } catch {
-            NSLog("ADR-0057: registrar reconcile failed, retried on the next change: %@",
-                  String(describing: error))
+            if !ConversationReentryRules.isBehindRefusal(error) {
+                NSLog("ADR-0057: registrar reconcile failed, retried on the next change: %@",
+                      String(describing: error))
+            }
         }
     }
 
@@ -9324,7 +9336,7 @@ public final class ChatRepository: ObservableObject {
         do {
             try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
         } catch {
-            NSLog("ADR-0060: committer delegations not sent: \(error)")
+            if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0060: committer delegations not sent: \(error)") }
             return
         }
         guard bound.isCurrent, let accountIdB64 = currentAccountIdB64 else { return }
@@ -9841,7 +9853,7 @@ public final class ChatRepository: ObservableObject {
                     guard bound.isCurrent else { return }
                     ReachCenter.shared.markOfferSent(groupIdHex: groupIdHex, key: offerKey)
                 } catch {
-                    NSLog("ADR-0060: introduction offer not sent: \(error)")
+                    if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0060: introduction offer not sent: \(error)") }
                 }
             }
             if !capped.isEmpty,
@@ -9853,7 +9865,7 @@ public final class ChatRepository: ObservableObject {
                     guard bound.isCurrent else { return }
                     ReachCenter.shared.markBundleSent(groupIdHex: groupIdHex, digest: bundleDigest)
                 } catch {
-                    NSLog("ADR-0060: introductions bundle not sent: \(error)")
+                    if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0060: introductions bundle not sent: \(error)") }
                 }
             }
         }
@@ -11224,6 +11236,32 @@ final class GroupRecord {
     /// `docs/ux/calls.md` section 6 — append a row this device wrote itself
     /// (today: a finished call). A system row with no author: nobody sent it,
     /// so nobody may edit or delete it.
+    /// ADR-0091 section 7 — a gap history arrived: narrow or remove the gap
+    /// line ending at `gapToMs` (``ConversationReentryRules/narrowGap(text:gapToMs:complete:earliestMs:)``).
+    /// `true` when a row changed.
+    @discardableResult
+    func narrowReentryGap(gapToMs: UInt64, complete: Bool, earliestMs: Int64?) -> Bool {
+        var changed = false
+        var next: [ChatMessage] = []
+        next.reserveCapacity(messages.count)
+        for var message in messages {
+            guard message.direction == .system else { next.append(message); continue }
+            switch ConversationReentryRules.narrowGap(
+                text: message.text, gapToMs: gapToMs, complete: complete, earliestMs: earliestMs) {
+            case .keep:
+                next.append(message)
+            case .remove:
+                changed = true
+            case .replace(let text):
+                message.text = text
+                next.append(message)
+                changed = true
+            }
+        }
+        if changed { messages = next }
+        return changed
+    }
+
     func appendLocalRow(text: String, messageId: Int64, createdAt: String) {
         messages.append(
             ChatMessage(

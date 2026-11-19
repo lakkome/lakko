@@ -5692,8 +5692,16 @@ public class ChatRepository(
             // left (or was forgotten) must not write them back.
             subscribeFn = { pushGid -> sessionLeg { subscribePushGidBestEffort(pushGid) } },
             unsubscribeFn = { pushGid -> sessionLeg { unsubscribePushGidBestEffort(pushGid) } },
+            // ADR-0091 live walk 2026-11-19 — a skipped send (behind, or a
+            // superseded one-to-one) answers null: it is not a send, so it
+            // must leave the routing row pending rather than distributed.
             broadcastFn = { envelope ->
-                sessionLeg { broadcastControlToGroup(identity, groupIdHex, group, envelope) }
+                sessionLeg {
+                    me.lakko.app.push.requireRoutingBroadcastSent<SendMessageResult> {
+                        broadcastControlToGroup(identity, groupIdHex, group, envelope)
+                    }
+                    Unit
+                }
             },
             // ADR-0044 — the MINT stamp source. Read under [providerLock]
             // (the `Group` handle is not safe to touch off it, the same
@@ -11208,6 +11216,10 @@ public class ChatRepository(
             runOwedMembershipEnds()
             return GroupPollOutcome.APPLIED
         }
+        // ADR-0091 phase 2 section 7 — a device that came back looks for the
+        // messages it missed after each applied poll (throttled to once a
+        // minute by its record). A read, not a send: also while behind.
+        pushScope.launchSession { lookForGapHistoryBestEffort(groupIdHex) }
         // ADR-0091 phase 2 section 2 — a device behind in this conversation
         // commits, sweeps, registers, repairs, re-admits and reads knocks
         // nowhere here: it asks to be brought back, and keeps reading.
@@ -11242,6 +11254,10 @@ public class ChatRepository(
         // role table, and for a candidate with nothing pending, so the common
         // case costs one short provider region.
         sweepIfCommitter(groupIdHex)
+        // ADR-0091 phase 2 section 7 — a replacement the sweep just above
+        // merged puts the group at the join epoch: the owed bundle goes now,
+        // not at the next poll (by which a later commit may have moved on).
+        sendOwedGapBundlesBestEffort(groupIdHex)
         // ADR-0050 section 2.5a point 4 — a merged commit (a remote one this
         // batch applied, or the sweep just above) may have dropped a request
         // this device made. Re-request it from its intent. After the sweep, so
@@ -11873,6 +11889,13 @@ public class ChatRepository(
                 skipped += 1
                 continue
             }
+            // ADR-0091 phase 2 section 2 — a chat this device is behind in
+            // takes no proposal from it; skipped without a warning, since the
+            // refusal is the stop list working.
+            if (behindStopsActing(groupIdHex)) {
+                skipped += 1
+                continue
+            }
             try {
                 val outcome = step(groupIdHex)
                 if (outcome == null) {
@@ -11885,7 +11908,7 @@ public class ChatRepository(
                 throw cause
             } catch (cause: Throwable) {
                 failed += 1
-                android.util.Log.w("ChatRepository", "ADR-0050 device fan-out: chat skipped $groupIdHex", cause)
+                android.util.Log.w("ChatRepository", "ADR-0050 device fan-out: chat skipped (${errorLogTag(cause)})")
             }
         }
         return DeviceFanOut(offered, skipped, failed)
@@ -12258,7 +12281,8 @@ public class ChatRepository(
         // ADR-0091 phase 2 — in-memory state of the session that left.
         conversationBehind.unbind()
         reentryLedger.clear()
-        owedGapBundles.clear()
+        // The owed gap bundles and the gap looks are durable: they stay for
+        // the next landing of this account and go on Forget device.
         knockKeySentVersion.clear()
         mutableReentryGaps.value = emptyMap()
         keyPackageAccount.set(null)
@@ -15086,6 +15110,8 @@ public class ChatRepository(
             knockKeys.remove(accountIdB64, hex)
             reentryGapStore.delete(accountIdB64, hex)
             mutableReentryGaps.update { it - hex }
+            gapLookStore.remove(accountIdB64, hex)
+            owedGapBundleStore.removeGroup(accountIdB64, hex)
         }
         step("reach grants") { me.lakko.app.reach.ReachManager.peek()?.forgetHeldScope(hex) }
         // In memory, per group.
@@ -15291,8 +15317,15 @@ public class ChatRepository(
     internal var reentryAdmissionRule: ReentryAdmissionRule = NativeReentryAdmissionRule
 
     /** Gap bundles this device owes as a re-admitter (section 7), by group
-     *  and KeyPackage. In memory. */
-    private val owedGapBundles = java.util.concurrent.ConcurrentHashMap<String, OwedGapBundle>()
+     *  and returning leaf. Durable: a restart before the replacement merges
+     *  still sends it. */
+    private val owedGapBundleStore: OwedGapBundleStore by lazy { SharedPrefsOwedGapBundleStore(applicationContext) }
+
+    /** The returning device's looks for its gap bundle (section 7): sealed
+     *  at rest, the secret included. */
+    private val gapLookStore: GapLookStore by lazy { EncryptedGapLookStore(applicationContext) }
+
+    private val gapHistoryLooker: GapHistoryLooker by lazy { GapHistoryLooker(gapLookStore) }
 
     /** Requests being sent, by group: one at a time per group. */
     private val reentryRequestsInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -15743,13 +15776,27 @@ public class ChatRepository(
         reentryLedger.noteAccepted(groupIdHex, leafHex, now)
         android.util.Log.i(REENTRY_LOG_TAG, "re-entry admitted: route=${route.name.lowercase()} epoch=$localEpoch")
         // Section 7 — the messages of the gap, once the replacement lands.
-        owedGapBundles[groupIdHex.lowercase() + ":" + leafHex] = OwedGapBundle(
-            groupIdHex = groupIdHex.lowercase(),
-            leafSignatureKey = target.signatureKey,
-            epochLeft = request.epochLeft,
-            gapFromMs = request.gapFromMs.toLong(),
-            owedSinceMs = now,
-        )
+        // Durable: the replacement may merge after a restart.
+        currentAccountIdB64.get()?.let { accountIdB64 ->
+            val written = try {
+                owedGapBundleStore.put(
+                    accountIdB64,
+                    owedGapBundleKey(groupIdHex, leafHex),
+                    OwedGapBundle(
+                        groupIdHex = groupIdHex.lowercase(),
+                        leafSignatureKey = target.signatureKey,
+                        epochLeft = request.epochLeft,
+                        gapFromMs = request.gapFromMs.toLong(),
+                        owedSinceMs = now,
+                    ),
+                )
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (_: Throwable) {
+                false
+            }
+            if (!written) android.util.Log.w(REENTRY_LOG_TAG, "owed gap bundle not saved")
+        }
         try {
             sweepIfCommitter(groupIdHex)
         } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -15792,10 +15839,14 @@ public class ChatRepository(
      */
     private suspend fun sendOwedGapBundlesBestEffort(groupIdHex: String) {
         val hex = groupIdHex.lowercase()
-        val owed = owedGapBundles.filter { it.value.groupIdHex == hex }
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val owed = try {
+            owedGapBundleStore.load(accountIdB64).filter { it.value.groupIdHex == hex }
+        } catch (_: Throwable) {
+            emptyMap()
+        }
         if (owed.isEmpty()) return
         val identity = canonicalIdentity.get() ?: return
-        val accountIdB64 = currentAccountIdB64.get() ?: return
         val record = groups[groupIdHex] ?: return
         for ((key, bundle) in owed) {
             try {
@@ -15803,11 +15854,14 @@ public class ChatRepository(
                 when (owedBundleStep(bundle, epoch, System.currentTimeMillis())) {
                     OwedBundleStep.WAIT -> continue
                     OwedBundleStep.DROP -> {
-                        owedGapBundles.remove(key)
-                        android.util.Log.i(REENTRY_LOG_TAG, "gap bundle dropped: the join epoch passed")
+                        if (owedGapBundleStore.take(accountIdB64, key) != null) {
+                            android.util.Log.i(REENTRY_LOG_TAG, "gap bundle dropped: the join epoch passed or it expired")
+                        }
                     }
                     OwedBundleStep.SEND -> {
-                        owedGapBundles.remove(key)
+                        // The one claim: another poll path that reached the
+                        // same row finds it gone and sends nothing.
+                        owedGapBundleStore.take(accountIdB64, key) ?: continue
                         // The replacement landed: what a newcomer is handed on
                         // growth goes to the returning device at once (it keeps
                         // its signature key, so no growth is seen anywhere).
@@ -15894,7 +15948,10 @@ public class ChatRepository(
             groupNameRepublish.publishNow(groupIdHex)
             groupSettingsRepublish.publishNow(groupIdHex)
             pinRepublish.onGrowth(groupIdHex)
-            redistributePushRoutingBestEffort(groupIdHex)
+            // The push routing secret only from the owner or an admin, as on
+            // an ordinary growth: a plain member's is refused by the others'
+            // gate anyway, and the re-send would only be noise.
+            if (ownIsOwnerOrAdmin(groupIdHex)) redistributePushRoutingBestEffort(groupIdHex)
             handOverOpenItemsBestEffort(groupIdHex, 1)
         } catch (ended: me.lakko.app.StaleBindingException) {
             throw ended
@@ -15904,6 +15961,18 @@ public class ChatRepository(
             android.util.Log.w(REENTRY_LOG_TAG, "growth state not re-sent (${errorLogTag(cause)})")
         }
         distributeKnockKeyIfDueBestEffort(groupIdHex, grew = true, afterReentry = true)
+    }
+
+    /** Whether this account is [groupIdHex]'s owner or one of its admins,
+     *  read now; `false` when the group or its role table cannot be read. */
+    private suspend fun ownIsOwnerOrAdmin(groupIdHex: String): Boolean {
+        val record = groups[groupIdHex] ?: return false
+        return providerLock.sessionLock {
+            val own = ownAccountKey()
+            val table = roleTableOrNull(record.group)
+            val isAdmin = own != null && table?.admins?.any { it.contentEquals(own) } == true
+            reentryResendsPushRoutingSecret(ownsGroupAsOwner(record.group), isAdmin)
+        }
     }
 
     /** Section 3 route 3 — a knock key from [senderKey], kept only from the
@@ -15995,60 +16064,94 @@ public class ChatRepository(
         } catch (_: Throwable) {
             null
         }
-        if (secret != null) pushScope.launchSession { fetchGapBundlesBestEffort(hex, gapFrom, now, secret, route) }
+        if (secret != null) {
+            // Section 7 — a durable look, retried from every applied poll of
+            // this group and on opening the chat, at most once a minute, for
+            // 30 days: the re-admitter may send it much later than the join.
+            val started = try {
+                gapHistoryLooker.start(
+                    accountIdB64,
+                    GapLookRecord(
+                        groupIdHex = hex,
+                        secretB64 = java.util.Base64.getEncoder().encodeToString(secret),
+                        gapFromMs = gapFrom,
+                        gapToMs = now,
+                        route = route,
+                    ),
+                )
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (cause: Throwable) {
+                android.util.Log.w(REENTRY_LOG_TAG, "gap look not saved (${cause.javaClass.simpleName})")
+                false
+            } finally {
+                secret.fill(0)
+            }
+            if (started) pushScope.launchSession { lookForGapHistoryBestEffort(hex) }
+        }
     }
 
-    /** Polls of a gap bundle's rendezvous, each a long poll. Chosen, not measured. */
-    private val gapBundlePolls: Int = 6
-    private val gapBundlePollWaitSecs: Int = 20
+    /** Section 7 — one look for [groupIdHex]'s gap bundle, launched (the
+     *  chat opened). Throttled by the record itself. */
+    internal fun lookForGapHistoryOnOpen(groupIdHex: String) {
+        if (currentAccountIdB64.get() == null) return
+        pushScope.launchSession { lookForGapHistoryBestEffort(groupIdHex) }
+    }
 
-    private suspend fun fetchGapBundlesBestEffort(
-        groupIdHex: String,
-        gapFrom: Long,
-        backAt: Long,
-        secret: ByteArray,
-        route: ReentryRouteKind,
-    ) {
+    /**
+     * Section 7 — the returning device's look for the messages it missed: one
+     * short read of the rendezvous the re-admitter posts to, when the look is
+     * due. The first row that opens is applied, the gap line narrowed and the
+     * look dropped; anything else keeps it for the next look.
+     */
+    private suspend fun lookForGapHistoryBestEffort(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
-        val rendezvous = reentryHistoryRendezvous(secret)
-        try {
-            repeat(gapBundlePolls) {
-                run {
-                    val raw = try {
-                        dsClient.fetchRendezvous(rendezvous, after = 0L, waitSecs = gapBundlePollWaitSecs)
-                    } catch (cause: kotlinx.coroutines.CancellationException) {
-                        throw cause
+        val hex = groupIdHex.lowercase()
+        val outcome = try {
+            gapHistoryLooker.lookIfDue(
+                accountIdB64 = accountIdB64,
+                groupIdHex = hex,
+                read = { rendezvous ->
+                    val fetched = dsClient.fetchRendezvous(rendezvous, after = 0L, waitSecs = 0)
+                    ensureSession()
+                    fetched.messages.map { it.payload }
+                },
+                open = { secret, payload, route ->
+                    me.lakko.app.devices.HistoryBundleCodec.applyReentryBundle(
+                        applicationContext,
+                        accountIdB64,
+                        secret,
+                        payload,
+                        hex,
+                    ) { direction -> reentryBundleDirection(route, direction) }
+                },
+                received = { record, applied ->
+                    // From the store, not the in-memory flow: after a
+                    // restart this chat's lines may not be loaded yet.
+                    val gaps = try {
+                        reentryGapStore.load(accountIdB64, hex)
                     } catch (_: Throwable) {
-                        null
-                    } ?: return@run
-                    val row = raw.messages.lastOrNull() ?: return@run
-                    val applied = try {
-                        me.lakko.app.devices.HistoryBundleCodec.applyReentryBundle(
-                            applicationContext,
-                            accountIdB64,
-                            secret,
-                            row.payload,
-                            groupIdHex,
-                        ) { direction -> reentryBundleDirection(route, direction) }
-                    } catch (_: Throwable) {
-                        return@run
+                        emptyList()
                     }
-                    val gaps = reentryGaps.value[groupIdHex].orEmpty()
                     val narrowed = gaps.mapNotNull { gap ->
-                        if (gap.fromMs == gapFrom && gap.toMs == backAt) {
+                        if (gap.fromMs == record.gapFromMs && gap.toMs == record.gapToMs) {
                             gapAfterBundle(gap, applied.rowTimesMs, applied.capped)
                         } else {
                             gap
                         }
                     }
-                    saveReentryGaps(groupIdHex, narrowed)
-                    android.util.Log.i(REENTRY_LOG_TAG, "gap bundle applied: rows=${applied.applied}")
-                    return
-                }
-            }
-            android.util.Log.i(REENTRY_LOG_TAG, "no gap bundle arrived")
-        } finally {
-            secret.fill(0)
+                    saveReentryGaps(hex, narrowed)
+                    android.util.Log.i(REENTRY_LOG_TAG, "missed messages received: rows=${applied.applied}")
+                },
+            )
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w(REENTRY_LOG_TAG, "gap look failed (${errorLogTag(cause)})")
+            return
+        }
+        if (outcome == GapLookOutcome.DROPPED) {
+            android.util.Log.i(REENTRY_LOG_TAG, "gap look dropped: retention passed")
         }
     }
 

@@ -1032,7 +1032,7 @@ public fun ChatScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
         ) {
-            if (state.messages.isEmpty() && pendingMedia.isEmpty()) {
+            if (showsEmptyTimeline(timeline, state.messages.isEmpty(), pendingMedia.isEmpty())) {
                 // ADR-0045 UX §6.2 — the empty-timeline copy invites a send,
                 // and once the membership has ended that is an invitation the
                 // bar below can no longer accept. The terminal row carries the

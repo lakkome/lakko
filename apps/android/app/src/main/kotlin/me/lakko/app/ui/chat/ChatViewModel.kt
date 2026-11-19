@@ -385,6 +385,9 @@ public class ChatViewModel(
 
     init {
         runCatching { repo.loadReentryGaps(groupIdHex) }
+        // ADR-0091 phase 2 section 7 — opening the chat looks once more for
+        // the messages missed while this device was out (throttled).
+        runCatching { repo.lookForGapHistoryOnOpen(groupIdHex) }
     }
 
     /** The hex ids of the groups this device holds. */

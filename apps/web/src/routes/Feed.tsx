@@ -49,7 +49,7 @@ import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../aut
 import { getDeviceKey } from "../auth/key-store";
 import { composeReadReceiptEnvelope } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { ChatClient, HeldForSuccessor } from "../chat/client";
+import { ChatClient, HeldForSuccessor, isConversationBehind } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { conversationTitle } from "../chat/conversation-title";
@@ -709,6 +709,8 @@ export default function Feed(): JSX.Element {
         void composeReadReceiptEnvelope(Number(upTo))
           .then((bytes) => receiptPublisher.broadcastControl(secrets, entry.group, bytes))
           .catch((err: unknown) => {
+            // ADR-0091: no read receipt while behind.
+            if (isConversationBehind(err)) return;
             // eslint-disable-next-line no-console
             console.warn("[feed] read receipt failed", err);
           });

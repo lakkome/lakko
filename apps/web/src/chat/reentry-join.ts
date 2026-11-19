@@ -19,8 +19,10 @@
  *    not read to now (UX 2.4).
  * 5. The record goes, and the private keys of every recorded KeyPackage are
  *    forgotten.
- * 6. The missed messages are fetched from the gap channel in the background
- *    (the line is narrowed or removed when they arrive).
+ * 6. The missed messages are looked for on the gap channel, durably: once
+ *    now, then after every poll of the group and on opening the chat, at
+ *    most once a minute, until they arrive or 30 days passed (live walk
+ *    2026-11-19; the line is narrowed or removed when they arrive).
  */
 
 import { base64Decode } from "../auth/account-id";
@@ -36,7 +38,12 @@ export interface ReentryJoinPorts {
   identity(): WasmIdentity | null;
   persistDurable(): Promise<void>;
   /** Fetch the gap's messages in the background (never awaited). */
-  fetchGapHistory(input: { readonly groupIdB64: string; readonly channel: GapChannel; readonly gapToMs: number }): void;
+  fetchGapHistory(input: {
+    readonly groupIdB64: string;
+    readonly channel: GapChannel;
+    readonly gapFromMs: number;
+    readonly gapToMs: number;
+  }): void;
 }
 
 let ports: ReentryJoinPorts | null = null;
@@ -90,5 +97,5 @@ export async function noteReentryJoined(input: {
   }
   // eslint-disable-next-line no-console
   console.info(`chat re-entry joined: epoch=${epoch ?? "-"}`);
-  if (channel !== null && p !== null) p.fetchGapHistory({ groupIdB64: input.groupIdB64, channel, gapToMs: nowMs });
+  if (channel !== null && p !== null) p.fetchGapHistory({ groupIdB64: input.groupIdB64, channel, gapFromMs: input.record.gapFromMs, gapToMs: nowMs });
 }

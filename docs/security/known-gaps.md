@@ -80,7 +80,7 @@ entry's status line, not a mechanical fact.
 | [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Closed in code (2026-11-14) | per-device PublisherGroup leaves (ADR-0090) on web, iOS and Android; walked on web only; an owner's channels from before the flag day stay read-only on its own device and show no line; see the entry |
 | [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
 | [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Closed in code (2026-11-15; ADR-0074 amendment), host-tested only | join routes, pairing recovery row, DeviceGroup lineage on web, iOS, Android |
-| [G-58](./known-gaps.md#g-58) | A device behind a conversation: what recovery cannot reach | Open | a fake epoch from a member registrar; a removed single-device account; a group whose only owner or admin is the behind device |
+| [G-58](./known-gaps.md#g-58) | A device behind a conversation: what recovery cannot reach | Open | a fake epoch from a member registrar; a removed single-device account; a group whose only owner or admin is the behind device; no push routing secret after a plain member brought the device back |
 
 ## MLS state machine
 
@@ -3480,3 +3480,9 @@ account's lineage seed, which every device of the account holds.
 - Closed in phase 1b: a commit-shaped garbage row a member posted through the
   plain publish route used to hold devices until their attempts were spent;
   the DS now names the registered commit row, so it holds nobody.
+- A device brought back by a plain member holds no push routing secret until
+  the owner's next rotation or redistribution (live walk 2026-11-19). The
+  re-admitter re-sends the secret only as the owner or an admin, since the
+  ADR-0042 receive gate keeps a plain member's secret only when it is the
+  bytes already held; the gate is unchanged. Until then the device receives
+  no push wake for that group and reads it when it polls.

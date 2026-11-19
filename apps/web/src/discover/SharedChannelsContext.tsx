@@ -38,7 +38,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { ChatClient, type IncomingChatEvent } from "../chat/client";
+import { ChatClient, isConversationBehind, type IncomingChatEvent } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { channelIdFromHex } from "../channels/composer";
 import { ProfilePublishScheduler } from "../profile/publish-scheduler";
@@ -198,6 +198,8 @@ export function SharedChannelsProvider(props: { children: JSX.Element }): JSX.El
     random: () => Math.random(),
     publish: republishInto,
     onError: (_groupIdB64, err) => {
+      // ADR-0091: a behind conversation sends nothing until it is back.
+      if (isConversationBehind(err)) return;
       // eslint-disable-next-line no-console
       console.warn("[shared-channels] growth re-send failed", err);
     },

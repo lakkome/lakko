@@ -635,6 +635,10 @@ public final class ChatViewModel: ObservableObject {
     func chatScreenOpened() {
         chatOpenCounted = true
         repository.chatScreenOpened(groupIdHex: groupIdHex)
+        // ADR-0091 section 7 — a device back after a re-entry looks for its
+        // gap history when the chat is opened (throttled to once a minute).
+        let hex = groupIdHex
+        Task { @MainActor [repository] in await repository.lookForReentryGapHistory(groupIdHex: hex) }
     }
 
     /// Whether this model currently counts as an open chat in the
@@ -3702,6 +3706,8 @@ public final class ChatViewModel: ObservableObject {
                     isTyping: isTyping
                 )
             } catch {
+                // ADR-0091 section 2 — refused while behind: the stop list, not a failure.
+                guard !ConversationReentryRules.isBehindRefusal(error) else { return }
                 NSLog("sendTyping failed: %@", error.localizedDescription)
             }
         }
@@ -3736,6 +3742,7 @@ public final class ChatViewModel: ObservableObject {
                     upTo: target
                 )
             } catch {
+                guard !ConversationReentryRules.isBehindRefusal(error) else { return }
                 NSLog("sendReadReceipt failed: %@", error.localizedDescription)
             }
         }

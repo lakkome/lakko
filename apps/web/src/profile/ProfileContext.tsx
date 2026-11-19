@@ -40,7 +40,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { conversationLabelsOf, realNameOf } from "./member-label";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
-import { ChatClient } from "../chat/client";
+import { ChatClient, isConversationBehind } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import type { FoundName } from "../contacts/contact-list-model";
 import { isRemovedContact, loadAccepted, loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
@@ -558,6 +558,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     random: () => Math.random(),
     publish: publishInto,
     onError: (_groupIdB64, err) => {
+      // ADR-0091: a conversation this device fell behind in sends nothing
+      // until it is back; that is the stop list working, not a failure.
+      if (isConversationBehind(err)) return;
       // The DS answer (status and error code) explains a failure; the
       // endpoint is left out because it names the conversation.
       const cause = (err as { cause?: unknown }).cause as

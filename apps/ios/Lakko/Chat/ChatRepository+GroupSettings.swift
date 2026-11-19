@@ -63,7 +63,7 @@ extension ChatRepository {
                 row.sent.append(KnockVersionStore.sentTag(admin, row.version))
                 KnockVersionStore.save(row, accountIdB64, groupIdHex)
             } catch {
-                NSLog("[knock] WARN a knock seed was not delivered; retried on the next change")
+                if !ConversationReentryRules.isBehindRefusal(error) { NSLog("[knock] WARN a knock seed was not delivered; retried on the next change") }
             }
         }
         // The owner's other devices learn every version, 0 through the current
@@ -86,7 +86,7 @@ extension ChatRepository {
                 row.sent.append(tag)
                 KnockVersionStore.save(row, accountIdB64, groupIdHex)
             } catch {
-                NSLog("[knock] WARN a knock seed for this account's devices was not sent; retried later")
+                if !ConversationReentryRules.isBehindRefusal(error) { NSLog("[knock] WARN a knock seed for this account's devices was not sent; retried later") }
             }
         }
         // ADR-0091 phase 2 route 3 — the knock key goes to every member, once

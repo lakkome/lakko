@@ -179,7 +179,7 @@ import {
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
-import { ChatClient, HeldForSuccessor, type PollMessagesResult } from "../chat/client";
+import { ChatClient, HeldForSuccessor, isConversationBehind, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
 import { dsAccess, dsClockSkewNotice, journalHex } from "../ds/access";
 import {
@@ -603,7 +603,7 @@ import { displayLocale } from "../l10n/display-locale";
 import { conversationBehind } from "../chat/conversation-behind";
 import { gapLines, gapLinesVersion, reentryRecordFor, type GapLine } from "../chat/reentry-store";
 import { gapLineTimes, insertByMessageId, placeGapLines } from "../chat/gap-line";
-import { onGapHistoryFiled } from "../chat/reentry-history";
+import { onGapHistoryFiled, requestGapHistoryLook } from "../chat/reentry-history";
 import { REENTRY_SECOND_LINE_MS, reentrySecondLineText } from "../chat/reentry-note";
 
 /**
@@ -2439,6 +2439,12 @@ function ChatView(props: {
       setRows(insertByMessageId(rows(), filed.map(persistedToTimelineRow), rowMessageId));
     });
     onCleanup(off);
+  });
+  // Live walk 2026-11-19 — opening the chat looks for the gap's messages
+  // (at most once a minute per group; a no-op without a pending look).
+  createEffect(() => {
+    const groupIdB64 = props.entry.groupIdB64;
+    untrack(() => requestGapHistoryLook(groupIdB64));
   });
   // UX 2.4 — the "can't be shown" lines of this chat, placed among the
   // timeline's entries.
@@ -5471,6 +5477,8 @@ function ChatView(props: {
     try {
       await publishQuiet(envelopeBytes);
     } catch (err) {
+      // ADR-0091: no typing signal or read receipt while behind.
+      if (isConversationBehind(err)) return;
       // eslint-disable-next-line no-console
       console.warn("publishEphemeral failed", err);
     }
@@ -8325,7 +8333,7 @@ function ChatView(props: {
       {/* ADR-0082 / UX 3.6 — "Messages here are in Spanish." */}
       <TranslateBar conversation={props.entry.groupIdB64} candidates={translateBarCandidates} />
       <Show
-        when={timelineEntries().length > 0 || carriedCopies().length > 0}
+        when={timelineEntries().length > 0 || carriedCopies().length > 0 || (gapPlacement()?.trailing.length ?? 0) > 0}
         fallback={
           <p
             style={{

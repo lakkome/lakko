@@ -256,7 +256,7 @@ extension ChatRepository {
                 do {
                     try await self?.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: row)
                 } catch {
-                    NSLog("ADR-0092: open-items hand-over row not sent")
+                    if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0092: open-items hand-over row not sent") }
                     return
                 }
             }

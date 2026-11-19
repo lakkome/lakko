@@ -290,6 +290,8 @@ enum AccountLocalDataWipe {
             standard.removeObject(forKey: ReentryAdmissionMemory.key(accountIdB64))
             standard.removeObject(forKey: ReentryKnockKeyStore.key(accountIdB64))
             standard.removeObject(forKey: ReentryHistoryOwed.key(accountIdB64))
+            // The gap histories still looked for, and their wrap key.
+            ReentryGapLookStore.wipe(accountIdB64: accountIdB64, defaults: standard)
         }
         step("requests-sent") { standard.removeObject(forKey: RequestsSentStore.key(accountIdB64)) }
         step("shared-pins") { SharedPinStore().clear(accountIdB64: accountIdB64) }

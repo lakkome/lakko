@@ -734,6 +734,25 @@ export class ConversationBehindError extends Error {
   }
 }
 
+/**
+ * Whether `err` is (or wraps, through `cause` or a `ContactsError`'s
+ * `variant.cause`) a {@link ConversationBehindError}. Such a refusal is the
+ * ADR-0091 stop list working, not a failure: callers that log failures stay
+ * quiet on it (live walk 2026-11-19).
+ */
+export function isConversationBehind(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof ConversationBehindError) return true;
+    if (typeof current !== "object") return false;
+    const next =
+      (current as { cause?: unknown }).cause ??
+      ((current as { variant?: { cause?: unknown } }).variant?.cause);
+    current = next;
+  }
+  return false;
+}
+
 /** Told after every applied poll batch of a group (ADR-0091: the re-entry
  *  runtime sends what it owes once the group reaches an epoch). */
 export type PollObserver = (group: WasmGroup) => void;

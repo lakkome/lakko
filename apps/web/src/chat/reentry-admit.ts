@@ -276,6 +276,19 @@ async function judgeAndAct(arrival: ReentryArrival, ports: ReentryAdmitPorts): P
 // ---------- intake ---------------------------------------------------------
 
 /** The handler the runtime installs. */
+/**
+ * Whether the re-admitter re-sends the push routing secret once the
+ * replacement landed: only as the owner or an admin. The ADR-0042 receive
+ * gate keeps a plain member's secret only when it is the bytes already held,
+ * so a plain member's re-send is refused there and only logs a refusal on the
+ * returning device (live walk 2026-11-19). A device brought back by a plain
+ * member gets the secret at the owner's next rotation or redistribution
+ * (G-58). Same rule on iOS and Android.
+ */
+export function resendsPushRoutingSecret(ownRole: "owner" | "admin" | "member" | null): boolean {
+  return ownRole === "owner" || ownRole === "admin";
+}
+
 export type ReentryIntake = (arrival: ReentryArrival) => void;
 
 let intake: ReentryIntake | null = null;

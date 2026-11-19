@@ -921,7 +921,9 @@ internal fun reentryHistoryRendezvous(secret: ByteArray): ByteArray {
 
 /** A gap bundle the re-admitter still owes: sent once its group reaches
  *  [epochLeft] + 1, the epoch the returning device joins at. [leafSignatureKey]
- *  is the returning leaf's key (the exporter context). In memory. */
+ *  is the returning leaf's key (the exporter context). Every field is public
+ *  (no secret): kept durably in an [OwedGapBundleStore], so a restart between
+ *  the admission and the merge of the replacement does not lose it. */
 internal data class OwedGapBundle(
     val groupIdHex: String,
     val leafSignatureKey: ByteArray,
@@ -933,11 +935,15 @@ internal data class OwedGapBundle(
 /** What to do with an owed bundle now that the group is at [epoch]. */
 internal enum class OwedBundleStep { WAIT, SEND, DROP }
 
-/** Give up on an owed bundle after a day. Chosen, not measured. */
-internal const val OWED_GAP_BUNDLE_TTL_MS: Long = 24L * 60L * 60L * 1_000L
+/**
+ * Give up on an owed bundle after 30 days: the returning device looks for
+ * it as long ([GAP_HISTORY_LOOK_RETENTION_MS]), which is the DS retention.
+ * Chosen, not measured.
+ */
+internal const val GAP_OWED_TTL_MS: Long = 30L * 24L * 60L * 60L * 1_000L
 
 internal fun owedBundleStep(owed: OwedGapBundle, epoch: ULong?, nowMs: Long): OwedBundleStep = when {
-    nowMs - owed.owedSinceMs > OWED_GAP_BUNDLE_TTL_MS -> OwedBundleStep.DROP
+    nowMs - owed.owedSinceMs > GAP_OWED_TTL_MS -> OwedBundleStep.DROP
     epoch == null -> OwedBundleStep.WAIT
     owed.epochLeft == ULong.MAX_VALUE -> OwedBundleStep.DROP
     epoch == owed.epochLeft + 1uL -> OwedBundleStep.SEND
@@ -961,9 +967,383 @@ internal fun reentryBundleDirection(route: ReentryRouteKind, senderDirection: St
     else -> "incoming"
 }
 
+/**
+ * Whether a gap bundle is marked as not holding everything of the gap
+ * (`countCapped`): the cap trimmed it, or the sender holds no row older than
+ * [fromMs]. Live walk 2026-11-19: the same rule as web and iOS, so a
+ * receiver keeps its gap line when the sender was away for part of it.
+ */
+internal fun gapBundleIncomplete(
+    rows: List<PersistedMessage>,
+    fromMs: Long,
+    cut: Boolean,
+    timeOf: (PersistedMessage) -> Long?,
+): Boolean = cut || rows.none { (timeOf(it) ?: Long.MAX_VALUE) < fromMs }
+
 /** The rows of [rows] a gap bundle carries: from [fromMs] on, at most [cap]. */
 internal fun gapRows(rows: List<PersistedMessage>, fromMs: Long, cap: Int, timeOf: (PersistedMessage) -> Long?): Pair<List<PersistedMessage>, Boolean> {
     val inGap = rows.filter { (timeOf(it) ?: 0L) >= fromMs }
     val kept = inGap.takeLast(cap.coerceAtLeast(1))
     return kept to (kept.size < inGap.size)
+}
+
+/** The key an owed bundle is filed under: one per (group, returning leaf). */
+internal fun owedGapBundleKey(groupIdHex: String, leafKeyHex: String): String =
+    groupIdHex.lowercase() + ":" + leafKeyHex.lowercase()
+
+/** The persisted form of an [OwedGapBundle]. [epochLeft] is a decimal
+ *  string, since a `ULong` does not fit a JSON number. */
+@Serializable
+internal data class OwedGapBundleRow(
+    val groupIdHex: String,
+    val leafSignatureKeyB64: String,
+    val epochLeft: String,
+    val gapFromMs: Long,
+    val owedSinceMs: Long,
+)
+
+internal fun OwedGapBundle.toRow(): OwedGapBundleRow = OwedGapBundleRow(
+    groupIdHex = groupIdHex.lowercase(),
+    leafSignatureKeyB64 = java.util.Base64.getEncoder().encodeToString(leafSignatureKey),
+    epochLeft = epochLeft.toString(),
+    gapFromMs = gapFromMs,
+    owedSinceMs = owedSinceMs,
+)
+
+/** `null` for a row that does not decode (dropped, never acted on). */
+internal fun OwedGapBundleRow.toOwed(): OwedGapBundle? = try {
+    OwedGapBundle(
+        groupIdHex = groupIdHex.lowercase(),
+        leafSignatureKey = java.util.Base64.getDecoder().decode(leafSignatureKeyB64),
+        epochLeft = epochLeft.toULong(),
+        gapFromMs = gapFromMs,
+        owedSinceMs = owedSinceMs,
+    )
+} catch (_: IllegalArgumentException) {
+    null
+}
+
+/** Where the re-admitter's owed bundles live (section 7). */
+internal interface OwedGapBundleStore {
+    fun load(accountIdB64: String): Map<String, OwedGapBundle>
+
+    /** `false` when the row did not reach the disk. */
+    fun put(accountIdB64: String, key: String, bundle: OwedGapBundle): Boolean
+
+    /**
+     * Remove [key] and return what it held, or `null` when it was gone: the
+     * one claim a SEND or a DROP makes, so two poll paths running at once
+     * act on a bundle once.
+     */
+    fun take(accountIdB64: String, key: String): OwedGapBundle?
+
+    /** The group left this device: every bundle owed into it. */
+    fun removeGroup(accountIdB64: String, groupIdHex: String)
+
+    fun clearForAccount(accountIdB64: String)
+}
+
+/** The production [OwedGapBundleStore], behind the ADR-0077 gate. Survives
+ *  a sign-out (the bundle is still owed when the account lands again); goes
+ *  on Forget device and with the group. */
+internal class SharedPrefsOwedGapBundleStore(context: Context) : OwedGapBundleStore {
+    private val appContext = context.applicationContext
+    private val json = Json { ignoreUnknownKeys = true }
+    private val serializer = MapSerializer(String.serializer(), OwedGapBundleRow.serializer())
+
+    private fun prefs(): SharedPreferences = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun key(accountIdB64: String) = "v1:$accountIdB64"
+
+    private fun rows(accountIdB64: String): Map<String, OwedGapBundleRow> = try {
+        prefs().getString(key(accountIdB64), null)
+            ?.let { runCatching { json.decodeFromString(serializer, it) }.getOrNull() }
+            .orEmpty()
+    } catch (_: Throwable) {
+        emptyMap()
+    }
+
+    private fun write(accountIdB64: String, rows: Map<String, OwedGapBundleRow>): Boolean =
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val editor = prefs().edit()
+            if (rows.isEmpty()) {
+                editor.remove(key(accountIdB64))
+            } else {
+                editor.putString(key(accountIdB64), json.encodeToString(serializer, rows))
+            }
+            editor.commit()
+        } ?: false
+
+    override fun load(accountIdB64: String): Map<String, OwedGapBundle> = synchronized(LOCK) {
+        rows(accountIdB64).mapNotNull { (k, row) -> row.toOwed()?.let { k to it } }.toMap()
+    }
+
+    override fun put(accountIdB64: String, key: String, bundle: OwedGapBundle): Boolean = synchronized(LOCK) {
+        write(accountIdB64, rows(accountIdB64) + (key to bundle.toRow()))
+    }
+
+    override fun take(accountIdB64: String, key: String): OwedGapBundle? = synchronized(LOCK) {
+        val all = rows(accountIdB64)
+        val row = all[key] ?: return null
+        if (!write(accountIdB64, all - key)) return null
+        row.toOwed()
+    }
+
+    override fun removeGroup(accountIdB64: String, groupIdHex: String) {
+        synchronized(LOCK) {
+            val hex = groupIdHex.lowercase()
+            val all = rows(accountIdB64)
+            val kept = all.filterValues { it.groupIdHex.lowercase() != hex }
+            if (kept.size != all.size) write(accountIdB64, kept)
+        }
+    }
+
+    override fun clearForAccount(accountIdB64: String) {
+        synchronized(LOCK) { prefs().edit().remove(key(accountIdB64)).commit() }
+    }
+
+    internal companion object {
+        const val PREFS_NAME = "lakko-reentry-owed-bundles"
+        private val LOCK = Any()
+    }
+}
+
+/**
+ * Who re-sends the push routing secret after bringing a device back: the
+ * group's owner or an admin, as for an ordinary growth. A plain member (a
+ * sibling device that is a plain member, the other person of a one-to-one
+ * with no role) leaves it to them; the receive gate is unchanged.
+ */
+internal fun reentryResendsPushRoutingSecret(isOwner: Boolean, isAdmin: Boolean): Boolean = isOwner || isAdmin
+
+// ---------------------------------------------------------------------------
+// The returning device's look for the gap bundle (section 7)
+// ---------------------------------------------------------------------------
+
+/** At most one look per conversation per minute. Chosen, not measured. */
+internal const val GAP_HISTORY_LOOK_INTERVAL_MS: Long = 60_000L
+
+/** A gap look is kept 30 days from the moment the device came back (the DS
+ *  retention): past it no bundle can still be read, and the gap line stays.
+ *  Chosen, not measured. */
+internal const val GAP_HISTORY_LOOK_RETENTION_MS: Long = 30L * 24L * 60L * 60L * 1_000L
+
+/**
+ * One conversation whose gap bundle this device has not read yet. [secretB64]
+ * is the 32-byte exporter secret of the join epoch (it opens the bundle and
+ * names its rendezvous): a [GapLookStore] keeps it sealed at rest. [gapFromMs]
+ * and [gapToMs] name the gap line it narrows; [lastLookMs] (0 before the
+ * first look) throttles the looks; [route] decides the bundle rows' direction.
+ */
+@Serializable
+internal data class GapLookRecord(
+    val groupIdHex: String,
+    val secretB64: String,
+    val gapFromMs: Long,
+    val gapToMs: Long,
+    val lastLookMs: Long = 0L,
+    val route: ReentryRouteKind,
+) {
+    /** A fresh copy of the secret; the caller zeroes it after use. */
+    fun secret(): ByteArray = java.util.Base64.getDecoder().decode(secretB64)
+
+    override fun toString(): String =
+        "GapLookRecord(gapFromMs=$gapFromMs, gapToMs=$gapToMs, lastLookMs=$lastLookMs, route=$route)"
+}
+
+/** What one pass of the gap look decided for a record. */
+internal enum class GapLookStep { LOOK, WAIT, DROP }
+
+internal fun gapLookStep(record: GapLookRecord, nowMs: Long): GapLookStep {
+    if (nowMs - record.gapToMs > GAP_HISTORY_LOOK_RETENTION_MS) return GapLookStep.DROP
+    val since = nowMs - record.lastLookMs
+    // A clock that moved back reads as due: one look, then throttled again.
+    if (record.lastLookMs > 0L && since in 0 until GAP_HISTORY_LOOK_INTERVAL_MS) return GapLookStep.WAIT
+    return GapLookStep.LOOK
+}
+
+/** Where the gap looks live. The production store seals the whole row
+ *  (secret included) under the device-held key. */
+internal interface GapLookStore {
+    fun load(accountIdB64: String): Map<String, GapLookRecord>
+
+    fun get(accountIdB64: String, groupIdHex: String): GapLookRecord? = load(accountIdB64)[groupIdHex.lowercase()]
+
+    /** `false` when the row did not reach the disk. */
+    fun put(accountIdB64: String, record: GapLookRecord): Boolean
+
+    fun remove(accountIdB64: String, groupIdHex: String)
+
+    fun clearForAccount(accountIdB64: String)
+}
+
+/** The production [GapLookStore]: EncryptedSharedPreferences (the Android
+ *  Keystore key), behind the ADR-0077 gate. */
+internal class EncryptedGapLookStore(context: Context) : GapLookStore {
+    private val app = context.applicationContext
+    private val json = Json { ignoreUnknownKeys = true }
+    private val serializer = MapSerializer(String.serializer(), GapLookRecord.serializer())
+
+    private val prefs: SharedPreferences by lazy {
+        val master = androidx.security.crypto.MasterKey.Builder(app)
+            .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        androidx.security.crypto.EncryptedSharedPreferences.create(
+            app,
+            PREFS_NAME,
+            master,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    private fun key(accountIdB64: String) = "v1:$accountIdB64"
+
+    private fun rows(accountIdB64: String): Map<String, GapLookRecord> = try {
+        prefs.getString(key(accountIdB64), null)
+            ?.let { runCatching { json.decodeFromString(serializer, it) }.getOrNull() }
+            .orEmpty()
+    } catch (_: Throwable) {
+        emptyMap()
+    }
+
+    private fun write(accountIdB64: String, rows: Map<String, GapLookRecord>): Boolean =
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val editor = prefs.edit()
+            if (rows.isEmpty()) {
+                editor.remove(key(accountIdB64))
+            } else {
+                editor.putString(key(accountIdB64), json.encodeToString(serializer, rows))
+            }
+            editor.commit()
+        } ?: false
+
+    override fun load(accountIdB64: String): Map<String, GapLookRecord> = synchronized(LOCK) { rows(accountIdB64) }
+
+    override fun put(accountIdB64: String, record: GapLookRecord): Boolean = synchronized(LOCK) {
+        write(accountIdB64, rows(accountIdB64) + (record.groupIdHex.lowercase() to record))
+    }
+
+    override fun remove(accountIdB64: String, groupIdHex: String) {
+        synchronized(LOCK) {
+            val all = rows(accountIdB64)
+            val hex = groupIdHex.lowercase()
+            if (hex in all) write(accountIdB64, all - hex)
+        }
+    }
+
+    override fun clearForAccount(accountIdB64: String) {
+        synchronized(LOCK) { prefs.edit().remove(key(accountIdB64)).commit() }
+    }
+
+    internal companion object {
+        const val PREFS_NAME = "lakko-reentry-gap-looks"
+        private val LOCK = Any()
+    }
+}
+
+/** What one call of [GapHistoryLooker.lookIfDue] did. */
+internal enum class GapLookOutcome {
+    /** No look is kept for this conversation. */
+    NOT_HELD,
+
+    /** Another look of this conversation is running. */
+    IN_FLIGHT,
+
+    /** Looked less than [GAP_HISTORY_LOOK_INTERVAL_MS] ago. */
+    NOT_DUE,
+
+    /** Past [GAP_HISTORY_LOOK_RETENTION_MS]: the look is dropped, the line stays. */
+    DROPPED,
+
+    /** Looked: the read failed, held no row, or no row opened. Kept. */
+    NOTHING_YET,
+
+    /** A bundle opened and was applied: the look is dropped. */
+    RECEIVED,
+}
+
+/**
+ * The returning device's look for its gap bundle (section 7): one short read
+ * of the rendezvous the re-admitter posts to, at most once a minute per
+ * conversation, for 30 days, until a bundle opens. The read, the open and
+ * what is done with an opened bundle are injected, so the decisions are
+ * tested without a network or the native core.
+ */
+internal class GapHistoryLooker(
+    private val store: GapLookStore,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** The join: the record is written, its first look due at once. */
+    fun start(accountIdB64: String, record: GapLookRecord): Boolean =
+        store.put(accountIdB64, record.copy(groupIdHex = record.groupIdHex.lowercase(), lastLookMs = 0L))
+
+    /**
+     * One look for [groupIdHex] when one is due. [read] returns the payloads
+     * of the rendezvous oldest first (`null` on a failed read); [open] opens
+     * and applies one, `null` (or a throw) when it is not a bundle of this
+     * secret; [received] narrows the gap line once one did.
+     */
+    suspend fun <T> lookIfDue(
+        accountIdB64: String,
+        groupIdHex: String,
+        read: suspend (rendezvous: ByteArray) -> List<ByteArray>?,
+        open: (secret: ByteArray, payload: ByteArray, route: ReentryRouteKind) -> T?,
+        received: (record: GapLookRecord, applied: T) -> Unit,
+    ): GapLookOutcome {
+        val hex = groupIdHex.lowercase()
+        val claim = "$accountIdB64:$hex"
+        if (!inFlight.add(claim)) return GapLookOutcome.IN_FLIGHT
+        try {
+            val record = store.get(accountIdB64, hex) ?: return GapLookOutcome.NOT_HELD
+            val now = clock()
+            when (gapLookStep(record, now)) {
+                GapLookStep.DROP -> {
+                    store.remove(accountIdB64, hex)
+                    return GapLookOutcome.DROPPED
+                }
+                GapLookStep.WAIT -> return GapLookOutcome.NOT_DUE
+                GapLookStep.LOOK -> Unit
+            }
+            // The time is written before the read: a read that fails, hangs
+            // or ends with the process still counts against the minute.
+            store.put(accountIdB64, record.copy(lastLookMs = now))
+            val secret = try {
+                record.secret()
+            } catch (_: IllegalArgumentException) {
+                store.remove(accountIdB64, hex)
+                return GapLookOutcome.DROPPED
+            }
+            try {
+                val payloads = try {
+                    read(reentryHistoryRendezvous(secret))
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    null
+                } ?: return GapLookOutcome.NOTHING_YET
+                // Newest first; a row that is not a bundle of this secret is
+                // passed over.
+                for (payload in payloads.asReversed()) {
+                    val applied = try {
+                        open(secret, payload, record.route)
+                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                        throw cause
+                    } catch (_: Throwable) {
+                        null
+                    } ?: continue
+                    received(record, applied)
+                    store.remove(accountIdB64, hex)
+                    return GapLookOutcome.RECEIVED
+                }
+                return GapLookOutcome.NOTHING_YET
+            } finally {
+                secret.fill(0)
+            }
+        } finally {
+            inFlight.remove(claim)
+        }
+    }
 }

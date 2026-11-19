@@ -22,6 +22,15 @@
  *   `(version, public key)` to every member in-group; a member keeps the
  *   newest from the owner or an admin. And the owner's mark of what it sent.
  *
+ * - **The re-admitter's owed sends** (section 7): the gap's messages this
+ *   device owes a device it brought back, sent once its group stands at the
+ *   epoch the replacement created. Public fields only (group, leaf key,
+ *   epoch, times).
+ * - **The gap looks** (section 7, live walk 2026-11-19): the device that came
+ *   back keeps looking for the gap's messages until they arrive or the DS
+ *   retention passed. The 32-byte history secret is stored sealed under the
+ *   account's device key (`DeviceCipher`), never in the clear.
+ *
  * Every row is `localStorage`, per account, written through the ADR-0077
  * `Storage.setItem` gate; dropped with the group (`membership-wipe.ts`) and
  * on Forget device (`wipe-account.ts`). Nothing here is secret: a KeyPackage
@@ -45,8 +54,18 @@ const READ_FROM_PREFIX = "lakko.chat.reentry-read-from.v1:";
 const GAP_PREFIX = "lakko.chat.reentry-gap.v1:";
 const KNOCK_KEY_PREFIX = "lakko.chat.knock-key.v1:";
 const KNOCK_KEY_SENT_PREFIX = "lakko.chat.knock-key-sent.v1:";
+const OWED_PREFIX = "lakko.chat.reentry-owed.v1:";
+const GAP_LOOK_PREFIX = "lakko.chat.reentry-gap-look.v1:";
 
-const ALL_PREFIXES = [RECORDS_PREFIX, READ_FROM_PREFIX, GAP_PREFIX, KNOCK_KEY_PREFIX, KNOCK_KEY_SENT_PREFIX];
+const ALL_PREFIXES = [
+  RECORDS_PREFIX,
+  READ_FROM_PREFIX,
+  GAP_PREFIX,
+  KNOCK_KEY_PREFIX,
+  KNOCK_KEY_SENT_PREFIX,
+  OWED_PREFIX,
+  GAP_LOOK_PREFIX,
+];
 
 /** The route a request took (section 3). */
 export type ReentryRouteName = "own-device" | "mailbox" | "knock";
@@ -385,6 +404,138 @@ export function knockKeySendDue(sentMark: string | undefined, version: number, m
   return sentVersion !== version || memberCount > sentMembers;
 }
 
+// ---------- the re-admitter's owed sends (section 7) -----------------------
+
+/** One owed send, as stored. */
+export interface StoredOwedGapSend {
+  readonly groupIdB64: string;
+  /** The returning leaf's signature key, standard base64. */
+  readonly leafKeyB64: string;
+  /** The epoch the replacement creates, decimal. */
+  readonly epochAfter: string;
+  readonly gapFromMs: number;
+  readonly notedAtMs: number;
+}
+
+function isOwed(raw: unknown): raw is StoredOwedGapSend {
+  if (typeof raw !== "object" || raw === null) return false;
+  const r = raw as Partial<StoredOwedGapSend>;
+  return (
+    typeof r.groupIdB64 === "string" &&
+    typeof r.leafKeyB64 === "string" &&
+    typeof r.epochAfter === "string" &&
+    /^\d{1,20}$/.test(r.epochAfter) &&
+    typeof r.gapFromMs === "number" &&
+    typeof r.notedAtMs === "number"
+  );
+}
+
+/** Every owed send of the bound account. */
+export function loadOwedGapSends(owner?: string): StoredOwedGapSend[] {
+  const a = account(owner);
+  if (a === null) return [];
+  const raw = read(OWED_PREFIX + a);
+  if (raw === null) return [];
+  try {
+    const parsed = JSON.parse(raw) as { v?: unknown; owed?: unknown };
+    if (parsed.v !== 1 || !Array.isArray(parsed.owed)) return [];
+    return parsed.owed.filter(isOwed);
+  } catch {
+    return [];
+  }
+}
+
+/** Replace the owed sends. Returns `false` when they could not be written. */
+export function saveOwedGapSends(list: readonly StoredOwedGapSend[], owner?: string): boolean {
+  const a = account(owner);
+  if (a === null) return false;
+  try {
+    if (list.length === 0) remove(OWED_PREFIX + a);
+    else write(OWED_PREFIX + a, JSON.stringify({ v: 1, owed: list }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------- the gap looks (section 7) --------------------------------------
+
+/** One gap look, as stored: the secret sealed under the device key. */
+export interface StoredGapLook {
+  /** AES-GCM IV, standard base64. */
+  readonly ivB64: string;
+  /** The sealed 32-byte history secret, standard base64. */
+  readonly sealedSecretB64: string;
+  readonly gapFromMs: number;
+  /** When the device came back: the gap line's end. */
+  readonly gapToMs: number;
+  /** When it last looked (0: never). */
+  readonly lastLookMs: number;
+}
+
+function isGapLook(raw: unknown): raw is StoredGapLook {
+  if (typeof raw !== "object" || raw === null) return false;
+  const r = raw as Partial<StoredGapLook>;
+  return (
+    typeof r.ivB64 === "string" &&
+    typeof r.sealedSecretB64 === "string" &&
+    typeof r.gapFromMs === "number" &&
+    typeof r.gapToMs === "number" &&
+    typeof r.lastLookMs === "number"
+  );
+}
+
+/** The gap look of `groupIdB64`, if any. */
+export function gapLookFor(groupIdB64: string, owner?: string): StoredGapLook | undefined {
+  const a = account(owner);
+  if (a === null) return undefined;
+  const raw = read(`${GAP_LOOK_PREFIX}${a}:${groupIdB64}`);
+  if (raw === null) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isGapLook(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keep a gap look. Returns `false` when it could not be written. */
+export function saveGapLook(groupIdB64: string, look: StoredGapLook, owner?: string): boolean {
+  const a = account(owner);
+  if (a === null) return false;
+  try {
+    write(`${GAP_LOOK_PREFIX}${a}:${groupIdB64}`, JSON.stringify(look));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The look ended (the messages arrived, or the retention passed). */
+export function deleteGapLook(groupIdB64: string, owner?: string): void {
+  const a = account(owner);
+  if (a !== null) remove(`${GAP_LOOK_PREFIX}${a}:${groupIdB64}`);
+}
+
+/** The groups the bound account has a gap look for. */
+export function gapLookGroups(owner?: string): string[] {
+  const a = account(owner);
+  if (a === null) return [];
+  const prefix = `${GAP_LOOK_PREFIX}${a}:`;
+  const out: string[] = [];
+  try {
+    const store = globalThis.localStorage;
+    if (store === undefined) return [];
+    for (let i = 0; i < store.length; i += 1) {
+      const k = store.key(i);
+      if (k !== null && k.startsWith(prefix)) out.push(k.slice(prefix.length));
+    }
+  } catch {
+    return [];
+  }
+  return out;
+}
+
 // ---------- wipes ---------------------------------------------------------
 
 /** The group left this device. */
@@ -392,9 +543,12 @@ export function clearReentryRowsForGroup(groupIdB64: string, owner?: string): vo
   const a = account(owner);
   if (a === null) return;
   deleteReentryRecord(groupIdB64, a);
-  for (const p of [READ_FROM_PREFIX, GAP_PREFIX, KNOCK_KEY_PREFIX, KNOCK_KEY_SENT_PREFIX]) {
+  for (const p of [READ_FROM_PREFIX, GAP_PREFIX, KNOCK_KEY_PREFIX, KNOCK_KEY_SENT_PREFIX, GAP_LOOK_PREFIX]) {
     remove(`${p}${a}:${groupIdB64}`);
   }
+  const owed = loadOwedGapSends(a);
+  const kept = owed.filter((o) => o.groupIdB64 !== groupIdB64);
+  if (kept.length !== owed.length) saveOwedGapSends(kept, a);
 }
 
 /** Forget device: every row of the account. */

@@ -46,7 +46,7 @@ import { ProfilePublishScheduler } from "../profile/publish-scheduler";
 import { readPushRotationRole, withRoutingRowLock, type PushRotationRole } from "../push/group-routing";
 import { loadWasm } from "../wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
-import { ChatClient, type IncomingChatEvent } from "./client";
+import { ChatClient, isConversationBehind, type IncomingChatEvent } from "./client";
 import { readIsActive } from "./membership-ended";
 import { conversationKindOf } from "./conversation-kind";
 import { IdbPinBackend } from "./pin-idb";
@@ -201,6 +201,8 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
     random: () => Math.random(),
     publish: republishInto,
     onError: (_groupIdB64, err) => {
+      // ADR-0091: a behind conversation sends nothing until it is back.
+      if (isConversationBehind(err)) return;
       // eslint-disable-next-line no-console
       console.warn("[pins] growth re-send failed", err);
     },

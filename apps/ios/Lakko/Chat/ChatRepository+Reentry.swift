@@ -87,6 +87,7 @@ extension ChatRepository {
         reentryHistoryOwed.save(
             reentryHistoryOwed.load(accountIdB64: accountIdB64).filter { $0.groupIdHex != groupIdHex },
             accountIdB64: accountIdB64)
+        reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         chatClient.reentryObservations.clear(groupIdHex: groupIdHex)
     }
 
@@ -371,7 +372,7 @@ extension ChatRepository {
             row.sent.append(tag)
             KnockVersionStore.save(row, accountIdB64, groupIdHex)
         } catch {
-            NSLog("[knock] WARN the knock key was not sent in-group; retried on the next change")
+            if !ConversationReentryRules.isBehindRefusal(error) { NSLog("[knock] WARN the knock key was not sent in-group; retried on the next change") }
         }
     }
 
@@ -572,6 +573,9 @@ extension ChatRepository {
         back.adoptReentryRecord(old, readFrom: record.readFromAfterReentry ?? old.cursor)
         // UX 2.4 — where messages were sent while out, one local line.
         let now = nowU64
+        // The gap's start: when the first row could not be read (the time
+        // stated in the request); the gap history is looked for from there.
+        let lookFrom = record.gapFromMs.map { min($0, now) } ?? now
         if let gapFrom = record.gapFromMs, gapFrom <= now {
             let lowest = back.messages.map(\.id).min() ?? 0
             back.appendLocalRow(
@@ -594,8 +598,15 @@ extension ChatRepository {
         // Everyone whose profile was sealed while out re-introduces itself.
         requestProfilesAfterJoin(groupIdHex: groupIdHex)
         if let historySecret {
+            // Section 7 — looked for until it arrives or the Delivery Service's
+            // retention passes (rule 1 of the 2026-11-19 walk fix), not by one
+            // timed wait: the re-admitter sends it only once its own poll
+            // reaches the new epoch, which may be days later.
+            reentryGapLooks.save(
+                ReentryGapLook(groupIdHex: groupIdHex, secret: historySecret, gapFromMs: lookFrom, gapToMs: now),
+                accountIdB64: accountIdB64)
             Task { @MainActor [weak self] in
-                await self?.readReentryHistory(groupIdHex: groupIdHex, secret: historySecret)
+                await self?.lookForReentryGapHistory(groupIdHex: groupIdHex)
             }
         }
         return true
@@ -631,7 +642,8 @@ extension ChatRepository {
                     length: ConversationReentryRules.historySecretLength)
                 let gapRows = ConversationReentryRules.gapRows(rows, gapFromMs: owed.gapFromMs)
                 if let sealed = try HistoryBundleCodec.buildForGroup(
-                    hex: groupIdHex, rows: gapRows, accountIdB64: accountIdB64, secret: secret) {
+                    hex: groupIdHex, rows: gapRows, accountIdB64: accountIdB64, secret: secret,
+                    heldBeforeGap: ConversationReentryRules.gapHeldBefore(rows, gapFromMs: owed.gapFromMs)) {
                     try await WelcomeCourier.publishHistoryBundle(
                         rendezvousPseudonym: ConversationReentryRules.historyRendezvous(secret: secret),
                         sealedBytes: sealed, ds: dsClient)
@@ -647,22 +659,64 @@ extension ChatRepository {
         resendGroupStateForReturningDevice(groupIdHex: groupIdHex)
     }
 
-    /// The device that came back: read the gap history from its rendezvous.
-    private func readReentryHistory(groupIdHex: String, secret: Data) async {
-        guard let accountIdB64 = currentAccountIdB64, !reentryHistoryReading.contains(groupIdHex) else { return }
+    /// The device that came back: one short read of the gap history's
+    /// rendezvous, at most once a minute per group (``ConversationReentryRules/gapLookVerdict(_:nowMs:)``).
+    /// Called right after the join, at the tail of every applied poll of the
+    /// group, and when the chat is opened; never from the notification
+    /// extension (C-59). The first row that opens and files ends the look and
+    /// narrows the gap line; a failed read, no row, or a row that does not
+    /// open keeps it.
+    func lookForReentryGapHistory(groupIdHex: String) async {
+        guard let accountIdB64 = currentAccountIdB64, !reentryHistoryReading.contains(groupIdHex),
+              let look = reentryGapLooks.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
+        let now = nowU64
+        switch ConversationReentryRules.gapLookVerdict(look, nowMs: now) {
+        case .wait:
+            return
+        case .drop:
+            reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            ReentryLog.emit("chat re-entry: gap look dropped: retention passed")
+            return
+        case .look:
+            break
+        }
         reentryHistoryReading.insert(groupIdHex)
         defer { reentryHistoryReading.remove(groupIdHex) }
+        reentryGapLooks.markLooked(accountIdB64: accountIdB64, groupIdHex: groupIdHex, atMs: now)
         let bound = binding.capture()
+        let rows: [MailboxMessage]
         do {
-            let outcome = try await WelcomeCourier.pollForHistoryBundle(
-                rendezvousPseudonym: ConversationReentryRules.historyRendezvous(secret: secret),
-                welcomeCursor: 0, timeoutSeconds: reentryHistoryWaitSeconds, ds: dsClient)
-            guard bound.isCurrent, case .received(let sealed) = outcome else { return }
-            let applied = try HistoryBundleCodec.applyToMessageLog(
-                accountIdB64: accountIdB64, secret: secret, sealedBytes: sealed, store: messageLogStore)
-            ReentryLog.emit("conversation re-entry: \(applied) missed rows filed from the gap history")
+            rows = try await dsClient.fetchRendezvous(
+                id: ConversationReentryRules.historyRendezvous(secret: look.secret),
+                after: 0, limit: Self.gapLookReadLimit, waitSecs: 0).messages
         } catch {
-            ReentryLog.emit("conversation re-entry: the gap history was not read: \(ErrorLogTag.of(error))")
+            return
+        }
+        guard bound.isCurrent, currentAccountIdB64 == accountIdB64 else { return }
+        for row in rows {
+            // Not the history bundle: skip it, as the timed wait did.
+            if RecoveryPayload.isRecoveryRow(row.payload) || StateBundle.isStateRow(row.payload) { continue }
+            let filed: HistoryBundleCodec.GapApplied
+            do {
+                filed = try HistoryBundleCodec.applyGapBundle(
+                    accountIdB64: accountIdB64, secret: look.secret, sealedBytes: row.payload,
+                    store: messageLogStore)
+            } catch {
+                continue
+            }
+            reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            if let record = groups[groupIdHex],
+               record.narrowReentryGap(
+                   gapToMs: look.gapToMs, complete: filed.complete, earliestMs: filed.earliestMs) {
+                persistMessageLogBestEffort()
+                state = state.with(threads: buildThreadList())
+            }
+            ReentryLog.emit("chat re-entry: missed messages received: rows=\(filed.applied)")
+            return
         }
     }
+
+    /// Rows one gap look reads from the rendezvous. Chosen, not measured:
+    /// the bundle is normally the first and only row.
+    static let gapLookReadLimit = 16
 }

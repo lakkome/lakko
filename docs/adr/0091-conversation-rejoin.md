@@ -802,6 +802,88 @@ nothing is deployed, `lakko-security` has not run. The S0 result is above
 9. **A refused join changes nothing** is pinned by comparing the identity's
    whole storage snapshot before and after each refused case.
 
+## Live walk 2026-11-19
+
+The first live walk of phase 2, on the test stack. The desktop app (the web
+client's code) fell behind in a group: local epoch 6, the journal at 16.
+
+**What worked.** The device was suspected and confirmed, sent a route 1
+request every 30 minutes, and was brought back by a Safari web device of the
+same account: the replacement committed, the Welcome arrived and
+`joinReentry` replaced the stale group (`chat re-entry joined: epoch=17`).
+Detection (section 1), the request (section 3), the replacement (section 4)
+and the join (section 5) worked as designed.
+
+**Four gaps, and how each was fixed (web, iOS and Android, host-tested only;
+nothing below has been walked yet).**
+
+1. **The gap line was not drawn in an empty chat.** The group held no
+   readable message on the device, and the web chat view replaced the whole
+   timeline with its empty-chat note, so the line was never shown. Web draws
+   the timeline when it holds a gap line (`routes/Chat.tsx`). Android had the
+   same defect (`ChatScreen.kt` branched on the message list alone); it now
+   branches on the built timeline (`showsEmptyTimeline`). iOS stores the line
+   as a system row in the message list and never had it; a test pins it.
+2. **The missed messages never arrived.** The device that came back read the
+   gap rendezvous only for a while after the join (web 15 minutes, iOS
+   600 s, Android 6 reads of 20 s), and the re-admitter posted only after its
+   own poll of the group saw `epoch_left + 1`. Here the re-admitter was a
+   hidden Safari tab whose background sweep was parked, so it most likely
+   polled after the window had closed. On every client:
+   - the device that came back keeps a durable *gap look* per group (the
+     32-byte history secret sealed at rest: web under the account's device
+     key, iOS AES-GCM under a Keychain wrap key, Android in
+     EncryptedSharedPreferences), and looks (one read of the rendezvous,
+     `waitSecs` 0) right after the join, after every applied poll of the
+     group, and when the chat is opened, at most once a minute, until the
+     bundle is filed or 30 days passed since it came back (then the gap line
+     stays);
+   - the re-admitter's owed send is durable (web and Android kept it in
+     memory, iOS already in `UserDefaults`), kept 30 days, and is sent from
+     every applied poll and again right after the poll tail's own sweep
+     (iOS and Android ran the sweep after the owed check, so a replacement
+     merged by it waited for the next poll); on web a one-minute tick also
+     sends an owed bundle whose group already stands at the replacement's
+     epoch and reads, once a minute, an owed group no open chat polls (a
+     hidden tab's background sweep may be parked);
+   - the carrier (label, context, rendezvous id, golden vector) is unchanged.
+   iOS never narrowed its gap line when a bundle arrived; it now does, by the
+   web rule, and its sender marks a bundle as not holding everything when it
+   holds no row older than the gap's start (web already did; Android was
+   aligned to the same rule).
+3. **Log noise while behind.** Web logged a behind-state refusal as a profile
+   publish failure. Web and iOS no longer log a send refused because the
+   device is behind (profile, group name and the other republishers, pins,
+   shared channels, typing, read receipts, the push routing broadcast, the
+   beacon and the knock key on iOS). Android already returned quietly; its
+   own-device fan-out now skips a behind chat instead of logging a warning
+   per chat.
+4. **The push routing secret after a re-entry.** The desktop logged
+   `push-routing secret REFUSED ... reject-not-authorized`: the re-admitter,
+   a plain member, re-sent the secret, and the ADR-0042 receive gate keeps a
+   plain member's secret only when it is the bytes already held. The
+   re-admitter now re-sends it only as the owner or an admin; the receive
+   gate is unchanged. A device brought back by a plain member gets the
+   secret at the owner's next rotation or redistribution, and until then
+   receives no push wake for that group (G-58).
+
+**New numbers (chosen, not measured).** A look at most once a minute per
+group (`GAP_HISTORY_LOOK_INTERVAL_MS` 60 000); looks for 30 days after the
+device came back (`GAP_HISTORY_LOOK_RETENTION_MS`, the DS retention); an
+owed send kept 30 days (was 24 hours); up to 16 rendezvous rows read per
+look on web and iOS.
+
+**Found and fixed the same day.** On Android a behind device's control send
+answers `null` instead of throwing, and the push routing broadcast took that
+`null` as a success, so a secret it meant to send while behind was recorded
+as distributed without being sent. The broadcast port now throws
+`RoutingBroadcastSkipped` on a skipped send, so the row stays pending and the
+next provision re-sends it once the device is back. On web and iOS the behind
+refusal is already an error (`ConversationBehindError`,
+`ChatRepository.BehindInConversation`) and takes the failed-publish path;
+each client now has a test that a refused broadcast stays pending and goes
+out once back, and web no longer logs that refusal as a broadcast failure.
+
 ## Abuse
 
 - **A stranger cannot cause a replacement.** A valid `K` needs the private

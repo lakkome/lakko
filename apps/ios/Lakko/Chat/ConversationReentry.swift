@@ -420,9 +420,11 @@ public struct ReentryOwedHistory: Codable, Equatable, Sendable {
 }
 
 public struct ReentryHistoryOwed {
-    /// How long an owed history waits for its epoch. Chosen, not measured:
-    /// a replacement is normally swept within minutes.
-    public static let lifetimeMs: UInt64 = 24 * 60 * 60 * 1000
+    /// How long an owed history waits for its epoch (`GAP_OWED_TTL_MS`).
+    /// Chosen, not measured: the returning device looks for the bundle for
+    /// ``ConversationReentryRules/gapHistoryLookRetentionMs``, so the
+    /// re-admitter owes it as long.
+    public static let lifetimeMs: UInt64 = 30 * 24 * 60 * 60 * 1000
 
     let defaults: UserDefaults
 
@@ -450,6 +452,156 @@ public struct ReentryHistoryOwed {
         rows.append(row)
         save(rows, accountIdB64: accountIdB64)
     }
+}
+
+// MARK: - The gap history a returning device looks for (section 7)
+
+/// One conversation whose gap history this device, back after a re-entry,
+/// still looks for: the history secret (exported at the epoch the
+/// replacement created; sealed at rest), the gap's two ends, and when it
+/// last looked.
+public struct ReentryGapLook: Equatable, Sendable {
+    public let groupIdHex: String
+    /// The 32-byte history secret. Never written in the clear.
+    public let secret: Data
+    public let gapFromMs: UInt64
+    /// The moment the device came back: the gap line's end.
+    public let gapToMs: UInt64
+    public var lastLookMs: UInt64?
+
+    public init(groupIdHex: String, secret: Data, gapFromMs: UInt64, gapToMs: UInt64, lastLookMs: UInt64? = nil) {
+        self.groupIdHex = groupIdHex
+        self.secret = secret
+        self.gapFromMs = gapFromMs
+        self.gapToMs = gapToMs
+        self.lastLookMs = lastLookMs
+    }
+}
+
+/// The durable gap looks, per account and group, in `UserDefaults`. The
+/// secret is sealed with AES-GCM under a per-account wrap key kept in the
+/// Keychain (the ``PushRoutingStore`` pattern); the other fields are public.
+public struct ReentryGapLookStore {
+    /// The stored form of one look.
+    struct Stored: Codable, Equatable {
+        let sealedSecret: Data
+        let gapFromMs: UInt64
+        let gapToMs: UInt64
+        var lastLookMs: UInt64?
+    }
+
+    let defaults: UserDefaults
+    /// The wrap key of an account: created on a write, read on a read.
+    let wrapKey: (_ accountIdB64: String, _ create: Bool) -> Data?
+
+    /// Keychain service of the wrap key; the Keychain account is the
+    /// account id, so Forget device removes the key with the rows.
+    public static let wrapKeyService = "me.lakko.reentry-gap-look-wrap.v1"
+
+    public init(
+        defaults: UserDefaults = .standard,
+        wrapKey: @escaping (_ accountIdB64: String, _ create: Bool) -> Data? = { account, create in
+            create
+                ? KeychainWrapKey.loadOrCreate(service: ReentryGapLookStore.wrapKeyService, account: account)
+                : KeychainWrapKey.read(service: ReentryGapLookStore.wrapKeyService, account: account)
+        }
+    ) {
+        self.defaults = defaults
+        self.wrapKey = wrapKey
+    }
+
+    public static func key(_ accountIdB64: String) -> String {
+        "lakko.conversation-reentry.gap-look.v1.\(accountIdB64)"
+    }
+
+    /// Forget device: the rows and the account's wrap key.
+    public static func wipe(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(accountIdB64))
+        KeychainWrapKey.delete(service: wrapKeyService, account: accountIdB64)
+    }
+
+    func storedRows(_ accountIdB64: String) -> [String: Stored] {
+        defaults.data(forKey: Self.key(accountIdB64))
+            .flatMap { try? JSONDecoder().decode([String: Stored].self, from: $0) } ?? [:]
+    }
+
+    private func write(_ map: [String: Stored], _ accountIdB64: String) {
+        if map.isEmpty {
+            defaults.removeObject(forKey: Self.key(accountIdB64))
+        } else {
+            defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+        }
+    }
+
+    /// The groups this account has a look for.
+    public func groupIds(accountIdB64: String) -> [String] {
+        Array(storedRows(accountIdB64).keys)
+    }
+
+    /// The look for `groupIdHex`, or `nil` when none is stored or its secret
+    /// does not open (a lost wrap key: the look is then useless).
+    public func load(accountIdB64: String, groupIdHex: String) -> ReentryGapLook? {
+        guard let stored = storedRows(accountIdB64)[groupIdHex],
+              let keyBytes = wrapKey(accountIdB64, false),
+              let box = try? AES.GCM.SealedBox(combined: stored.sealedSecret),
+              let secret = try? AES.GCM.open(box, using: SymmetricKey(data: keyBytes)) else { return nil }
+        return ReentryGapLook(
+            groupIdHex: groupIdHex, secret: secret, gapFromMs: stored.gapFromMs,
+            gapToMs: stored.gapToMs, lastLookMs: stored.lastLookMs)
+    }
+
+    /// Store `look` (replacing any for its group). `false` when the account
+    /// is closing or the secret could not be sealed; nothing is written then.
+    @discardableResult
+    public func save(_ look: ReentryGapLook, accountIdB64: String) -> Bool {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return false }
+        defer { gate.leave() }
+        guard let keyBytes = wrapKey(accountIdB64, true),
+              let sealed = try? AES.GCM.seal(look.secret, using: SymmetricKey(data: keyBytes)).combined
+        else { return false }
+        var map = storedRows(accountIdB64)
+        map[look.groupIdHex] = Stored(
+            sealedSecret: sealed, gapFromMs: look.gapFromMs, gapToMs: look.gapToMs, lastLookMs: look.lastLookMs)
+        write(map, accountIdB64)
+        return true
+    }
+
+    /// Record that a look for `groupIdHex` started at `atMs`.
+    public func markLooked(accountIdB64: String, groupIdHex: String, atMs: UInt64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = storedRows(accountIdB64)
+        guard map[groupIdHex] != nil else { return }
+        map[groupIdHex]?.lastLookMs = atMs
+        write(map, accountIdB64)
+    }
+
+    public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = storedRows(accountIdB64)
+        guard map.removeValue(forKey: groupIdHex) != nil else { return }
+        write(map, accountIdB64)
+    }
+}
+
+/// What a gap look does now.
+public enum ReentryGapLookVerdict: Equatable, Sendable {
+    /// Read the rendezvous once.
+    case look
+    /// Looked less than ``ConversationReentryRules/gapHistoryLookIntervalMs`` ago.
+    case wait
+    /// ``ConversationReentryRules/gapHistoryLookRetentionMs`` has passed since
+    /// the gap's end: drop the look; the gap line stays.
+    case drop
+}
+
+/// What a received gap history does to one stored gap line.
+public enum ReentryGapNarrowing: Equatable, Sendable {
+    case keep
+    case remove
+    /// The line now ends at the earliest row received.
+    case replace(String)
 }
 
 // MARK: - The rules
@@ -692,6 +844,73 @@ public enum ConversationReentryRules {
     /// Whether an owed history is still owed at `nowMs`.
     public static func historyStillOwed(_ owed: ReentryOwedHistory, nowMs: UInt64) -> Bool {
         nowMs < owed.owedAtMs &+ ReentryHistoryOwed.lifetimeMs
+    }
+
+    /// Whether the sender held a row older than the gap's start: without one
+    /// it cannot vouch that it saw the start of the gap, and the bundle is
+    /// marked `countCapped` (the web rule).
+    static func gapHeldBefore(_ rows: [PersistedMessage], gapFromMs: UInt64) -> Bool {
+        HistoryBundleCodec.bundledMessages(rows).contains { row in
+            guard let ms = ChatRepository.parseDsTimestampMs(row.createdAt) else { return false }
+            return ms < Int64(clamping: gapFromMs)
+        }
+    }
+
+    // MARK: The gap look of a returning device
+
+    /// `GAP_HISTORY_LOOK_INTERVAL_MS`: at most one look per group per
+    /// minute. Chosen, not measured.
+    public static let gapHistoryLookIntervalMs: UInt64 = 60_000
+
+    /// `GAP_HISTORY_LOOK_RETENTION_MS`: a look is kept 30 days from the gap's
+    /// end, the Delivery Service's retention. Chosen, not measured.
+    public static let gapHistoryLookRetentionMs: UInt64 = 30 * 24 * 60 * 60 * 1000
+
+    /// What a look for `look` does at `nowMs`.
+    public static func gapLookVerdict(_ look: ReentryGapLook, nowMs: UInt64) -> ReentryGapLookVerdict {
+        if nowMs >= look.gapToMs &+ gapHistoryLookRetentionMs { return .drop }
+        if let last = look.lastLookMs, nowMs < last &+ gapHistoryLookIntervalMs { return .wait }
+        return .look
+    }
+
+    /// What a received gap history does to a stored row's `text` (the web
+    /// `narrowGapLine` rule): only the gap line ending at `gapToMs` moves; a
+    /// complete bundle removes it; otherwise it ends at the earliest row the
+    /// bundle carried, and goes when that is at or before its start.
+    public static func narrowGap(
+        text: String, gapToMs: UInt64, complete: Bool, earliestMs: Int64?
+    ) -> ReentryGapNarrowing {
+        guard let gap = parseGap(text), gap.toMs == gapToMs else { return .keep }
+        if complete { return .remove }
+        guard let earliestMs, earliestMs >= 0, UInt64(earliestMs) < gap.toMs else { return .keep }
+        let earliest = UInt64(earliestMs)
+        if earliest <= gap.fromMs { return .remove }
+        return .replace(gapMarker(fromMs: gap.fromMs, toMs: earliest))
+    }
+
+    // MARK: The group state re-sent after a replacement
+
+    /// Whether the re-admitter also re-sends the push routing secret after a
+    /// replacement: only an owner or an admin (rule 3 of the walk fix). A
+    /// plain member, a route-1 sibling that is a plain member, and the other
+    /// person of a one-to-one never send it.
+    public static func resendsPushRoutingSecret(ownRole: Role?) -> Bool {
+        ownRole == .owner || ownRole == .admin
+    }
+
+    // MARK: Quiet refusals
+
+    /// Whether `error` is the refusal of a send this device must not make
+    /// while behind (section 2), possibly wrapped in ``ChatError/wrapped(_:underlying:)``.
+    /// Such a refusal is the stop list working, not a failure to log.
+    public static func isBehindRefusal(_ error: Error) -> Bool {
+        var current: Error = error
+        for _ in 0..<8 {
+            if current is ChatRepository.BehindInConversation { return true }
+            guard case ChatError.wrapped(_, let underlying) = current else { return false }
+            current = underlying
+        }
+        return false
     }
 }
 

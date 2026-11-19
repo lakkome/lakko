@@ -777,7 +777,6 @@ final class MembershipEndTests: XCTestCase {
         }
         XCTAssertEqual(try MembershipEndRules.stillActiveGroupIdHex(XCTUnwrap(refusal)), hex)
         XCTAssertTrue(f.repo.holdWelcomeForActiveGroup(groupIdHex: hex, welcome: welcome))
-        f.repo.reentryHistoryWaitSeconds = 0
         await f.repo.resolveHeldWelcomes()
 
         let back = try XCTUnwrap(f.repo.groups[hex])

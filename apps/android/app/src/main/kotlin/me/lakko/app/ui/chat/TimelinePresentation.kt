@@ -437,6 +437,18 @@ internal fun withReentryGapLines(
     return out
 }
 
+/**
+ * Whether the chat shows its empty-timeline content instead of the list:
+ * nothing held, nothing being sent, and nothing in the built [timeline]. A
+ * chat whose every message was missed while the device was out still draws
+ * its gap line (`docs/ux/conversation-rejoin.md` 2.4).
+ */
+internal fun showsEmptyTimeline(
+    timeline: List<TimelineItem>,
+    messagesEmpty: Boolean,
+    pendingMediaEmpty: Boolean,
+): Boolean = messagesEmpty && pendingMediaEmpty && timeline.isEmpty()
+
 /** The gap line's text in [strings], times in the device's clock format. */
 internal fun reentryGapLabel(
     gap: me.lakko.app.chat.ReentryGap,

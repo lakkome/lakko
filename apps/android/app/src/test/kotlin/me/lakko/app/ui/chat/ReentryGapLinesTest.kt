@@ -7,7 +7,9 @@ import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
 import me.lakko.app.chat.ReentryGap
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -54,5 +56,20 @@ class ReentryGapLinesTest {
     fun `with nothing after it the line goes last`() {
         val out = withReentryGapLines(items, listOf(ReentryGap(10L, Long.MAX_VALUE - 1))) { "gap" }
         assertEquals("gap-10-${Long.MAX_VALUE - 1}", out.last().key)
+    }
+
+    @Test
+    fun `a chat whose every message was missed still draws its gap line`() {
+        val timeline = withReentryGapLines(emptyList(), listOf(ReentryGap(10L, 20L))) { "gap" }
+        assertEquals(listOf("gap-10-20"), keys(timeline))
+        assertTrue(timeline.single() is TimelineItem.DateSeparator)
+        assertFalse(showsEmptyTimeline(timeline, messagesEmpty = true, pendingMediaEmpty = true))
+    }
+
+    @Test
+    fun `an empty chat with no gap line shows the empty hint`() {
+        assertTrue(showsEmptyTimeline(emptyList(), messagesEmpty = true, pendingMediaEmpty = true))
+        assertFalse("a send in flight draws the list", showsEmptyTimeline(emptyList(), messagesEmpty = true, pendingMediaEmpty = false))
+        assertFalse(showsEmptyTimeline(items, messagesEmpty = false, pendingMediaEmpty = true))
     }
 }

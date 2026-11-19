@@ -45,7 +45,7 @@ import { loadWasm } from "../wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { ownsGroup } from "./group-owner";
 import { notePublicRecordChanged } from "./handle-owed";
-import { ChatClient, type IncomingChatEvent } from "./client";
+import { ChatClient, isConversationBehind, type IncomingChatEvent } from "./client";
 import { IdbGroupNameBackend } from "./group-name-idb";
 import {
   GroupSettingStore,
@@ -294,6 +294,8 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     random: () => Math.random(),
     publish: republishInto,
     onError: (_groupIdB64, err) => {
+      // ADR-0091: a behind conversation sends nothing until it is back.
+      if (isConversationBehind(err)) return;
       // eslint-disable-next-line no-console
       console.warn("[group-name] growth re-send failed", err);
     },

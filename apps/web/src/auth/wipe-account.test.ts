@@ -351,6 +351,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.chat.behind.v1:${acct}:${G}`, JSON.stringify({ v: 1, kind: "confirmed", since: 1 }));
   put(`lakko.chat.reentry.v1:${acct}`, JSON.stringify({ v: 1, records: [] }));
   put(`lakko.chat.reentry-gap.v1:${acct}:${G}`, "[]");
+  put(`lakko.chat.reentry-owed.v1:${acct}`, JSON.stringify({ v: 1, owed: [] }));
+  put(`lakko.chat.reentry-gap-look.v1:${acct}:${G}`, "{}");
   saveKnownGroupIds([G], acct);
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
@@ -758,6 +760,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.chat.reentry-gap.v1:": "account",
   "lakko.chat.knock-key.v1:": "account",
   "lakko.chat.knock-key-sent.v1:": "account",
+  "lakko.chat.reentry-owed.v1:": "account",
+  "lakko.chat.reentry-gap-look.v1:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
   "lakko.channels.publish-counter.v2.": "account",

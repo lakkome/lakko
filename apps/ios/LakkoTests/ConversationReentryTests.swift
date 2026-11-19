@@ -455,4 +455,173 @@ final class ConversationReentryTests: XCTestCase {
         XCTAssertEqual(key.knockVersion, 3)
         XCTAssertEqual(key.knockPk, Data(repeating: 5, count: 32))
     }
+
+    // MARK: - The 2026-11-19 walk fix
+
+    private let day: UInt64 = 24 * 60 * 60 * 1000
+
+    /// A wrap-key provider standing in for the Keychain: one fixed key.
+    private func lookStore(_ defaults: UserDefaults, key: Data = Data(repeating: 0x5A, count: 32))
+        -> ReentryGapLookStore {
+        ReentryGapLookStore(defaults: defaults, wrapKey: { _, _ in key })
+    }
+
+    func testAGapLookRoundTripsAndItsSecretIsNeverStoredInTheClear() throws {
+        let defaults = suite()
+        let store = lookStore(defaults)
+        let secret = Data((0..<32).map { UInt8($0) &* 7 &+ 3 })
+        let look = ReentryGapLook(groupIdHex: "aa", secret: secret, gapFromMs: 1_000, gapToMs: 5_000)
+        XCTAssertTrue(store.save(look, accountIdB64: account))
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa"), look)
+        XCTAssertEqual(store.groupIds(accountIdB64: account), ["aa"])
+
+        let raw = try XCTUnwrap(defaults.data(forKey: ReentryGapLookStore.key(account)))
+        XCTAssertNil(raw.range(of: secret), "the stored bytes do not hold the secret")
+        XCTAssertFalse(String(decoding: raw, as: UTF8.self).contains(secret.base64EncodedString()),
+                       "nor its base64 form")
+
+        // Another wrap key opens nothing: the look is unreadable, not wrong.
+        let other = lookStore(defaults, key: Data(repeating: 0x11, count: 32))
+        XCTAssertNil(other.load(accountIdB64: account, groupIdHex: "aa"))
+
+        store.markLooked(accountIdB64: account, groupIdHex: "aa", atMs: 9_000)
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa")?.lastLookMs, 9_000)
+        store.remove(accountIdB64: account, groupIdHex: "aa")
+        XCTAssertNil(store.load(accountIdB64: account, groupIdHex: "aa"))
+        XCTAssertNil(defaults.data(forKey: ReentryGapLookStore.key(account)))
+    }
+
+    func testAGapLookWithoutAWrapKeyIsNotWritten() {
+        let defaults = suite()
+        let store = ReentryGapLookStore(defaults: defaults, wrapKey: { _, _ in nil })
+        let look = ReentryGapLook(groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 2)
+        XCTAssertFalse(store.save(look, accountIdB64: account))
+        XCTAssertNil(defaults.data(forKey: ReentryGapLookStore.key(account)))
+    }
+
+    func testAGapLookRunsAtMostOncePerMinute() {
+        XCTAssertEqual(ConversationReentryRules.gapHistoryLookIntervalMs, 60_000)
+        var look = ReentryGapLook(groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 100)
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 100), .look, "the first look is at once")
+        look.lastLookMs = 1_000
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 1_000), .wait)
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 60_999), .wait)
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 61_000), .look)
+    }
+
+    func testAGapLookIsDroppedThirtyDaysAfterTheGapsEnd() {
+        XCTAssertEqual(ConversationReentryRules.gapHistoryLookRetentionMs, 30 * day)
+        let look = ReentryGapLook(
+            groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 10_000, lastLookMs: nil)
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 10_000 + 30 * day - 1), .look)
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 10_000 + 30 * day), .drop)
+        var recent = look
+        recent.lastLookMs = 10_000 + 30 * day - 10
+        XCTAssertEqual(ConversationReentryRules.gapLookVerdict(recent, nowMs: 10_000 + 30 * day), .drop,
+                       "retention wins over the throttle")
+    }
+
+    func testAnOwedHistoryWaitsThirtyDays() {
+        XCTAssertEqual(ReentryHistoryOwed.lifetimeMs, 30 * day)
+        let row = ReentryOwedHistory(
+            groupIdHex: "g", keyPackage: Data([1]), leafKey: Data(repeating: 2, count: 32),
+            targetEpoch: 8, gapFromMs: 1, owedAtMs: 100)
+        XCTAssertTrue(ConversationReentryRules.historyStillOwed(row, nowMs: 100 + 29 * day))
+        XCTAssertFalse(ConversationReentryRules.historyStillOwed(row, nowMs: 100 + 30 * day))
+    }
+
+    func testOnlyAnOwnerOrAnAdminResendsThePushRoutingSecret() {
+        XCTAssertTrue(ConversationReentryRules.resendsPushRoutingSecret(ownRole: .owner))
+        XCTAssertTrue(ConversationReentryRules.resendsPushRoutingSecret(ownRole: .admin))
+        XCTAssertFalse(ConversationReentryRules.resendsPushRoutingSecret(ownRole: .member))
+        XCTAssertFalse(ConversationReentryRules.resendsPushRoutingSecret(ownRole: nil),
+                       "no role table (a one-to-one) sends none")
+    }
+
+    @MainActor
+    func testABehindRefusalIsRecognisedWrappedOrNot() {
+        struct Other: Error {}
+        let behind = ChatRepository.BehindInConversation()
+        XCTAssertTrue(ConversationReentryRules.isBehindRefusal(behind))
+        XCTAssertTrue(ConversationReentryRules.isBehindRefusal(ChatError.wrapped("send", underlying: behind)))
+        XCTAssertTrue(ConversationReentryRules.isBehindRefusal(
+            ChatError.wrapped("outer", underlying: ChatError.wrapped("inner", underlying: behind))))
+        XCTAssertFalse(ConversationReentryRules.isBehindRefusal(Other()))
+        XCTAssertFalse(ConversationReentryRules.isBehindRefusal(ChatError.argument("x")))
+        XCTAssertFalse(ConversationReentryRules.isBehindRefusal(ChatError.wrapped("send", underlying: Other())))
+    }
+
+    func testAGapHistoryNarrowsOnlyItsOwnGapLine() {
+        let line = ConversationReentryRules.gapMarker(fromMs: 1_000, toMs: 9_000)
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: line, gapToMs: 9_000, complete: true, earliestMs: nil),
+                       .remove)
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: line, gapToMs: 9_000, complete: false, earliestMs: 4_000),
+                       .replace(ConversationReentryRules.gapMarker(fromMs: 1_000, toMs: 4_000)))
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: line, gapToMs: 9_000, complete: false, earliestMs: 1_000),
+                       .remove, "the bundle reaches the gap's start")
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: line, gapToMs: 9_000, complete: false, earliestMs: 9_500),
+                       .keep, "nothing earlier than the line's end")
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: line, gapToMs: 9_000, complete: false, earliestMs: nil),
+                       .keep)
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: line, gapToMs: 8_000, complete: true, earliestMs: nil),
+                       .keep, "another re-entry's line")
+        XCTAssertEqual(ConversationReentryRules.narrowGap(text: "hello", gapToMs: 9_000, complete: true, earliestMs: nil),
+                       .keep)
+    }
+
+    func testAGroupRecordNarrowsAndRemovesItsGapLine() throws {
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32))
+        let record = GroupRecord(group: try Group.create(identity: identity, kind: .group),
+                                 groupId: Data(repeating: 0x78, count: 32))
+        record.appendLocalRow(
+            text: ConversationReentryRules.gapMarker(fromMs: 1_000, toMs: 9_000), messageId: -1, createdAt: "")
+        XCTAssertFalse(record.narrowReentryGap(gapToMs: 9_000, complete: false, earliestMs: nil))
+        XCTAssertTrue(record.narrowReentryGap(gapToMs: 9_000, complete: false, earliestMs: 5_000))
+        XCTAssertEqual(record.messages.map(\.text), [ConversationReentryRules.gapMarker(fromMs: 1_000, toMs: 5_000)])
+        XCTAssertEqual(record.messages.first?.messageId, -1, "the row keeps its place")
+        XCTAssertTrue(record.narrowReentryGap(gapToMs: 5_000, complete: true, earliestMs: nil))
+        XCTAssertTrue(record.messages.isEmpty)
+    }
+
+    func testAGapBundleSaysWhetherItCarriesEverythingAndItsEarliestRow() throws {
+        let secret = Data(repeating: 0x42, count: 32)
+        let hex = String(repeating: "ab", count: 32)
+        let rows = [
+            PersistedMessage(messageId: 7, direction: "incoming", text: "one", attachments: [],
+                             createdAt: "2026-11-11T13:10:00Z"),
+            PersistedMessage(messageId: 8, direction: "incoming", text: "two", attachments: [],
+                             createdAt: "2026-11-11T13:20:00Z"),
+        ]
+        let earliest = ChatRepository.parseDsTimestampMs("2026-11-11T13:10:00Z")
+        let gapFrom = UInt64(ChatRepository.parseDsTimestampMs("2026-11-11T13:00:00Z")!)
+        XCTAssertFalse(ConversationReentryRules.gapHeldBefore(rows, gapFromMs: gapFrom))
+        let older = [PersistedMessage(messageId: 6, direction: "incoming", text: "zero", attachments: [],
+                                      createdAt: "2026-11-11T12:00:00Z")] + rows
+        XCTAssertTrue(ConversationReentryRules.gapHeldBefore(older, gapFromMs: gapFrom))
+
+        for heldBefore in [true, false] {
+            let sealed = try XCTUnwrap(HistoryBundleCodec.buildForGroup(
+                hex: hex, rows: rows, accountIdB64: account, secret: secret, heldBeforeGap: heldBefore))
+            let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealed)
+            XCTAssertEqual(opened.groups.first?.countCapped, !heldBefore)
+            let summary = HistoryBundleCodec.gapSummary(opened)
+            XCTAssertEqual(summary.complete, heldBefore)
+            XCTAssertEqual(summary.earliestMs, earliest)
+        }
+    }
+
+    func testAChatWhoseOnlyRowIsTheGapLineDrawsIt() {
+        let gap = ChatMessage(
+            messageId: -1, direction: .system,
+            text: ConversationReentryRules.gapMarker(fromMs: 1_000, toMs: 9_000),
+            createdAt: "2026-11-19T10:00:00Z")
+        for isGroup in [true, false] {
+            let shown = [gap].filter { !ChatTimeline.isHiddenSystemRow($0, isGroup: isGroup) }
+            let entries = ChatTimeline.layout(
+                messages: shown, nowMs: 0, calendar: Calendar(identifier: .gregorian),
+                locale: Locale(identifier: "en_GB"), parseMs: ChatRepository.parseDsTimestampMs)
+            XCTAssertEqual(entries.count, 1)
+            XCTAssertEqual(entries.first?.message.messageId, -1)
+        }
+    }
 }

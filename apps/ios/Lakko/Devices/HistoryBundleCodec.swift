@@ -86,16 +86,22 @@ public enum HistoryBundleCodec {
     /// ADR-0091 phase 2 section 7 — one conversation's `rows` (already the
     /// gap's, bookkeeping rows left out) sealed under `secret`, or `nil` when
     /// none of them projects.
+    ///
+    /// `heldBeforeGap`: whether this device holds a row older than the gap's
+    /// start. Without one it cannot vouch that it saw the start of the gap,
+    /// and the group is marked `countCapped` ("not everything"), the web rule;
+    /// a receiver whose bundle is not capped drops its gap line.
     static func buildForGroup(
         hex: String,
         rows: [PersistedMessage],
         accountIdB64: String,
         secret: Data,
+        heldBeforeGap: Bool = true,
         cards: ChannelInviteCardStore = .shared
     ) throws -> Data? {
         guard let projected = projectGroup(
             hex: hex, rows: rows, cap: Self.maxBundleMessages,
-            accountIdB64: accountIdB64, cards: cards),
+            accountIdB64: accountIdB64, cards: cards, notEverything: !heldBeforeGap),
               !projected.group.messages.isEmpty else { return nil }
         return try sealHistoryBundleStructured(
             secret: secret, groups: [projected.group], maxHlc: projected.maxHlc)
@@ -108,14 +114,15 @@ public enum HistoryBundleCodec {
         rows carried: [PersistedMessage],
         cap: Int,
         accountIdB64: String,
-        cards: ChannelInviteCardStore
+        cards: ChannelInviteCardStore,
+        notEverything: Bool = false
     ) -> (group: StructuredHistoryGroup, maxHlc: UInt64)? {
         guard let groupIdBytes = Self.hexToBytes(hex) else { return nil }
         // The MLS bookkeeping rows (a commit, an external-join request)
         // are never carried: this client hides them, and a receiver that
         // draws them as "Members changed" showed one per device commit.
         let trimmed = Array(carried.suffix(cap))
-        let capped = trimmed.count < carried.count
+        let capped = trimmed.count < carried.count || notEverything
         var maxHlc: UInt64 = 0
         var messages: [StructuredHistoryMessage] = []
         for m in trimmed {
@@ -174,6 +181,56 @@ public enum HistoryBundleCodec {
             secret: secret,
             sealedBytes: sealedBytes
         )
+        return applyOpened(opened, accountIdB64: accountIdB64, store: store, cards: cards)
+    }
+
+    /// ADR-0091 section 7 — what a filed gap history tells the gap line.
+    struct GapApplied: Equatable {
+        /// Rows the merge added.
+        let applied: Int
+        /// No group was marked `countCapped`: the bundle carries everything
+        /// from the gap's start.
+        let complete: Bool
+        /// The earliest row the bundle carried, in milliseconds.
+        let earliestMs: Int64?
+    }
+
+    /// Open a gap history, file it like ``applyToMessageLog(accountIdB64:secret:sealedBytes:store:cards:)``
+    /// and report what it carried (the web `applyGapHistoryBundle`).
+    static func applyGapBundle(
+        accountIdB64: String,
+        secret: Data,
+        sealedBytes: Data,
+        store: MessageLogStore = MessageLogStore(),
+        cards: ChannelInviteCardStore = .shared
+    ) throws -> GapApplied {
+        let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealedBytes)
+        let summary = gapSummary(opened)
+        let applied = applyOpened(opened, accountIdB64: accountIdB64, store: store, cards: cards)
+        return GapApplied(applied: applied, complete: summary.complete, earliestMs: summary.earliestMs)
+    }
+
+    /// Whether `opened` carries everything, and its earliest row.
+    static func gapSummary(_ opened: StructuredHistoryBundle) -> (complete: Bool, earliestMs: Int64?) {
+        var complete = true
+        var earliest: Int64?
+        for g in opened.groups {
+            if g.countCapped { complete = false }
+            for m in g.messages {
+                guard let row = Self.decodeOpenedPlaceholder(m.payloadBytes)?.message,
+                      let ms = ChatRepository.parseDsTimestampMs(row.createdAt) else { continue }
+                if earliest.map({ ms < $0 }) ?? true { earliest = ms }
+            }
+        }
+        return (complete, earliest)
+    }
+
+    private static func applyOpened(
+        _ opened: StructuredHistoryBundle,
+        accountIdB64: String,
+        store: MessageLogStore,
+        cards: ChannelInviteCardStore
+    ) -> Int {
         let existing = store.getLog(accountIdB64: accountIdB64)
             ?? MessageLogPayload(version: 1, groups: [:])
 

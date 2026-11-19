@@ -242,6 +242,12 @@ public object AccountLocalWipe {
         Step("reentry-records") { ctx, acct -> me.lakko.app.chat.SharedPrefsReentryRecordStore(ctx).clearForAccount(acct) },
         Step("knock-keys") { ctx, acct -> me.lakko.app.chat.SharedPrefsKnockKeyStore(ctx).clearForAccount(acct) },
         Step("reentry-gaps") { ctx, acct -> me.lakko.app.chat.SharedPrefsReentryGapStore(ctx).clearForAccount(acct) },
+        // The returning device's looks for its gap bundle (sealed secret) and
+        // the bundles this device owes as a re-admitter.
+        Step("reentry-gap-looks") { ctx, acct -> me.lakko.app.chat.EncryptedGapLookStore(ctx).clearForAccount(acct) },
+        Step("reentry-owed-bundles") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsOwedGapBundleStore(ctx).clearForAccount(acct)
+        },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },

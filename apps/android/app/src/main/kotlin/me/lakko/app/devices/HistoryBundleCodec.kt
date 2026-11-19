@@ -162,11 +162,14 @@ public object HistoryBundleCodec {
         val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
         val slot = log.groups[groupIdHex] ?: log.groups[groupIdHex.lowercase()] ?: return null
         val groupIdBytes = hexToBytes(groupIdHex) ?: return null
-        val (kept, capped) = me.lakko.app.chat.gapRows(
-            bundledMessages(slot.messages),
-            fromMs,
-            MAX_BUNDLE_MESSAGES,
-        ) { m -> parseIsoMs(m.createdAt).toLong().takeIf { it > 0 } }
+        val carried = bundledMessages(slot.messages)
+        val timeOf: (me.lakko.app.chat.PersistedMessage) -> Long? = { m -> parseIsoMs(m.createdAt).toLong().takeIf { it > 0 } }
+        val (kept, cut) = me.lakko.app.chat.gapRows(carried, fromMs, MAX_BUNDLE_MESSAGES, timeOf)
+        // Not everything of the gap (the receiver keeps its gap line): the
+        // cap trimmed the rows, or this device holds no row older than the
+        // gap's start, so it may have been away for part of it too. The same
+        // rule as web `buildGapHistoryBundle` and iOS `buildForGroup`.
+        val capped = me.lakko.app.chat.gapBundleIncomplete(carried, fromMs, cut, timeOf)
         if (kept.isEmpty()) return null
         var maxHlc: ULong = 0u
         val messages = kept.mapNotNull { m ->
