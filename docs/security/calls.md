@@ -5716,6 +5716,106 @@ DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
 and **#4** (refuse, never fall back); **#2** and **#5** untouched.
 
 
+## A report's message counts as the target's only when its signature checks (C-90)
+
+### C-90: the panel marks a reported message "Written by this account" only when the attestation verifies to the target
+
+[ADR-0089](../adr/0089-reporting-and-moderation.md) sections 1 and 7, built in
+steps 1 and 5 (2026-11-08 and 2026-11-20, host-tested; the panel walked once
+locally with a software key).
+
+A message in a report is marked as written by the reported account only when
+`lakko_moderation::evidence::verify_message_evidence` accepts it: the attested
+wrapper's signature by the sender leaf over the group id and the envelope, the
+leaf's ADR-0050 device binding to an account key, and that account key hashing
+to the report's target. Anything else is shown greyed as "Not verified" and
+counts for nothing in the case order. Contact requests, channel posts and
+listings are shown as "Not checked".
+
+Why it is indexed: a report is written by a stranger. Without the check a
+reporter could put words in the target's mouth, and a moderator would act on
+them.
+
+**Enforced by:** `crates/lakko-moderation/src/evidence.rs`
+(`a_signed_bound_message_names_its_account`,
+`a_wrong_group_or_binding_is_not_verified`),
+`crates/lakko-moderation/tests/report_end_to_end.rs`, the wasm
+`OpenedReport.evidenceIsByTarget`, and the panel's
+`apps/moderation/src/model/evidence.ts` / `screens/Evidence.tsx`.
+
+## A client shows another person's suspension only with log inclusion (C-92)
+
+### C-92: a suspension mark needs a verified snapshot bucket from the witnessed moderation log
+
+[ADR-0089](../adr/0089-reporting-and-moderation.md) section 5, built in step 4
+(2026-11-20, host-tested only).
+
+A client marks another account as suspended (the one-to-one banner, the card
+line, the member-list marker, the search filter, the invite-link refusal, the
+dropped contact request) only when `lakko_moderation::snapshot::check_account`
+returns `Suspended` for that account. The check verifies, in order: the log
+root's signature under the build-time pinned moderation-log operator key, the
+witness quorum under `LogId::Moderation` when witness keys are pinned, the
+inclusion of the snapshot root (log leaf kind 3) in that root, the inclusion of
+the bucket at the account target's two-byte prefix in the snapshot's bucket
+tree, that the snapshot is no older than two periods, and that the entry's end
+time has not passed. Any failure, a missing pin, a timeout or a network error
+reads as unknown, which every client treats as not suspended: the mark is a
+warning, not access control, and failing toward no mark is the safe side.
+
+Why it is indexed: a mark attaches "broke the rules" to a key every contact
+recognises. Without the log a moderation service, or anything between it and
+the client, could put that mark on anyone.
+
+**Amended by the security fixes (2026-11-20):** a `Suspended` answer alone is
+not acted on. The client also fetches the log entry the snapshot names and
+checks it with `prove_standing`: included under the same witnessed head, a
+Suspend (or ChannelRemove) signed by a moderator of a list verified under the
+pinned moderation root and not older than the device's list floor, naming the
+same target and end. So the holder of the log operator key alone cannot mark
+anyone.
+
+**Does NOT** prove that the snapshot contains every suspension the log holds:
+anyone can rebuild a snapshot from the public log (`build_snapshot` over
+`leaves[..covered_log_size]`) and compare roots, so a dropped entry is found
+after the fact, not by the client at the time.
+
+**Enforced by:** `crates/lakko-moderation/src/snapshot.rs`
+(`a_suspended_account_reads_suspended_and_others_do_not`,
+`the_latest_issued_decision_wins_ties_by_log_index`,
+`a_flipped_byte_is_refused_or_changes_nothing`, fuzz `snapshot_check`), the
+FFI `moderationAccountStanding` on UniFFI and wasm, and each client's
+standing service (web `moderation/suspension-marks.ts`, iOS
+`Moderation/SuspensionMarks.swift`, Android `moderation/SuspensionMarks.kt`),
+none of which decides a mark without it.
+
+## No service applies a moderation action without a moderator's signature under the pinned root (C-91)
+
+### C-91: an applying service verifies the moderator list and the statement itself
+
+[ADR-0089](../adr/0089-reporting-and-moderation.md) section 4, built in step 3
+for the one applying service that exists so far, `services/auth`
+(2026-11-19, host-tested only).
+
+auth applies a Suspend or a Lift only after it has verified, itself, that the
+moderator list is signed by the build-time pinned moderation root
+(`LAKKO_AUTH_MODERATION_ROOT_KEY`) and is not older than the newest list it has
+seen, that the statement's WebAuthn assertion was made by a current moderator of
+that list over the statement's challenge, that the reason opens the statement's
+commitment, and that the account key hashes to the statement's target. The
+moderation service only forwards; a compromised moderation service therefore
+cannot suspend anyone. Decisions apply in the order moderators made them, so a
+replayed older statement changes nothing.
+
+Since step 5 (2026-11-20) discovery, channels and storage do the same through
+`lakko_moderation::apply::check_for_service` (each accepting only its own
+actions), with their own replay, list-version and per-target order tables.
+
+**Enforced by:** `services/auth/src/suspension.rs` and
+`services/auth/src/suspension_tests.rs` (`a_suspension_from_statement_to_lift`,
+`an_older_decision_resent_after_a_newer_one_changes_nothing`), over
+`lakko_moderation::moderators` and `lakko_moderation::webauthn`.
+
 ## A key joins a person only with the consent of the key pinned for them (C-89)
 
 ### C-89: a proven predecessor comes from an anchored proof or a link both keys signed

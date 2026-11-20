@@ -50,6 +50,13 @@
 //!   `LAKKO_STORAGE_READ_PASS_KEEPS` (5000) - chosen, not measured
 //! - `LAKKO_STORAGE_BLOB_LIFETIME_DAYS` (365; 0 disables the sweep),
 //!   `LAKKO_STORAGE_SWEEP_INTERVAL_SECS` (86400)
+//! - `LAKKO_STORAGE_INTERNAL_BIND` (`127.0.0.1:8098`),
+//!   `LAKKO_STORAGE_INTERNAL_SECRET` (standard base64, at least 16 bytes),
+//!   `LAKKO_STORAGE_MODERATION_ROOT_KEY` (base64url, the value of
+//!   `LAKKO_MODERATION_ROOT_KEY`) - the internal listener a moderator's
+//!   BlobDelete arrives on (ADR-0089 step 5, [`moderation`]); with the
+//!   secret or the key unset it does not start; either malformed refuses
+//!   startup
 //! - `RUST_LOG` - `tracing-subscriber` env-filter spec
 //!
 //! # Endpoints
@@ -59,6 +66,8 @@
 //! - `PUT` / `GET` / `HEAD` / `DELETE /blob/{sha256_hex}`, `POST /blob/keep`
 //! - `PUT` / `GET` / `DELETE /backup` - the per-account backup blob, session
 //!   token (unchanged; not indexed, never swept)
+//! - On the INTERNAL listener only: `POST /internal/moderation/statement` (a
+//!   moderator's BlobDelete, ADR-0089 step 5)
 
 #![forbid(unsafe_code)]
 
@@ -66,6 +75,7 @@ mod auth;
 mod backup;
 mod blob;
 mod index;
+mod moderation;
 mod pass;
 mod stream;
 mod sweep;
@@ -316,6 +326,10 @@ async fn main() -> Result<()> {
         tokens,
     };
 
+    // ADR-0089 step 5 - the internal listener a moderator's BlobDelete
+    // arrives on. Loopback, never proxied.
+    spawn_internal_listener(state.clone()).await?;
+
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -328,6 +342,37 @@ async fn main() -> Result<()> {
         .context("axum serve")?;
 
     tracing::info!("storage service stopped cleanly");
+    Ok(())
+}
+
+/// ADR-0089 step 5 - start the internal listener a moderator's statement
+/// arrives on, when its secret and root key are set (one warning otherwise).
+///
+/// # Errors
+///
+/// A malformed setting, or a bind failure.
+async fn spawn_internal_listener(state: AppState) -> Result<()> {
+    let Some(config) = moderation::load_internal()
+        .map_err(anyhow::Error::msg)
+        .context("load the internal moderation listener config")?
+    else {
+        tracing::warn!(
+            "internal moderation listener NOT started: LAKKO_STORAGE_INTERNAL_SECRET or \
+             LAKKO_STORAGE_MODERATION_ROOT_KEY unset; a moderator cannot delete a blob"
+        );
+        return Ok(());
+    };
+    let internal_bind = config.bind;
+    let internal_app = moderation::internal_router(state, config);
+    let internal_listener = tokio::net::TcpListener::bind(internal_bind)
+        .await
+        .with_context(|| format!("bind {internal_bind}"))?;
+    tracing::info!(addr = %internal_bind, "internal moderation listener started");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(internal_listener, internal_app).await {
+            tracing::warn!(error = %e, "internal moderation listener stopped");
+        }
+    });
     Ok(())
 }
 
@@ -346,10 +391,17 @@ pub(crate) fn build_app(state: AppState) -> Router {
                 .get(backup::get_backup)
                 .route_layer(DefaultBodyLimit::max(backup::MAX_BACKUP_BYTES)),
         )
-        .route("/backup", delete(backup::delete_backup))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,
+        ));
+    // `DELETE /backup` also takes a suspended account's restricted session
+    // (ADR-0089 step 3), so deleting the account removes the backup.
+    let backup_delete = Router::new()
+        .route("/backup", delete(backup::delete_backup))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_session_or_restricted,
         ));
 
     Router::new()
@@ -371,6 +423,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_BLOB_BYTES))
         .merge(backup_routes)
+        .merge(backup_delete)
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(lakko_log_hygiene::request_span),

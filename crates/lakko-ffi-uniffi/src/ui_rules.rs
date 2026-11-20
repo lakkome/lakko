@@ -408,6 +408,12 @@ pub enum InfoSection {
     /// while Members of my groups and channels is on. Appended last: uniffi
     /// lowers this enum by ordinal.
     MembersCanFindMe,
+    /// Block this person (ADR-0089 section 6). Appended last.
+    Block,
+    /// Unblock a blocked person, in place of `Block`. Appended last.
+    Unblock,
+    /// Report to Lakko's moderators (ADR-0089 section 2). Appended last.
+    Report,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -443,12 +449,81 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::Admins => Self::Admins,
             RustInfoSection::Reactions => Self::Reactions,
             RustInfoSection::MembersCanFindMe => Self::MembersCanFindMe,
+            RustInfoSection::Block => Self::Block,
+            RustInfoSection::Unblock => Self::Unblock,
+            RustInfoSection::Report => Self::Report,
         }
+    }
+}
+
+/// Where something from (or to) a person meets a block (ADR-0089
+/// section 6, UX `reporting-and-moderation.md` 1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BlockPath {
+    /// A message, edit, delete or reaction in the one-to-one with them.
+    OneToOneMessage,
+    /// A message of theirs in a group both are in.
+    GroupMessage,
+    /// A contact request from them, by any route.
+    ContactRequest,
+    /// A call from them ringing on this device.
+    IncomingCall,
+    /// Their tile in a call both are in.
+    CallTile,
+    /// A notification, badge or push preview for something of theirs.
+    Notification,
+    /// Typing, a read receipt or a profile update to them in the one-to-one.
+    OutgoingSignal,
+    /// Their typing, read receipt or profile update in the one-to-one.
+    IncomingSignal,
+}
+
+/// What the client does on a [`BlockPath`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BlockVerdict {
+    /// As if there were no block.
+    Show,
+    /// Not shown, not stored, not notified.
+    Drop,
+    /// One muted row that shows the message when tapped.
+    Collapse,
+    /// Declined without a ring, no missed-call row.
+    DeclineSilently,
+    /// Shown with a muted "Blocked" label.
+    Label,
+    /// Not sent.
+    Withhold,
+}
+
+/// What a block does on `path` when the person is (`blocked`) or is not
+/// blocked: one rule for every client (ADR-0089 section 6).
+#[uniffi::export]
+#[must_use]
+pub fn block_verdict(path: BlockPath, blocked: bool) -> BlockVerdict {
+    use lakko_ui_rules::block::{block_verdict as rule, BlockPath as P, BlockVerdict as V};
+    let p = match path {
+        BlockPath::OneToOneMessage => P::OneToOneMessage,
+        BlockPath::GroupMessage => P::GroupMessage,
+        BlockPath::ContactRequest => P::ContactRequest,
+        BlockPath::IncomingCall => P::IncomingCall,
+        BlockPath::CallTile => P::CallTile,
+        BlockPath::Notification => P::Notification,
+        BlockPath::OutgoingSignal => P::OutgoingSignal,
+        BlockPath::IncomingSignal => P::IncomingSignal,
+    };
+    match rule(p, blocked) {
+        V::Show => BlockVerdict::Show,
+        V::Drop => BlockVerdict::Drop,
+        V::Collapse => BlockVerdict::Collapse,
+        V::DeclineSilently => BlockVerdict::DeclineSilently,
+        V::Label => BlockVerdict::Label,
+        V::Withhold => BlockVerdict::Withhold,
     }
 }
 
 /// What the viewer is to a one-to-one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PersonInfoCapabilities {
     /// This device's membership in the conversation is over (ADR-0045 UX 6.2).
     pub membership_ended: bool,
@@ -459,6 +534,10 @@ pub struct PersonInfoCapabilities {
     /// `who-can-find-me.md` 5.1), under either form.
     #[uniffi(default = false)]
     pub contacts_of_contacts_on: bool,
+    /// The viewer blocked this person (ADR-0089 section 6), read from the
+    /// synced block register.
+    #[uniffi(default = false)]
+    pub is_blocked: bool,
 }
 
 impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
@@ -467,6 +546,7 @@ impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
             membership_ended: c.membership_ended,
             is_contact: c.is_contact,
             contacts_of_contacts_on: c.contacts_of_contacts_on,
+            is_blocked: c.is_blocked,
         }
     }
 }
@@ -491,6 +571,10 @@ pub struct GroupInfoCapabilities {
     pub can_leave: bool,
     /// This device's membership is over: read-only (ADR-0045 UX 6.2).
     pub membership_ended: bool,
+    /// The group holds an `@name` (ADR-0087); a group is reported only by
+    /// its name (ADR-0089).
+    #[uniffi(default = false)]
+    pub has_handle: bool,
 }
 
 impl From<GroupInfoCapabilities> for RustGroupInfoCapabilities {
@@ -502,6 +586,7 @@ impl From<GroupInfoCapabilities> for RustGroupInfoCapabilities {
             is_owner: c.is_owner,
             can_leave: c.can_leave,
             membership_ended: c.membership_ended,
+            has_handle: c.has_handle,
         }
     }
 }
@@ -2197,6 +2282,7 @@ mod tests {
             membership_ended: true,
             is_contact: true,
             contacts_of_contacts_on: false,
+            is_blocked: false,
         });
         assert!(ended.contains(&InfoSection::DeleteChat));
         assert!(!ended.contains(&InfoSection::Call));
@@ -2204,14 +2290,36 @@ mod tests {
             membership_ended: false,
             is_contact: false,
             contacts_of_contacts_on: true,
+            is_blocked: false,
         });
         assert!(removed.contains(&InfoSection::AddContact));
         assert!(!removed.contains(&InfoSection::RemoveContact));
+        let blocked = person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: false,
+            contacts_of_contacts_on: false,
+            is_blocked: true,
+        });
+        assert!(blocked.contains(&InfoSection::Unblock));
+        assert!(!blocked.contains(&InfoSection::Call));
+        assert_eq!(
+            block_verdict(BlockPath::OneToOneMessage, true),
+            BlockVerdict::Drop
+        );
+        assert_eq!(
+            block_verdict(BlockPath::IncomingCall, true),
+            BlockVerdict::DeclineSilently
+        );
+        assert_eq!(
+            block_verdict(BlockPath::CallTile, false),
+            BlockVerdict::Show
+        );
         assert!(!removed.contains(&InfoSection::TheirContactsCanFindMe));
         assert!(person_info_sections(PersonInfoCapabilities {
             membership_ended: false,
             is_contact: true,
             contacts_of_contacts_on: true,
+            is_blocked: false,
         })
         .contains(&InfoSection::TheirContactsCanFindMe));
         assert_eq!(
@@ -2226,6 +2334,7 @@ mod tests {
                 InfoSection::ChannelDescription,
                 InfoSection::Subscribers,
                 InfoSection::MembersCanFindMe,
+                InfoSection::Report,
                 InfoSection::Unsubscribe,
             ]
         );

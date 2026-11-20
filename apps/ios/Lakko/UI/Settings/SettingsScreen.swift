@@ -155,6 +155,9 @@ struct SettingsScreen: View {
                 row(l10n.t("who_can_find_me.title"), systemImage: "person.2.badge.gearshape") {
                     onOpen(.whoCanFindMe)
                 }
+                // ADR-0089 / UX 1.1, 2.3.
+                row(l10n.t("block.list.title"), systemImage: "hand.raised") { onOpen(.blockedPeople) }
+                row(l10n.t("report.list.title"), systemImage: "flag") { onOpen(.yourReports) }
                 // ADR-0080 — per device, on by default.
                 Toggle(isOn: Binding(
                     get: { deviceCards.showCity },

@@ -11,6 +11,9 @@
  * through `chat/conversation-info.ts`); this file draws what it is told. The
  * rows open pushed screens (`ChannelInfoScreens.tsx`).
  */
+import { accountSuspended } from "../auth/suspension-state";
+import { sectionsWhileRemoved, sectionsWhileSuspended } from "../chat/conversation-info";
+import { channelRemovalLine, channelRemovalLineKey } from "../moderation/channel-removal";
 import { createMemo, createResource, createSignal, Match, Show, Switch, type JSX } from "solid-js";
 
 import { channelInfoSections, type InfoSection } from "../chat/conversation-info";
@@ -43,6 +46,8 @@ import { channelAllowedReactions } from "./PostReactions";
 import { channelErrorText } from "./channel-error-copy";
 import { channelMetaErrorCode, channelMetaErrorText } from "./channel-meta";
 import { channelPublishers } from "./channel-publishers";
+import { openChannelReport } from "../moderation/channel-report";
+import { CONVERSATION_CHANNEL } from "../moderation/report-model";
 import { channelFacts, channelHeaderLine } from "./channel-facts";
 import {
   ChannelInvitePeopleScreen,
@@ -71,24 +76,35 @@ export function ChannelInfo(props: {
   const publishes = (): boolean => role() === "owner" || role() === "publisher";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(props.id);
   const handle = (): string | null => channelHandleOf(props.id);
+  // ADR-0089 step 5: a channel moderators removed.
+  const removalLine = (): ReturnType<typeof channelRemovalLine> => channelRemovalLine(props.id);
+  const removed = (): boolean => removalLine() !== null;
 
   const sections = createMemo((): readonly InfoSection[] => {
     const r = role();
     if (r === null) return [];
-    return channelInfoSections(uiRules(), {
-      role: r,
-      hasHandle: handle() !== null,
-      hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
-      // Shown for every role: the switch itself reads the setting and says
-      // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
-      membersOfGroupsAndChannelsOn: true,
-    });
+    // ADR-0089 step 3: a suspended account invites nobody; step 5: a
+    // removed channel offers nothing that reaches the service.
+    return sectionsWhileRemoved(
+      sectionsWhileSuspended(
+        channelInfoSections(uiRules(), {
+          role: r,
+          hasHandle: handle() !== null,
+          hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
+          // Shown for every role: the switch itself reads the setting and says
+          // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
+          membersOfGroupsAndChannelsOn: true,
+        }),
+        accountSuspended(),
+      ),
+      removed(),
+    );
   });
   const has = (s: InfoSection): boolean => sections().includes(s);
 
   // The exact count, to the owner and the publishers (UX 15.1).
   const [count] = createResource(
-    () => (publishes() ? props.id : null),
+    () => (publishes() && !removed() ? props.id : null),
     async (id) => {
       const identity = chats.conversationAccountIdentity();
       if (identity === null) return null;
@@ -184,6 +200,25 @@ export function ChannelInfo(props: {
 
   const [handleCopy, setHandleCopy] = createSignal<"idle" | "copied" | "failed">("idle");
 
+  /** ADR-0089 UX 2.1 - report the channel from its info; `Unsubscribe` in
+   *  the sheet ends the subscription as the control below does, without a
+   *  second question (the checkbox is the choice). */
+  function reportChannel(): void {
+    const name = facts().name;
+    openChannelReport({
+      channelIdHex: props.id,
+      name,
+      conversationKind: CONVERSATION_CHANNEL,
+      fixed: [],
+      leave: has("unsubscribe")
+        ? async () => {
+            await membershipEnd.endChannel(props.id, name);
+            props.onEnded();
+          }
+        : null,
+    });
+  }
+
   async function unsubscribe(): Promise<void> {
     const name = facts().name;
     const ok = await requestConfirm({
@@ -245,7 +280,7 @@ export function ChannelInfo(props: {
             }
             playVideo
           />
-          <Show when={isOwner()}>
+          <Show when={isOwner() && !removed()}>
             <button
               type="button"
               class="lk-icon-button lk-profile-avatar-edit"
@@ -368,6 +403,13 @@ export function ChannelInfo(props: {
         <p class="lk-info-header-line">
           {channelHeaderLine(channelVisibilityOf(props.id), publishes() ? (count() ?? null) : null)}
         </p>
+        <Show when={removalLine()}>
+          {(line) => (
+            <p class="lk-alert info lk-channel-removed" role="status">
+              {t(channelRemovalLineKey(line()))}
+            </p>
+          )}
+        </Show>
         <Show when={has("handle") ? handle() : null}>
           {(h) => (
             <div class="lk-card-row">
@@ -394,7 +436,7 @@ export function ChannelInfo(props: {
           )}
         </Show>
         {/* UX 4.4 — a channel whose @name lapsed: the owner chooses one. */}
-        <Show when={isOwner() && handle() === null && has("group-type")}>
+        <Show when={isOwner() && !removed() && handle() === null && has("group-type")}>
           <div class="lk-banner" role="status">
             <span>{t("channels.info.handle_lapsed")}</span>
             <button type="button" class="ghost small" onClick={() => setScreen("type")}>
@@ -412,6 +454,7 @@ export function ChannelInfo(props: {
         </Show>
       </section>
 
+      <Show when={!removed()}>
       <section class="lk-card">
         <Show when={has("invite-people")}>
           <InfoRow icon="userPlus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
@@ -452,11 +495,29 @@ export function ChannelInfo(props: {
           />
         </Show>
       </section>
+      </Show>
 
       <Show when={has("members-can-find-me")}>
         <MembersCanFindMeSwitch kind="channel" idHex={props.id} />
       </Show>
 
+      {/* ADR-0089 UX 2.1 - a subscriber reports the channel (the shared
+          rule), before Unsubscribe. */}
+      <Show when={has("report")}>
+        <section class="lk-card danger">
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="flag" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">{t("report.action")}</span>
+            </div>
+            <button type="button" class="danger lk-card-row-action" onClick={reportChannel}>
+              {t("report.action")}
+            </button>
+          </div>
+        </section>
+      </Show>
       <Show when={has("unsubscribe")}>
         <section class="lk-card danger">
           <div class="lk-card-row">

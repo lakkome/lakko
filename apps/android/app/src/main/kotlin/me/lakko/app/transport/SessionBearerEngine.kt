@@ -19,6 +19,9 @@ import io.ktor.utils.io.readRemaining
 import kotlinx.io.readByteArray
 import me.lakko.app.anon.errorCodeOf
 import me.lakko.app.auth.SessionRefusal
+import me.lakko.app.auth.SuspendedWriteRefused
+import me.lakko.app.auth.SuspensionGate
+import me.lakko.app.auth.isAccountSuspended
 import me.lakko.app.auth.SessionTokenProvider
 import me.lakko.app.auth.SessionTokens
 import me.lakko.app.auth.deviceRevokedHintOf
@@ -48,6 +51,16 @@ import me.lakko.app.auth.sessionRefusalOf
  *      `403 device-revoked`, which proves nothing, refreshes at auth so
  *      auth's answer decides.
  *
+ *   5. on `403 account-suspended` (ADR-0089 section 4) to an access token of
+ *      the managed account, refreshes once at auth: the refresh route
+ *      answers the restricted session, which puts the device in suspended
+ *      mode. Not a sign-out, not a wipe.
+ *
+ * Before any of it: while the account is suspended, a write to the Delivery
+ * Service or the channels service is refused here, before it leaves the
+ * device ([SuspensionGate]); the DS does not know accounts, so the client
+ * honours the suspension itself.
+ *
  * A request with no bearer, a refresh credential as bearer, or a bearer of
  * another account goes through untouched; the provider never substitutes a
  * token it does not manage. The DS speaks proofs, not bearers, so it is
@@ -64,13 +77,16 @@ public class SessionBearerEngine(
         get() = delegate.supportedCapabilities
 
     override suspend fun execute(data: HttpRequestData): HttpResponseData {
+        if (SuspensionGate.refuses(data.method.value, data.url.toString(), suspensionGatedBases())) {
+            throw SuspendedWriteRefused()
+        }
         val provider = SessionTokens.provider ?: return delegate.execute(data)
         val bearer = bearerOf(data) ?: return delegate.execute(data)
         if (!provider.manages(bearer)) return delegate.execute(data)
 
         val token = provider.current() ?: bearer
         val first = delegate.execute(if (token == bearer) data else withBearer(data, token))
-        if (first.statusCode == HttpStatusCode.Forbidden) return afterForbidden(first, provider)
+        if (first.statusCode == HttpStatusCode.Forbidden) return afterForbidden(first, provider, token)
         if (first.statusCode != HttpStatusCode.Unauthorized) return first
 
         val (body, firstAgain) = drainBody(first)
@@ -115,13 +131,23 @@ public class SessionBearerEngine(
     private suspend fun afterForbidden(
         response: HttpResponseData,
         provider: SessionTokenProvider,
+        token: String,
     ): HttpResponseData {
         val (body, again) = drainBody(response)
-        if (deviceRevokedHintOf(response.statusCode.value, errorCodeOf(String(body, Charsets.UTF_8)))) {
+        val code = errorCodeOf(String(body, Charsets.UTF_8))
+        if (deviceRevokedHintOf(response.statusCode.value, code)) {
             provider.refreshNow()
+        } else if (isAccountSuspended(response.statusCode.value, code) && provider.peek()?.accessToken == token) {
+            provider.suspendedFromBearerRoute()
         }
         return again
     }
+
+    /** The services a suspended device writes nothing to. */
+    private fun suspensionGatedBases(): List<String> = listOf(
+        me.lakko.app.config.ApiEndpoints.baseUrlFor(me.lakko.app.config.ApiService.DS),
+        me.lakko.app.config.ApiEndpoints.baseUrlFor(me.lakko.app.config.ApiService.CHANNELS),
+    )
 
     override fun close() {
         delegate.close()

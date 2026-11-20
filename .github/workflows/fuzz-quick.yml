@@ -80,6 +80,8 @@ jobs:
             manifest: crates/lakko-transparency/fuzz/Cargo.toml
           - crate: lakko-attest
             manifest: crates/lakko-attest/fuzz/Cargo.toml
+          - crate: lakko-moderation
+            manifest: crates/lakko-moderation/fuzz/Cargo.toml
           - crate: lakko-sync
             manifest: crates/lakko-sync/fuzz/Cargo.toml
           - crate: lakko-push

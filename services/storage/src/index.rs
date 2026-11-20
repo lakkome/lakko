@@ -94,6 +94,41 @@ pub(crate) enum UploadOutcome {
     /// A row already existed; its last access was moved to the upload day
     /// and its delete key left as it was (the first uploader's).
     Existed,
+    /// A moderator deleted this id (ADR-0089); no row was written.
+    Removed,
+}
+
+/// A moderator's checked BlobDelete statement (ADR-0089 step 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModerationDelete {
+    /// The statement id; applied once.
+    pub(crate) statement_id: [u8; 16],
+    /// The moderator-list version it verified under.
+    pub(crate) list_version: u64,
+    /// The blob.
+    pub(crate) id: BlobId,
+    /// The day it is applied (the tombstone's day).
+    pub(crate) day: u32,
+    /// When it is applied (unix ms).
+    pub(crate) now_ms: u64,
+}
+
+/// What [`BlobIndex::apply_moderation_delete`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModerationOutcome {
+    /// The id is tombstoned now; `node` names the storage node of the row
+    /// that was removed, if there was one (the caller deletes the file).
+    Removed {
+        /// The removed row's node.
+        node: Option<String>,
+    },
+    /// Another statement already tombstoned the id; this one is recorded.
+    AlreadyRemoved,
+    /// The statement id was applied before; nothing changed.
+    Repeat,
+    /// The statement verified under a moderator list older than the newest
+    /// one seen; nothing changed.
+    StaleList,
 }
 
 /// An index store failure. Callers answer 500 and do not honour the request.
@@ -118,8 +153,28 @@ pub(crate) trait BlobIndex: Send + Sync {
 
     /// Record a stored upload. A new row is written as `row`; an existing
     /// row keeps its delete key, creation day and idle life and has its last
-    /// access raised to `row.last_access_day`.
+    /// access raised to `row.last_access_day`; a tombstoned id writes nothing
+    /// ([`UploadOutcome::Removed`]).
     async fn record_upload(&self, row: BlobRow) -> Result<UploadOutcome, IndexError>;
+
+    /// Whether a moderator deleted `id` (ADR-0089).
+    async fn is_tombstoned(&self, id: &BlobId) -> Result<bool, IndexError>;
+
+    /// Apply a moderator's BlobDelete in one step: a list older than the
+    /// newest seen is [`ModerationOutcome::StaleList`], an id applied before
+    /// [`ModerationOutcome::Repeat`]; otherwise the id is tombstoned (kept
+    /// forever), its row removed, the statement recorded and the stored list
+    /// version raised.
+    async fn apply_moderation_delete(
+        &self,
+        statement: &ModerationDelete,
+    ) -> Result<ModerationOutcome, IndexError>;
+
+    /// Raise the moderator-list floor (the highest list version seen) to
+    /// `list_version` when it is higher, on its own (ADR-0089 F1: a newer
+    /// list is kept even when the statement beside it is refused). `false`
+    /// when `list_version` is older than the floor (nothing changed).
+    async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, IndexError>;
 
     /// Raise the last access day of each existing id in `ids` to `day`. Ids
     /// without a row are ignored; a row already at `day` is not written.
@@ -265,5 +320,104 @@ pub(crate) mod contract {
 
         assert!(index.remove(&a.id).await.unwrap());
         assert!(!index.remove(&a.id).await.unwrap());
+    }
+
+    /// The ADR-0089 tombstone. `ids` (two blob ids) and `statement` (the
+    /// seed of the statement ids) are random, so a persistent database can
+    /// be reused across runs (a tombstone is kept forever); `version` is the
+    /// list version every statement carries (it only grows in a shared
+    /// database).
+    pub(crate) async fn run_moderation(
+        index: &dyn BlobIndex,
+        ids: [[u8; 32]; 2],
+        statement: [u8; 16],
+        version: u64,
+    ) {
+        use super::{ModerationDelete, ModerationOutcome};
+        let mut a = row(0, 100, Some(7));
+        a.id = ids[0];
+        let mut gone = row(0, 100, None);
+        gone.id = ids[1];
+        let _ = index.remove(&a.id).await.unwrap();
+        index.record_upload(a.clone()).await.unwrap();
+        assert!(!index.is_tombstoned(&a.id).await.unwrap());
+
+        let delete = |id, n: u8, version| ModerationDelete {
+            statement_id: {
+                let mut s = statement;
+                s[0] = n;
+                s
+            },
+            list_version: version,
+            id,
+            day: 120,
+            now_ms: 1,
+        };
+        assert_eq!(
+            index
+                .apply_moderation_delete(&delete(a.id, 1, version))
+                .await
+                .unwrap(),
+            ModerationOutcome::Removed {
+                node: Some("local".to_string())
+            }
+        );
+        assert_eq!(index.get(&a.id).await.unwrap(), None);
+        assert!(index.is_tombstoned(&a.id).await.unwrap());
+        assert_eq!(
+            index.record_upload(a.clone()).await.unwrap(),
+            UploadOutcome::Removed
+        );
+        assert_eq!(index.get(&a.id).await.unwrap(), None);
+        assert_eq!(
+            index
+                .apply_moderation_delete(&delete(a.id, 1, version))
+                .await
+                .unwrap(),
+            ModerationOutcome::Repeat
+        );
+        assert_eq!(
+            index
+                .apply_moderation_delete(&delete(a.id, 2, version))
+                .await
+                .unwrap(),
+            ModerationOutcome::AlreadyRemoved
+        );
+        // An id never stored is tombstoned too.
+        assert_eq!(
+            index
+                .apply_moderation_delete(&delete(gone.id, 3, version))
+                .await
+                .unwrap(),
+            ModerationOutcome::Removed { node: None }
+        );
+        assert!(index.is_tombstoned(&gone.id).await.unwrap());
+        assert_eq!(
+            index
+                .apply_moderation_delete(&delete(gone.id, 4, version - 1))
+                .await
+                .unwrap(),
+            ModerationOutcome::StaleList
+        );
+        // The floor alone: an older list is refused, the floor itself kept,
+        // a newer one raises it and retires the older one.
+        assert!(!index
+            .raise_moderation_list_floor(version - 1)
+            .await
+            .unwrap());
+        assert!(index.raise_moderation_list_floor(version).await.unwrap());
+        if version < u64::MAX {
+            assert!(index
+                .raise_moderation_list_floor(version + 1)
+                .await
+                .unwrap());
+            assert_eq!(
+                index
+                    .apply_moderation_delete(&delete(gone.id, 5, version))
+                    .await
+                    .unwrap(),
+                ModerationOutcome::StaleList
+            );
+        }
     }
 }

@@ -290,7 +290,10 @@ final class RecoveryFlowTests: XCTestCase {
             passkeyCeremony: { try await passkey.run($0) },
             markers: markers,
             tokenProvider: tokens,
-            keyResetOperation: { try await reset.reset($0, $1, $2, $3) },
+            keyResetOperation: { token, grant, seed, key, accountId in
+                XCTAssertEqual(accountId.count, 16, "the identity proof names the account")
+                return try await reset.reset(token, grant, seed, key)
+            },
             proofLoginOperation: { try await reset.login($0, $1) },
             grantNowMs: { clock.nowMs },
             attestationVerifier: reset,

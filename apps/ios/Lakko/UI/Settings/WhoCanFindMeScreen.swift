@@ -82,6 +82,23 @@ enum WhoCanFindMeCopy {
         (scope.kind == .group ? "g:" : "c:") + scope.id.base64EncodedString()
     }
 
+    /// ADR-0089 step 5 — moderators removed this account from search.
+    static var hiddenByModeration: String { t("who_can_find_me.hidden_by_moderation") }
+
+    /// What the screen shows while discovery refuses the Everyone record:
+    /// the setting as it is, except that Everyone reads as "Some people"
+    /// with the person's other scopes as they are (the shared transition
+    /// rule). Nothing is stored by showing it.
+    static func displayed(_ setting: FfiVisibilitySetting, hiddenFromSearch: Bool) -> FfiVisibilitySetting {
+        guard hiddenFromSearch, setting.mode == .everyone else { return setting }
+        return chooseVisibilityMode(setting: setting, mode: .some)
+    }
+
+    /// The modes offered: Everyone cannot be chosen while hidden from search.
+    static func modes(hiddenFromSearch: Bool) -> [FfiVisibilityMode] {
+        hiddenFromSearch ? [.nobody, .some] : [.nobody, .some, .everyone]
+    }
+
     /// Whether `scope` is switched on in the chosen list.
     static func isChosen(_ scope: FfiScopeId, in setting: FfiVisibilitySetting) -> Bool {
         setting.chosen.contains { key($0) == key(scope) }
@@ -105,7 +122,17 @@ struct WhoCanFindMeScreen: View {
     @State private var fofSpreading = false
     @ObservedObject private var l10n = Localization.shared
 
-    private var setting: FfiVisibilitySetting { reach.setting }
+    private var setting: FfiVisibilitySetting {
+        WhoCanFindMeCopy.displayed(reach.setting, hiddenFromSearch: reach.hiddenFromSearch)
+    }
+
+    private func modeLabel(_ mode: FfiVisibilityMode) -> String {
+        switch mode {
+        case .nobody: return l10n.t("who_can_find_me.mode.nobody")
+        case .some: return l10n.t("who_can_find_me.mode.some")
+        case .everyone: return l10n.t("who_can_find_me.mode.everyone")
+        }
+    }
     private var allScopes: [FfiScopeId] { (groups + channels).map(\.scope) }
 
     private var mode: Binding<FfiVisibilityMode> {
@@ -159,11 +186,11 @@ struct WhoCanFindMeScreen: View {
     var body: some View {
         List {
             Section {
-                LakkoInlinePicker(selection: mode, options: [
-                    LakkoPickerOption(value: FfiVisibilityMode.nobody, label: l10n.t("who_can_find_me.mode.nobody")),
-                    LakkoPickerOption(value: FfiVisibilityMode.some, label: l10n.t("who_can_find_me.mode.some")),
-                    LakkoPickerOption(value: FfiVisibilityMode.everyone, label: l10n.t("who_can_find_me.mode.everyone")),
-                ])
+                LakkoInlinePicker(
+                    selection: mode,
+                    options: WhoCanFindMeCopy.modes(hiddenFromSearch: reach.hiddenFromSearch).map {
+                        LakkoPickerOption(value: $0, label: modeLabel($0))
+                    })
             } header: {
                 statusHeader
             } footer: {
@@ -257,6 +284,9 @@ struct WhoCanFindMeScreen: View {
                     ProgressView().controlSize(.small)
                         .accessibilityLabel(l10n.t("who_can_find_me.applying_a11y"))
                 }
+            }
+            if reach.hiddenFromSearch {
+                Text(WhoCanFindMeCopy.hiddenByModeration).textCase(nil)
             }
             switch reach.status {
             case .pendingOffline:

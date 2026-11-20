@@ -16,14 +16,20 @@
 //! t <id hex> <day>
 //! d <id hex>
 //! i <node> <day>
+//! x <id hex> <day>
+//! s <statement id hex>
+//! v <list version>
 //! ```
 //!
 //! `b` writes a whole row (a line without the idle-days field, written before
 //! ADR-0087, reads as no idle life), `t` raises a row's last access, `d` removes a
-//! row, `i` marks a node's import done. Node names carry no whitespace
-//! (checked at configuration). Row and removal records are flushed to disk
-//! before the call returns; an access record is not, since losing one only
-//! makes a blob look a day or so older.
+//! row, `i` marks a node's import done. ADR-0089 step 5: `x` tombstones an
+//! id a moderator deleted (and removes its row; kept forever), `s` records a
+//! moderator statement applied, `v` raises the highest moderator-list
+//! version seen. Node names carry no whitespace (checked at configuration).
+//! Row, removal and moderation records are flushed to disk before the call
+//! returns; an access record is not, since losing one only makes a blob look
+//! a day or so older.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -33,12 +39,27 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use super::{is_expired, BlobId, BlobIndex, BlobRow, IndexError, UploadOutcome};
+use super::{
+    is_expired, BlobId, BlobIndex, BlobRow, IndexError, ModerationDelete, ModerationOutcome,
+    UploadOutcome,
+};
+
+/// The moderation state of the index (ADR-0089 step 5).
+#[derive(Default)]
+struct Moderation {
+    /// Tombstoned id -> the day it was tombstoned.
+    tombstones: HashMap<BlobId, u32>,
+    /// Statement ids applied.
+    applied: HashSet<[u8; 16]>,
+    /// The highest moderator-list version seen.
+    list_version: Option<u64>,
+}
 
 /// The index state and its open log.
 struct Inner {
     rows: HashMap<BlobId, BlobRow>,
     imported: HashMap<String, u32>,
+    moderation: Moderation,
     log: File,
 }
 
@@ -68,15 +89,25 @@ fn row_line(r: &BlobRow) -> String {
     )
 }
 
-/// The rows and the per-node import days a replay rebuilds.
-type Replayed = (HashMap<BlobId, BlobRow>, HashMap<String, u32>);
+/// The rows, the per-node import days and the moderation state a replay
+/// rebuilds.
+type Replayed = (HashMap<BlobId, BlobRow>, HashMap<String, u32>, Moderation);
 
+fn parse_hex16(s: &str) -> Option<[u8; 16]> {
+    let v = hex::decode(s).ok()?;
+    <[u8; 16]>::try_from(v.as_slice()).ok()
+}
+
+#[allow(clippy::too_many_lines)] // one match arm per record kind
 fn replay(path: &Path) -> Result<Replayed, IndexError> {
     let mut rows = HashMap::new();
     let mut imported = HashMap::new();
+    let mut moderation = Moderation::default();
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((rows, imported)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((rows, imported, moderation))
+        },
         Err(e) => return Err(e.into()),
     };
     for (n, line) in BufReader::new(file).lines().enumerate() {
@@ -126,10 +157,25 @@ fn replay(path: &Path) -> Result<Replayed, IndexError> {
             ["i", node, day] => {
                 imported.insert((*node).to_string(), day.parse().map_err(|_| bad())?);
             },
+            ["x", id, day] => {
+                let id = parse_hex32(id).ok_or_else(bad)?;
+                rows.remove(&id);
+                moderation
+                    .tombstones
+                    .insert(id, day.parse().map_err(|_| bad())?);
+            },
+            ["s", id] => {
+                moderation.applied.insert(parse_hex16(id).ok_or_else(bad)?);
+            },
+            ["v", version] => {
+                let version: u64 = version.parse().map_err(|_| bad())?;
+                moderation.list_version =
+                    Some(moderation.list_version.map_or(version, |v| v.max(version)));
+            },
             _ => return Err(bad()),
         }
     }
-    Ok((rows, imported))
+    Ok((rows, imported, moderation))
 }
 
 /// Write the compact form of the state to `path` atomically and return the
@@ -138,6 +184,7 @@ fn compact(
     path: &Path,
     rows: &HashMap<BlobId, BlobRow>,
     imported: &HashMap<String, u32>,
+    moderation: &Moderation,
 ) -> Result<File, IndexError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::Builder::new()
@@ -151,6 +198,15 @@ fn compact(
         for r in rows.values() {
             w.write_all(row_line(r).as_bytes())?;
         }
+        for (id, day) in &moderation.tombstones {
+            w.write_all(format!("x {} {day}\n", hex::encode(id)).as_bytes())?;
+        }
+        for id in &moderation.applied {
+            w.write_all(format!("s {}\n", hex::encode(id)).as_bytes())?;
+        }
+        if let Some(v) = moderation.list_version {
+            w.write_all(format!("v {v}\n").as_bytes())?;
+        }
         w.sync_data()?;
     }
     tmp.persist(path).map_err(|e| IndexError::Io(e.error))?;
@@ -163,13 +219,14 @@ impl FileIndex {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let (rows, imported) = replay(&path)?;
-        let log = compact(&path, &rows, &imported)?;
+        let (rows, imported, moderation) = replay(&path)?;
+        let log = compact(&path, &rows, &imported, &moderation)?;
         Ok(Self {
             path,
             inner: Mutex::new(Inner {
                 rows,
                 imported,
+                moderation,
                 log,
             }),
         })
@@ -186,7 +243,7 @@ impl FileIndex {
     /// Rewrite the log compactly (after a sweep removed many rows).
     pub(crate) fn compact_now(&self) -> Result<(), IndexError> {
         let mut g = self.lock();
-        let log = compact(&self.path, &g.rows, &g.imported)?;
+        let log = compact(&self.path, &g.rows, &g.imported, &g.moderation)?;
         g.log = log;
         Ok(())
     }
@@ -209,6 +266,9 @@ impl BlobIndex for FileIndex {
     async fn record_upload(&self, row: BlobRow) -> Result<UploadOutcome, IndexError> {
         let mut g = self.lock();
         let inner = &mut *g;
+        if inner.moderation.tombstones.contains_key(&row.id) {
+            return Ok(UploadOutcome::Removed);
+        }
         if let Some(existing) = inner.rows.get_mut(&row.id) {
             if existing.last_access_day < row.last_access_day {
                 existing.last_access_day = row.last_access_day;
@@ -220,6 +280,64 @@ impl BlobIndex for FileIndex {
         append(&mut inner.log, &row_line(&row), true)?;
         inner.rows.insert(row.id, row);
         Ok(UploadOutcome::Created)
+    }
+
+    async fn is_tombstoned(&self, id: &BlobId) -> Result<bool, IndexError> {
+        Ok(self.lock().moderation.tombstones.contains_key(id))
+    }
+
+    async fn apply_moderation_delete(
+        &self,
+        statement: &ModerationDelete,
+    ) -> Result<ModerationOutcome, IndexError> {
+        let mut g = self.lock();
+        let inner = &mut *g;
+        if inner
+            .moderation
+            .list_version
+            .is_some_and(|v| statement.list_version < v)
+        {
+            return Ok(ModerationOutcome::StaleList);
+        }
+        if inner.moderation.applied.contains(&statement.statement_id) {
+            return Ok(ModerationOutcome::Repeat);
+        }
+        let outcome = if inner.moderation.tombstones.contains_key(&statement.id) {
+            ModerationOutcome::AlreadyRemoved
+        } else {
+            // The tombstone line removes the row on replay too.
+            let line = format!("x {} {}\n", hex::encode(statement.id), statement.day);
+            append(&mut inner.log, &line, false)?;
+            inner
+                .moderation
+                .tombstones
+                .insert(statement.id, statement.day);
+            let node = inner.rows.remove(&statement.id).map(|r| r.node);
+            ModerationOutcome::Removed { node }
+        };
+        let version = inner
+            .moderation
+            .list_version
+            .map_or(statement.list_version, |v| v.max(statement.list_version));
+        let lines = format!("s {}\nv {version}\n", hex::encode(statement.statement_id));
+        append(&mut inner.log, &lines, true)?;
+        inner.moderation.applied.insert(statement.statement_id);
+        inner.moderation.list_version = Some(version);
+        Ok(outcome)
+    }
+
+    async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, IndexError> {
+        let mut g = self.lock();
+        let inner = &mut *g;
+        match lakko_moderation::apply::list_floor(inner.moderation.list_version, list_version) {
+            Err(_) => Ok(false),
+            Ok(lakko_moderation::apply::FloorStep::Keep) => Ok(true),
+            Ok(lakko_moderation::apply::FloorStep::Raise) => {
+                append(&mut inner.log, &format!("v {list_version}\n"), true)?;
+                inner.moderation.list_version = Some(list_version);
+                Ok(true)
+            },
+        }
     }
 
     async fn touch(&self, ids: &[BlobId], day: u32) -> Result<(), IndexError> {
@@ -297,7 +415,10 @@ impl BlobIndex for FileIndex {
         let mut seen = HashSet::new();
         let mut inserted = 0;
         for r in rows {
-            if inner.rows.contains_key(&r.id) || !seen.insert(r.id) {
+            if inner.rows.contains_key(&r.id)
+                || inner.moderation.tombstones.contains_key(&r.id)
+                || !seen.insert(r.id)
+            {
                 continue;
             }
             append(&mut inner.log, &row_line(&r), false)?;
@@ -319,6 +440,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = FileIndex::open(dir.path().join("idx/blobs.log")).unwrap();
         super::super::contract::run(&index, 1).await;
+    }
+
+    #[tokio::test]
+    async fn the_file_index_keeps_moderator_tombstones_across_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blobs.log");
+        let ids = [[0xA1; 32], [0xA2; 32]];
+        {
+            let index = FileIndex::open(path.clone()).unwrap();
+            super::super::contract::run_moderation(&index, ids, [5; 16], 7).await;
+        }
+        // Replayed from the log, then again from its compact form.
+        for _ in 0..2 {
+            let index = FileIndex::open(path.clone()).unwrap();
+            assert!(index.is_tombstoned(&ids[0]).await.unwrap());
+            assert!(index.is_tombstoned(&ids[1]).await.unwrap());
+            assert_eq!(index.get(&ids[0]).await.unwrap(), None);
+            let mut again = super::super::contract::row(0, 1, None);
+            again.id = ids[0];
+            assert_eq!(
+                index.record_upload(again).await.unwrap(),
+                UploadOutcome::Removed
+            );
+            let mut repeat = [5; 16];
+            repeat[0] = 1;
+            // The contract raised the floor to 8 on its own: version 7 is
+            // stale after the reopen too.
+            assert!(!index.raise_moderation_list_floor(7).await.unwrap());
+            assert_eq!(
+                index
+                    .apply_moderation_delete(&ModerationDelete {
+                        statement_id: repeat,
+                        list_version: 8,
+                        id: ids[0],
+                        day: 1,
+                        now_ms: 1,
+                    })
+                    .await
+                    .unwrap(),
+                ModerationOutcome::Repeat
+            );
+            assert_eq!(
+                index
+                    .apply_moderation_delete(&ModerationDelete {
+                        statement_id: [0xEE; 16],
+                        list_version: 6,
+                        id: [0xA3; 32],
+                        day: 1,
+                        now_ms: 1,
+                    })
+                    .await
+                    .unwrap(),
+                ModerationOutcome::StaleList
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_moderation_line_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blobs.log");
+        for line in ["x nothex 1\n", "s abc\n", "v -1\n"] {
+            std::fs::write(&path, line).unwrap();
+            assert!(
+                matches!(FileIndex::open(path.clone()), Err(IndexError::Corrupt(1))),
+                "{line}"
+            );
+        }
     }
 
     #[tokio::test]

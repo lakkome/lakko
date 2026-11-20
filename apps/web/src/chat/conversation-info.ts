@@ -97,6 +97,10 @@ const SECTION_NAMES = [
   "reactions",
   /* who-can-find-me.md section 5: a channel's info, every role. */
   "members-can-find-me",
+  /* ADR-0089 (reporting-and-moderation.md sections 1.1 and 2.1). */
+  "block",
+  "unblock",
+  "report",
 ] as const;
 
 /**
@@ -132,6 +136,55 @@ export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
 ];
 
 /**
+ * ADR-0089 step 3 (UX `reporting-and-moderation.md` section 4): the blocks a
+ * suspended account is not offered, because each adds someone or starts a
+ * call (adding people to a group, an invite link, adding a contact, calling).
+ * Applied by the screens on top of the shared rule's answer.
+ */
+export const SUSPENDED_HIDDEN_SECTIONS: readonly InfoSection[] = [
+  "add-member",
+  "invite-link",
+  "invite-people",
+  "add-contact",
+  "call",
+];
+
+/** `sections` as a suspended account sees them. Pure. */
+export function sectionsWhileSuspended(
+  sections: readonly InfoSection[],
+  suspended: boolean,
+): readonly InfoSection[] {
+  return suspended ? sections.filter((s) => !SUSPENDED_HIDDEN_SECTIONS.includes(s)) : sections;
+}
+
+/**
+ * ADR-0089 step 5 (UX `reporting-and-moderation.md` section 3): the only
+ * blocks a channel moderators removed still offers. Everything else names the
+ * channel on the service, changes it, or invites someone into it; the
+ * `@name` (when the channel has one) and the description stay readable and
+ * anyone can still leave. The owner and a
+ * publisher, whose own rule offers no leaving, get the subscriber's control in
+ * its place: it ends the channel on the account's devices with no request the
+ * service would answer (it answers `410` anyway); Delete stays hidden.
+ */
+export const REMOVED_CHANNEL_SECTIONS: readonly InfoSection[] = [
+  "handle",
+  "channel-description",
+  "members-can-find-me",
+  "unsubscribe",
+];
+
+/** `sections` of a channel as shown while it is removed. Pure. */
+export function sectionsWhileRemoved(
+  sections: readonly InfoSection[],
+  removed: boolean,
+): readonly InfoSection[] {
+  if (!removed) return sections;
+  const kept = sections.filter((s) => REMOVED_CHANNEL_SECTIONS.includes(s));
+  return kept.includes("unsubscribe") ? kept : [...kept, "unsubscribe"];
+}
+
+/**
  * What the viewer is to a one-to-one conversation (spec section 2.1).
  *
  * The other person in a one-to-one is a contact by construction
@@ -148,6 +201,9 @@ export interface PersonInfoCapabilities {
    *  be named in the setting (`docs/ux/who-can-find-me.md` section 5.1). Left
    *  out it reads off. */
   readonly contactsOfContactsOn?: boolean;
+  /** ADR-0089 section 6 - this account blocked the person (the block
+   *  register). Left out it reads not blocked. */
+  readonly isBlocked?: boolean;
 }
 
 /** What the viewer is to a channel (ADR-0087 section 15): one role. */
@@ -237,7 +293,12 @@ export function personInfoSections(
   if (rules === null) return [];
   return known(
     rules.personInfoSections(
-      new rules.PersonInfoCapabilities(caps.membershipEnded, caps.isContact, caps.contactsOfContactsOn ?? false),
+      new rules.PersonInfoCapabilities(
+        caps.membershipEnded,
+        caps.isContact,
+        caps.contactsOfContactsOn ?? false,
+        caps.isBlocked ?? false,
+      ),
     ),
   );
 }

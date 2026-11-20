@@ -16,6 +16,8 @@
  * the cross-device sync runtime; unread, preview and time from the persisted
  * message log, which the open chat and the background receive both write.
  */
+import { accountSuspended } from "../auth/suspension-state";
+import { SuspendedBanner } from "../auth/SuspendedReadOnly";
 import { dropRequestSent, requestsSent } from "./requests-sent";
 import { RequestsSentScreen } from "./RequestsSentScreen";
 import { unseenReactionIds } from "./unseen-reactions";
@@ -144,20 +146,23 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           dismissable without a keyboard. */}
       <div class="lk-menu-backdrop" onClick={() => props.onClose()} />
       <div class="lk-menu" role="menu" aria-label={t("chats.create.menu")}>
-        <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
-          <Icon name="compose" size={16} />
-          {t("chats.create.chat")}
-        </button>
-        <button type="button" role="menuitem" onClick={() => go(paths.newGroup)}>
-          <Icon name="groups" size={16} />
-          {t("chats.create.group")}
-        </button>
-        <button type="button" role="menuitem" onClick={() => go(paths.channelNew)}>
-          <Icon name="channels" size={16} />
-          {t("chats.create.channel")}
-        </button>
-        {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
-        <div class="lk-menu-sep" />
+        {/* ADR-0089 step 3: a suspended account starts nothing new. */}
+        <Show when={!accountSuspended()}>
+          <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
+            <Icon name="compose" size={16} />
+            {t("chats.create.chat")}
+          </button>
+          <button type="button" role="menuitem" onClick={() => go(paths.newGroup)}>
+            <Icon name="groups" size={16} />
+            {t("chats.create.group")}
+          </button>
+          <button type="button" role="menuitem" onClick={() => go(paths.channelNew)}>
+            <Icon name="channels" size={16} />
+            {t("chats.create.channel")}
+          </button>
+          {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
+          <div class="lk-menu-sep" />
+        </Show>
         <button type="button" role="menuitem" onClick={() => go(paths.saved)}>
           <Icon name="bookmark" size={16} />
           {t("saved.title")}
@@ -589,6 +594,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
       </label>
+      {/* ADR-0089 step 3: reading the chats of a suspended account; the row
+          brings the suspended screen back. */}
+      <SuspendedBanner />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />

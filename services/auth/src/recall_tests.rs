@@ -133,6 +133,35 @@ pub(crate) fn pubkey(key: &SigningKey) -> [u8; 32] {
     key.verifying_key().to_bytes()
 }
 
+/// The account a v3 bearer names.
+pub(crate) fn account_of_token(bearer: &str) -> [u8; 16] {
+    URL_SAFE_NO_PAD
+        .decode(bearer.split('.').nth(1).expect("account part"))
+        .expect("base64")
+        .try_into()
+        .expect("16 bytes")
+}
+
+/// `key`'s identity proof for `account` (ADR-0089 F3), as a client sends
+/// it beside a key auth records.
+pub(crate) fn identity_proof(account: &[u8; 16], key: &SigningKey) -> String {
+    b64u(&lakko_attest::sign_identity_proof(&key.to_seed(), account))
+}
+
+/// Put a fresh new identity key, with its own valid identity proof, into a
+/// `recall/finish` body: the attacker swapping in their own key gets past
+/// the proof check and is refused by the statement.
+pub(crate) fn swap_new_key(body: &mut Value) {
+    let account: [u8; 16] = URL_SAFE_NO_PAD
+        .decode(body["account_id_b64"].as_str().expect("account_id_b64"))
+        .expect("base64")
+        .try_into()
+        .expect("16 bytes");
+    let key = fresh_key();
+    body["new_signature_pubkey_b64"] = json!(b64u(&pubkey(&key)));
+    body["identity_proof_b64"] = json!(identity_proof(&account, &key));
+}
+
 pub(crate) fn fresh_seed() -> Vec<u8> {
     let mut seed = vec![0u8; 64];
     OsRng.fill_bytes(&mut seed);
@@ -325,12 +354,22 @@ pub(crate) async fn new_account(
     key: &SigningKey,
 ) -> Account {
     let id = *Uuid::now_v7().as_bytes();
-    sqlx::query("INSERT INTO accounts (id, identity_pubkey) VALUES (?, ?)")
+    sqlx::query("INSERT INTO accounts (id, identity_pubkey, identity_target) VALUES (?, ?, ?)")
         .bind(&id[..])
         .bind(&pubkey(key)[..])
+        .bind(&crate::identity_target::target_of(&pubkey(key))[..])
         .execute(&state.db)
         .await
         .expect("insert account");
+    // What the genesis mint claims beside the key (ADR-0089 F3).
+    sqlx::query(
+        "INSERT INTO account_identity_targets (target, account_id, added_at_ms) VALUES (?, ?, 0)",
+    )
+    .bind(&crate::identity_target::target_of(&pubkey(key))[..])
+    .bind(&id[..])
+    .execute(&state.db)
+    .await
+    .expect("insert identity target");
     for (kind, secret) in [(KIND_PASSWORD, password), (KIND_RECOVERY, recovery_seed)] {
         sqlx::query(
             "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
@@ -451,6 +490,7 @@ pub(crate) async fn reset_keys(
             "fresh_grant": fresh,
             "recovery_upload": upload,
             "new_signature_pubkey_b64": b64u(&pubkey(new_key)),
+            "identity_proof_b64": identity_proof(&account_of_token(&bearer), new_key),
         }),
     )
     .await
@@ -656,6 +696,7 @@ pub(crate) fn finish_body(
         "password_upload": password_upload,
         "recovery_upload": recovery_upload,
         "new_signature_pubkey_b64": b64u(&pubkey(new_key)),
+        "identity_proof_b64": identity_proof(account, new_key),
         "device_id_b64": b64u(&NEW_DEVICE),
         "statement_b64": statement(key, AccountStatementKind::Recall, account, &body, now_ms()),
     }))
@@ -931,7 +972,7 @@ async fn no_recorded_key_and_the_cap_capture_nothing() {
     let k0 = fresh_key();
     let seed0 = fresh_seed();
     let account = new_account(&state, b"pw", &seed0, &k0).await;
-    sqlx::query("UPDATE accounts SET identity_pubkey = NULL WHERE id = ?")
+    sqlx::query("UPDATE accounts SET identity_pubkey = NULL, identity_target = NULL WHERE id = ?")
         .bind(&account.id[..])
         .execute(&pool)
         .await
@@ -943,8 +984,9 @@ async fn no_recorded_key_and_the_cap_capture_nothing() {
     assert!(anchors(&pool, &account.id).await.is_empty());
 
     // Fill the list by hand, then change the password under a ninth key.
-    sqlx::query("UPDATE accounts SET identity_pubkey = ? WHERE id = ?")
+    sqlx::query("UPDATE accounts SET identity_pubkey = ?, identity_target = ? WHERE id = ?")
         .bind(&pubkey(&k0)[..])
+        .bind(&crate::identity_target::target_of(&pubkey(&k0))[..])
         .bind(&account.id[..])
         .execute(&pool)
         .await
@@ -1742,6 +1784,7 @@ async fn finish_without_attempt(
             "password_upload": password_upload,
             "recovery_upload": recovery_upload,
             "new_signature_pubkey_b64": b64u(&pubkey(&new_key)),
+            "identity_proof_b64": identity_proof(&account_id, &new_key),
             "statement_b64": statement(
                 signer,
                 AccountStatementKind::Recall,
@@ -1818,6 +1861,7 @@ async fn a_phone_finder_spends_attempts_and_the_owner_recalls_below_the_cap() {
         "password_upload": password_upload,
         "recovery_upload": recovery_upload,
         "new_signature_pubkey_b64": b64u(&pubkey(&new_key)),
+        "identity_proof_b64": identity_proof(&account.id, &new_key),
         "statement_b64": statement(
             &k0,
             AccountStatementKind::Recall,
@@ -1975,7 +2019,7 @@ async fn a_tampered_finish_is_refused_before_and_after_the_recall() {
     };
     // Another new key (the attacker swapping in their own).
     let mut swapped = honest.clone();
-    swapped["new_signature_pubkey_b64"] = json!(b64u(&pubkey(&fresh_key())));
+    swap_new_key(&mut swapped);
     refused(swapped).await;
     // Another password upload, another recovery upload.
     let mut other_password = honest.clone();
@@ -2020,7 +2064,7 @@ async fn a_tampered_finish_is_refused_before_and_after_the_recall() {
     another_device["device_id_b64"] = json!(b64u(&ATTACKER_DEVICE));
     refused(another_device).await;
     let mut another_key = honest.clone();
-    another_key["new_signature_pubkey_b64"] = json!(b64u(&pubkey(&fresh_key())));
+    swap_new_key(&mut another_key);
     refused(another_key).await;
     assert_eq!(
         identity_of(&pool, &account.id).await.0,

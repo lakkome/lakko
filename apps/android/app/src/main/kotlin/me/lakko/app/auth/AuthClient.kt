@@ -282,16 +282,20 @@ public class AuthClient(
      * the server's URL-safe base64), ready to ride onto the identity-bundle
      * upload alongside the ADR-0019 genesis self-signature.
      */
-    public suspend fun genesisAttest(sessionToken: String, pubkey: ByteArray): ByteArray {
+    public suspend fun genesisAttest(sessionToken: String, pubkey: ByteArray, identityProof: ByteArray): ByteArray {
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
         if (pubkey.size != PUBKEY_LEN) {
             throw AuthClientArgError("pubkey must be $PUBKEY_LEN bytes (Ed25519)")
         }
+        requireIdentityProof(identityProof)
         val resp: GenesisAttestResponse = post(
             "/auth/genesis/attest",
-            GenesisAttestRequest(pubkey_b64 = base64UrlEncodeNoPad(pubkey)),
+            GenesisAttestRequest(
+                pubkey_b64 = base64UrlEncodeNoPad(pubkey),
+                identity_proof_b64 = base64UrlEncodeNoPad(identityProof),
+            ),
             bearer = sessionToken,
         )
         return base64UrlDecodeNoPad(resp.genesis_attest_b64)
@@ -873,6 +877,33 @@ public class AuthClient(
         postNoContent("/auth/session/logout", bearer = sessionToken)
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0089 section 4 - a suspended account (the `s1` restricted session)
+    // -----------------------------------------------------------------
+
+    /** `GET /account/suspension` with [bearer] (the `s1`, or an access token). */
+    public suspend fun suspensionStatus(bearer: String): SuspensionStatusAnswer {
+        requireSession(bearer)
+        val text: String = doRequest(HttpMethod.Get, "/account/suspension") {
+            header(HttpHeaders.Authorization, "Bearer $bearer")
+        }
+        return parseSuspensionStatus(text)
+    }
+
+    /**
+     * `POST /account/suspension/appeal` with [bearer] (the `s1`) and the
+     * appeal sealed to the moderators -> `204`; `409 not-suspended` /
+     * `409 appeal-already-sent` surface as [AuthHttpError].
+     */
+    public suspend fun suspensionAppeal(bearer: String, sealed: ByteArray) {
+        requireSession(bearer)
+        postNoContent(
+            "/account/suspension/appeal",
+            bearer = bearer,
+            body = SuspensionAppealRequest(sealed_b64 = java.util.Base64.getEncoder().encodeToString(sealed)),
+        )
+    }
+
     /**
      * `POST /auth/session/bind-device` (bearer): name [deviceId] as the
      * device of a session that landed without one. [refreshToken] is the
@@ -974,8 +1005,11 @@ public class AuthClient(
         freshGrant: String,
         seed: ByteArray,
         newSignaturePubkey: ByteArray,
+        /** ADR-0089 F3: `signIdentityProof` by the NEW key over the account id. */
+        identityProof: ByteArray,
     ): KeyResetResult {
         requireSession(sessionToken)
+        requireIdentityProof(identityProof)
         if (freshGrant.isEmpty()) {
             throw AuthClientArgError("freshGrant must be non-empty")
         }
@@ -998,6 +1032,7 @@ public class AuthClient(
                     fresh_grant = freshGrant,
                     recovery_upload = upload,
                     new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
+                    identity_proof_b64 = base64UrlEncodeNoPad(identityProof),
                 ),
                 bearer = sessionToken,
             )
@@ -1089,6 +1124,8 @@ public class AuthClient(
         newPassword: ByteArray,
         newSeed: ByteArray,
         newSignaturePubkey: ByteArray,
+        /** ADR-0089 F3: `signIdentityProof` by the NEW key over [accountId]. */
+        identityProof: ByteArray,
         deviceId: ByteArray? = null,
         /** ADR-0075 section 8: the 64-byte seed of the OLD recovery phrase.
          *  When given, the login is made against the anchored RECOVERY
@@ -1103,6 +1140,7 @@ public class AuthClient(
             throw AuthClientArgError("newSignaturePubkey must be $PUBKEY_LEN bytes (Ed25519)")
         }
         if (anchorSeq < 0) throw AuthClientArgError("anchorSeq must not be negative")
+        requireIdentityProof(identityProof)
         val accountIdB64Url = base64UrlEncodeNoPad(accountId)
         val loginSecret = oldRecoverySeed ?: oldPassword
         val loginStart =
@@ -1163,6 +1201,7 @@ public class AuthClient(
                         val loginFinish = loginOut.finalizeB64()
                         val deviceIdB64 = deviceIdField(deviceId)
                         val pubkeyB64 = base64UrlEncodeNoPad(newSignaturePubkey)
+                        val identityProofB64 = base64UrlEncodeNoPad(identityProof)
                         fun requestSignedAt(signAtMs: Long?): RecallFinishRequest {
                             val statement = if (signAtMs == null) {
                                 uniffi.lakko_ffi_uniffi.signRecallStatement(
@@ -1195,6 +1234,7 @@ public class AuthClient(
                                 password_upload = passwordUpload,
                                 recovery_upload = recoveryUpload,
                                 new_signature_pubkey_b64 = pubkeyB64,
+                                identity_proof_b64 = identityProofB64,
                                 device_id_b64 = deviceIdB64,
                                 statement_b64 = base64UrlEncodeNoPad(statement),
                             )
@@ -1306,10 +1346,13 @@ public class AuthClient(
         newSignaturePubkey: ByteArray,
         supersessionProof: ByteArray,
         revokeDeviceIds: List<ByteArray>,
+        /** ADR-0089 F3: `signIdentityProof` by the NEW key over the account id. */
+        identityProof: ByteArray,
         /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
         phraseSaved: Boolean = false,
     ): KeyResetResult {
         requireSession(sessionToken)
+        requireIdentityProof(identityProof)
         if (freshGrant.isEmpty()) throw AuthClientArgError("freshGrant must be non-empty")
         if (seed.isEmpty()) throw AuthClientArgError("seed must be non-empty")
         if (newSignaturePubkey.size != PUBKEY_LEN) {
@@ -1334,6 +1377,7 @@ public class AuthClient(
                     fresh_grant = freshGrant,
                     recovery_upload = upload,
                     new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
+                    identity_proof_b64 = base64UrlEncodeNoPad(identityProof),
                     supersession_proof_b64 = base64UrlEncodeNoPad(supersessionProof),
                     revoke_device_ids_b64 = revokeDeviceIds.map { base64UrlEncodeNoPad(it) },
                     phrase_saved = if (phraseSaved) true else null,
@@ -2059,14 +2103,19 @@ public class AuthClient(
         }
 
         if (!response.status.isSuccess()) {
-            val text = response.safeReadBody()
+            // The whole body, once: a suspension refusal carries two
+            // credentials and is longer than the truncated copy.
+            val full = response.readBodyOrNull()
+            val text = full?.let { if (it.length > ERROR_BODY_KEEP) "${it.take(ERROR_BODY_KEEP)}…" else it }
+                ?: "<unreadable body>"
             throw AuthHttpError(
                 status = response.status.value,
                 endpoint = endpoint,
                 body = text,
-                code = me.lakko.app.anon.errorCodeOf(text),
+                code = me.lakko.app.anon.errorCodeOf(full ?: text),
                 retryAfterSecs = me.lakko.app.anon.longFieldOf(text, "retry_after_secs")
                     ?: response.headers[HttpHeaders.RetryAfter]?.trim()?.toLongOrNull(),
+                suspended = if (response.status.value == HTTP_FORBIDDEN_SUSPENDED) parseSuspendedBody(full) else null,
             )
         }
         return response.body()
@@ -2102,6 +2151,15 @@ public class AuthClient(
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
 
+        /** ADR-0089 F3: an identity proof is one Ed25519 signature. */
+        public const val IDENTITY_PROOF_LEN: Int = 64
+
+        private fun requireIdentityProof(proof: ByteArray) {
+            if (proof.size != IDENTITY_PROOF_LEN) {
+                throw AuthClientArgError("identityProof must be $IDENTITY_PROOF_LEN bytes")
+            }
+        }
+
         /** The fixed layout of the ADR-0073 key-reset attestation. */
         public const val KEY_RESET_ATTESTATION_LEN: Int = 145
         /** A supersession proof is this many bytes (ADR-0016). */
@@ -2127,6 +2185,20 @@ public class AuthClient(
 
         private const val LOGIN_HANDLE_PATH: String = "/auth/login-handle"
     }
+}
+
+/** The length of the error body an [AuthHttpError] keeps. */
+private const val ERROR_BODY_KEEP: Int = 512
+
+/** The status of a suspension refusal (ADR-0089 section 4). */
+private const val HTTP_FORBIDDEN_SUSPENDED: Int = 403
+
+private suspend fun HttpResponse.readBodyOrNull(): String? = try {
+    bodyAsText()
+} catch (cause: kotlinx.coroutines.CancellationException) {
+    throw cause
+} catch (_: Throwable) {
+    null
 }
 
 private suspend fun HttpResponse.safeReadBody(): String {
@@ -2403,6 +2475,10 @@ public class AuthHttpError(
     public val code: String? = null,
     /** The wait a `429` states (`retry_after_secs` or `Retry-After`). */
     public val retryAfterSecs: Long? = null,
+    /** ADR-0089 section 4 - a landing or the refresh route answered `403
+     *  account-suspended` with the restricted session and a refresh
+     *  credential (read from the whole body, before [body] is truncated). */
+    public val suspended: SuspendedCredentials? = null,
 ) : RuntimeException("auth $endpoint → $status: $body")
 
 /** Network failure (DNS / connectivity / TLS). Distinct from

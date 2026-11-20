@@ -29,6 +29,10 @@ struct ChannelInfoSheet: View {
 
     @ObservedObject private var l10n = Localization.shared
     @ObservedObject private var reach = ReachCenter.shared
+    /// ADR-0089 step 5 — a channel moderators removed.
+    @ObservedObject private var removals = ChannelRemovals.shared
+    /// ADR-0089 step 3 — a suspended account invites nobody.
+    @Environment(\.accountSuspended) private var accountSuspended
     @State private var confirmingUnsubscribe = false
     @State private var typeOpen = false
     @State private var inviteFailedNames: [String] = []
@@ -38,6 +42,8 @@ struct ChannelInfoSheet: View {
     @State private var confirmingDelete = false
     @State private var deleting = false
     @State private var deleteFailed = false
+    /// ADR-0089 / UX 2.1 — the report sheet for the channel.
+    @State private var reportRequest: ReportRequest?
     /// UX 4.5.2 — the header photo (the owner changes it).
     @StateObject private var photo: ChannelPhotoModel
     @StateObject private var reactions: ChannelReactionsSetting
@@ -80,17 +86,24 @@ struct ChannelInfoSheet: View {
         return [fromRecord, held, local].first { !$0.isEmpty } ?? ""
     }
 
+    private var removal: ChannelRemovals.Status? { removals.status(channelId) }
+
     private var sections: [InfoSection] {
         // Read so the screen redraws when the publisher record changes.
         _ = publishersRevision
-        return channelInfoSections(caps: ChannelInfoCapabilities(
+        return ChannelRemovalRules.infoSections(baseSections, removed: removal != nil)
+    }
+
+    private var baseSections: [InfoSection] {
+        SuspendedInfo.withoutSending(channelInfoSections(caps: ChannelInfoCapabilities(
             role: role,
             hasHandle: !handle.isEmpty,
             // The co-publishers this account approved; a co-publisher always
             // has the owner. Delete channel itself waits for the core route.
             hasOtherPublishers: CoPublisherKeyBook.hasOtherPublishers(
                 channelIdHex: channelId, isOwner: isOwner),
-            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil))
+            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil)),
+            suspended: accountSuspended)
     }
 
     private var title: String {
@@ -112,7 +125,7 @@ struct ChannelInfoSheet: View {
     var body: some View {
         List {
             header
-            if nameLapsed {
+            if nameLapsed, removal == nil {
                 Section {
                     HStack {
                         Text(l10n.t("channels.info.handle_lapsed"))
@@ -136,6 +149,26 @@ struct ChannelInfoSheet: View {
             detail
             if sections.contains(.membersCanFindMe) {
                 MembersCanFindMeSection(groupIdHex: channelId, kind: .channel)
+            }
+            // ADR-0089 / UX 2.1 — a subscriber reports the channel; its posts
+            // may be picked.
+            if sections.contains(.report), let id = ChannelsClient.hexToData(channelId), id.count == 16 {
+                Section {
+                    Button(role: .destructive) {
+                        // The posts this device holds for the channel: its
+                        // local post log (the one the Feed reads), with the
+                        // wires of posts loaded this session as a fallback.
+                        reportRequest = ChannelReportSource.request(
+                            channelId: id, title: title,
+                            logged: AcceptedContactsStore.boundAccountIdB64
+                                .flatMap { ChannelPostLogStore().get(accountIdB64: $0)?.channels[channelId] }?
+                                .posts ?? [],
+                            loaded: state.postsByChannel[channelId] ?? [])
+                    } label: {
+                        Label(l10n.t("report.action"), systemImage: "flag")
+                            .foregroundStyle(Color.lakkoDanger)
+                    }
+                }
             }
             if sections.contains(.unsubscribe) {
                 Section {
@@ -181,6 +214,9 @@ struct ChannelInfoSheet: View {
         ) {
             [.danger(l10n.t("channels.delete.control")) { Task { await deleteChannel() } }, .cancel()]
         }
+        .reportSheet($reportRequest) { follow in
+            if follow == .unsubscribe { unsubscribe() }
+        }
         .lakkoDialog(
             isPresented: $confirmingUnsubscribe,
             title: l10n.t("channels.unsubscribe.title_named", texts: ["name": title]),
@@ -190,7 +226,7 @@ struct ChannelInfoSheet: View {
         }
         .task {
             // Section 15.1 — the exact count, for the owner and publishers.
-            guard isPublisher, let identity = try? Identity.fromSeed(seed: accountIdentitySeed),
+            guard isPublisher, removal == nil, let identity = try? Identity.fromSeed(seed: accountIdentitySeed),
                   let exact = try? await client.subscriberCount(channelIdHex: channelId, accountIdentity: identity)
             else { return }
             state.setSubscriberCount(channelId: channelId, count: Int(clamping: exact))
@@ -212,6 +248,13 @@ struct ChannelInfoSheet: View {
                     Text(line)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
+                }
+                // ADR-0089 step 5 / UX 3 — said only once the log proved it.
+                if let removal {
+                    Text(l10n.t(removal.lineKey))
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .multilineTextAlignment(.center)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -352,6 +395,16 @@ struct ChannelInfoSheet: View {
     }
 
     private func unsubscribe() {
+        if removal != nil, isPublisher {
+            // ADR-0089 step 5 — the owner or a publisher takes a removed
+            // channel out of the list, on every device of the account (the
+            // conversation-end record); the service is not asked (it answers
+            // 410 for the channel anyway).
+            ChannelUnsubscribe.leaveRemoved(state: state, channelId: channelId)
+            state.onUnsubscribedHere?(channelId)
+            onUnsubscribed()
+            return
+        }
         ChannelUnsubscribe.stopFollowing(state: state, channelId: channelId)
         state.onUnsubscribedHere?(channelId)
         onUnsubscribed()

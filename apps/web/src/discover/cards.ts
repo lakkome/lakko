@@ -56,6 +56,9 @@ export interface DirectoryCard {
   /** Set for a card that came from groups: the group with the most
    *  followers, and the total across groups. */
   readonly followers: GroupFollowers | null;
+  /** ADR-0089 section 2 - the listing as the directory served it (base64),
+   *  which a report on the card carries. */
+  readonly listingB64?: string;
 }
 
 /** One item of a bucket or search response, as the server sends it. */
@@ -105,6 +108,7 @@ export function cardsFromItems(
       source,
       serverRank: i,
       followers: null,
+      listingB64: item.listing_b64,
     });
   });
   return out;

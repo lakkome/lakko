@@ -111,6 +111,15 @@
 //! - `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` — seconds a name an account
 //!   renamed away from stays unclaimable before the hourly pruner frees it
 //!   (ADR-0076 D1; default 2592000 = 30 days, chosen not measured).
+//! - `LAKKO_DISCOVERY_INTERNAL_BIND` — the internal moderation listener
+//!   (ADR-0089 step 5; default `127.0.0.1:8097`, loopback, never proxied).
+//! - `LAKKO_DISCOVERY_INTERNAL_SECRET` — standard base64 of at least 16
+//!   bytes, the `x-lakko-internal-secret` the moderation service presents.
+//! - `LAKKO_DISCOVERY_MODERATION_ROOT_KEY` — base64url of the moderation root
+//!   public key the moderator list must verify under (the value of
+//!   `LAKKO_MODERATION_ROOT_KEY`). With it or the secret unset the internal
+//!   listener does not start (one warning) and no moderator action reaches
+//!   discovery; either set but malformed refuses startup.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -153,6 +162,10 @@
 //! - `POST   /discovery/group-invite`             — upload GroupInviteCapability blob (ADR-0028, G-3)
 //! - `GET    /discovery/group-invite/{blob_id}`   — fetch GroupInviteCapability blob (ADR-0028, G-3)
 //! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3, token)
+//! - On the INTERNAL listener only (ADR-0089 step 5, [`moderation`]):
+//!   `POST /internal/moderation/statement` (apply a moderator's signed
+//!   statement) and `POST /internal/moderation/account` (the panel's read of
+//!   an account target).
 
 #![forbid(unsafe_code)]
 
@@ -167,6 +180,7 @@ mod key_reset;
 mod keypackage;
 mod ledger_id;
 mod locate;
+mod moderation;
 mod oprf;
 mod rate_limit;
 mod registry;
@@ -451,6 +465,11 @@ async fn main() -> Result<()> {
     // idempotent, so it never blocks startup or any request path.
     let _transparency_reconciler = maybe_spawn_reconciler(state.transparency.clone(), pool.clone());
 
+    // ADR-0089 step 5 — the internal listener the moderation service
+    // forwards a moderator's statement to. Loopback, never proxied.
+    let _hold_pruner = moderation::spawn_hold_pruner(pool.clone());
+    spawn_internal_listener(state.clone()).await?;
+
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -471,6 +490,37 @@ async fn main() -> Result<()> {
 
     pool.close().await;
     tracing::info!("discovery service stopped cleanly");
+    Ok(())
+}
+
+/// ADR-0089 step 5 - start the internal listener a moderator's statement
+/// arrives on, when its secret and root key are set (one warning otherwise).
+///
+/// # Errors
+///
+/// A malformed setting, or a bind failure.
+async fn spawn_internal_listener(state: AppState) -> Result<()> {
+    let Some(config) = moderation::load_internal()
+        .map_err(anyhow::Error::msg)
+        .context("load the internal moderation listener config")?
+    else {
+        tracing::warn!(
+            "internal moderation listener NOT started: LAKKO_DISCOVERY_INTERNAL_SECRET or \
+             LAKKO_DISCOVERY_MODERATION_ROOT_KEY unset; no moderator action reaches discovery"
+        );
+        return Ok(());
+    };
+    let internal_bind = config.bind;
+    let internal_app = moderation::internal_router(state, config);
+    let internal_listener = tokio::net::TcpListener::bind(internal_bind)
+        .await
+        .with_context(|| format!("bind {internal_bind}"))?;
+    tracing::info!(addr = %internal_bind, "internal moderation listener started");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(internal_listener, internal_app).await {
+            tracing::warn!(error = %e, "internal moderation listener stopped");
+        }
+    });
     Ok(())
 }
 
@@ -503,10 +553,8 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         // (username binding, identity bundle, KeyPackage). Invite rows name no
         // owner (ADR-0078 section 10) and are not touched.
         // Session-token-gated; the account_id comes from the verified token.
-        .route(
-            "/discovery/account",
-            axum::routing::delete(account::delete_account),
-        )
+        // `DELETE /discovery/account` is in `account_delete_routes`: it also
+        // takes a suspended account's restricted session (ADR-0089 step 3).
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
         // ADR-0050 — remove one device's KeyPackage (device removal). ADR-0074:
@@ -587,6 +635,22 @@ pub(crate) fn build_app(state: AppState) -> Router {
     };
 
     let protected = protected_routes(&state);
+    // A3 (GDPR erasure) — purge this account's discovery footprint. Takes the
+    // `s1` restricted session too (ADR-0089 step 3), so a suspended person who
+    // deletes the account leaves nothing here.
+    let account_delete = Router::new()
+        .route(
+            "/discovery/account",
+            axum::routing::delete(account::delete_account),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state.rate_limits),
+            rate_limit::write_middleware,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_session_or_restricted,
+        ));
 
     // ADR-0054 S3 — the OPRF evaluation spends a `discovery-lookup` token.
     let oprf = Router::new()
@@ -690,6 +754,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
 
     open.merge(rate_limited)
         .merge(protected)
+        .merge(account_delete)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)

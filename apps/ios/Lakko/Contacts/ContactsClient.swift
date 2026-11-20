@@ -1385,7 +1385,8 @@ public final class ContactsClient {
             intro: intro,
             profile: profile,
             createdAt: createdAt,
-            viaGroupIdHex: viaGroupIdHex
+            viaGroupIdHex: viaGroupIdHex,
+            wire: body
         )
         return (req, replyGrant, linkAnswer)
     }
@@ -1548,6 +1549,10 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// when it came that way and not through the mailbox: the Requests row
     /// says "Via {group}". `nil` for a mailbox request.
     public let viaGroupIdHex: String?
+    /// ADR-0089 — the signed request wire as received, kept so a report on
+    /// the request can carry it as evidence. `nil` for a row stored before
+    /// the field existed.
+    public let wire: Data?
 
     public init(
         messageId: Int64,
@@ -1558,8 +1563,10 @@ public struct IncomingContactRequest: Equatable, Codable {
         intro: String?,
         profile: ProfileClaim? = nil,
         createdAt: String,
-        viaGroupIdHex: String? = nil
+        viaGroupIdHex: String? = nil,
+        wire: Data? = nil
     ) {
+        self.wire = wire
         self.messageId = messageId
         self.fromPubkey = fromPubkey
         self.fromAccountId = fromAccountId

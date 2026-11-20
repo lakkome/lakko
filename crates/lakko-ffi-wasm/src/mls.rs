@@ -2067,6 +2067,19 @@ impl Group {
             })
             .collect())
     }
+
+    /// The device binding of the leaf at `leaf` (ADR-0050), empty for a leaf
+    /// that is its account key, or `undefined` for a leaf not in the roster.
+    /// A report carries it beside a message the leaf signed (ADR-0089
+    /// section 1).
+    #[wasm_bindgen(js_name = deviceBindingAt)]
+    pub fn device_binding_at(&self, leaf: u32) -> Result<Option<Vec<u8>>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.device_binding_at(leaf))
+    }
 }
 
 /// Host-testable cores of the ADR-0045 proposal surface.

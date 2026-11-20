@@ -110,6 +110,13 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/gifs/, ""),
       },
+      // ADR-0089: lakko-svc-moderation defaults to 127.0.0.1:8094. Same
+      // prefix strip as production nginx `location /api/moderation/`.
+      "/api/moderation": {
+        target: "http://127.0.0.1:8094",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/moderation/, ""),
+      },
     },
   },
 

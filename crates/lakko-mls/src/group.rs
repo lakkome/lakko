@@ -1848,6 +1848,19 @@ impl Group {
         account_key_at_leaf(&self.members(), leaf).map(|k| k.to_vec())
     }
 
+    /// The credential identity bytes of the leaf at `leaf`: its ADR-0050
+    /// device binding, or empty for a leaf that is its account key. `None`
+    /// for a leaf that is not in the roster. Read-only; a report hands these
+    /// bytes to a moderator beside a message the leaf signed, so the
+    /// moderator can resolve the leaf to its account (ADR-0089 section 1).
+    #[must_use]
+    pub fn device_binding_at(&self, leaf: u32) -> Option<Vec<u8>> {
+        self.inner
+            .members()
+            .find(|m| m.index.u32() == leaf)
+            .map(|m| m.credential.serialized_content().to_vec())
+    }
+
     /// Whether this device holds a leaf in the roster: the precondition for
     /// any committer rank. Since ADR-0050 section 2.5a item 6 the acting
     /// device among an account's leaves is no longer decided here (a lost

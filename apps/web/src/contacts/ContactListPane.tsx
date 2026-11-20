@@ -16,6 +16,7 @@
  *
  * Markup only: the route owns the state and every mutation.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { createSignal, For, Show, type JSX } from "solid-js";
 
 import { base64Encode } from "../auth/account-id";
@@ -33,6 +34,9 @@ import {
   type SentRequestRecord,
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
+import { blockPerson, confirmBlock } from "../moderation/block-actions";
+import { openReport } from "../moderation/report-session";
+import { CONVERSATION_CONTACT_REQUEST } from "../moderation/report-model";
 import { pendingNameOf, type PendingContact } from "./pending-contacts";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
@@ -92,7 +96,29 @@ export interface ContactListPaneProps {
 
 export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const profiles = useProfiles();
+  /** ADR-0089 UX 1.2 - block the requester: the request goes with it. */
+  async function blockRequester(req: IncomingContactRequest, name: string): Promise<void> {
+    if (!(await confirmBlock(name))) return;
+    try {
+      await blockPerson(base64Encode(req.fromPubkey));
+      props.onDecline(req);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[block] not written", err instanceof Error ? err.name : "unknown");
+    }
+  }
+  /** ADR-0089 UX 2.1 - report the requester; the request itself, intro
+   *  included, is what the report carries. */
+  function reportRequest(req: IncomingContactRequest, name: string): void {
+    openReport({
+      target: { kind: "person", accountKeyB64: base64Encode(req.fromPubkey), name },
+      conversationKind: CONVERSATION_CONTACT_REQUEST,
+      fixed: req.wire === undefined ? [] : [{ kind: "contact-request", wire: req.wire }],
+    });
+  }
   const [menuOpen, setMenuOpen] = createSignal(false);
+  /** The request whose overflow menu is open (phone width), by DS id. */
+  const [requestMenu, setRequestMenu] = createSignal<number | null>(null);
   const [sentOpen, setSentOpen] = createSignal(false);
 
   const nameOf = (c: AcceptedContact): string =>
@@ -144,7 +170,9 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
     <aside class="lk-pane" aria-label={t("nav.contacts")}>
       <div class="lk-pane-head">
         <h1>{t("nav.contacts")}</h1>
-        <div class="lk-menu-anchor">
+        {/* ADR-0089 step 3: a suspended account adds no contact and shares
+            no invite link. */}
+        <div class="lk-menu-anchor" style={accountSuspended() ? { display: "none" } : undefined}>
           <button
             type="button"
             class="lk-icon-button accent"
@@ -223,6 +251,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       <button
                         class="primary small"
                         type="button"
+                        style={accountSuspended() ? { display: "none" } : undefined}
                         disabled={props.pendingBusy() || props.accepting?.(req) === true}
                         onClick={() => props.onAccept(req)}
                       >
@@ -234,6 +263,70 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       <button class="small" type="button" onClick={() => props.onDecline(req)}>
                         {t("contacts.request.decline")}
                       </button>
+                      {/* ADR-0089 UX 1.1 / 2.1 - Block beside Accept and
+                          Decline; Report carries the request itself. Inline
+                          on a wide pane; behind the row's overflow menu on a
+                          phone width (`.lk-request-more`). */}
+                      <span class="lk-request-inline">
+                        <button
+                          class="small ghost"
+                          type="button"
+                          style={{ color: "var(--danger)" }}
+                          onClick={() => void blockRequester(req, memberNameOf(r(), "a contact request row"))}
+                        >
+                          {t("block.action")}
+                        </button>
+                        <button
+                          class="small ghost"
+                          type="button"
+                          style={{ color: "var(--danger)" }}
+                          onClick={() => reportRequest(req, memberNameOf(r(), "a contact request row"))}
+                        >
+                          {t("report.action")}
+                        </button>
+                      </span>
+                      <div class="lk-menu-anchor lk-request-more">
+                        <button
+                          type="button"
+                          class="lk-icon-button"
+                          title={t("common.more_options")}
+                          aria-label={t("common.more_options")}
+                          aria-haspopup="menu"
+                          aria-expanded={requestMenu() === req.messageId}
+                          onClick={() => setRequestMenu(requestMenu() === req.messageId ? null : req.messageId)}
+                        >
+                          <Icon name="more" size={18} />
+                        </button>
+                        <Show when={requestMenu() === req.messageId}>
+                          <div class="lk-menu-backdrop" onClick={() => setRequestMenu(null)} />
+                          <div class="lk-menu" role="menu">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              class="danger-item"
+                              onClick={() => {
+                                setRequestMenu(null);
+                                void blockRequester(req, memberNameOf(r(), "a contact request row"));
+                              }}
+                            >
+                              <Icon name="shieldAlert" size={18} />
+                              {t("block.action")}
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              class="danger-item"
+                              onClick={() => {
+                                setRequestMenu(null);
+                                reportRequest(req, memberNameOf(r(), "a contact request row"));
+                              }}
+                            >
+                              <Icon name="flag" size={18} />
+                              {t("report.action")}
+                            </button>
+                          </div>
+                        </Show>
+                      </div>
                     </div>
                     <Show when={props.acceptFailed?.(req) === true}>
                       <div class="form-error" role="status">
@@ -295,9 +388,11 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               <span>{t("contacts.list.empty.body")}</span>
               {/* Finding someone is the search field above (UX who-can-find-me
                   6.1); the button is the other way in, the invite link. */}
-              <button type="button" class="primary" onClick={() => props.onAdd("invite")}>
-                {t("contacts.add.share_invite")}
-              </button>
+              <Show when={!accountSuspended()}>
+                <button type="button" class="primary" onClick={() => props.onAdd("invite")}>
+                  {t("contacts.add.share_invite")}
+                </button>
+              </Show>
             </div>
           }
         >

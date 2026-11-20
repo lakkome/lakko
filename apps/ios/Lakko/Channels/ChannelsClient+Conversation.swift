@@ -147,7 +147,7 @@ extension ChannelsClient {
             request.setValue(tokenHeader, forHTTPHeaderField: AnonTokenRoute.headerName)
             request.setValue(inviteProof, forHTTPHeaderField: channelInviteProofHeaderName())
             request.httpBody = body
-            let (data, response) = try await AntiCensorshipTransport.perform(
+            let (data, response) = try await channelsPerform(
                 request, session: anonymousSession, config: .current)
             guard let http = response as? HTTPURLResponse else {
                 throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -175,7 +175,7 @@ extension ChannelsClient {
     public func fetchPublicSeed(channelIdHex: String, epoch: UInt32) async throws -> Data? {
         var request = URLRequest(url: try buildURL(endpoint: "/v1/channels/\(channelIdHex)/public-seed/\(epoch)"))
         request.httpMethod = "GET"
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -216,7 +216,7 @@ extension ChannelsClient {
             endpoint: "/v1/channels/\(channelIdHex)/reactions?posts="
                 + posts.prefix(50).map(String.init).joined(separator: ",")))
         request.httpMethod = "GET"
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -253,7 +253,7 @@ extension ChannelsClient {
             endpoint: "/v1/channels/\(channelIdHex)/posts/\(postCursor)/comment-reactions?comments="
                 + comments.prefix(50).map(String.init).joined(separator: ",")))
         request.httpMethod = "GET"
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -286,7 +286,7 @@ extension ChannelsClient {
             request.setValue(header, forHTTPHeaderField: AnonTokenRoute.headerName)
             request.setValue(writeKey.signAdd(), forHTTPHeaderField: channelWriteProofHeaderName())
             request.httpBody = body
-            let (data, response) = try await AntiCensorshipTransport.perform(
+            let (data, response) = try await channelsPerform(
                 request, session: anonymousSession, config: .current)
             guard let http = response as? HTTPURLResponse else {
                 throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -306,7 +306,7 @@ extension ChannelsClient {
         var request = URLRequest(url: try buildURL(endpoint: path))
         request.httpMethod = "DELETE"
         request.setValue(writeKey.signDelete(), forHTTPHeaderField: channelWriteProofHeaderName())
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -333,7 +333,7 @@ extension ChannelsClient {
             // Each attempt signs anew: the nonce is single use.
             request.setValue(writeKey.signAdd(), forHTTPHeaderField: channelWriteProofHeaderName())
             request.httpBody = body
-            let (data, response) = try await AntiCensorshipTransport.perform(
+            let (data, response) = try await channelsPerform(
                 request, session: anonymousSession, config: .current)
             guard let http = response as? HTTPURLResponse else {
                 throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -352,7 +352,7 @@ extension ChannelsClient {
         var request = URLRequest(url: try buildURL(endpoint: path))
         request.httpMethod = "DELETE"
         request.setValue(writeKey.signDelete(), forHTTPHeaderField: channelWriteProofHeaderName())
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -387,7 +387,7 @@ extension ChannelsClient {
         var request = URLRequest(url: try buildURL(
             endpoint: "/v1/channels/\(channelIdHex)/posts/\(postCursor)/comments?after=\(after)&limit=\(limit)"))
         request.httpMethod = "GET"
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -420,7 +420,7 @@ extension ChannelsClient {
             request.setValue(header, forHTTPHeaderField: AnonTokenRoute.headerName)
             request.setValue(writeKey.signAdd(sealed: sealed), forHTTPHeaderField: channelWriteProofHeaderName())
             request.httpBody = body
-            let (data, response) = try await AntiCensorshipTransport.perform(
+            let (data, response) = try await channelsPerform(
                 request, session: anonymousSession, config: .current)
             guard let http = response as? HTTPURLResponse else {
                 throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -439,7 +439,7 @@ extension ChannelsClient {
             endpoint: "/v1/channels/\(channelIdHex)/posts/\(postCursor)/comments/\(commentCursor)"))
         request.httpMethod = "DELETE"
         request.setValue(writeKey.signDelete(commentCursor: commentCursor), forHTTPHeaderField: channelWriteProofHeaderName())
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")

@@ -101,6 +101,7 @@ pub mod link_refusal;
 pub mod mailbox;
 pub mod mls;
 pub mod mnemonic;
+pub mod moderation;
 pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;

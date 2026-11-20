@@ -29,7 +29,11 @@ final class ChannelPhotoModel: ObservableObject, ConversationPhotoModel {
     var photoIdHex: String { channelId }
     var photoIsGroup: Bool { false }
     /// Section 4.5.1 — the owner (who renames it).
-    var canSetPhoto: Bool { ChannelOwnership.isOwner(channelId: channelId, state: state) }
+    /// Not while moderators hold the channel removed (ADR-0089 step 5).
+    var canSetPhoto: Bool {
+        ChannelOwnership.isOwner(channelId: channelId, state: state)
+            && !ChannelRemovals.shared.isRemoved(channelId)
+    }
     var currentPhoto: ProfileAvatar? { state.extras(channelId).avatar }
     var photoRemoveTitleKey: String { "channels.photo.remove_title" }
     var photoRemoveBodyKey: String { "channels.photo.remove_body" }

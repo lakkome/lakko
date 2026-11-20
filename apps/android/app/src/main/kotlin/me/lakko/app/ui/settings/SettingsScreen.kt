@@ -38,6 +38,8 @@ import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -112,6 +114,10 @@ public fun SettingsScreen(
     onOpenChatFolders: () -> Unit = {},
     /** `docs/ux/who-can-find-me.md` section 2 — Settings > Privacy. */
     onOpenWhoCanFindMe: () -> Unit = {},
+    /** ADR-0089 — Settings > Privacy > Blocked people. */
+    onOpenBlockedPeople: () -> Unit = {},
+    /** ADR-0089 — Settings > Privacy > Your reports. */
+    onOpenYourReports: () -> Unit = {},
     /** ADR-0075 / UX 19.1 — Settings > Account: how the account is
      *  protected (status line, banner, recovery email, recovery phrase). */
     accountProtection: @Composable () -> Unit = {},
@@ -201,6 +207,8 @@ public fun SettingsScreen(
             SectionLabel(t("settings.section.privacy"))
             SettingsRow(t("who_can_find_me.title"), Icons.Filled.Visibility, onOpenWhoCanFindMe)
             ShowCityRow()
+            SettingsRow(t("block.list.title"), Icons.Filled.Block, onOpenBlockedPeople)
+            SettingsRow(t("report.list.title"), Icons.Filled.Flag, onOpenYourReports)
 
             SectionLabel(t("settings.section.security"))
             // A guest account has no password to change.

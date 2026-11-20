@@ -260,7 +260,8 @@ Settings sections:
 - **Profile**: avatar, display name, `@username`.
 - **Privacy**: who can find me by username or name, and so who can ask to
   be a contact ([`docs/ux/who-can-find-me.md`](../../../docs/ux/who-can-find-me.md)).
-  About people, not keys, so not under Security.
+  About people, not keys, so not under Security. Also **Blocked people**
+  and **Your reports** ([`docs/ux/reporting-and-moderation.md`](../../../docs/ux/reporting-and-moderation.md)).
 - **Security**: passkeys (list + add), linked devices (list, link new via
   QR, remove), recovery phrase (view once / verify), two-step (TOTP),
   recovery contact.

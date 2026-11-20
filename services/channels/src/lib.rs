@@ -29,9 +29,10 @@ pub use config::{Config, ConfigError};
 pub use feedback::{PostReactionCounts, StoredComment};
 pub use sql_store::SqlChannelStore;
 pub use storage::{
-    ChannelId, ChannelStore, DirectoryQuery, InMemoryChannelStore, InviteKeyRow, ModerationAction,
-    PublicSeedOutcome, SealedTicket, StorageError, StoredListing, StoredPost, SubscriberEntry,
-    SubscriberId, INVITE_USES_UNLIMITED, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
+    ChannelId, ChannelModeration, ChannelStore, DirectoryQuery, InMemoryChannelStore, InviteKeyRow,
+    ModerationOutcome, ModerationStatement, PublicSeedOutcome, SealedTicket, StorageError,
+    StoredListing, StoredPost, SubscriberEntry, SubscriberId, INVITE_USES_UNLIMITED,
+    PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
 
 /// The service's migrations, for `main` and the DB-gated tests.

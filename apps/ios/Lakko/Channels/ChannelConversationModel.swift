@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 import LakkoCore
 import UIKit
@@ -23,6 +24,9 @@ final class ChannelConversationModel: ObservableObject {
     let client: ChannelsClient
     let accountIdentitySeed: Data
     private(set) weak var sync: DeviceGroupSyncRepository?
+    /// ADR-0089 step 5 — the channels moderators removed.
+    let removals: ChannelRemovals
+    private var removalWatch: AnyCancellable?
 
     /// The handle and name a search card or a link carried, while the channel
     /// is not in the local list yet.
@@ -72,12 +76,17 @@ final class ChannelConversationModel: ObservableObject {
     @Published private(set) var removedName: String?
 
     init(
-        channelId: String, state: ChannelsUiState, client: ChannelsClient, accountIdentitySeed: Data
+        channelId: String, state: ChannelsUiState, client: ChannelsClient, accountIdentitySeed: Data,
+        removals: ChannelRemovals = .shared
     ) {
         self.channelId = channelId
         self.state = state
         self.client = client
         self.accountIdentitySeed = accountIdentitySeed
+        self.removals = removals
+        // Every view of the model redraws when the channel is held as removed
+        // or answers again.
+        removalWatch = removals.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         self.access = Self.initialAccess(channelId: channelId, state: state)
     }
 
@@ -92,6 +101,15 @@ final class ChannelConversationModel: ObservableObject {
     }
 
     var isPublisher: Bool { state.keysByChannel[channelId] != nil }
+
+    /// ADR-0089 step 5 — set while the service answers `channel-removed` for
+    /// this channel: the line the conversation shows instead of its write
+    /// controls.
+    var removal: ChannelRemovals.Status? { removals.status(channelId) }
+
+    /// Whether composing, commenting and reacting are offered: not while the
+    /// channel is held as removed (UX `reporting-and-moderation.md` 3).
+    var writable: Bool { removal == nil }
 
     var channelIdBytes: Data? { ChannelsClient.hexToData(channelId) }
 
@@ -175,6 +193,12 @@ final class ChannelConversationModel: ObservableObject {
                 endDeleted()
                 return
             }
+            if ChannelsApiError.isChannelRemoved(error) {
+                // ADR-0089 step 5 — nothing ends: the posts this device holds
+                // stay readable.
+                await showHeldPosts()
+                return
+            }
             NSLog("[channels] posts did not load")
         }
     }
@@ -209,6 +233,29 @@ final class ChannelConversationModel: ObservableObject {
         await decodeAll()
         await refreshCounts()
         return true
+    }
+
+    /// The posts this device already holds for a channel the service no
+    /// longer serves: those loaded this session and those in the post log
+    /// the Feed keeps (with their wires), by cursor.
+    nonisolated static func heldPosts(loaded: [PostView], logged: [PersistedChannelPost]) -> [PostView] {
+        var byCursor: [UInt64: PostView] = [:]
+        for post in logged {
+            guard let wire = post.payloadB64 else { continue }
+            byCursor[post.cursor] = PostView(
+                cursor: post.cursor, serverTsMs: UInt64(clamping: post.serverTsMs), payloadB64: wire)
+        }
+        for post in loaded { byCursor[post.cursor] = post }
+        return byCursor.values.sorted { $0.cursor < $1.cursor }
+    }
+
+    private func showHeldPosts() async {
+        let logged = AcceptedContactsStore.boundAccountIdB64
+            .flatMap { ChannelPostLogStore().get(accountIdB64: $0)?.channels[channelId] }?.posts ?? []
+        let held = Self.heldPosts(loaded: rawPosts + (state.postsByChannel[channelId] ?? []), logged: logged)
+        guard held.map(\.cursor) != rawPosts.map(\.cursor) else { return }
+        rawPosts = held
+        await decodeAll()
     }
 
     private func decodeAll() async {
@@ -251,6 +298,35 @@ final class ChannelConversationModel: ObservableObject {
         }
         decoded = next
         timeline = ChannelTimeline.fold(Array(next.values))
+    }
+
+    /// ADR-0089 — the evidence item of a post as it was received (its wire),
+    /// `nil` when this device no longer holds it.
+    func postEvidence(cursor: UInt64) -> FfiEvidenceItem? {
+        guard let id = channelIdBytes,
+              let raw = rawPosts.first(where: { $0.cursor == cursor }),
+              let wire = Data(base64UrlNoPadListing: raw.payloadB64) else { return nil }
+        return .channelPost(channelId: id, post: wire)
+    }
+
+    /// ADR-0089 / UX 2.1 — a report on the channel from a post's menu (that
+    /// post included) or from the channel's info (nothing included). Every
+    /// post may be picked; `Unsubscribe` is the follow-up for a subscriber.
+    func reportRequest(title: String, includingCursor: UInt64?, subscriber: Bool) -> ReportRequest? {
+        guard let id = channelIdBytes, id.count == 16 else { return nil }
+        let candidates = timeline.items.reversed().map {
+            ReportCandidate(messageId: Int64(clamping: $0.cursor), authorName: nil, text: $0.text, createdAt: "")
+        }
+        return ReportRequest(
+            target: .channel(channelId: id), targetName: title,
+            conversationKind: .channel,
+            initialMessageIds: includingCursor.map { [Int64(clamping: $0)] } ?? [],
+            candidates: candidates,
+            followUp: subscriber ? .unsubscribe : nil,
+            candidateEvidence: { [weak self] messageId in
+                guard messageId >= 0 else { return nil }
+                return self?.postEvidence(cursor: UInt64(messageId))
+            })
     }
 
     /// The epoch seed a readable post was opened under.
@@ -431,6 +507,7 @@ final class ChannelConversationModel: ObservableObject {
 
     /// Publish the draft and the staged attachments as one post.
     func sendDraft() async {
+        guard writable else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = pendingAttachments
         guard !text.isEmpty || !attachments.isEmpty, !sending else { return }
@@ -655,6 +732,7 @@ final class ChannelConversationModel: ObservableObject {
     /// Press `emoji` on a post: add it, or take it off. Shown at once; an add
     /// that finds no token waits for the next refill (section 13.1).
     func react(_ item: ChannelTimelineItem, emoji: String) async {
+        guard writable else { return }
         guard let id = channelIdBytes, let sync, let writer = writerIdentity, let key = reactionKey(item) else { return }
         let own = ownReactions(item)
         let verdict = reactionTapVerdict(
@@ -766,6 +844,7 @@ final class ChannelConversationModel: ObservableObject {
 
     /// Press `emoji` on a comment: add it, or take it off.
     func reactComment(_ comment: Comment, of item: ChannelTimelineItem, emoji: String) async {
+        guard writable else { return }
         guard comment.cursor != 0, let id = channelIdBytes, let sync, let writer = writerIdentity,
               let key = commentReactionKey(item) else { return }
         let own = ownCommentReactions(comment, of: item)
@@ -848,6 +927,8 @@ final class ChannelConversationModel: ObservableObject {
 
     /// Load the first page of a post's comments when it comes on screen.
     func loadComments(_ item: ChannelTimelineItem, more: Bool = false) async {
+        // A removed channel keeps the comments already loaded; nothing is asked.
+        guard writable else { return }
         var thread = threads[item.cursor] ?? CommentThread()
         guard !thread.loading else { return }
         if !more, !thread.comments.isEmpty { return }
@@ -898,6 +979,7 @@ final class ChannelConversationModel: ObservableObject {
     /// Write a comment under a post (section 13.2): text and emoji only.
     @discardableResult
     func comment(_ item: ChannelTimelineItem, text: String, replyTo: UInt64?) async -> Bool {
+        guard writable else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, (try? checkCommentText(text: trimmed)) != nil,
               let id = channelIdBytes, let seed = epochSeed(of: item), let writer = writerIdentity

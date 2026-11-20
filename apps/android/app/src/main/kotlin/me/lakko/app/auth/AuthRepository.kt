@@ -314,6 +314,320 @@ public class AuthRepository(
         log = { message -> Log.w("lakko-auth", message) },
     )
 
+    // -----------------------------------------------------------------
+    // ADR-0089 section 4 - a suspended account
+    // -----------------------------------------------------------------
+
+    /**
+     * The suspended mode of the account this device serves (`Suspension.kt`).
+     * Entered by a landing's `403 account-suspended` ([landSuspended]) or by
+     * a refresh that answered it (the token provider's `onSuspended`); left
+     * when the refresh route answers a normal pair.
+     */
+    private val suspensionController: SuspensionController = SuspensionController(
+        ports = object : SuspensionPorts {
+            override suspend fun refresh(refreshToken: String): SuspensionRefresh = try {
+                SuspensionRefresh.Resumed(authClientFactory().use { it.sessionRefresh(refreshToken) })
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (err: AuthHttpError) {
+                val suspended = err.suspended
+                val refusal = sessionRefusalOf(err.status, err.code)
+                when {
+                    suspended != null -> SuspensionRefresh.Suspended(suspended)
+                    refusal != null -> SuspensionRefresh.Refused(refusal)
+                    else -> SuspensionRefresh.Unreachable
+                }
+            } catch (_: AuthNetworkError) {
+                SuspensionRefresh.Unreachable
+            }
+
+            override suspend fun status(restrictedToken: String): SuspensionStatusAnswer = try {
+                authClientFactory().use { it.suspensionStatus(restrictedToken) }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Throwable) {
+                SuspensionStatusAnswer.Unreachable
+            }
+
+            override suspend fun appeal(restrictedToken: String, text: String): AppealAnswer =
+                sendSuspensionAppeal(restrictedToken, text)
+
+            override fun save(credentials: SuspendedCredentials) {
+                SuspensionStore.put(applicationContext, credentials)
+            }
+
+            override fun clear(accountIdB64: String) {
+                SuspensionStore.delete(applicationContext, accountIdB64)
+            }
+        },
+        events = object : SuspensionEvents {
+            override fun onCredentials(credentials: SuspendedCredentials) = serveSuspended(credentials)
+
+            override fun onResumed(accountIdB64: String, pair: SessionPair) = resumeAfterSuspension(accountIdB64, pair)
+
+            override fun onRefused(accountIdB64: String, refusal: SessionRefusal) {
+                SuspensionGate.set(false)
+                when (refusal) {
+                    SessionRefusal.KeysReset -> onKeysSuperseded(accountIdB64)
+                    SessionRefusal.DeviceRevoked -> onDeviceRevoked(accountIdB64)
+                    SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized ->
+                        if (signedInAccountIdB64() == accountIdB64) logout() else landedState = AuthState.Anon(
+                            cachedUsername = sessionStore.load()?.username,
+                        )
+                }
+            }
+        },
+        log = { message -> Log.w("lakko-auth", message) },
+    )
+
+    /** `null` while the account is not suspended; the app root draws the
+     *  suspended screen (or the read-only app) from it. */
+    public val suspension: StateFlow<SuspensionUi?> = suspensionController.ui
+
+    /** "Read my chats". */
+    public fun suspensionReadChats(): Unit = suspensionController.readChats()
+
+    /** Back to the suspended screen. */
+    public fun suspensionShowScreen(): Unit = suspensionController.showScreen()
+
+    /** Ask the refresh route now and every ten minutes, until the mode ends
+     *  (the app root runs it while the app is in front). */
+    public suspend fun keepCheckingSuspension(): Unit = suspensionController.keepChecking()
+
+    /** Load the suspended screen's details again (its retry). */
+    public suspend fun reloadSuspensionDetails(): Unit = suspensionController.loadDetails()
+
+    /** Send the one appeal. */
+    public suspend fun sendAppeal(text: String): AppealAnswer = suspensionController.sendAppeal(text)
+
+    /**
+     * The credentials of a suspension, as the session of their account: the
+     * restricted pair is what the provider serves and what the live secrets
+     * carry (so Delete account and Sign out go with the `s1`), the landing's
+     * grant is the fresh-auth proof, and the transport refuses DS writes.
+     */
+    private fun serveSuspended(credentials: SuspendedCredentials) {
+        val acct = credentials.accountIdB64
+        SuspensionGate.set(true)
+        if (credentials.freshGrant != null) {
+            freshAuth.put(acct, credentials.freshGrant, credentials.freshGrantExpiresAtMs, System.currentTimeMillis())
+        }
+        val pair = credentials.asSessionPair()
+        sessionTokenProvider.serveSuspended(credentials)
+        val live = mutableIdentitySecrets.value
+        if (live != null && base64Encode(live.accountId) == acct) {
+            mutableIdentitySecrets.value = live.copy(session = pair)
+            persistSessionPairBestEffort(acct, pair)
+        }
+    }
+
+    /** The suspension ended: the account's normal pair, silently. */
+    private fun resumeAfterSuspension(accountIdB64: String, pair: SessionPair) {
+        SuspensionGate.set(false)
+        val live = mutableIdentitySecrets.value
+        if (live != null && base64Encode(live.accountId) == accountIdB64 && signedInAccountIdB64() == accountIdB64) {
+            persistSessionPairBestEffort(accountIdB64, pair)
+            installSessionPair(accountIdB64, pair)
+            mutableIdentitySecrets.value = live.copy(session = pair)
+            subscribePushBestEffort("suspension-ended")
+            return
+        }
+        // A device that never held the account's keys: the pair alone lands
+        // nothing; the person signs in again, now unsuspended.
+        if (signedInAccountIdB64() == null) {
+            landedState = AuthState.Anon(cachedUsername = sessionStore.load()?.username)
+        }
+    }
+
+    /** The suspension record kept for [accountIdB64], or `null`. */
+    private fun storedSuspension(accountIdB64: String): SuspendedCredentials? = try {
+        SuspensionStore.get(applicationContext, accountIdB64)
+    } catch (cause: Throwable) {
+        Log.w("lakko-auth", "suspension record not readable: ${cause.javaClass.simpleName}")
+        null
+    }
+
+    /**
+     * ADR-0089 section 4 - a suspended account on a device without its chats
+     * has no session to prove for, and its suspended screen offers Delete
+     * account: the proof is for the suspended account.
+     */
+    private fun suspendedProofTarget(): ProofTarget? {
+        val creds = suspensionController.credentials() ?: return null
+        val bytes = try {
+            base64Decode(creds.accountIdB64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        val username = try {
+            sessionStore.load()?.takeIf { it.accountIdB64 == creds.accountIdB64 }?.username
+        } catch (_: Exception) {
+            null
+        }
+        return ProofTarget(bytes, creds.accountIdB64, username.orEmpty())
+    }
+
+    /** The account Delete account erases and the bearer it goes with: the
+     *  live session's, else (ADR-0089, a suspended account on a device
+     *  without its chats) the restricted session's. */
+    public fun accountForDeletion(): AccountForDeletion? {
+        mutableIdentitySecrets.value?.let { return AccountForDeletion(it.accountId, it.sessionToken) }
+        val creds = suspensionController.credentials() ?: return null
+        val bytes = try {
+            base64Decode(creds.accountIdB64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return AccountForDeletion(bytes, creds.restrictedToken)
+    }
+
+    /** The provider saw the refresh route answer the suspension. */
+    private fun onProviderSuspended(accountIdB64: String, credentials: SuspendedCredentials) {
+        if (credentials.accountIdB64 != accountIdB64) return
+        suspensionController.enter(credentials, canRead = signedInAccountIdB64() == accountIdB64 &&
+            mutableState.value is AuthState.Session)
+    }
+
+    /** The provider's own refresh brought a normal pair while suspended. */
+    private fun onProviderResumed(accountIdB64: String) {
+        if (suspensionController.credentials()?.accountIdB64 != accountIdB64) return
+        suspensionController.clear()
+        SuspensionGate.set(false)
+    }
+
+    /**
+     * A landing route answered `403 account-suspended` (ADR-0089 section 4):
+     * keep the restricted session and the refresh credential and land the
+     * account as a sign-in would, in suspended mode. A device that holds the
+     * account's keys lands its session (the chats are readable); a fresh
+     * device has nothing to read and shows the suspended screen alone.
+     */
+    private fun landSuspended(credentials: SuspendedCredentials, typedUsername: String?) {
+        val acct = credentials.accountIdB64
+        val cached = sessionStore.load()
+        val username = cached?.takeIf { it.accountIdB64 == acct }?.username
+            ?: typedUsername?.trim()?.removePrefix("@").orEmpty()
+        openStoresFor(acct)
+        try {
+            sessionStore.save(PersistedSession(accountIdB64 = acct, username = username))
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "session marker persist (suspended) failed: ${cause.javaClass.simpleName}")
+        }
+        val accountIdBytes = try {
+            base64Decode(acct)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        val hasDeviceKey = try {
+            deviceKeyStore.getDeviceKey(applicationContext, acct)?.let { it.fill(0); true } ?: false
+        } catch (_: Throwable) {
+            false
+        }
+        val seed = if (hasDeviceKey && accountIdBytes != null) {
+            try {
+                AccountIdentitySeedStore.getAccountIdentitySeed(applicationContext, acct)
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+        if (seed == null || accountIdBytes == null || seed.size != AccountIdentitySeedStore.SEED_LENGTH) {
+            seed?.fill(0)
+            Log.i("lakko-auth", "signed in to a suspended account; no chats on this device")
+            suspensionController.enter(credentials, canRead = false)
+            return
+        }
+        val exportKey = try {
+            ExportKeyStore.getExportKey(applicationContext, acct)
+        } catch (_: Throwable) {
+            null
+        }?.takeIf { it.size == ExportKeyStore.EXPORT_KEY_LENGTH } ?: ByteArray(0)
+        val pair = credentials.asSessionPair()
+        persistSessionPairBestEffort(acct, pair)
+        installSessionPair(acct, pair)
+        publishIdentitySecrets(
+            IdentitySecrets(
+                accountId = accountIdBytes,
+                exportKey = exportKey,
+                accountIdentitySeed = seed,
+                session = pair,
+            ),
+        )
+        landedState = AuthState.Session(account = SessionAccount(accountIdB64 = acct, username = username))
+        Log.i("lakko-auth", "signed in to a suspended account")
+        suspensionController.enter(credentials, canRead = true)
+    }
+
+    /** Run a landing; a `403 account-suspended` lands the account in
+     *  suspended mode instead of failing ([landSuspended]). */
+    private suspend inline fun landingOrSuspended(typedUsername: String?, landing: () -> Unit) {
+        try {
+            landing()
+        } catch (err: AuthHttpError) {
+            landSuspended(err.suspended ?: throw err, typedUsername)
+        } catch (err: me.lakko.app.webauthn.WebauthnHttpError) {
+            landSuspended(err.suspended ?: throw err, typedUsername)
+        }
+    }
+
+    /** Seal the appeal to the moderators and send it with the `s1`. */
+    private suspend fun sendSuspensionAppeal(restrictedToken: String, text: String): AppealAnswer {
+        val root = me.lakko.app.moderation.pinnedModerationRootKey() ?: return AppealAnswer.UNAVAILABLE
+        // ADR-0089: the list is verified under the root and checked against
+        // the device's floor, as the report sheet's, before anything is sealed.
+        val list = when (
+            val fetch = me.lakko.app.moderation.ModeratorListCache.shared.fetchVerified()
+        ) {
+            is me.lakko.app.moderation.ModeratorListFetch.Ok -> fetch.bytes
+            me.lakko.app.moderation.ModeratorListFetch.Unavailable -> return AppealAnswer.UNAVAILABLE
+            else -> return AppealAnswer.FAILED
+        }
+        val sealed = try {
+            uniffi.lakko_ffi_uniffi.sealModerationAppeal(text, list, root)
+        } catch (_: Throwable) {
+            return AppealAnswer.FAILED
+        }
+        return try {
+            authClientFactory().use { it.suspensionAppeal(restrictedToken, sealed) }
+            AppealAnswer.SENT
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (err: AuthHttpError) {
+            when (err.code) {
+                "appeal-already-sent" -> AppealAnswer.SENT
+                "not-suspended" -> AppealAnswer.NOT_SUSPENDED
+                else -> AppealAnswer.FAILED
+            }
+        } catch (_: Throwable) {
+            AppealAnswer.FAILED
+        }
+    }
+
+    /**
+     * Sign out from the suspended screen: the server is told with the `s1`
+     * (the restricted session opens the logout route), then the ordinary
+     * local sign-out; nothing is wiped beyond what a sign-out drops.
+     */
+    public fun signOutSuspended() {
+        val creds = suspensionController.credentials()
+        val sessionHeld = sessionTokenProvider.peek() != null
+        suspensionController.clear()
+        SuspensionGate.set(false)
+        if (creds != null && !sessionHeld) {
+            pushScope.launch {
+                try {
+                    authClientFactory().use { it.sessionLogout(creds.restrictedToken) }
+                } catch (cause: Throwable) {
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                    Log.w("lakko-auth", "server logout (suspended) not confirmed: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
+        logout()
+    }
+
     /**
      * In-memory identity secrets — the OPAQUE export key + the
      * raw account id bytes for the active session.
@@ -725,6 +1039,16 @@ public class AuthRepository(
             }
             is SessionRestoreDecision.SignedOut -> {
                 landedState = AuthState.Anon(cachedUsername = decision.cachedUsername)
+                // ADR-0089 - a suspended account on a device without its
+                // chats: the suspended screen alone, after a restart too.
+                val marker = try {
+                    sessionStore.load()
+                } catch (_: Exception) {
+                    null
+                }
+                marker?.accountIdB64?.let(::storedSuspension)?.let { record ->
+                    suspensionController.enter(record, canRead = false)
+                }
             }
             is SessionRestoreDecision.Restored -> {
                 // ADR-0073 section 3.3 - the restore refreshes the access token
@@ -751,6 +1075,14 @@ public class AuthRepository(
                 // Session flip must already find the secrets it needs.
                 publishIdentitySecrets(decision.secrets)
                 landedState = AuthState.Session(account = decision.account)
+                // ADR-0089 - the account was suspended when the app last ran:
+                // back in suspended mode before anything talks to a server.
+                // The duties below would all be refused; the suspended mode
+                // asks the refresh route itself when the app comes to front.
+                storedSuspension(accountIdB64)?.let { record ->
+                    suspensionController.enter(record, canRead = true)
+                    return
+                }
                 // A backup restore still pending from an earlier landing (a
                 // failed fetch, a process killed mid-restore) is tried now.
                 retryPendingBackupRestoreInBackground(decision.secrets)
@@ -1019,6 +1351,8 @@ public class AuthRepository(
                     SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
                 }
             },
+            onSuspended = { credentials -> onProviderSuspended(accountIdB64, credentials) },
+            onResumed = { _ -> onProviderResumed(accountIdB64) },
         )
     }
 
@@ -1046,6 +1380,8 @@ public class AuthRepository(
                     SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
                 }
             },
+            onSuspended = { credentials -> onProviderSuspended(accountIdB64, credentials) },
+            onResumed = { _ -> onProviderResumed(accountIdB64) },
         )
     }
 
@@ -1272,7 +1608,9 @@ public class AuthRepository(
         if (!genesisMintNeeded(genesisRecorded.recordedPubkeyB64(accountIdB64), pubkeyB64)) return
         val token = sessionTokenProvider.current() ?: return
         val error = try {
-            authClientFactory().use { it.genesisAttest(token, pubkey) }
+            // ADR-0089 F3: the key being recorded proves itself for this account.
+            val proof = identityProofFor(accountIdentitySeed, base64Decode(accountIdB64))
+            authClientFactory().use { it.genesisAttest(token, pubkey, proof) }
             null
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
@@ -1284,7 +1622,11 @@ public class AuthRepository(
             GenesisMintOutcome.Mismatch ->
                 Log.w("lakko-auth", "auth holds another identity key for this account; not recorded")
             GenesisMintOutcome.Retry ->
-                Log.w("lakko-auth", "identity key not recorded at auth yet: ${error?.javaClass?.simpleName}")
+                Log.w(
+                    "lakko-auth",
+                    "identity key not recorded at auth yet: " +
+                        ((error as? AuthHttpError)?.code ?: error?.javaClass?.simpleName),
+                )
         }
     }
 
@@ -1350,8 +1692,16 @@ public class AuthRepository(
                 when (logoutRetryStep(owed, System.currentTimeMillis())) {
                     LogoutRetryStep.Drop -> Unit
                     LogoutRetryStep.Logout -> client.sessionLogout(owed.accessToken)
-                    LogoutRetryStep.RefreshThenLogout ->
-                        client.sessionLogout(client.sessionRefresh(owed.refreshToken).accessToken)
+                    LogoutRetryStep.RefreshThenLogout -> {
+                        // ADR-0089 - a suspended account's refresh answers the
+                        // restricted session, which opens the logout route.
+                        val bearer = try {
+                            client.sessionRefresh(owed.refreshToken).accessToken
+                        } catch (err: AuthHttpError) {
+                            err.suspended?.restrictedToken ?: throw err
+                        }
+                        client.sessionLogout(bearer)
+                    }
                 }
             }
             logoutOwedStore.clear(accountIdB64)
@@ -2048,6 +2398,11 @@ public class AuthRepository(
     public suspend fun login(
         username: String,
         password: ByteArray,
+    ): Unit = landingOrSuspended(username) { loginLanding(username, password) }
+
+    private suspend fun loginLanding(
+        username: String,
+        password: ByteArray,
     ) {
         val trimmed = username.trim()
         if (trimmed.isEmpty()) {
@@ -2349,15 +2704,22 @@ public class AuthRepository(
         val start = signInStart()
         try {
             authClientFactory().use { client ->
-                val result = signInByName(
-                    named = named,
-                    call = {
-                        client.recover(it.handle, seed, newPassword, landingDeviceId(candidateAccount(named.username), wipes))
-                            .bound(wipes)
-                    },
-                    sessionTokenOf = { it.sessionToken },
-                    rebind = ::rebindLoginHandleInBackground,
-                )
+                val result = try {
+                    signInByName(
+                        named = named,
+                        call = {
+                            client.recover(it.handle, seed, newPassword, landingDeviceId(candidateAccount(named.username), wipes))
+                                .bound(wipes)
+                        },
+                        sessionTokenOf = { it.sessionToken },
+                        rebind = ::rebindLoginHandleInBackground,
+                    )
+                } catch (err: AuthHttpError) {
+                    // ADR-0089 section 4 - the account is suspended: it
+                    // lands in suspended mode (nothing changed server-side).
+                    landSuspended(err.suspended ?: throw err, named.username)
+                    return@use
+                }
                 start.bound.ensureCurrent()
                 val accountIdBytes = result.accountId
                 val accountIdB64 = base64Encode(accountIdBytes)
@@ -2614,7 +2976,10 @@ public class AuthRepository(
      *         disabled server-side.
      * @throws AuthNetworkError on transport failure.
      */
-    public suspend fun recoverWithTotp(username: String, code: String) {
+    public suspend fun recoverWithTotp(username: String, code: String): Unit =
+        landingOrSuspended(username) { recoverWithTotpLanding(username, code) }
+
+    private suspend fun recoverWithTotpLanding(username: String, code: String) {
         val trimmed = username.trim()
         if (trimmed.isEmpty()) {
             throw AuthClientArgError(
@@ -2758,6 +3123,12 @@ public class AuthRepository(
      * @throws AuthNetworkError on a transport failure.
      */
     public suspend fun recoverWithThreeWords(positions: ByteArray, words: List<String>): Boolean {
+        var landed = true
+        landingOrSuspended(threeWordsContext()?.username) { landed = recoverWithThreeWordsLanding(positions, words) }
+        return landed
+    }
+
+    private suspend fun recoverWithThreeWordsLanding(positions: ByteArray, words: List<String>): Boolean {
         val found = threeWordsContext() ?: throw AuthClientArgError(
             "three words are not available on this device",
             me.lakko.app.l10n.UiText("recovery.words.error.unavailable"),
@@ -3853,8 +4224,14 @@ public class AuthRepository(
             }
             EmailRecoverAction.SetPassword -> {
                 val start = signInStart()
-                val result = authClientFactory().use {
-                    it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate, start.wipes))
+                val result = try {
+                    authClientFactory().use {
+                        it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate, start.wipes))
+                    }
+                } catch (err: AuthHttpError) {
+                    // ADR-0089 section 4 - the account is suspended.
+                    landSuspended(err.suspended ?: throw err, named.username)
+                    return EmailRecoverOutcome.PasswordSet
                 }
                 // Overtaken while the round trip was out: nothing lands.
                 start.standDownIfOvertaken()
@@ -3962,6 +4339,8 @@ public class AuthRepository(
                         newPassword = newPassword,
                         newSeed = seedCopy,
                         newSignaturePubkey = newSignaturePubkey,
+                        // ADR-0089 F3: the NEW key proves itself for this account.
+                        identityProof = identityProofFor(seedCopy, offer.accountId),
                         deviceId = landingDeviceId(accountIdB64, wipes),
                         oldRecoverySeed = oldRecoverySeed,
                     )
@@ -4669,6 +5048,8 @@ public class AuthRepository(
                         freshGrant = proof.grant,
                         seed = seedCopy,
                         newSignaturePubkey = newSignaturePubkey,
+                        // ADR-0089 F3: the NEW key proves itself for this account.
+                        identityProof = identityProofFor(seedCopy, accountIdBytes),
                     )
                 }
             } finally {
@@ -4905,7 +5286,7 @@ public class AuthRepository(
 
     private fun proofTarget(): ProofTarget? {
         pendingRecovery.get()?.let { return ProofTarget(it.accountIdBytes, it.accountIdB64, it.username) }
-        val session = mutableState.value as? AuthState.Session ?: return null
+        val session = mutableState.value as? AuthState.Session ?: return suspendedProofTarget()
         val secrets = mutableIdentitySecrets.value ?: return null
         if (base64Encode(secrets.accountId) != session.account.accountIdB64) return null
         return ProofTarget(secrets.accountId, session.account.accountIdB64, session.account.username)
@@ -4951,6 +5332,7 @@ public class AuthRepository(
         val token = sessionTokenProvider.current()
             ?: pendingRecovery.get()?.sessionToken
             ?: mutableIdentitySecrets.value?.sessionToken
+            ?: suspensionController.credentials()?.restrictedToken
             ?: return null
         return try {
             WebauthnClient().use { client ->
@@ -4997,6 +5379,12 @@ public class AuthRepository(
             // the password does not open the envelope.
             throw FreshAuthWrongPassword()
         } catch (cause: AuthHttpError) {
+            // ADR-0089 - a suspended account's password sign-in answers the
+            // restricted session and a fresh grant: that is the proof.
+            cause.suspended?.let { credentials ->
+                proofWhileSuspended(target.accountIdB64, credentials)
+                return
+            }
             if (isWrongPasswordFailure(cause, localOpaqueFailure = false)) throw FreshAuthWrongPassword()
             throw cause
         }
@@ -5037,11 +5425,19 @@ public class AuthRepository(
             me.lakko.app.l10n.UiText("common.error.session_not_ready"),
         )
         val parked = pendingRecovery.get()
-        val assertion = runPasskeyCeremony(
-            activityContext,
-            accountIdB64Url = base64UrlEncodeNoPad(target.accountIdBytes),
-            wipes = me.lakko.app.account.AccountStoreGate.wipeMark(),
-        )
+        val assertion = try {
+            runPasskeyCeremony(
+                activityContext,
+                accountIdB64Url = base64UrlEncodeNoPad(target.accountIdBytes),
+                wipes = me.lakko.app.account.AccountStoreGate.wipeMark(),
+            )
+        } catch (cause: me.lakko.app.webauthn.WebauthnHttpError) {
+            // ADR-0089 - as for the password proof above.
+            val credentials = cause.suspended ?: throw cause
+            if (credentials.accountIdB64 != target.accountIdB64) throw FreshAuthOtherAccount()
+            proofWhileSuspended(target.accountIdB64, credentials)
+            return
+        }
         try {
             if (!accountIdOfAssertion(assertion).contentEquals(target.accountIdBytes)) {
                 Log.w("lakko-auth", "the proof's passkey belongs to another account; refused")
@@ -5062,6 +5458,23 @@ public class AuthRepository(
             }
         } finally {
             assertion.prfOutput?.fill(0)
+        }
+    }
+
+    /**
+     * ADR-0089 - a proof's sign-in of a suspended account: the refusal carries
+     * fresh restricted credentials and the fresh-auth grant. Served like a
+     * probe's answer; the grant becomes the proof.
+     */
+    private fun proofWhileSuspended(accountIdB64: String, credentials: SuspendedCredentials) {
+        if (credentials.accountIdB64 != accountIdB64) throw FreshAuthWrongPassword()
+        val ui = suspensionController.ui.value
+        suspensionController.enter(
+            credentials,
+            canRead = ui?.canRead ?: (mutableState.value is AuthState.Session && signedInAccountIdB64() == accountIdB64),
+        )
+        if (!freshAuth.hasLive(accountIdB64, System.currentTimeMillis())) {
+            throw AuthHttpError(403, "/login/finish", "no fresh-auth proof in the suspended sign-in's answer")
         }
     }
 
@@ -5222,7 +5635,7 @@ public class AuthRepository(
                         x25519Pubkey = identity.x25519PublicKey(),
                         supersessionProofB64 = null,
                         leafAuth = signLeafGenesis(identity.ed25519Seed(), transparencyAccountKey(accountIdBytes)),
-                        genesisAttest = mintGenesisAttestBestEffort(sessionToken, signaturePubkey),
+                        genesisAttest = mintGenesisAttestBestEffort(sessionToken, identity, accountIdBytes),
                         keyResetAttest = attestation,
                     )
                 }
@@ -5474,7 +5887,7 @@ public class AuthRepository(
                             null
                         }
                         val genesisAttest = if (withGenesisAuth) {
-                            mintGenesisAttestBestEffort(sessionToken, signaturePubkey)?.also {
+                            mintGenesisAttestBestEffort(sessionToken, identity, accountId)?.also {
                                 // ADR-0074 - auth signed this key, so it is
                                 // the recorded one.
                                 genesisRecorded.markRecorded(accountIdB64, base64Encode(signaturePubkey))
@@ -5576,17 +5989,23 @@ public class AuthRepository(
      */
     private suspend fun mintGenesisAttestBestEffort(
         sessionToken: String,
-        pubkey: ByteArray,
+        identity: Identity,
+        accountId: ByteArray,
     ): ByteArray? =
         try {
-            authClientFactory().use { it.genesisAttest(sessionToken, pubkey) }
+            // ADR-0089 F3: the key being recorded proves itself for this account.
+            val pubkey = identity.signaturePublicKey()
+            val proof = uniffi.lakko_ffi_uniffi.signIdentityProof(identity, accountId)
+            authClientFactory().use { it.genesisAttest(sessionToken, pubkey, proof) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
         } catch (cause: Throwable) {
             Log.w(
                 "lakko-auth",
-                "ADR-0036: genesis attestation mint failed; publishing the " +
-                    "genesis bundle WITHOUT it (additive — the transparency " +
-                    "require-genesis-attest flag defaults OFF during rollout)",
-                cause,
+                "ADR-0036: genesis attestation mint failed (" +
+                    ((cause as? AuthHttpError)?.code ?: cause.javaClass.simpleName) +
+                    "); publishing the genesis bundle WITHOUT it (additive — the " +
+                    "transparency require-genesis-attest flag defaults OFF during rollout)",
             )
             null
         }
@@ -5990,6 +6409,12 @@ public class AuthRepository(
         activityContext: Context = applicationContext,
         usernameHint: String? = null,
         forgotPassword: Boolean = false,
+    ): Unit = landingOrSuspended(usernameHint) { loginWithPasskeyLanding(activityContext, usernameHint, forgotPassword) }
+
+    private suspend fun loginWithPasskeyLanding(
+        activityContext: Context = applicationContext,
+        usernameHint: String? = null,
+        forgotPassword: Boolean = false,
     ) {
         val start = signInStart()
         val assertion = runPasskeyCeremony(activityContext, accountIdB64Url = null, wipes = start.wipes)
@@ -6064,11 +6489,18 @@ public class AuthRepository(
             "no pending identity recovery",
             me.lakko.app.l10n.UiText("restore_identity.error.nothing"),
         )
-        val assertion = runPasskeyCeremony(
-            activityContext,
-            accountIdB64Url = base64UrlEncodeNoPad(pending.accountIdBytes),
-            wipes = wipes,
-        )
+        val assertion = try {
+            runPasskeyCeremony(
+                activityContext,
+                accountIdB64Url = base64UrlEncodeNoPad(pending.accountIdBytes),
+                wipes = wipes,
+            )
+        } catch (err: me.lakko.app.webauthn.WebauthnHttpError) {
+            // ADR-0089 section 4 - suspended since the sign-in: the
+            // suspended screen takes over.
+            landSuspended(err.suspended ?: throw err, pending.username)
+            return PasskeyKeysOutcome.NoKeys
+        }
         try {
             if (!accountIdOfAssertion(assertion).contentEquals(pending.accountIdBytes)) {
                 throw AuthClientArgError(
@@ -6193,6 +6625,11 @@ public class AuthRepository(
             throw cause
         } catch (_: WebauthnUserCancelledError) {
             throw PasskeyCancelled()
+        } catch (cause: me.lakko.app.webauthn.WebauthnHttpError) {
+            // ADR-0089 section 4 - a suspended account: the caller lands it
+            // in suspended mode ([landingOrSuspended], the proofs).
+            if (cause.suspended != null) throw cause
+            throw AuthClientArgError("passkey sign-in failed: ${cause.javaClass.simpleName}", passkeyFailureText(cause))
         } catch (cause: Throwable) {
             throw AuthClientArgError("passkey sign-in failed: ${cause.javaClass.simpleName}", passkeyFailureText(cause))
         }
@@ -6298,6 +6735,9 @@ public class AuthRepository(
         // wake binding (a wake that lands from here on is refused) and this
         // app's delivered notifications.
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
+        // ADR-0089 - a sign-out ends suspended mode on this device.
+        suspensionController.clear()
+        SuspensionGate.set(false)
         val cached = sessionStore.load()
         // No write of the session that is ending starts from here on, and
         // one in flight on another thread has finished. Nothing is deleted:
@@ -6363,6 +6803,8 @@ public class AuthRepository(
         // ADR-0042, amended 2026-09-30 — first, as in [logout] (the wipe
         // repeats it as its first step; idempotent).
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
+        suspensionController.clear()
+        SuspensionGate.set(false)
         val accountIdB64 = identitySecrets.value?.let { base64Encode(it.accountId) }
             ?: sessionStore.load()?.accountIdB64
         // ADR-0074 - read before the wipe: the session is ended at the
@@ -6741,6 +7183,8 @@ public class AuthRepository(
                     newSignaturePubkey = newPubkey,
                     supersessionProof = prepared.supersessionProof,
                     revokeDeviceIds = listOfNotNull(revokeDeviceId),
+                    // ADR-0089 F3: the NEW key proves itself for this account.
+                    identityProof = identityProofFor(newSeed, secrets.accountId),
                     phraseSaved = phraseSaved,
                 )
             }
@@ -7502,6 +7946,8 @@ public class AuthRepository(
         if (signOut.phase == KeyResetSignOut.Phase.Removed) return
         val accountIdB64 = signOut.accountIdB64
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
+        suspensionController.clear()
+        SuspensionGate.set(false)
         // The unregister draws its token from THIS session's pool, read
         // before the live secrets go.
         val departingSession = currentAnonSession()
@@ -7815,6 +8261,8 @@ public class AuthRepository(
                             newPassword = newPassword,
                             newSeed = seedCopy,
                             newSignaturePubkey = newSignaturePubkey,
+                            // ADR-0089 F3: the NEW key proves itself for this account.
+                            identityProof = identityProofFor(seedCopy, record.accountId),
                             deviceId = landingDeviceId(ui.accountIdB64, wipes),
                             oldRecoverySeed = oldRecoverySeed,
                         )
@@ -8906,4 +9354,13 @@ internal fun freshIdentityAfterPublish(
     now is AuthState.NeedsRecoveryPhrase && now.account.accountIdB64 == accountIdB64 ->
         FreshIdentityAfterPublish.SHOW_AND_KEEP
     else -> FreshIdentityAfterPublish.KEEP_OWED
+}
+
+/** ADR-0089 - what Delete account erases and the bearer it sends. */
+public class AccountForDeletion(
+    public val accountId: ByteArray,
+    /** The access token, or the `s1` of a suspended account. Never printed. */
+    public val bearer: String,
+) {
+    override fun toString(): String = "AccountForDeletion(bearer=<redacted>)"
 }

@@ -278,6 +278,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   markFirstPasswordOwed(local, acct);
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
   put(`lakko.device-ack.unsent.v1.${acct}`, "1");
+  put(`lakko.blocked.unsent.v1.${acct}`, "1");
   put(`lakko.link-records.unsent.v1.${acct}`, "1");
   put(`lakko.link-claims.v1.${acct}`, JSON.stringify({ v: 1, seen: {}, own: {} }));
   put(`lakko.blob-deletes-owed.v1.${acct}`, JSON.stringify(["00".repeat(32)]));
@@ -656,6 +657,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:first-password-owed:": "account",
   "lakko.own-username.unsent.v1.": "account",
   "lakko.device-ack.unsent.v1.": "account",
+  "lakko.blocked.unsent.v1.": "account",
   "lakko.link-records.unsent.v1.": "account",
   "lakko.link-claims.v1.": "account",
   "lakko.blob-deletes-owed.v1.": "account",
@@ -712,6 +714,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.tones": "retired",
   // device settings (see the module doc of wipe-account.ts)
   "lakko.theme": "device",
+  // ADR-0089 section 2: the highest moderator-list version seen here, which
+  // names no account.
+  "lakko.moderation.list-version.v1": "device",
   // docs/ux/text-size.md: the message text size is chosen per device.
   "lakko.textSize": "device",
   // ADR-0061: the interface language is chosen per device.

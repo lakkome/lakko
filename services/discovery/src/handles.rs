@@ -42,6 +42,12 @@
 //!    signature verified, so nobody can burn another key's nonce.
 //! 5. The row: held by this key (`401 statement-refused` otherwise, the same
 //!    answer as a bad signature), the name free (`409 name-taken`).
+//! 6. Moderation (ADR-0089 step 5, [`crate::moderation`]): a row a moderator
+//!    blocked refuses every write (`403 blocked`) and is never freed by the
+//!    pruner, so its name stays held; a delisted row refuses a write that
+//!    publishes it or moves it to another name (`403 delisted`). A name a
+//!    moderator took back holds a `name_claims` row of its own, so a claim
+//!    meets `409 name-taken`.
 //!
 //! ## The lease
 //!
@@ -82,6 +88,7 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sqlx::MySqlPool;
 
+use crate::moderation::handle_write_refusal;
 use crate::registry::CLAIM_HANDLE;
 use crate::visibility::{decode_hash, decode_public_record, publish, TARGET_HANDLE};
 use crate::AppState;
@@ -324,24 +331,27 @@ struct Row {
     handle_id: Vec<u8>,
     write_pk: Vec<u8>,
     retired: bool,
+    /// `handles.moderation` (ADR-0089 step 5): open, delisted or blocked.
+    moderation: u8,
 }
 
 async fn lock_row(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     lookup_key: &[u8],
 ) -> Result<Option<Row>, Response> {
-    let row: Option<(Vec<u8>, Vec<u8>, bool)> = sqlx::query_as(
-        "SELECT handle_id, write_pk, retired_at IS NOT NULL FROM handles \
+    let row: Option<(Vec<u8>, Vec<u8>, bool, u8)> = sqlx::query_as(
+        "SELECT handle_id, write_pk, retired_at IS NOT NULL, moderation FROM handles \
          WHERE lookup_key = ? FOR UPDATE",
     )
     .bind(lookup_key)
     .fetch_optional(&mut **tx)
     .await
     .map_err(internal("lock handle"))?;
-    Ok(row.map(|(handle_id, write_pk, retired)| Row {
+    Ok(row.map(|(handle_id, write_pk, retired, moderation)| Row {
         handle_id,
         write_pk,
         retired,
+        moderation,
     }))
 }
 
@@ -586,6 +596,9 @@ pub(crate) async fn update(
         if row.write_pk != stmt.write_pk {
             return Err(refused());
         }
+        if let Some(refusal) = handle_write_refusal(row.moderation, body.visibility.is_public()) {
+            return Err(refusal);
+        }
         let (until, lease_secs) = lease_from_now();
         revive(&mut tx, &stmt.lookup_key, &row.handle_id, body, lease_secs).await?;
         tx.commit().await.map_err(internal("commit update"))?;
@@ -642,6 +655,11 @@ pub(crate) async fn replace(
         if old.retired {
             return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
         }
+        // A handle under moderation does not move: a new name would carry
+        // none of it.
+        if let Some(refusal) = handle_write_refusal(old.moderation, true) {
+            return Err(refusal);
+        }
         // The new name: free, or this key's own retired row.
         let claimed: Option<(u8,)> =
             sqlx::query_as("SELECT kind FROM name_claims WHERE lookup_key = ? FOR UPDATE")
@@ -653,6 +671,11 @@ pub(crate) async fn replace(
         let take_back = match (&claimed, &target) {
             (None, None) => None,
             (Some((CLAIM_HANDLE,)), Some(row)) if row.retired && row.write_pk == old.write_pk => {
+                if let Some(refusal) =
+                    handle_write_refusal(row.moderation, body.visibility.is_public())
+                {
+                    return Err(refusal);
+                }
                 Some(row.handle_id.clone())
             },
             _ => return Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN)),
@@ -697,8 +720,10 @@ async fn free_retired_except(
     for sql in [
         "DELETE FROM name_claims WHERE lookup_key IN \
            (SELECT lookup_key FROM handles \
-            WHERE write_pk = ? AND retired_at IS NOT NULL AND lookup_key <> ?)",
-        "DELETE FROM handles WHERE write_pk = ? AND retired_at IS NOT NULL AND lookup_key <> ?",
+            WHERE write_pk = ? AND retired_at IS NOT NULL AND lookup_key <> ? \
+              AND moderation <> 2)",
+        "DELETE FROM handles WHERE write_pk = ? AND retired_at IS NOT NULL AND lookup_key <> ? \
+           AND moderation <> 2",
     ] {
         sqlx::query(sql)
             .bind(write_pk)
@@ -735,6 +760,9 @@ pub(crate) async fn rekey(
     };
     if row.write_pk != stmt.write_pk {
         return Err(refused());
+    }
+    if let Some(refusal) = handle_write_refusal(row.moderation, false) {
+        return Err(refusal);
     }
     let taken: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM handles WHERE write_pk = ? LIMIT 1 FOR UPDATE")
@@ -791,6 +819,9 @@ pub(crate) async fn retire_name(
         };
         if row.write_pk != stmt.write_pk {
             return Err(refused());
+        }
+        if let Some(refusal) = handle_write_refusal(row.moderation, false) {
+            return Err(refusal);
         }
         retire(&mut tx, &stmt.lookup_key, &row.handle_id).await?;
         tx.commit().await.map_err(internal("commit retire"))
@@ -912,6 +943,7 @@ async fn free_held_batch(pool: &MySqlPool, hold: i64) -> Result<(usize, u64), sq
     let candidates: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT lookup_key FROM handles \
          WHERE retired_at IS NOT NULL AND retired_at <= NOW(3) - INTERVAL ? SECOND \
+           AND moderation <> 2 \
          ORDER BY lookup_key LIMIT ?",
     )
     .bind(hold)
@@ -929,7 +961,7 @@ async fn free_held_batch(pool: &MySqlPool, hold: i64) -> Result<(usize, u64), sq
     q.push(" ORDER BY lookup_key FOR UPDATE");
     q.build().fetch_all(&mut *tx).await?;
     let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new(
-        "SELECT lookup_key FROM handles WHERE retired_at IS NOT NULL \
+        "SELECT lookup_key FROM handles WHERE retired_at IS NOT NULL AND moderation <> 2 \
          AND retired_at <= NOW(3) - INTERVAL ",
     );
     q.push_bind(hold);

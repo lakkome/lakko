@@ -85,6 +85,14 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         ContinuityMirror.isSuperseded(senderKeyB64, in: ContinuityMirror.read(accountIdB64: accountIdB64))
     }
 
+    /// ADR-0089 section 6 — an account this account blocked, from the App
+    /// Group mirror the APP writes (``BlockedSenderMirror``). READ-ONLY.
+    func isBlockedSender(accountIdB64: String, senderKeyB64: String?) -> Bool {
+        BlockedSenderMirror.dropsNotification(
+            senderKeyB64: senderKeyB64,
+            blockedKeysB64: BlockedSenderMirror.read(accountIdB64: accountIdB64))
+    }
+
     /// ADR-0073 R.7 case 1 — the rule the app's own receive paths run
     /// (``ResendMarker/heldResendPredicate(batch:port:)``), over what this
     /// process may READ: the message log the app wrote (the stored rows of

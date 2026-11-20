@@ -36,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Translate
@@ -177,9 +178,12 @@ internal data class MessageActions(
     /** ADR-0087 section 13 — a publisher's `Ban from comments` on someone
      *  else's comment, in the destructive group under Delete. */
     val canBan: Boolean = false,
+    /** ADR-0089 / UX `reporting-and-moderation.md` 2.1 — `Report` on someone
+     *  else's message, in the destructive group. */
+    val canReport: Boolean = false,
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan || canReport
 }
 
 /**
@@ -199,22 +203,25 @@ internal fun messageActionsFor(
     pinLabel: String = Localization.strings.value["chat.message.pin"],
     /** Saved section 2 — the message is in the account's saved list. */
     saved: Boolean = false,
+    /** ADR-0089 section 4 — the account is suspended: nothing that sends a
+     *  message (Reply, Forward, Edit, Delete) is offered. */
+    suspended: Boolean = me.lakko.app.auth.SuspensionGate.readOnly.value,
 ): MessageActions = MessageActions(
     // Copy reads a string this device already holds and sends nothing, so it is
     // the one action that does NOT die with the membership gate. It is still
     // gated on the menu being available because the menu is how it is reached.
     canCopy = menuAvailable && text.isNotEmpty(),
-    canEdit = menuAvailable && isOwn && !deleted,
-    canDelete = menuAvailable && isOwn && !deleted,
+    canEdit = menuAvailable && isOwn && !deleted && !suspended,
+    canDelete = menuAvailable && isOwn && !deleted && !suspended,
     // Section 3.1 — "any message with an id". `menuAvailable` already carries
     // the id gate (a row with no DS id has nothing to point at), the deleted
     // gate and the membership gate: a reply composes an application message,
     // which the core refuses once membership has ended, like Send.
-    canReply = menuAvailable,
+    canReply = menuAvailable && !suspended,
     // Section 5.1 — "A message that cannot be forwarded yet (its attachments
     // still uploading, or a failed send) does not offer Forward." The id gate
     // and the deleted gate ride in `menuAvailable`, as for Reply.
-    canForward = menuAvailable && sendComplete,
+    canForward = menuAvailable && sendComplete && !suspended,
     // Section 4.1 — "on any message whose send is complete and that is not
     // deleted": the same gates as Forward. A personal pin sends nothing, so
     // the membership gate inside `menuAvailable` is stricter than a pin
@@ -230,6 +237,9 @@ internal fun messageActionsFor(
     // sending has no id to save under.
     canSave = !deleted && sendComplete,
     saved = saved,
+    // Reporting section 2.1 — never on own messages; a deleted message has
+    // nothing to include.
+    canReport = menuAvailable && !isOwn && !deleted,
 )
 
 /**
@@ -295,6 +305,8 @@ internal fun MessageActionMenuOverlay(
     onTranslate: () -> Unit = {},
     /** ADR-0087 section 13 — Ban from comments was chosen. */
     onBan: () -> Unit = {},
+    /** ADR-0089 — Report was chosen. */
+    onReport: () -> Unit = {},
     /** reactions-and-emoji section 5 — the emoji this person already gave
      *  this message (drawn pressed; pressing one takes it off). */
     ownReactions: Set<String> = emptySet(),
@@ -413,6 +425,7 @@ internal fun MessageActionMenuOverlay(
                             onDelete = onDelete,
                             onTranslate = onTranslate,
                             onBan = onBan,
+                            onReport = onReport,
                         )
                     }
                 },
@@ -566,6 +579,7 @@ internal fun MessageActionCard(
     onSave: () -> Unit = {},
     onTranslate: () -> Unit = {},
     onBan: () -> Unit = {},
+    onReport: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -658,7 +672,7 @@ internal fun MessageActionCard(
                     onClick = onEdit,
                 )
             }
-            if (actions.canDelete || actions.canBan) {
+            if (actions.canDelete || actions.canBan || actions.canReport) {
                 // Section 2 — the destructive action is separated and in the
                 // platform's destructive colour. The rule belongs to the
                 // destructive GROUP rather than to the Delete row, as on web,
@@ -691,6 +705,14 @@ internal fun MessageActionCard(
                             label = t("channels.moderation.ban"),
                             icon = Icons.Filled.Block,
                             onClick = onBan,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    if (actions.canReport) {
+                        ActionRow(
+                            label = t("report.action"),
+                            icon = Icons.Filled.Flag,
+                            onClick = onReport,
                             tint = MaterialTheme.colorScheme.error,
                         )
                     }

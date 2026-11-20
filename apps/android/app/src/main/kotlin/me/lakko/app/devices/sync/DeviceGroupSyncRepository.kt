@@ -399,6 +399,9 @@ public class DeviceGroupSyncRepository(
         reportAcknowledged(accountIdB64)
         // ADR-0080 - this account's device cards, sent through this
         // runtime's DeviceGroup `ServiceEnvelope`.
+        // ADR-0089 section 6 - blocking writes through this runtime, like
+        // the device acknowledgements.
+        me.lakko.app.moderation.BlockRegister.writer = { key, blocked -> setBlocked(key, blocked) }
         me.lakko.app.devices.DeviceCardCenter.bind(applicationContext, accountIdB64) { envelope ->
             sendServiceEnvelope(envelope)
         }
@@ -457,6 +460,13 @@ public class DeviceGroupSyncRepository(
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
         me.lakko.app.chat.ConversationEndsMirror.publish(null)
+        me.lakko.app.moderation.BlockRegister.writer = null
+        me.lakko.app.moderation.BlockRegister.publish(null)
+        // ADR-0089 step 4 - the other accounts' suspension standings kept
+        // in memory, and the own-key binding, go with the session.
+        me.lakko.app.moderation.SuspensionMarks.clear()
+        // ADR-0089 step 5 - the removed-channel marks too.
+        me.lakko.app.channels.RemovedChannels.clear()
         synchronized(stateLock) {
             syncedState = null
             mutableRecoveryEmail.value = RecoveryAddressState.NOT_READY
@@ -597,6 +607,7 @@ public class DeviceGroupSyncRepository(
                 republishOwnUsername(state)
                 republishQuickReaction(state)
                 republishDeviceAcks(state)
+                republishBlocked(state)
                 republishLinkRecords(state)
                 republishLineage(state)
                 // ADR-0073 R.5 - every person-facing store is keyed by
@@ -1260,6 +1271,65 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
+    // ADR-0089 section 6 - the block register
+    // ------------------------------------------------------------
+
+    /** Hand the folded block register to [me.lakko.app.moderation.BlockRegister].
+     *  Under [stateLock]. */
+    private fun republishBlocked(state: SyncedState) {
+        val accountIdB64 = activeAccountIdB64.get() ?: return
+        val blocked = runCatching { state.blockedAccounts() }.getOrNull() ?: return
+        me.lakko.app.moderation.BlockRegister.publish(
+            me.lakko.app.moderation.BlockedState(
+                accountIdB64 = accountIdB64,
+                blocked = blocked.map {
+                    me.lakko.app.moderation.BlockedPerson(
+                        accountKeyB64 = java.util.Base64.getEncoder().encodeToString(it.accountKey),
+                        blockedAtMs = it.blockedAtMs.toLong(),
+                    )
+                },
+            ),
+        )
+    }
+
+    /**
+     * Block or unblock [accountKey]: fold it here at once and tell the other
+     * devices. A send that fails is owed: the pending flag makes the next
+     * flush re-send every block envelope ([publishSnapshot]). Returns whether
+     * the register changed.
+     */
+    private suspend fun setBlocked(accountKey: ByteArray, blocked: Boolean): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            state.setBlocked(Hlc.mint(), accountKey, blocked, System.currentTimeMillis().toULong())
+        } ?: return false
+        republish()
+        try {
+            sendServiceEnvelope(envelope)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "block not published (${cause.javaClass.simpleName})")
+            pendingFlag?.recordFailure()
+        }
+        return true
+    }
+
+    /** A received block envelope from another device of the account. */
+    private fun applyBlocked(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyBlockedEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "block envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
     // ADR-0079 - the account's own invite links
     // ------------------------------------------------------------
 
@@ -1628,6 +1698,8 @@ public class DeviceGroupSyncRepository(
         runCatching { restored.quickReactionEnvelope() }.getOrNull()?.let { applyQuickReaction(it) }
         // UX 17.6 - and the device acknowledgements.
         for (envelope in runCatching { restored.deviceAckEnvelopes() }.getOrNull().orEmpty()) applyDeviceAck(envelope)
+        // ADR-0089 section 6 - and the block register.
+        for (envelope in runCatching { restored.blockedEnvelopes() }.getOrNull().orEmpty()) applyBlocked(envelope)
         // ADR-0079 - and the link records.
         for (envelope in runCatching { restored.linkRecordEnvelopes() }.getOrNull().orEmpty()) applyLinkRecord(envelope)
     }
@@ -1924,6 +1996,12 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.deviceAckEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in deviceAckEnvelopes) sendServiceEnvelope(envelope)
+        // ADR-0089 section 6 - nor is the block register; this is also how a
+        // block whose live send failed is re-sent.
+        val blockedEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.blockedEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in blockedEnvelopes) sendServiceEnvelope(envelope)
         // ADR-0079 - nor are the link records; each goes with its own stamp.
         val linkRecordEnvelopes = synchronized(stateLock) {
             runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
@@ -2169,6 +2247,14 @@ public class DeviceGroupSyncRepository(
                                 // envelope, routed before the lakko-contacts
                                 // dispatcher.
                                 applyDeviceAck(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isBlockedEnvelope(body.envelope)
+                            ) {
+                                // ADR-0089 section 6 - a block or unblock from
+                                // another device of the account; a `lakko-sync`
+                                // envelope, routed before the lakko-contacts
+                                // dispatcher.
+                                applyBlocked(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isLinkRecordEnvelope(body.envelope)
                             ) {
@@ -3296,6 +3382,8 @@ internal object CoreSyncedStateBytes : SyncedStateBytes {
                 restored.quickReactionEnvelope()?.let { state.applyQuickReactionEnvelope(it) }
                 // UX 17.6 - and the device acknowledgements.
                 for (envelope in restored.deviceAckEnvelopes()) state.applyDeviceAckEnvelope(envelope)
+                // ADR-0089 section 6 - and the block register.
+                for (envelope in restored.blockedEnvelopes()) state.applyBlockedEnvelope(envelope)
             }
             state.toBytes()
         }

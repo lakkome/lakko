@@ -142,6 +142,7 @@ import androidx.compose.ui.unit.Dp
 import java.time.ZoneId
 import java.util.Locale
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.CircleShape
@@ -329,6 +330,20 @@ public fun ChatScreen(
     // on the roster only so a group loaded after first composition is read.
     val conversationKind = remember(state.groupIdHex, otherMembers) { viewModel.conversationKind() }
     val isGroupChat = conversationKind == ConversationKind.Group
+    // ADR-0089 section 6 — the block register, for the collapsed group rows,
+    // the one-to-one banner and the call tiles.
+    val blockRegister by me.lakko.app.moderation.BlockRegister.state.collectAsStateWithLifecycle()
+    val blockScope = rememberCoroutineScope()
+    val oneToOnePeer = remember(state.groupIdHex, isGroupChat, state.messages.size) {
+        if (isGroupChat) null else viewModel.oneToOnePeerPersonKey()
+    }
+    val blockedPeerKey = oneToOnePeer?.takeIf { blockRegister?.isBlocked(it) == true }
+    // ADR-0089 step 4 / UX 3 — whether the other person in a one-to-one is
+    // suspended, as the moderation log confirms; asked when the chat opens.
+    val peerSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(oneToOnePeer)
+    // ADR-0089 section 4 - while the account is suspended the chat is
+    // read-only: no composer, no calls.
+    val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // UX 5.2 — the second header line of a 1x1 chat is the verified @username.
     val peerUsername = remember(state.groupIdHex, nameVersion, otherMembers) {
         viewModel.oneToOnePeerUsername()
@@ -830,7 +845,8 @@ public fun ChatScreen(
             // not one. Folded into `callActive` because the reasons to hide
             // them are the same rendering decision; a group of one is the third
             // (docs/ux/group-and-channel-privacy.md section 10).
-            callActive = callOccupant != null || membershipEnded || !callControls,
+            // ADR-0089 section 4 - a suspended account makes no calls.
+            callActive = callOccupant != null || membershipEnded || !callControls || suspendedReadOnly,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
@@ -867,6 +883,17 @@ public fun ChatScreen(
     Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
     Column(modifier = Modifier.fillMaxSize()) {
 
+        // ADR-0089 step 4 / UX 3 — a suspended person's one-to-one carries a
+        // banner at the top; the chat still works. A blocked person's chat
+        // shows the block banner only.
+        if (oneToOnePeer != null &&
+            me.lakko.app.moderation.suspendedBannerShows(blocked = blockedPeerKey != null, suspended = peerSuspended)
+        ) {
+            me.lakko.app.ui.suspension.SuspendedPeerBanner(
+                name = peerName ?: viewModel.nameOf(oneToOnePeer),
+            )
+        }
+
         // docs/ux/calls.md section 2.1.1 — a muted conversation's incoming
         // call, offered rather than thrown. FIRST child of the column, so it
         // sits in the layout above the timeline instead of over it: nothing
@@ -893,7 +920,9 @@ public fun ChatScreen(
         // device is not in. Hidden once this device's membership has ended —
         // the call key can no longer be derived, so Join could only fail.
         val joinable = joinableGroupCall
-        if (joinable != null && !membershipEnded) {
+        // ADR-0089 section 4 — and while the account is suspended: calls are
+        // not offered.
+        if (joinable != null && !membershipEnded && !suspendedReadOnly) {
             GroupCallBanner(
                 call = joinable,
                 onJoin = {
@@ -1080,7 +1109,7 @@ public fun ChatScreen(
                         val pinMenu = me.lakko.app.chat.pinMenuFor(
                             sharedPinned = sharedPins[msg.messageId]?.pinned == true,
                             personalPinned = msg.messageId in personalPins,
-                            mayShared = mayPinShared,
+                            mayShared = me.lakko.app.chat.sharedPinOffered(mayPinShared, suspendedReadOnly),
                         )
                         // UX section 8 — while selecting, the whole row is the
                         // toggle and a mark sits at its leading edge; a row that
@@ -1244,6 +1273,37 @@ public fun ChatScreen(
                             onRetrySend = { viewModel.onRetrySend(it) },
                             // UX section 8 — enter selection mode on this row.
                             onSelect = { viewModel.onEnterSelection(msg) },
+                            // ADR-0089 — Report on someone else's message: its
+                            // author, with this message included.
+                            onReport = {
+                                msg.authorKey?.let { author ->
+                                    me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                                        me.lakko.app.ui.moderation.ReportRequest(
+                                            me.lakko.app.moderation.messageReportSubject(
+                                                authorKeyB64 = author,
+                                                authorName = viewModel.nameOf(author),
+                                                groupIdHex = msg.historyOf ?: state.groupIdHex,
+                                                oneToOne = !isGroupChat,
+                                                message = me.lakko.app.moderation.ReportableMessage(
+                                                    messageId = if (msg.isHistory) msg.historyMessageId else msg.messageId,
+                                                    groupIdHex = msg.historyOf ?: state.groupIdHex,
+                                                    evidence = msg.evidence,
+                                                ),
+                                            ),
+                                        ),
+                                    )
+                                }
+                            },
+                            // ADR-0089 / UX 1.2 — a blocked person's group
+                            // message, collapsed until tapped.
+                            collapsedBlocked = msg.direction == Direction.Incoming &&
+                                blockRegister?.isBlocked(msg.authorKey) == true &&
+                                me.lakko.app.moderation.receivedMessageVerdict(
+                                    oneToOne = !isGroupChat,
+                                    senderKeyB64 = msg.authorKey,
+                                    isOwn = false,
+                                    isBlocked = { true },
+                                ) == uniffi.lakko_ffi_uniffi.BlockVerdict.COLLAPSE,
                         )
                         }
                         }
@@ -1345,6 +1405,21 @@ public fun ChatScreen(
                 onDelete = { confirmBulkDelete = true },
                 onSave = { viewModel.onSaveSelected() },
             )
+                } else if (suspendedReadOnly) {
+                    // ADR-0089 section 4 - the account is suspended: one muted
+                    // line in place of the composer, no send control.
+                    me.lakko.app.ui.suspension.SuspendedComposerLine()
+                } else if (blockedPeerKey != null) {
+                    // ADR-0089 / UX 1.2 — a banner replaces the composer in the
+                    // one-to-one with a person this account blocked.
+                    BlockedBanner(
+                        name = viewModel.oneToOnePeerName() ?: viewModel.nameOf(blockedPeerKey),
+                        onUnblock = {
+                            blockScope.launch {
+                                me.lakko.app.moderation.BlockRegister.setBlocked(blockedPeerKey, blocked = false)
+                            }
+                        },
+                    )
                 } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
                 recorder = recorder,
@@ -1688,8 +1763,27 @@ private fun MessageRow(
     savedMessage: Boolean = false,
     /** Saved section 2 — Save / Remove from saved was chosen. */
     onToggleSaved: () -> Unit = {},
+    /** ADR-0089 — Report was chosen on someone else's message. */
+    onReport: () -> Unit = {},
+    /** ADR-0089 / UX 1.2 — a group message from someone this account blocked:
+     *  drawn as one muted row until tapped. */
+    collapsedBlocked: Boolean = false,
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
+    var revealedBlocked by remember(msg.messageId) { mutableStateOf(false) }
+    if (collapsedBlocked && !revealedBlocked) {
+        Text(
+            t("block.group_row"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = gapAbove)
+                .clickable { revealedBlocked = true }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+        return
+    }
     // UX 3.1 — "the surface tint used for the pressed state": Material's
     // pressed state layer is `onSurface` at 12 percent, so the lit row reads as
     // a held row rather than a selected one, and it fades back on its own.
@@ -1803,6 +1897,7 @@ private fun MessageRow(
                     onToggleSaved = onToggleSaved,
                     pinUndoes = pinUndoes,
                     onSelect = onSelect,
+                    onReport = onReport,
                     // Incoming bubbles never show our read state.
                     readState = OwnReadState.None,
                     // UX section 4 — incoming on the sunken surface.
@@ -2083,6 +2178,8 @@ internal fun Bubble(
      *  and Delete for the owner and publishers whoever wrote it. `null` in a
      *  chat. */
     channelPost: ChannelPostActions? = null,
+    /** ADR-0089 — Report was chosen on someone else's message. */
+    onReport: (() -> Unit)? = null,
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -2153,13 +2250,16 @@ internal fun Bubble(
         }
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly || emojiOnly > 0
         val reactionCtx = LocalBubbleReactions.current
+        // ADR-0089 section 4 — a suspended account reacts to nothing (the
+        // reaction would be refused), and joins no call from a link.
+        val bubbleSuspended by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
         val ownEmoji = remember(msg.reactions, ownIdentity) {
             me.lakko.app.chat.ownReactionEmoji(msg.reactions, ownIdentity).toSet()
         }
         // Section 6 — a double tap sends the quick reaction; nothing on a
         // message not sent, failed, deleted, ended, or while selecting.
         val quickReactable = actionsAvailable && hasId && !msg.deleted && !msg.isHistory &&
-            msg.ack == Ack.SENT && msg.unsupportedVersion == null && reactionCtx != null
+            msg.ack == Ack.SENT && msg.unsupportedVersion == null && reactionCtx != null && !bubbleSuspended
         // ADR-0061 section 6 — a newer-version row has no content this build
         // can read, so nothing to copy, edit, quote or forward: no menu.
         // ADR-0073 R.5 — a row of an older segment is read-only history: its
@@ -2293,7 +2393,7 @@ internal fun Bubble(
                                 )
                             }
                         }
-                        if (callInvite != null) {
+                        if (callInvite != null && !bubbleSuspended) {
                             CallInviteCard(
                                 bubbleColor = background,
                                 contentColor = contentColor,
@@ -2463,7 +2563,8 @@ internal fun Bubble(
                             translateLabel = tr.menuLabel,
                         ).let { base ->
                             if (channelPost == null) {
-                                base
+                                // ADR-0089 — Report only where a host can open it.
+                                base.copy(canReport = base.canReport && onReport != null)
                             } else {
                                 base.copy(
                                     canReply = false,
@@ -2473,6 +2574,8 @@ internal fun Bubble(
                                     canSave = channelPost.canSave && !msg.deleted,
                                     canEdit = menuAvailable && channelPost.publisher && !msg.deleted,
                                     canDelete = menuAvailable && channelPost.publisher && !msg.deleted,
+                                    // ADR-0089 — a post reports the channel.
+                                    canReport = base.canReport && onReport != null,
                                 )
                             }
                         }
@@ -2481,7 +2584,8 @@ internal fun Bubble(
                     ownReactions = ownEmoji,
                     capReached = ownEmoji.size >= MAX_OWN_REACTIONS,
                     showExpand = reactionCtx?.showExpand ?: true,
-                    showRow = !msg.isHistory && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off,
+                    showRow = !msg.isHistory && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off &&
+                        !bubbleSuspended && channelPost?.canReact != false,
                     onReact = { emoji ->
                         menuOpen = false
                         onReact(emoji)
@@ -2528,6 +2632,10 @@ internal fun Bubble(
                         menuOpen = false
                         onDelete()
                     },
+                    onReport = {
+                        menuOpen = false
+                        onReport?.invoke()
+                    },
                     onDismiss = { menuOpen = false },
                 )
             }
@@ -2544,8 +2652,8 @@ internal fun Bubble(
             ReactionChips(
                 reactions = msg.reactions,
                 ownIdentity = ownIdentity,
-                onToggle = { emoji -> if (actionsAvailable && hasId) onReact(emoji) },
-                interactive = actionsAvailable,
+                onToggle = { emoji -> if (actionsAvailable && hasId && !bubbleSuspended) onReact(emoji) },
+                interactive = actionsAvailable && !bubbleSuspended,
                 onShowReactors = { emoji -> reactionCtx?.onShowReactors?.invoke(msg.messageId, emoji) },
             )
         }
@@ -2586,6 +2694,9 @@ internal data class ChannelPostActions(
     val canForward: Boolean = false,
     /** UX 12 — the post menu's Save (the saved register, kind channel). */
     val canSave: Boolean = false,
+    /** ADR-0089 step 5 — the menu's reaction row; off for a channel
+     *  moderators removed. */
+    val canReact: Boolean = true,
 )
 
 /** The edit dialog's text field, for the UI tests. */
@@ -4352,6 +4463,16 @@ private fun MembersSheet(
     // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
     // block recomposes when any of them moves.
     val rosterViews = remember(members) { viewModel.rosterViews() }
+    // ADR-0089 step 4 / UX 3 — members whose account the moderation log
+    // confirms suspended, marked as the answers arrive. Keyed on the
+    // ACCOUNT key (one person, however many devices); a leaf whose
+    // credential did not resolve carries none and is not asked about.
+    val memberAccountKeys = remember(members) {
+        members.mapNotNullTo(HashSet()) { m ->
+            m.accountKey.takeIf { it.size == 32 }?.let { java.util.Base64.getEncoder().encodeToString(it) }
+        }
+    }
+    val suspendedMembers by me.lakko.app.ui.suspension.rememberSuspendedAmong(memberAccountKeys)
     val ownerKeyB64 = roleTable?.owner?.let { me.lakko.app.chat.outboxB64(it) }
     val adminKeysB64 = roleTable?.admins?.map { me.lakko.app.chat.outboxB64(it) }?.toSet()
         ?: emptySet()
@@ -4365,7 +4486,10 @@ private fun MembersSheet(
     // every editing and exit section away and leaves the name readable.
     val settingsVersionForInfo by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
     val hasHandle = remember(settingsVersionForInfo) { viewModel.groupHandle() != null }
-    val sections = remember(canManage, isOwner, canLeave, membershipEnded, transferCandidates, hasHandle) {
+    // ADR-0089 section 4 - no calls and no adding people while suspended.
+    val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
+    val sections = remember(canManage, isOwner, canLeave, membershipEnded, transferCandidates, hasHandle, suspendedReadOnlyInfo) {
+        me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
         conversationInfoSections(
             ConversationInfoCapabilities(
                 kind = ConversationInfoKind.GROUP,
@@ -4380,7 +4504,7 @@ private fun MembersSheet(
                 canLeave = canLeave && !membershipEnded,
                 hasHandle = hasHandle,
             ),
-        )
+        ))
     }
     // §6.1.6 / §6.1.8 — the role change already WAITING to apply, if any.
     // `waiting` and not merely pending is the whole point: below the quiet window
@@ -5019,7 +5143,20 @@ private fun MembersSheet(
                                 )
                                 Spacer(Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(text = memberName)
+                                    val memberSuspended = !isOwnRow && member.accountKey.size == 32 &&
+                                        java.util.Base64.getEncoder().encodeToString(member.accountKey) in suspendedMembers
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(text = memberName, modifier = Modifier.weight(1f, fill = false))
+                                        // UX 3 — "Suspended" after the name, muted.
+                                        if (memberSuspended) {
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = t("suspended.member"),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
                                     annotation?.let {
                                         Text(
                                             text = it.text(),
@@ -5138,6 +5275,32 @@ private fun MembersSheet(
                 // section rule says nothing about and never will: a section
                 // list answers "is this block here", not "is this control
                 // enabled and why not".
+                // ADR-0089 — Report, first in the exit block, for anyone but
+                // the owner and only for a group with an @name (the rule).
+                if (InfoSection.REPORT in sections) {
+                    val handle = viewModel.groupHandle()?.handle
+                    if (handle != null) {
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(
+                            onClick = {
+                                me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                                    me.lakko.app.ui.moderation.ReportRequest(
+                                        subject = me.lakko.app.moderation.groupReportSubject(
+                                            handle = handle,
+                                            name = viewModel.groupName.value.ifBlank { "@$handle" },
+                                            groupIdHex = viewModel.groupIdHex,
+                                        ),
+                                        leaveOrUnsubscribe = { viewModel.onLeaveGroup() },
+                                    ),
+                                )
+                            },
+                            enabled = !busy,
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                        ) { Text(t("report.action")) }
+                    }
+                }
                 when (exit) {
                     me.lakko.app.chat.ExitBlock.Hidden -> Unit
                     // ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has
@@ -5512,5 +5675,26 @@ private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
         error?.let {
             Text(it.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
+    }
+}
+
+/** ADR-0089 / UX 1.2 — "You blocked {name}." with Unblock, in place of the composer. */
+@Composable
+private fun BlockedBanner(name: String, onUnblock: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Text(
+            t("block.banner", mapOf("name" to name)),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onUnblock) { Text(t("block.unblock")) }
     }
 }

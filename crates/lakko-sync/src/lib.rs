@@ -116,6 +116,9 @@ pub mod fuzz_api {
     /// * `decode_device_ack_envelope` — the device-acknowledgement registers
     ///   (identity-recovery 17.5), reached the same way: canonical, folding
     ///   to exactly its keys, not applying twice.
+    /// * `decode_blocked_envelope` — the block registers (ADR-0089 section
+    ///   6), reached the same way: canonical, folding to exactly its keys and
+    ///   states, not applying twice.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
     ///   must persist to bytes that read back as the same state, its
@@ -132,6 +135,7 @@ pub mod fuzz_api {
             && quick_reaction_envelope_holds(bytes)
             && link_record_envelope_holds(bytes)
             && device_ack_envelope_holds(bytes)
+            && blocked_envelope_holds(bytes)
             && channel_reaction_envelope_holds(bytes)
             && channel_comment_envelope_holds(bytes)
             && persisted_state_holds(bytes)
@@ -195,6 +199,23 @@ pub mod fuzz_api {
             let n = state.len();
             state.prune_channel_activity(u64::MAX) == n && state.is_empty()
         }
+    }
+
+    /// The block envelope (ADR-0089 section 6): canonical, folds to exactly
+    /// its keys and states, carried back by `blocked_envelopes`, and does
+    /// not apply twice.
+    fn blocked_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_blocked_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_blocked_envelope(&entries).as_deref() == Ok(bytes)
+            && state.apply_blocked_envelope(bytes) == Ok(true)
+            && entries
+                .iter()
+                .all(|e| state.is_blocked(&e.value.account_key) == e.value.blocked)
+            && state.blocked_envelopes() == vec![bytes.to_vec()]
+            && state.apply_blocked_envelope(bytes) == Ok(false)
     }
 
     /// The device-acknowledgement envelope (identity-recovery 17.5):
@@ -601,6 +622,9 @@ mod fuzz_api_tests {
             .delete_channel_comment(13, [3; 16], 7, [9; 16], 1_000)
             .unwrap();
         let persisted_comments = removed.to_bytes();
+        let blocked = removed.set_blocked(14, [4; 32], true, 1_000).unwrap();
+        let unblocked = removed.set_blocked(15, [4; 32], false, 2_000).unwrap();
+        let persisted_blocked = removed.to_bytes();
         for wire in [
             &envelope,
             &persisted,
@@ -618,6 +642,9 @@ mod fuzz_api_tests {
             &commented,
             &uncommented,
             &persisted_comments,
+            &blocked,
+            &unblocked,
+            &persisted_blocked,
         ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {

@@ -37,7 +37,8 @@
  * these to surface the right toast.
  */
 
-import { DEFAULT_BASE_URL } from "./client";
+import { AccountSuspendedError, DEFAULT_BASE_URL } from "./client";
+import { isSuspendedBody, suspendedLandingOf } from "./suspension";
 import { sessionFetch } from "./session-fetch";
 import type { SessionPairWire } from "./session-pair";
 import { FRESH_GRANT_HEADER } from "./fresh-auth";
@@ -626,6 +627,14 @@ export class WebauthnClient {
 
 async function parseJsonOrThrow<T>(response: Response, endpoint: string): Promise<T> {
   if (!response.ok) {
+    if (response.status === 403) {
+      // ADR-0089: a passkey sign-in of a suspended account answers with the
+      // restricted session; read whole, never truncated or logged.
+      const full = await response.text().catch(() => "");
+      const landing = isSuspendedBody(full) ? suspendedLandingOf(full) : null;
+      if (landing !== null) throw new AccountSuspendedError(endpoint, landing);
+      throw new WebauthnHttpError(403, endpoint, full.length > 512 ? `${full.slice(0, 509)}...` : full);
+    }
     const body = await safeReadBody(response);
     throw new WebauthnHttpError(response.status, endpoint, body);
   }

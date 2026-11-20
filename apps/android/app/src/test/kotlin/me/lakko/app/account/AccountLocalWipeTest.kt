@@ -632,7 +632,7 @@ class AccountLocalWipeTest {
          * neither can be observed.
          */
         val KEYSTORE_BACKED_STEPS = setOf(
-            "push-routing-secrets", "session-token", "account-identity-seed", "device-identity-seed", "export-key",
+            "push-routing-secrets", "session-token", "suspension", "account-identity-seed", "device-identity-seed", "export-key",
             "recovery-phrase", "guest-phrase", "backup-floor", "journal-ownership", "reach", "identity-pins",
             "channel-log-and-keys",
         )

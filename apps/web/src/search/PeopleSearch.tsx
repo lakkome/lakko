@@ -24,6 +24,7 @@
  *
  * Every decision is in the plain modules beside this file; this renders them.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { ConversationCard, ConversationRow, foundIdHex, isMemberOf, useLineageIfMounted } from "./ConversationCard";
 import type { FoundConversation } from "./people-search";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
@@ -80,6 +81,8 @@ import {
 } from "./wiring";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { pendingContacts } from "../contacts/pending-contacts";
+import { isSuspendedKeyB64 } from "../moderation/suspension-marks";
+import { withoutSuspended } from "../moderation/suspension-rules";
 
 /** Where the field is: Chats matches conversations too, Contacts only people. */
 export type PeopleSearchScope = "chats" | "contacts";
@@ -267,7 +270,12 @@ export function PeopleSearch(props: {
     asContacts(mergePeople([local(), network().outcome?.people ?? []], ownKeyHex()), contactSet());
   const people = (): PersonResult[] => {
     const all = merged();
-    return peopleRows(all, props.listedB64?.() ?? new Set(), props.standingAboveB64?.() ?? new Set());
+    // ADR-0089 step 4, UX 3 - search lists no suspended account. Rows show
+    // at once; one drops out when the log confirms its suspension.
+    return withoutSuspended(
+      peopleRows(all, props.listedB64?.() ?? new Set(), props.standingAboveB64?.() ?? new Set()),
+      isSuspendedKeyB64,
+    );
   };
 
   const channel = () => (inContacts ? null : (network().outcome?.channel ?? null));
@@ -534,7 +542,8 @@ function PersonRow(props: {
             )}
           </Show>
         </Show>
-        <Show when={view().add !== "hidden"}>
+        {/* ADR-0089 step 3: a suspended account adds no contact. */}
+        <Show when={view().add !== "hidden" && !accountSuspended()}>
           <button
             type="button"
             class="lk-pane-lookup"

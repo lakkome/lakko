@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-moderation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Reporting and moderation (ADR-0089): reason codes, report targets, the anonymous report sealed to the moderator list, the root-signed moderator list, moderator statements signed through WebAuthn, and the check of a report's message evidence."
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-crypto.workspace = true
+# The attested-message verifier the evidence check runs (ADR-0089 section 1).
+lakko-attachments.workspace = true
+# The snapshot's bucket tree and its check against the moderation log's
+# signed, witnessed head (ADR-0089 section 5, step 4).
+lakko-transparency.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+base64 = "0.22"
+# ES256 (P-256 ECDSA) WebAuthn assertions from moderators' security keys.
+# Already in the dependency graph through openmls (hpke-rs-rust-crypto); no
+# new crate enters the lock file.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+
+[features]
+# A software EdDSA "security key" for test stacks and tests
+# (`tools/moderation-root dev-sign`, the moderation service's route tests).
+# Never enabled in a client or a deployed service build.
+software-authenticator = []
+
+[dev-dependencies]
+proptest = "1"
+# The end-to-end test drives a real MLS group with a bound device leaf.
+lakko-mls.workspace = true
+openmls = "0.8"

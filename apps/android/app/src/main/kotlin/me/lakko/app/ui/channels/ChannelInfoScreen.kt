@@ -142,7 +142,16 @@ public fun ChannelInfoScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     val deleteScope = rememberCoroutineScope()
     var deleteError by remember { mutableStateOf<UiText?>(null) }
-    val sections = remember(owner, publisher, handle, membersOn, hasOtherPublishers) {
+    // ADR-0089 section 4 - no calls and no adding people while suspended.
+    val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
+    // ADR-0089 step 5 — a channel moderators removed keeps only what reads
+    // the device, leaves or reports.
+    val removedChannels by me.lakko.app.channels.RemovedChannels.state.collectAsState()
+    val removal = removedChannels[channelId.lowercase()]
+    val removedLine = me.lakko.app.channels.channelRemovedLineKey(removal)
+    val sections = remember(owner, publisher, handle, membersOn, hasOtherPublishers, suspendedReadOnlyInfo, removal != null) {
+        me.lakko.app.channels.removedChannelSections(removed = removal != null, sections =
+        me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
         try {
             uniffi.lakko_ffi_uniffi.channelInfoSections(
                 uniffi.lakko_ffi_uniffi.ChannelInfoCapabilities(
@@ -158,7 +167,7 @@ public fun ChannelInfoScreen(
             )
         } catch (_: Throwable) {
             emptyList()
-        }
+        }))
     }
 
     // reactions-and-emoji section 9 — the owner's Reactions screen, pushed.
@@ -218,7 +227,7 @@ public fun ChannelInfoScreen(
             when (page) {
                 InfoPage.Info -> {
                     // Section 4.4 — a lapsed @name: the owner is asked for one.
-                    if (owner && handle == null) {
+                    if (owner && handle == null && removedLine == null) {
                         Text(
                             t("channels.info.handle_lapsed"),
                             style = MaterialTheme.typography.bodyMedium,
@@ -239,6 +248,14 @@ public fun ChannelInfoScreen(
                         state = state,
                         client = client,
                     )
+                    removedLine?.let { key ->
+                        Text(
+                            t(key),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        )
+                    }
                     for (section in sections) {
                         when (section) {
                             InfoSection.INVITE_LINK -> InfoRow(t("chat.invite_link.label")) { page = InfoPage.InviteLink }
@@ -268,6 +285,35 @@ public fun ChannelInfoScreen(
                                 deleteError?.let {
                                     Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                                 }
+                            }
+                            // ADR-0089 — a subscriber reports the channel.
+                            InfoSection.REPORT -> {
+                                HorizontalDivider()
+                                Text(
+                                    t("report.action"),
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                                                me.lakko.app.ui.moderation.ReportRequest(
+                                                    subject = me.lakko.app.moderation.channelReportSubject(
+                                                        channelIdHex = channelId,
+                                                        name = title,
+                                                        conversationKind = me.lakko.app.moderation.ReportConversationKind.CHANNEL,
+                                                        pickPosts = true,
+                                                    ),
+                                                    channelState = state,
+                                                    leaveOrUnsubscribe = {
+                                                        me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
+                                                        onLeft()
+                                                    },
+                                                ),
+                                            )
+                                        }
+                                        .padding(vertical = 14.dp),
+                                )
                             }
                             InfoSection.UNSUBSCRIBE -> {
                                 HorizontalDivider()
@@ -399,7 +445,13 @@ public fun ChannelInfoScreen(
             body = t("channels.unsubscribe.body"),
             confirm = LakkoDialogAction(t("channels.unsubscribe.action"), LakkoDialogTone.Danger) {
                 confirmUnsubscribe = false
-                me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
+                if (removal != null && publisher) {
+                    // ADR-0089 step 5 — a removed channel's owner or
+                    // publisher: as an Unsubscribe, without the service call.
+                    me.lakko.app.channels.ChannelUnsubscribe.leaveRemoved(state, channelId)
+                } else {
+                    me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
+                }
                 onLeft()
             },
         )

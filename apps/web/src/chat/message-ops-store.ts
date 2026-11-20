@@ -68,8 +68,11 @@ export function persistedWithOps(
   const reactions = reactionsToPersisted(state.held);
   const opId = state.lastOpId === undefined ? {} : { lastOpId: String(state.lastOpId) };
   if (state.deleted === true) {
+    // ADR-0089 section 1 - the evidence holds the message's plaintext, so a
+    // deleted row keeps none of it (the reason the text is emptied).
+    const { evidence: _evidence, ...rest } = m;
     return {
-      ...m,
+      ...rest,
       text: "",
       attachments: [],
       deleted: true,

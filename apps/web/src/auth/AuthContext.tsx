@@ -84,6 +84,7 @@ import {
   AuthHttpError,
   AuthNetworkError,
   RecallWrongPasswordError,
+  suspendedLandingFrom,
   ACCOUNT_STATEMENT_KIND_SESSION_UPGRADE,
   type RecallPendingFinish,
   type RecallResult,
@@ -131,6 +132,25 @@ import {
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
 import { decideSilentRestore } from "./silent-restore";
+import {
+  nextSuspension,
+  sendAppeal,
+  type AppealOutcome,
+  type RestrictedSession,
+  type SuspendedLanding,
+  type SuspensionEvent,
+  type SuspensionMode,
+  type SuspensionStatus,
+} from "./suspension";
+import { fetchSuspensionStatus, postSuspensionAppeal } from "./suspension-client";
+import { setAccountSuspendedFlag } from "./suspension-state";
+import { documentForeground, startSuspensionChecks } from "./suspension-timer";
+import {
+  acceptModeratorList,
+  fetchModeratorList,
+  pinnedModerationRootKey,
+  wasmListVersion,
+} from "../moderation/report-api";
 import { sessionTokens } from "./session-token-provider";
 import { sessionPairOf, type SessionPair } from "./session-pair";
 import { errorCodeOf } from "./session-401";
@@ -164,7 +184,9 @@ import { getDeviceKey, putDeviceKey } from "./key-store";
 import {
   deleteSessionToken,
   getSessionPair,
+  getSuspendedSession,
   putSessionPair,
+  putSuspendedSession,
 } from "./session-token-store";
 import {
   getExportKey,
@@ -756,6 +778,11 @@ export interface AuthApi {
   /** URL-safe base64 of this device's id for a landing of `username`'s
    *  account, when this device already holds its keys; else `undefined`. */
   landingDeviceIdFor(username: string): string | undefined;
+  /** ADR-0089: when `err` is a landing route's `403 account-suspended`
+   *  (thrown by a route this context does not drive itself, the email
+   *  recovery's password step), land the account in suspended mode and
+   *  answer `true`; otherwise `false` and nothing changes. */
+  landSuspendedFrom(err: unknown, username: string): Promise<boolean>;
   /** ADR-0073: this device's keys are not the account's keys any more
    *  (`SignedOutState`). While non-null both route guards render the
    *  signed-out screen instead of any route, whatever `state()` says. */
@@ -765,6 +792,27 @@ export interface AuthApi {
    *  refused. While true both route guards render the refusal screen. Never
    *  true on the web, where nothing throws `KeyStoreUnavailableError`. */
   readonly keyStoreUnavailable: Accessor<boolean>;
+  /** ADR-0089 (UX `reporting-and-moderation.md` section 4): this device is
+   *  in suspended mode, or `null`. While it is set and not `reading`, both
+   *  route guards render the suspended screen in place of any route. */
+  readonly suspension: Accessor<SuspensionMode | null>;
+  /** "Read my chats": the app opens read-only. */
+  readSuspendedChats(): void;
+  /** The banner at the top of the chat list: the suspended screen again. */
+  showSuspensionScreen(): void;
+  /** `GET /account/suspension` with the restricted session. `null` when it
+   *  could not be read (the screen offers Retry). A `{ suspended: false }`
+   *  answer ends suspended mode at once (through a refresh). */
+  loadSuspension(): Promise<SuspensionStatus | null>;
+  /** Seal `text` to Lakko's moderators and send it, once per suspension. */
+  appealSuspension(text: string): Promise<AppealOutcome>;
+  /** The bearer a suspended account deletes itself with (its restricted
+   *  session), or `null` outside suspended mode. */
+  suspendedBearer(): string | null;
+  /** The local cleanup after a suspended account deleted itself from a
+   *  device that holds none of its keys ("Delete account" on the suspended
+   *  screen): this account's local data, the session, the screen. */
+  finishSuspendedDeletion(): Promise<void>;
   /** The refusal screen's "Try again": re-runs the step that stopped (the
    *  page-load restore, or the same sign-in call with the same arguments).
    *  Shows the screen again when the key store still refuses. */
@@ -1329,6 +1377,21 @@ function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
+/**
+ * ADR-0089: run a landing route; a `403 account-suspended` carrying the
+ * restricted session comes back as `{ suspended }` instead of a throw, so the
+ * caller lands the account in suspended mode.
+ */
+async function orSuspended<T>(run: Promise<T>): Promise<{ readonly ok: T } | { readonly suspended: SuspendedLanding }> {
+  try {
+    return { ok: await run };
+  } catch (err) {
+    const suspended = suspendedLandingFrom(err);
+    if (suspended !== null) return { suspended };
+    throw err;
+  }
+}
+
 export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // Start in `loading` so the very first paint doesn't snap to
   // `/login`; the onMount hook reads localStorage + IDB, then
@@ -1438,6 +1501,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // then only clears the screen and the person repeats the step.
   const [keyStoreUnavailable, setKeyStoreUnavailable] = createSignal(false);
   let keyStoreRetry: (() => Promise<unknown>) | null = null;
+  // ADR-0089: suspended mode (`suspension.ts`). Every change goes through
+  // `nextSuspension`; the module flag the composers and the DS client read
+  // follows it.
+  const [suspension, setSuspensionSignal] = createSignal<SuspensionMode | null>(null);
+  const moveSuspension = (event: SuspensionEvent): void => {
+    const next = nextSuspension(suspension(), event);
+    setAccountSuspendedFlag(next !== null);
+    if (next === null) anonTokens.setSuspended(false);
+    setSuspensionSignal(next);
+  };
   /** Put up the refusal screen when `err` is the key-store refusal. */
   function noteKeyStoreUnavailable(err: unknown, retry: (() => Promise<unknown>) | null): boolean {
     if (!(err instanceof KeyStoreUnavailableError)) return false;
@@ -1628,6 +1701,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     if (s.kind === "session" || s.kind === "needs-recovery-phrase") {
       return { accountIdB64: s.account.accountId, username: s.account.username };
     }
+    // ADR-0089: a suspended account on a device that holds none of its keys
+    // proves its password to delete itself.
+    const suspended = suspension();
+    if (suspended !== null) {
+      return { accountIdB64: suspended.accountIdB64, username: suspended.username };
+    }
     const pending = pendingRecovery();
     return pending === null
       ? null
@@ -1663,6 +1742,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
   function dropSession(): void {
     // Sign-out and the account wipe both pass through here.
+    moveSuspension({ kind: "ended" });
     freshGrants.clear();
     sessionLanding = "other";
     phraseCheckedAtMs = null;
@@ -1737,7 +1817,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   ): Promise<Uint8Array | undefined> {
     const ownKeyB64 = base64Encode(identity.signaturePublicKey);
     try {
-      const attestation = await client.genesisAttest(sessionToken, identity.signaturePublicKey);
+      const attestation = await client.genesisAttest(sessionToken, identity, base64Decode(accountIdB64));
       writeGenesisRecorded(plainStorage(), accountIdB64, ownKeyB64);
       return attestation;
     } catch (err) {
@@ -1750,7 +1830,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         outcome === "mismatch"
           ? "genesis-attest: auth holds another identity key for this account"
           : "genesis-attest mint failed; it is tried again at the next landing",
-        err instanceof AuthHttpError ? err.status : err,
+        err instanceof AuthHttpError ? (err.errorCode ?? err.status) : err instanceof Error ? err.name : "error",
       );
       return undefined;
     }
@@ -1791,6 +1871,39 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       },
     });
   }
+  /** ADR-0089: `POST /auth/session/logout` with a suspended account's
+   *  restricted session (refreshed first when it expired). Never throws. */
+  function restrictedServerLogout(restricted: RestrictedSession): Promise<LogoutAttempt> {
+    return runServerLogout(
+      {
+        sessionToken: restricted.restrictedToken,
+        sessionExpiresAtMs: restricted.restrictedExpiresAtMs,
+        refreshToken: restricted.refreshToken,
+        refreshExpiresAtMs: restricted.refreshExpiresAtMs,
+        keyGeneration: restricted.keyGeneration,
+      },
+      {
+        now: () => Date.now(),
+        refresh: async (refreshToken) => {
+          try {
+            return { token: (await client.sessionRefresh(refreshToken)).sessionToken };
+          } catch (err) {
+            const suspended = suspendedLandingFrom(err);
+            if (suspended !== null) return { token: suspended.session.restrictedToken };
+            return { status: err instanceof AuthHttpError ? err.status : null };
+          }
+        },
+        logout: async (sessionToken) => {
+          try {
+            await client.sessionLogout(sessionToken);
+            return 204;
+          } catch (err) {
+            return err instanceof AuthHttpError ? err.status : null;
+          }
+        },
+      },
+    );
+  }
   /** Persist `pair` under the account's device key. Best effort: logged. */
   async function persistSessionPair(accountIdB64: string, pair: SessionPair, context: string): Promise<void> {
     try {
@@ -1801,11 +1914,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn(`session-pair persist (${context}) failed`, err);
     }
   }
+  /** ADR-0089: persist a restricted session under the device key. Best
+   *  effort: logged. */
+  async function persistRestricted(accountIdB64: string, restricted: RestrictedSession): Promise<void> {
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey !== null) await putSuspendedSession(accountIdB64, restricted, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("restricted-session persist failed", err instanceof Error ? err.name : "unknown");
+    }
+  }
   sessionTokens.configure({
+    persistRestricted,
     refresh: async (refreshToken) => {
       try {
         return { kind: "pair", pair: await client.sessionRefresh(refreshToken) };
       } catch (err) {
+        const suspended = suspendedLandingFrom(err);
+        if (suspended !== null) return { kind: "suspended", restricted: suspended.session };
         if (err instanceof AuthHttpError) {
           return { kind: "refused", status: err.status, errorCode: err.errorCode };
         }
@@ -1849,9 +1976,203 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         case "refresh-invalid":
           endExpiredSession();
           return;
+        case "suspended":
+          onSuspendedRefresh(event.accountIdB64, event.restricted);
+          return;
       }
     }),
   );
+  // ADR-0089: a refresh that answered a pair while suspended ends suspended
+  // mode, silently.
+  onCleanup(
+    sessionTokens.subscribe((event) => {
+      if (event.kind !== "pair") return;
+      const mode = suspension();
+      if (mode === null || mode.accountIdB64 !== event.accountIdB64) return;
+      leaveSuspension(mode, event.pair);
+    }),
+  );
+  // ADR-0089: while suspended, ask whether the suspension ended every ten
+  // minutes and whenever the app comes back to the foreground.
+  createEffect(() => {
+    if (suspension() === null) return;
+    const stop = startSuspensionChecks({
+      refresh: () => sessionTokens.refreshOnce(),
+      setInterval: (fn, ms) => setInterval(fn, ms),
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+      onForeground: documentForeground,
+    });
+    onCleanup(stop);
+  });
+
+  /**
+   * ADR-0089: the refresh route answered `403 account-suspended` (a bearer
+   * route of auth refused the session, the periodic check ran, or a reload
+   * refreshed). The provider already holds the restricted session and has
+   * persisted it. A session on screen for this account goes into suspended
+   * mode; one still landing is put there by its landing.
+   */
+  function onSuspendedRefresh(accountIdB64: string, restricted: RestrictedSession): void {
+    const s = state();
+    if (s.kind !== "session" || s.account.accountId !== accountIdB64) return;
+    // eslint-disable-next-line no-console
+    console.warn("[auth] the account is suspended; this device is in suspended mode");
+    // Nothing of this account's may use the access token any more: the
+    // provider answers it locally, and the readers below forget it.
+    discovery.setSessionToken(null);
+    suspendTokenPool(restricted);
+    moveSuspension({
+      kind: "refresh-suspended",
+      accountIdB64,
+      username: s.account.username,
+      canRead: true,
+    });
+  }
+
+  /**
+   * ADR-0089: the suspension ended (a refresh answered a pair). A session
+   * that is open goes back to normal and runs the steps its suspended landing
+   * skipped; a device that showed the screen alone has no keys on it, so it
+   * lands on the sign-in screen and the person signs in again.
+   */
+  function leaveSuspension(mode: SuspensionMode, pair: SessionPair): void {
+    // eslint-disable-next-line no-console
+    console.warn("[auth] the suspension ended");
+    moveSuspension({ kind: "refresh-pair", accountIdB64: mode.accountIdB64 });
+    const s = state();
+    if (!mode.canRead || s.kind !== "session" || s.account.accountId !== mode.accountIdB64) {
+      if (s.kind === "anon") {
+        const cached = loadPersisted();
+        api.logout();
+        setState({ kind: "anon", ...(cached !== null ? { cachedUsername: cached.username } : {}) });
+      }
+      return;
+    }
+    discovery.setSessionToken(pair.sessionToken);
+    anonTokens.setSessionToken(pair.sessionToken);
+    const canonical = chats.accountIdentity();
+    const accountIdB64 = mode.accountIdB64;
+    void (async (): Promise<void> => {
+      await ensureSessionDeviceBound(accountIdB64).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("session bind-device (after suspension) failed", err instanceof Error ? err.name : "unknown");
+      });
+      if (canonical !== null && chats.accountIdentity() === canonical) {
+        await ensureGenesisRecorded(accountIdB64, canonical);
+        await publishKeyPackageBestEffort("after suspension");
+      }
+      if (guestState() === null) {
+        void subscribePushFor(accountIdB64).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("push subscribe failed", err);
+        });
+      }
+    })();
+  }
+
+  /**
+   * ADR-0089: a landing route answered `403 account-suspended`. Keep both
+   * credentials (in memory and under the device key), then land the account
+   * in suspended mode: a device that holds the account's keys lands it as a
+   * reload would, with nothing sent to any server, and offers "Read my
+   * chats"; a device that holds none shows the suspended screen alone.
+   */
+  async function landSuspended(
+    landing: SuspendedLanding,
+    usernameHint: string,
+    flow?: FlowBinding,
+  ): Promise<void> {
+    const accountIdB64 = landing.accountIdB64;
+    if (flow !== undefined) {
+      flow.require();
+      flow.openStores(accountIdB64);
+    } else {
+      openStoresFor(accountIdB64);
+    }
+    // eslint-disable-next-line no-console
+    console.warn("[auth] the account is suspended; landing in suspended mode");
+    explicitSignInThisPage = true;
+    sessionTokens.installRestricted(accountIdB64, landing.session);
+    discovery.setSessionToken(null);
+    if (landing.freshGrant !== null) freshGrants.put(accountIdB64, landing.freshGrant);
+    let deviceKey: DeviceCipher | null = null;
+    try {
+      deviceKey = await getDeviceKey(accountIdB64);
+    } catch (err) {
+      if (err instanceof KeyStoreUnavailableError) throw err;
+      deviceKey = null;
+    }
+    if (deviceKey !== null) await persistRestricted(accountIdB64, landing.session);
+    let seed: Uint8Array | null = null;
+    if (deviceKey !== null) {
+      try {
+        seed = await getAccountIdentitySeed(accountIdB64, deviceKey);
+      } catch {
+        seed = null;
+      }
+    }
+    flow?.require();
+    const cached = loadPersisted();
+    const username =
+      cached !== null && cached.accountIdB64 === accountIdB64 && cached.username.length > 0
+        ? cached.username
+        : usernameHint;
+    await landSuspendedWith(accountIdB64, landing.session, username, seed, flow);
+  }
+
+  /** ADR-0089: the anonymous-token pool draws `blob-read` alone, with the
+   *  restricted session (files in chats still open while suspended). */
+  function suspendTokenPool(restricted: RestrictedSession): void {
+    anonTokens.setSuspended(true);
+    anonTokens.setSessionToken(restricted.restrictedToken);
+  }
+
+  /** The landing half of {@link landSuspended}, shared with the reload. */
+  async function landSuspendedWith(
+    accountIdB64: string,
+    restricted: RestrictedSession,
+    username: string,
+    seed: Uint8Array | null,
+    flow?: FlowBinding,
+  ): Promise<void> {
+    suspendTokenPool(restricted);
+    if (seed === null) {
+      binding.landed();
+      moveSuspension({ kind: "landed", accountIdB64, username, canRead: false });
+      if (state().kind === "loading") setState({ kind: "anon", cachedUsername: username });
+      return;
+    }
+    savePersisted({ v: 1, accountIdB64, username });
+    moveSuspension({ kind: "landed", accountIdB64, username, canRead: true });
+    const wasm = await loadWasm();
+    try {
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed: seed,
+        accountIdBytes: base64Decode(accountIdB64),
+        accountIdB64,
+        exportKey: new Uint8Array(0),
+        session: {
+          sessionToken: restricted.restrictedToken,
+          sessionExpiresAtMs: restricted.restrictedExpiresAtMs,
+          refreshToken: restricted.refreshToken,
+          refreshExpiresAtMs: restricted.refreshExpiresAtMs,
+          keyGeneration: restricted.keyGeneration,
+        },
+        username,
+        suspended: true,
+        ...(flow !== undefined ? { wipes: flow.wipes } : {}),
+      });
+    } catch (err) {
+      if (err instanceof StaleBindingError) throw err;
+      // The local landing failed: the screen alone, as on a device that
+      // holds nothing.
+      // eslint-disable-next-line no-console
+      console.warn("suspended landing failed; showing the suspended screen alone", err instanceof Error ? err.name : "unknown");
+      moveSuspension({ kind: "landed", accountIdB64, username, canRead: false });
+      if (state().kind === "loading") setState({ kind: "anon", cachedUsername: username });
+    }
+  }
   /** A sign-in flow installing the session it was just given. Counted, so a
    *  landing refused after a sign-out does not take this session down with
    *  its own installs (`finishCanonicalSession`). */
@@ -3541,6 +3862,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  registration. A person who was sent a call link is not asked whether
      *  this site may send notifications. */
     guest?: boolean;
+    /** ADR-0089: the account is suspended. `session` is the restricted
+     *  session (the provider already holds it). The landing is local only:
+     *  the keys, the chats on this device and the state, nothing sent to any
+     *  server; the steps it skips run when the suspension ends. */
+    suspended?: boolean;
     /** The landing of an account whose registration has just finished on the
      *  server (guest signup). It is completed whatever else landed meanwhile;
      *  only a sign-out stops it. */
@@ -3622,7 +3948,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
     };
-    installSession(args.accountIdB64, args.session);
+    // A suspended landing holds the restricted session, installed by the
+    // caller; installing it as a pair would hand the provider a token it must
+    // never send as one.
+    if (args.suspended !== true) installSession(args.accountIdB64, args.session);
 
     // Rehydrate BEFORE any KeyPackage is minted: `restoreStorage` REPLACES the
     // provider storage, so a KeyPackage created earlier would lose its private
@@ -3631,6 +3960,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     await rehydrateMlsState(chats, args.accountIdB64);
     requireNotSignedOut();
 
+    if (args.suspended === true) {
+      setIdentitySecrets({
+        accountId: args.accountIdBytes,
+        exportKey: args.exportKey,
+        accountIdentitySeed: args.accountIdentitySeed,
+        ...(conversationIdentitySeed !== null ? { conversationIdentitySeed } : {}),
+        sessionToken: args.session.sessionToken,
+        sessionExpiresAtMs: args.session.sessionExpiresAtMs,
+        keyGeneration: args.session.keyGeneration,
+      });
+      setPendingRecovery(null);
+      setState({
+        kind: "session",
+        account: { accountId: args.accountIdB64, username: args.username },
+      });
+      return;
+    }
     await restoreOwedSignupPhrase(args.accountIdB64);
     requireNotSignedOut();
     settleOwedKeyResetPublish(args.accountIdB64, args.accountIdBytes, args.accountIdentitySeed);
@@ -3713,6 +4059,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       kind: "session",
       account: { accountId: args.accountIdB64, username: args.username },
     });
+    // ADR-0089: a suspension that came in while this landing was running (a
+    // bearer route answered `403 account-suspended` before the state was a
+    // session): suspended mode now.
+    {
+      const restricted = sessionTokens.restricted();
+      if (restricted !== null && sessionTokens.accountIdB64() === args.accountIdB64) {
+        onSuspendedRefresh(args.accountIdB64, restricted);
+        return;
+      }
+    }
     if (args.guest !== true) {
       void subscribePushFor(args.accountIdB64).catch((err) => {
         // eslint-disable-next-line no-console
@@ -4423,9 +4779,53 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /**
+   * ADR-0089: the page-load restore of a suspended account. Refreshes with
+   * the stored credential: still suspended (or no answer) lands in suspended
+   * mode and returns `true`; a pair means the suspension ended while this
+   * device was closed, the pair is persisted, and `false` lets the ordinary
+   * restore run on it. A refusal that ends the session is the provider
+   * listener's (`true`).
+   */
+  async function restoreSuspended(
+    cached: { accountIdB64: string; username: string },
+    restricted: RestrictedSession,
+    seed: Uint8Array | null,
+  ): Promise<boolean> {
+    explicitSignInThisPage = false;
+    sessionTokens.installRestricted(cached.accountIdB64, restricted);
+    const outcome = await sessionTokens.refreshOnce();
+    if (outcome === "refreshed") {
+      const pair = sessionTokens.pair();
+      seed?.fill(0);
+      if (pair !== null) await persistSessionPair(cached.accountIdB64, pair, "suspension ended");
+      sessionTokens.clear();
+      return false;
+    }
+    if (outcome === "superseded" || outcome === "device-revoked" || outcome === "invalid") {
+      seed?.fill(0);
+      return true;
+    }
+    if (state().kind !== "loading") {
+      seed?.fill(0);
+      return true;
+    }
+    const held = sessionTokens.restricted() ?? restricted;
+    try {
+      await landSuspendedWith(cached.accountIdB64, held, cached.username, seed);
+    } catch (err) {
+      if (err instanceof StaleBindingError) {
+        seed?.fill(0);
+        return true;
+      }
+      throw err;
+    }
+    return true;
+  }
+
   async function restoreSessionOnLoadInner(): Promise<void> {
     if (await restoreOwedRecall()) return;
-    const probe = await probeStoredSecrets();
+    let probe = await probeStoredSecrets();
     // ADR-0074 section 2.3: a logout that could not reach the server left a
     // marker and the stored pair. That pair is not a session to restore; it
     // is what the ONE retry signs out with, and it goes whatever the answer.
@@ -4442,6 +4842,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           /* best-effort */
         });
       });
+    }
+    // ADR-0089: the account was suspended when this device last asked. A
+    // refresh decides: a pair is a normal restore, the same refusal (or no
+    // answer) stays in suspended mode.
+    if (!logoutOwed && probe.cachedAccount !== null && probe.deviceKey !== null && probe.suspended) {
+      if (state().kind !== "loading") {
+        probe.identitySeed?.fill(0);
+        return;
+      }
+      if (await restoreSuspended(probe.cachedAccount, probe.suspended, probe.identitySeed)) return;
+      probe = await probeStoredSecrets();
     }
     const decision = decideSilentRestore({
       cachedAccount: probe.cachedAccount,
@@ -5293,7 +5704,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       };
     },
     async commit(grant, revokeDeviceIds, options) {
-      const { accountIdB64, secrets } = rotationSession();
+      const { accountIdB64, accountIdBytes, secrets } = rotationSession();
       const deviceKey = await rotationDeviceKey(accountIdB64);
       const prepared = (await getKeyRotationState(accountIdB64, deviceKey)).prepared;
       if (prepared === null) throw new Error("key rotation: nothing was prepared");
@@ -5309,6 +5720,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           freshGrant: grant,
           newSeed: seed.slice(),
           newSignaturePubkey: base64Decode(prepared.newSignaturePubkeyB64),
+          accountId: accountIdBytes,
           proof: base64Decode(prepared.proofB64),
           revokeDeviceIds,
           phraseSaved: options?.phraseSaved === true,
@@ -5646,8 +6058,82 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     landingDeviceIdFor(username) {
       return landingDevice({ username });
     },
+    async landSuspendedFrom(err, username) {
+      const suspended = suspendedLandingFrom(err);
+      if (suspended === null) return false;
+      await landSuspended(suspended, username, startFlow());
+      return true;
+    },
     signedOut,
     keyStoreUnavailable,
+    suspension,
+    readSuspendedChats() {
+      moveSuspension({ kind: "read" });
+    },
+    suspendedBearer() {
+      if (suspension() === null) return null;
+      return sessionTokens.restricted()?.restrictedToken ?? sessionTokens.peek();
+    },
+    async finishSuspendedDeletion() {
+      const account = suspension()?.accountIdB64 ?? sessionTokens.accountIdB64();
+      binding.signedOut();
+      keyPackageAccount = null;
+      chats.clear();
+      setIdentitySecrets(null);
+      dropSession();
+      if (account !== null) {
+        clearLogoutOwed(plainStorage(), account);
+        try {
+          await wipeAccountLocalData(account);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("suspended deletion: local wipe failed", err instanceof Error ? err.name : "unknown");
+        }
+        anonTokens.forgetAccount(account);
+      }
+      setState({ kind: "anon" });
+    },
+    showSuspensionScreen() {
+      moveSuspension({ kind: "show-screen" });
+    },
+    async loadSuspension() {
+      const bearer = sessionTokens.restricted()?.restrictedToken ?? sessionTokens.peek();
+      if (bearer === null) return null;
+      let status: SuspensionStatus | null;
+      try {
+        status = await fetchSuspensionStatus(bearer);
+      } catch {
+        return null;
+      }
+      // The suspension ended meanwhile: the refresh answers a pair and the
+      // provider's `pair` ends suspended mode.
+      if (status !== null && !status.suspended && sessionTokens.restricted() !== null) {
+        void sessionTokens.refreshOnce();
+      }
+      return status;
+    },
+    async appealSuspension(text) {
+      const wasm = await loadWasm();
+      return sendAppeal(text, {
+        rootKey: pinnedModerationRootKey,
+        fetchList: async () => {
+          const list = await fetchModeratorList();
+          const root = pinnedModerationRootKey();
+          if (list === null || root === null) return null;
+          // The report sheet's rule: a list that verifies under the pinned
+          // root and is not older than one this device has seen (a newer one
+          // raises the floor), so an appeal is never sealed to a list that
+          // still names a removed moderator.
+          return acceptModeratorList(list, root, wasmListVersion(wasm));
+        },
+        seal: (body, list, root) => wasm.sealModerationAppeal(body, list, root),
+        post: async (sealed) => {
+          const bearer = sessionTokens.restricted()?.restrictedToken ?? sessionTokens.peek();
+          if (bearer === null) throw new Error("no session");
+          return postSuspensionAppeal(bearer, sealed);
+        },
+      });
+    },
     async retryKeyStore() {
       const retry = keyStoreRetry;
       keyStoreRetry = null;
@@ -6147,12 +6633,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // A password sign-in owes no new-password step and explains nothing.
       setNewPasswordOwed(false);
       setRestoreNotice(null);
-      const result = await accessByName({
-        target,
-        run: (handle) =>
-          client.login(handle, utf8(password), landingDevice({ username: target.username })),
-        bind: bindIfCurrent(flow),
-      });
+      const outcome = await orSuspended(
+        accessByName({
+          target,
+          run: (handle) =>
+            client.login(handle, utf8(password), landingDevice({ username: target.username })),
+          bind: bindIfCurrent(flow),
+        }),
+      );
+      if ("suspended" in outcome) {
+        // ADR-0089: the password was right and the account is suspended.
+        await landSuspended(outcome.suspended, resolvedUsername, flow);
+        return;
+      }
+      const result = outcome.ok;
       flow.require();
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
@@ -6290,7 +6784,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // passkey sheet for a long time, and whatever landed on this device in
       // the meantime stays.
       const flow = startFlow();
-      const assertion = await runPasskeyCeremony();
+      const ceremony = await orSuspended(runPasskeyCeremony());
+      if ("suspended" in ceremony) {
+        const cachedHint = loadPersisted();
+        await landSuspended(
+          ceremony.suspended,
+          usernameHint ??
+            (cachedHint !== null && cachedHint.accountIdB64 === ceremony.suspended.accountIdB64
+              ? cachedHint.username
+              : ""),
+          flow,
+        );
+        return;
+      }
+      const assertion = ceremony.ok;
       flow.require();
       const accountIdB64 = assertion.account_id_b64;
       const accountIdBytes = base64Decode(accountIdB64);
@@ -6899,6 +7406,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           landingDevice({ accountIdB64: account.accountIdB64 }),
         );
       } catch (err) {
+        // ADR-0089: a suspended account's password sign-in still carries a
+        // fresh-auth grant (so it can delete itself) and a new restricted
+        // session for the same account.
+        const suspended = suspendedLandingFrom(err);
+        if (suspended !== null && suspended.accountIdB64 === account.accountIdB64) {
+          if (suspended.freshGrant === null) throw new FreshAuthRequiredError();
+          freshGrants.put(account.accountIdB64, suspended.freshGrant);
+          sessionTokens.installRestricted(account.accountIdB64, suspended.session);
+          await persistRestricted(account.accountIdB64, suspended.session);
+          // A session that had not learned of the suspension yet learns it
+          // here (a no-op when already in suspended mode).
+          onSuspendedRefresh(account.accountIdB64, suspended.session);
+          return;
+        }
         const failure = proofLoginFailure({
           status: err instanceof AuthHttpError ? err.status : null,
           network: err instanceof AuthNetworkError,
@@ -7044,6 +7565,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           grant,
           accountIdentitySeed.slice(),
           newPubkey,
+          pending.accountIdBytes,
         );
       } catch (err) {
         accountIdentitySeed.fill(0);
@@ -7175,17 +7697,27 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       oldIdentity.free();
 
       try {
-        const result = await accessByName({
-          target,
-          run: (handle) =>
-            client.recover(
-              handle,
-              seed,
-              utf8(newPassword),
-              landingDevice({ username: target.username }),
-            ),
-          bind: bindIfCurrent(flow),
-        });
+        const outcome = await orSuspended(
+          accessByName({
+            target,
+            run: (handle) =>
+              client.recover(
+                handle,
+                seed,
+                utf8(newPassword),
+                landingDevice({ username: target.username }),
+              ),
+            bind: bindIfCurrent(flow),
+          }),
+        );
+        if ("suspended" in outcome) {
+          // ADR-0089: the phrase was right; nothing was changed on the
+          // server (the password stays as it was).
+          accountIdentitySeed.fill(0);
+          await landSuspended(outcome.suspended, resolvedUsername, flow);
+          return;
+        }
+        const result = outcome.ok;
         flow.require();
         const accountIdBytes = result.accountId;
         const accountIdB64 = base64Encode(accountIdBytes);
@@ -7536,12 +8068,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const target = await nameTargetFor(trimmed);
       flow.require();
       const resolvedUsername = target.username;
-      const result = await accessByName({
-        target,
-        run: (handle) =>
-          client.totpRecover(handle, code, landingDevice({ username: target.username })),
-        bind: bindIfCurrent(flow),
-      });
+      const outcome = await orSuspended(
+        accessByName({
+          target,
+          run: (handle) =>
+            client.totpRecover(handle, code, landingDevice({ username: target.username })),
+          bind: bindIfCurrent(flow),
+        }),
+      );
+      if ("suspended" in outcome) {
+        await landSuspended(outcome.suspended, resolvedUsername, flow);
+        return;
+      }
+      const result = outcome.ok;
       // Overtaken while the code was being verified: dropped, like `login`.
       flow.require();
       const accountIdBytes = result.accountId;
@@ -7589,7 +8128,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // answers with a session; the password is left as it is (the
         // "Choose a new password" step follows and replaces it).
         const target = await nameTargetFor(found.username);
-        const result = await accessByName({
+        const outcome = await orSuspended(accessByName({
           target,
           run: async (handle) => {
             try {
@@ -7616,7 +8155,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             }
           },
           bind: bindIfCurrent(flow),
-        });
+        }));
+        if ("suspended" in outcome) {
+          await landSuspended(outcome.suspended, found.username, flow);
+          return true;
+        }
+        const result = outcome.ok;
         // Overtaken while the sign-in was out: dropped, like `login`.
         flow.require();
         if (base64Encode(result.accountId) !== found.accountIdB64) {
@@ -7712,10 +8256,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // `decideSilentRestore`) for ONE retry at the next launch.
       const heldPair = sessionTokens.pair();
       const heldAccount = sessionTokens.accountIdB64();
+      // ADR-0089: a suspended account signs out with its restricted session.
+      const heldRestricted = sessionTokens.restricted();
       const serverSide: Promise<LogoutAttempt> =
         heldPair !== null && heldAccount !== null
           ? (markLogoutOwed(plainStorage(), heldAccount), serverLogout(heldPair))
-          : Promise.resolve("done");
+          : heldRestricted !== null && heldAccount !== null
+            ? (markLogoutOwed(plainStorage(), heldAccount), restrictedServerLogout(heldRestricted))
+            : Promise.resolve("done");
       keyPackageAccount = null;
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context so a
@@ -7937,6 +8485,9 @@ async function probeStoredSecrets(): Promise<{
   deviceKey: DeviceCipher | null;
   sessionPair: SessionPair | null;
   identitySeed: Uint8Array | null;
+  /** ADR-0089: the restricted session of a suspended account, when the row
+   *  holds one in place of a pair. */
+  suspended?: RestrictedSession | null;
 }> {
   const cached = loadPersisted();
   if (cached === null) {
@@ -7963,15 +8514,23 @@ async function probeStoredSecrets(): Promise<{
   } catch {
     sessionPair = null;
   }
+  let suspended: RestrictedSession | null = null;
+  if (sessionPair === null) {
+    try {
+      suspended = await getSuspendedSession(cached.accountIdB64, deviceKey);
+    } catch {
+      suspended = null;
+    }
+  }
   let identitySeed: Uint8Array | null = null;
-  if (sessionPair !== null) {
+  if (sessionPair !== null || suspended !== null) {
     try {
       identitySeed = await getAccountIdentitySeed(cached.accountIdB64, deviceKey);
     } catch {
       identitySeed = null;
     }
   }
-  return { cachedAccount, deviceKey, sessionPair, identitySeed };
+  return { cachedAccount, deviceKey, sessionPair, identitySeed, suspended };
 }
 
 /**

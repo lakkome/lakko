@@ -39,9 +39,10 @@ use crate::limits::{Category, Limits, Scope, Window};
 use crate::mail::RecordingSender;
 use crate::opaque::LakkoCipherSuite;
 use crate::recall_tests::{
-    b64u, build_state, call, code, finish_body, fresh_key, fresh_seed, grant, json_of, login,
-    new_account, password_registration, pool, post, pubkey, recovery_login, reg_finish, reg_start,
-    reset_keys, roomy, statement, takeover, text, token, Account, Attempt, OWNER_DEVICE,
+    account_of_token, b64u, build_state, call, code, finish_body, fresh_key, fresh_seed, grant,
+    identity_proof, json_of, login, new_account, password_registration, pool, post, pubkey,
+    recovery_login, reg_finish, reg_start, reset_keys, roomy, statement, takeover, text, token,
+    Account, Attempt, OWNER_DEVICE,
 };
 use crate::session::now_ms;
 use crate::AppState;
@@ -1363,6 +1364,7 @@ async fn rotate(
         "fresh_grant": grant(&who.session),
         "recovery_upload": upload,
         "new_signature_pubkey_b64": b64u(&pubkey(new_key)),
+        "identity_proof_b64": identity_proof(&account_of_token(&bearer), new_key),
         "supersession_proof_b64": b64u(&proof),
     });
     if let Some(flag) = flag {

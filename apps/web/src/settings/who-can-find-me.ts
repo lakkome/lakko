@@ -338,3 +338,9 @@ export function chosenKeysOf(
   }
   return out;
 }
+
+/** ADR-0089 step 5: whether Everyone can be chosen. Not while moderators hid
+ *  the account from search; the other choices stay as they are. */
+export function everyoneOffered(hiddenFromSearch: boolean): boolean {
+  return !hiddenFromSearch;
+}

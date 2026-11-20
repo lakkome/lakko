@@ -53,6 +53,7 @@ import {
 import { sectionsForBuild, showsShortcutList } from "../settings/desktop-only";
 import { addedNotice, badgeVisible } from "../devices/added-notice";
 import { DevicesAttention, devicesNeedAttention } from "../devices/DeviceAddedNotice";
+import { BlockedPeopleList, PrivacyModerationRows, YourReportsList } from "../moderation/PrivacyModeration";
 
 type Section =
   | "profile"
@@ -65,7 +66,15 @@ type Section =
   | "media"
   | "about"
   | "account";
-type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts" | "translation" | "text-size";
+type Page =
+  | Section
+  | "recovery"
+  | "privacy-groups"
+  | "privacy-contacts"
+  | "privacy-blocked"
+  | "privacy-reports"
+  | "translation"
+  | "text-size";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
 const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
@@ -95,6 +104,8 @@ function currentLanguageOwnName(): string {
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
   if (s === "privacy-groups" || s === "privacy-contacts") return s;
+  // ADR-0089 - Blocked people and Your reports, sub-screens of Privacy.
+  if (s === "privacy-blocked" || s === "privacy-reports") return s;
   // ADR-0082 / UX section 6 - a sub-screen of Language.
   if (s === "translation") return "translation";
   // docs/ux/text-size.md - a sub-screen of Appearance.
@@ -127,7 +138,9 @@ export default function Settings(): JSX.Element {
     if (p === "recovery") return "security";
     if (p === "translation") return "language";
     if (p === "text-size") return "appearance";
-    return p === "privacy-groups" || p === "privacy-contacts" ? "privacy" : p;
+    return p === "privacy-groups" || p === "privacy-contacts" || p === "privacy-blocked" || p === "privacy-reports"
+      ? "privacy"
+      : p;
   };
 
   const username = (): string => {
@@ -195,6 +208,13 @@ export default function Settings(): JSX.Element {
           <Show when={shown() === "privacy"}>
             <WhoCanFindMeSection />
             <ShowCitySection />
+            <PrivacyModerationRows />
+          </Show>
+          <Show when={shown() === "privacy-blocked"}>
+            <BlockedPeopleList />
+          </Show>
+          <Show when={shown() === "privacy-reports"}>
+            <YourReportsList />
           </Show>
           <Show when={shown() === "privacy-groups"}>
             <WhoCanFindMeList />

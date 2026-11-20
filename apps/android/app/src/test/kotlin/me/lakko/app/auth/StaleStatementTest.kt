@@ -168,6 +168,7 @@ class StaleStatementTest {
             password_upload = "pu",
             recovery_upload = "ru",
             new_signature_pubkey_b64 = "k",
+            identity_proof_b64 = "p",
             device_id_b64 = null,
             statement_b64 = "st",
         )

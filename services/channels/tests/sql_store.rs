@@ -8,9 +8,9 @@
 //! test works on fresh random channel ids.
 
 use lakko_svc_channels::{
-    ChannelId, ChannelStore, DirectoryQuery, ModerationAction, PublicSeedOutcome, SqlChannelStore,
-    StorageError, StoredListing, SubscriberId, INVITE_USES_UNLIMITED, MIGRATIONS, PUBLIC_SEED_LEN,
-    SEALED_TICKET_LEN,
+    ChannelId, ChannelModeration, ChannelStore, DirectoryQuery, ModerationOutcome,
+    ModerationStatement, PublicSeedOutcome, SqlChannelStore, StorageError, StoredListing,
+    SubscriberId, INVITE_USES_UNLIMITED, MIGRATIONS, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
 use sqlx::mysql::MySqlPoolOptions;
 
@@ -182,31 +182,74 @@ async fn a_listing_must_be_newer_survives_nothing_when_blocked_and_keeps_its_fir
         10 * DAY_MS
     );
 
-    // Block removes the listing and refuses a new one; a removal keeps the
-    // block; unblock lifts it.
-    s.moderate(c, ModerationAction::Block, "spam", 1)
-        .await
-        .unwrap();
+    // ADR-0089: a block removes the listing and refuses a new one, a delist
+    // and a removal accumulate with it, a restore clears all three. The list
+    // version only grows and the database is shared, so every statement here
+    // is under the highest version there is.
+    let statement = |channel, action, at| ModerationStatement {
+        statement_id: random(),
+        list_version: u64::MAX,
+        channel,
+        action,
+        issued_at_ms: at,
+        log_index: at,
+        reason: "spam",
+        now_ms: at,
+    };
+    let block = statement(c, ChannelModeration::BlockHandle, 1);
+    assert_eq!(
+        s.apply_moderation(&block).await.unwrap(),
+        ModerationOutcome::Changed
+    );
     assert!(s.listing(c, 21 * DAY_MS).await.unwrap().is_none());
     assert!(matches!(
         s.put_listing(c, listing("en", "D", 2), 21 * DAY_MS).await,
         Err(StorageError::ListingBlocked)
     ));
-    s.moderate(c, ModerationAction::Remove, "dup", 2)
+    assert_eq!(
+        s.apply_moderation(&block).await.unwrap(),
+        ModerationOutcome::Repeat
+    );
+    s.apply_moderation(&statement(c, ChannelModeration::Remove, 3))
         .await
         .unwrap();
-    assert!(matches!(
-        s.put_listing(c, listing("en", "D", 2), 21 * DAY_MS).await,
-        Err(StorageError::ListingBlocked)
-    ));
-    s.moderate(c, ModerationAction::Unblock, "appeal", 3)
+    assert_eq!(s.removed_channel(c).await.unwrap(), Some(3));
+    // A Restore the moderator made before the removal changes nothing.
+    assert_eq!(
+        s.apply_moderation(&statement(c, ChannelModeration::Restore, 2))
+            .await
+            .unwrap(),
+        ModerationOutcome::Superseded
+    );
+    assert_eq!(s.removed_channel(c).await.unwrap(), Some(3));
+    s.apply_moderation(&statement(c, ChannelModeration::Restore, 4))
         .await
         .unwrap();
+    assert_eq!(s.removed_channel(c).await.unwrap(), None);
     s.put_listing(c, listing("en", "D", 2), 21 * DAY_MS)
         .await
         .unwrap();
-    // A block may precede the channel's creation.
-    s.moderate(channel(), ModerationAction::Block, "pre-emptive", 4)
+    s.apply_moderation(&statement(c, ChannelModeration::Delist, 5))
+        .await
+        .unwrap();
+    assert!(s.listing(c, 21 * DAY_MS).await.unwrap().is_none());
+    assert!(matches!(
+        s.put_listing(c, listing("en", "E", 3), 21 * DAY_MS).await,
+        Err(StorageError::ListingDelisted)
+    ));
+    // A list older than one already seen is refused.
+    let mut stale = statement(c, ChannelModeration::Restore, 6);
+    stale.list_version = u64::MAX - 1;
+    assert_eq!(
+        s.apply_moderation(&stale).await.unwrap(),
+        ModerationOutcome::StaleList
+    );
+    // The floor alone (ADR-0089 F1): an older list is refused, the floor
+    // itself is kept.
+    assert!(!s.raise_moderation_list_floor(u64::MAX - 1).await.unwrap());
+    assert!(s.raise_moderation_list_floor(u64::MAX).await.unwrap());
+    // A statement may precede the channel's creation.
+    s.apply_moderation(&statement(channel(), ChannelModeration::BlockHandle, 7))
         .await
         .unwrap();
 }

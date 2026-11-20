@@ -262,6 +262,8 @@ struct DirectoryCard: Equatable, Identifiable {
     /// Position in the server's list (bucket or search), 0 = first.
     let serverRank: Int
     let followers: GroupFollowers?
+    /// ADR-0089 — the signed listing as shown, for a report's evidence.
+    var listingWire: Data? = nil
 
     var id: String { channelIdHex }
 }
@@ -323,7 +325,8 @@ enum DiscoverCards {
                 band: subscriberBands.contains(item.subscribers) ? item.subscribers : nil,
                 source: source,
                 serverRank: i,
-                followers: nil))
+                followers: nil,
+                listingWire: Data(base64UrlNoPadListing: item.listingB64)))
         }
         return out
     }
@@ -368,7 +371,8 @@ enum DiscoverCards {
                 band: base.band,
                 source: followers != nil ? .group : base.source,
                 serverRank: min(held.serverRank, c.serverRank),
-                followers: followers)
+                followers: followers,
+                listingWire: base.listingWire ?? held.listingWire ?? c.listingWire)
         }
         return order.compactMap { merged[$0] }
             .filter { visible($0, ctx) }

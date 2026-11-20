@@ -679,6 +679,18 @@ pub(crate) async fn refresh(
         FloorVerdict::LoggedOut => return Err(ApiError::RefreshInvalid),
         FloorVerdict::Removed => return Err(ApiError::DeviceRevoked),
     }
+    // ADR-0089 section 4: while the account is suspended the refresh answers
+    // `403 account-suspended` with a fresh restricted session and a fresh
+    // refresh credential (the device stays in suspended mode); once it is
+    // not, a normal pair.
+    crate::suspension::refuse_landing_if_suspended(
+        &state,
+        &verified.account_id,
+        current,
+        &verified.device_id,
+        crate::suspension::LandingGrant::None,
+    )
+    .await?;
     if verified.key_generation < current {
         tracing::info!(
             from = verified.key_generation,

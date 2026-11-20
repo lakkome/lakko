@@ -108,6 +108,15 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     /// yet: a take on an empty context waits for it.
     private var initialPending: Set<AnonTokenContext> = []
     private var lastFailure: [AnonTokenContext: AnonTokenUnavailable] = [:]
+    /// Whether the signed-in account is suspended (ADR-0089 step 3). The
+    /// process-wide token provider; a test replaces it.
+    var suspended: @Sendable () -> Bool = { SessionTokenProvider.shared.isSuspended }
+
+    /// Whether `context` is drawn while the account is `suspended`: only the
+    /// file-read pass's tokens are.
+    static func issuesWhileSuspended(_ context: AnonTokenContext, suspended: Bool) -> Bool {
+        !suspended || context == .blobRead
+    }
     private var quotaUntil: [AnonTokenContext: Date] = [:]
     /// The issuer's epoch minus this device's, learned from `epoch-not-issuable`.
     private var epochCorrection: Int64 = 0
@@ -217,6 +226,10 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     private func scheduledRefill(_ context: AnonTokenContext, generation: Int) async {
         let task: Task<Void, Never>? = lock.withLock {
             guard generation == self.generation else { return nil }
+            // ADR-0089 step 3 — a suspended account draws `blob-read` only;
+            // the other contexts wait, and are topped up when it ends
+            // (``runScheduledRefills()``).
+            guard Self.issuesWhileSuspended(context, suspended: suspended()) else { return nil }
             pruneLocked(context)
             if (stock[context]?.count ?? 0) >= context.poolTarget { return nil }
             return try? startRefillLocked(context)

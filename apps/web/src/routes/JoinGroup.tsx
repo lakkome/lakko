@@ -53,6 +53,7 @@
  * repair this side has: `Request again`, user-driven, which mints a fresh
  * KeyPackage. It never claims that is why.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
@@ -348,7 +349,8 @@ function JoinGroupFlow() {
             </>
           }
         >
-          <Show when={phase() === "idle"}>
+          {/* ADR-0089 step 3: a suspended account asks to join nothing. */}
+          <Show when={phase() === "idle" && !accountSuspended()}>
             <button type="button" class="primary" onClick={() => void onRequest(ticket()!)}>
               {t("group.join.request")}
             </button>

@@ -416,6 +416,25 @@ private fun format(ms: Long?, language: String): String? {
  * until the typed password (no passkey) or the gesture (a passkey account)
  * passed.
  */
+/**
+ * ADR-0089 section 4 - the usual Delete account confirmation, opened from
+ * the suspended screen of a device that holds no chats of the account
+ * (Settings cannot be reached there). [viewModel] deletes with the
+ * restricted session ([AuthRepository.accountForDeletion]).
+ */
+@Composable
+public fun DeleteAccountConfirmation(viewModel: PasskeysViewModel, onClose: () -> Unit) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    DeleteAccountDialog(
+        viewModel = viewModel,
+        state = state,
+        onClose = {
+            viewModel.clearDeleteError()
+            onClose()
+        },
+    )
+}
+
 @Composable
 private fun DeleteAccountDialog(
     viewModel: PasskeysViewModel,

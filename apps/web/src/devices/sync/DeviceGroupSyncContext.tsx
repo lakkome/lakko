@@ -194,6 +194,16 @@ import {
 } from "./link-records";
 import { installLinkRegister } from "./link-register";
 import {
+  clearBlocked,
+  entriesFromFlat,
+  installBlockWriter,
+  publishBlocked,
+  type BlockedEntry,
+} from "../../moderation/block-registry";
+import { clearSuspensionMarks } from "../../moderation/suspension-marks";
+import { clearChannelRemovals } from "../../moderation/channel-removal";
+import { clearHiddenFromSearch } from "../../moderation/hidden-from-search";
+import {
   bytesToHex,
   stampEdits,
   type ConversationRef,
@@ -283,6 +293,15 @@ export interface DeviceGroupSyncApi {
    *  key; a send that does not go out is owed and re-sent at the next start.
    *  Never throws. */
   acknowledgeDevices(keysHex: readonly string[]): Promise<void>;
+  /** ADR-0089 section 6 - reactive: the accounts this account blocked, from
+   *  every device, most recently blocked first. */
+  readonly blockedAccounts: Accessor<readonly BlockedEntry[]>;
+  /** Block or unblock the account whose 32-byte account signature key is
+   *  `accountKey`: fold it here at once and send it to the account's other
+   *  devices. A send that does not go out is owed and re-sent at the next
+   *  start. `false` when nothing changed. Throws while the synced state is
+   *  not loaded. */
+  setBlocked(accountKey: Uint8Array, blocked: boolean): Promise<boolean>;
 
   /** Convenience helper — return the draft for `groupId` or
    *  `undefined` if none. `groupId` is the raw bytes. */
@@ -472,6 +491,7 @@ export function DeviceGroupSyncProvider(props: {
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
   const [deviceRoster, setDeviceRoster] = createSignal<DeviceRoster | null>(null);
   const [acknowledgedDevices, setAcknowledgedDevices] = createSignal<readonly string[]>([]);
+  const [blockedAccounts, setBlockedAccounts] = createSignal<readonly BlockedEntry[]>([]);
   /** Publish the roster of the held handle. `localChange`: the handle was
    *  just reloaded after a change made on this device, so what is new in it
    *  was let in here. A read that fails publishes nothing. */
@@ -688,6 +708,12 @@ export function DeviceGroupSyncProvider(props: {
     setSavedBlobIdsHex(p.savedBlobIdsHex);
     setEndedConversations(p.endedConversations);
     setAcknowledgedDevices(readAcknowledgedDevices(synced, untrack(acknowledgedDevices)));
+    // ADR-0089 section 6 - the block register, for every receive path.
+    {
+      const next = readBlockedAccounts(synced, untrack(blockedAccounts));
+      setBlockedAccounts(next);
+      publishBlocked(next);
+    }
     if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
@@ -928,6 +954,7 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister = installAddressRegister({ accountIdB64, set: setRecoveryEmailImpl });
     void flushUnsentOwnUsername();
     void flushUnsentDeviceAcks();
+    void flushUnsentBlocks();
     void flushUnsentLinkRecords();
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
@@ -1041,6 +1068,7 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentOwnUsername();
     void flushUnsentQuickReaction();
     void flushUnsentDeviceAcks();
+    void flushUnsentBlocks();
     void flushUnsentLinkRecords();
   }
 
@@ -1133,6 +1161,11 @@ export function DeviceGroupSyncProvider(props: {
     setSavedBlobIdsHex([]);
     setEndedConversations([]);
     setLinkRecords([]);
+    setBlockedAccounts([]);
+    clearBlocked();
+    clearSuspensionMarks();
+    clearChannelRemovals();
+    clearHiddenFromSearch();
     setOutbox([]);
   }
 
@@ -1241,6 +1274,9 @@ export function DeviceGroupSyncProvider(props: {
       if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
+      // ADR-0089 section 6 - and every block register, so a device that
+      // joins applies the blocks from its first poll.
+      await sendLineageEnvelopes(synced.blockedEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -1632,6 +1668,57 @@ export function DeviceGroupSyncProvider(props: {
       /* storage unavailable: the send below is the only attempt */
     }
     await sendDeviceAckEnvelopes(account, envelopes);
+  }
+
+  // ----- ADR-0089 section 6: the block register -----------------------
+
+  /** `localStorage` marker: a block or unblock written here has not been
+   *  confirmed sent. Re-sending every held register is idempotent: the fold
+   *  keeps the winning stamp. */
+  const blocksUnsentKey = (account: string): string => `lakko.blocked.unsent.v1.${account}`;
+
+  async function sendBlockedEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(blocksUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("block send failed; retried at the next start", err instanceof Error ? err.name : "unknown");
+    }
+  }
+
+  async function flushUnsentBlocks(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(blocksUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.blockedEnvelopes();
+    } catch {
+      return;
+    }
+    await sendBlockedEnvelopes(account, envelopes);
+  }
+
+  async function setBlockedImpl(accountKey: Uint8Array, blocked: boolean): Promise<boolean> {
+    if (synced === null) throw new Error("the synced state is not loaded");
+    if (accountKey.length !== 32) throw new Error("an account key is 32 bytes");
+    const envelope = synced.setBlocked(mintHlc(), accountKey, blocked, BigInt(Date.now()));
+    if (envelope === undefined) return false;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return true;
+    try {
+      localStorage.setItem(blocksUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendBlockedEnvelopes(account, [envelope]);
+    return true;
   }
 
   // ----- ADR-0079: the link-record register -----------------------
@@ -2769,6 +2856,18 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
+      // ADR-0089 section 6 - the block register, the same way.
+      if (wasmSync !== null && wasmSync.isBlockedEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyBlockedEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
       // Identity-recovery 17.5 - the device-acknowledgement register, the
       // same way.
       if (wasmSync !== null && wasmSync.isDeviceAckEnvelope(parsed.serviceEnvelope)) {
@@ -3194,6 +3293,8 @@ export function DeviceGroupSyncProvider(props: {
     deviceRoster,
     acknowledgedDevices,
     acknowledgeDevices: acknowledgeDevicesImpl,
+    blockedAccounts,
+    setBlocked: setBlockedImpl,
     getDraft(groupId) {
       return drafts()[groupIdHex(groupId)];
     },
@@ -3219,6 +3320,10 @@ export function DeviceGroupSyncProvider(props: {
     revoke: revokeLinkRecordImpl,
   });
   onCleanup(() => installLinkRegister(null));
+  // ADR-0089 section 6 - the block writer for screens outside this tree's
+  // reach (the report sheet, a request row).
+  installBlockWriter(setBlockedImpl);
+  onCleanup(() => installBlockWriter(null));
 
   return (
     <DeviceGroupSyncContext.Provider value={api}>
@@ -3258,6 +3363,27 @@ function readAcknowledgedDevices(
   for (let off = 0; off + 32 <= flat.length; off += 32) keys.push(bytesToHex(flat.subarray(off, off + 32)));
   if (keys.length === held.length && keys.every((k, i) => k === held[i])) return held;
   return keys;
+}
+
+/** ADR-0089 section 6 - the block register as entries; `held` when it did
+ *  not change or cannot be read. */
+function readBlockedAccounts(
+  s: { blockedAccounts(): Uint8Array; blockedAccountTimes(): BigUint64Array },
+  held: readonly BlockedEntry[],
+): readonly BlockedEntry[] {
+  let next: BlockedEntry[];
+  try {
+    next = entriesFromFlat(s.blockedAccounts(), s.blockedAccountTimes(), base64Encode);
+  } catch {
+    return held;
+  }
+  if (
+    next.length === held.length &&
+    next.every((e, i) => e.keyB64 === held[i]?.keyB64 && e.blockedAtMs === held[i]?.blockedAtMs)
+  ) {
+    return held;
+  }
+  return next;
 }
 
 /** The DeviceGroup's current epoch, or `null` when it cannot be read. The

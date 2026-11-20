@@ -123,18 +123,33 @@ pub(crate) async fn is_past_unclaimed_lifetime(
 ///
 /// A database error; nothing is deleted then.
 pub(crate) async fn prune_unclaimed(pool: &MySqlPool, ttl_secs: u64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM accounts \
+    // One transaction: the batch is chosen and locked, each account's
+    // identity-key history is deleted or kept (ADR-0089 F3: kept while the
+    // account is suspended), then the accounts go.
+    let mut tx = pool.begin().await?;
+    let ids: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT id FROM accounts \
          WHERE created_at < NOW() - INTERVAL ? SECOND \
            AND NOT EXISTS (SELECT 1 FROM login_handles h WHERE h.account_id = accounts.id) \
            AND NOT EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.account_id = accounts.id) \
-         LIMIT ?",
+         LIMIT ? FOR UPDATE",
     )
     .bind(ttl_secs)
     .bind(PRUNE_BATCH)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(result.rows_affected())
+    let now = crate::session::now_ms();
+    let mut deleted = 0;
+    for id in &ids {
+        crate::identity_target::on_account_deleted(&mut tx, id, now).await?;
+        deleted += sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(id.as_slice())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Start the pruner, or not: `None` when sign-in by name is not configured or

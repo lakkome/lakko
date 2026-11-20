@@ -189,9 +189,19 @@ impl ParsedBody {
 /// Decode an MLS Application message body into a classified [`ParsedBody`]
 /// (ADR-0023/0024). Never fails — a malformed / ambiguous op degrades to
 /// `Chat`, the same fail-safe posture the full surface uses.
+///
+/// An attested message (ADR-0089 section 1) is unwrapped first, so the
+/// notification previews the envelope inside it. The signature is not
+/// checked here: a notification preview is not evidence, and the app checks
+/// it when it receives the message. A wrapper whose framing is malformed is
+/// left whole, so it classifies as a service envelope and is not previewed.
 #[uniffi::export]
 #[must_use]
 pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
+    let bytes = match inner::attested::split(&bytes) {
+        Ok((_, envelope)) => envelope.to_vec(),
+        Err(_) => bytes,
+    };
     match inner::parse_body(&bytes) {
         // ADR-0052: a reply's quote is not previewed by a notification, and
         // this surface stays the smallest that decrypts (C-59), so the reply
@@ -286,6 +296,25 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod attested_tests {
+    use super::*;
+
+    #[test]
+    fn an_attested_message_previews_its_envelope() {
+        let env = inner::compose("hello", Vec::new()).unwrap_or_default();
+        let wire = inner::attested::attest(&[3; 32], None, b"group", &env).unwrap_or_default();
+        assert!(wire.starts_with(b"lakko/"));
+        let parsed = parse_body_envelope(wire.clone());
+        assert_eq!(parsed.kind, MessageBodyKind::Chat);
+        assert_eq!(parsed.text, "hello");
+        // A broken wrapper is never previewed.
+        let mut broken = wire;
+        broken.truncate(40);
+        assert_ne!(parse_body_envelope(broken).kind, MessageBodyKind::Chat);
+    }
 }
 
 #[cfg(test)]

@@ -795,8 +795,8 @@ async fn try_apply_identity_once(
                 "INSERT INTO identity_bundles \
                     (account_id, signature_pubkey, x25519_pubkey, supersession_proof, \
                      leaf_auth, genesis_attest, key_generation, key_reset_attest, \
-                     conversation_link) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     conversation_link, account_target) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
@@ -808,6 +808,7 @@ async fn try_apply_identity_once(
             .bind(attested.map_or(1u64, |(g, _)| g))
             .bind(attested.map(|(_, bytes)| bytes))
             .bind(evidence.conversation_link)
+            .bind(&account_target(signature_pubkey)[..])
             .execute(&mut *tx)
             .await?;
             if attested.is_some() {
@@ -889,6 +890,7 @@ async fn try_apply_identity_once(
             sqlx::query(
                 "UPDATE identity_bundles SET \
                     signature_pubkey            = ?, \
+                    account_target              = ?, \
                     x25519_pubkey               = ?, \
                     supersession_proof          = COALESCE(?, supersession_proof), \
                     leaf_auth                   = COALESCE(?, leaf_auth), \
@@ -901,6 +903,7 @@ async fn try_apply_identity_once(
                  WHERE account_id = ?",
             )
             .bind(signature_pubkey)
+            .bind(&account_target(signature_pubkey)[..])
             .bind(x25519_pubkey)
             .bind(evidence.supersession_proof)
             .bind(leaf_auth)
@@ -936,6 +939,14 @@ async fn try_apply_identity_once(
 
     tx.commit().await?;
     Ok(decision)
+}
+
+/// The account target of a signature key (ADR-0089 step 5): what
+/// `identity_bundles.account_target` holds and what a moderator statement
+/// names an account by. Written in the same statement as the key, by every
+/// writer of it.
+pub(crate) fn account_target(signature_pubkey: &[u8]) -> [u8; 32] {
+    lakko_moderation::target::account_target_hash(signature_pubkey)
 }
 
 /// Delete every KeyPackage row of `account_id` and KEEP its device
@@ -1533,6 +1544,13 @@ mod tests {
             .await
             .expect("read conversation_link")
         }
+        async fn stored_target(pool: &sqlx::MySqlPool, acct: &[u8]) -> Option<Vec<u8>> {
+            sqlx::query_scalar("SELECT account_target FROM identity_bundles WHERE account_id = ?")
+                .bind(acct)
+                .fetch_one(pool)
+                .await
+                .expect("read account_target")
+        }
         let evidence = |link: Option<&'static [u8]>| Evidence {
             supersession_proof: None,
             key_reset_attest: None,
@@ -1584,6 +1602,12 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("same-key upload"));
             assert_eq!(stored_link(&pool, &acct).await.as_deref(), expected);
+            // ADR-0089 step 5: the INSERT and the UPDATE both write the
+            // key's account target.
+            assert_eq!(
+                stored_target(&pool, &acct).await.as_deref(),
+                Some(&account_target(&key1)[..])
+            );
         }
 
         // A key change that brings no link leaves none: a link names the key
@@ -1606,6 +1630,10 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("attested key change"));
         assert_eq!(stored_link(&pool, &acct).await, None);
+        assert_eq!(
+            stored_target(&pool, &acct).await.as_deref(),
+            Some(&account_target(&key2)[..])
+        );
     }
 
     #[test]

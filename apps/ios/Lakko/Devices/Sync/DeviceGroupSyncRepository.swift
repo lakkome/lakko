@@ -504,6 +504,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             NewDeviceNoticeCenter.shared.setAcknowledged(
                 accountIdB64: account, keys: (try? s.acknowledgedDevices()) ?? [])
         }
+        // ADR-0089 section 6 — the blocked set every path reads, and its
+        // App Group mirror for the notification extension (written at every
+        // launch and every fold; an equal set is not rewritten). A `nil`
+        // account (the sign-out teardown) writes nothing.
+        let blockedAccounts = (try? s.blockedAccounts()) ?? []
+        BlockList.shared.adopt(blockedAccounts)
+        BlockedSenderMirror.replace(
+            accountIdB64: activeAccountIdB64, accountKeys: blockedAccounts.map(\.accountKey))
     }
 
     /// Fold a restored backup state in, when it is this account's.
@@ -855,6 +863,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isQuickReactionEnvelope(bytes: envelope) { return "quick-reaction" }
         // UX 17.6 — every device acknowledgement is its own slot.
         if isDeviceAckEnvelope(bytes: envelope) { return "device-ack:" + envelope.base64EncodedString() }
+        // ADR-0089 section 6 — every block register is its own slot.
+        if isBlockedEnvelope(bytes: envelope) { return "blocked:" + envelope.base64EncodedString() }
         // ADR-0079 — every link record is its own slot.
         if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
@@ -1263,6 +1273,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentLinkRecords()
         guard bound.isCurrent else { return }
         await flushUnsentDeviceAcks()
+        guard bound.isCurrent else { return }
+        await flushUnsentBlocks()
         while !Task.isCancelled, bound.isCurrent {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
@@ -1272,6 +1284,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // retried on every turn of the loop until it goes through.
             if deviceAcksUnsent {
                 await flushUnsentDeviceAcks()
+                guard bound.isCurrent else { return }
+            }
+            // ADR-0089 section 6 — the same for a block whose send failed.
+            if blocksUnsent {
+                await flushUnsentBlocks()
                 guard bound.isCurrent else { return }
             }
             let result: FetchResult
@@ -2004,6 +2021,19 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // ADR-0089 section 6 — a block register, the same way: the
+            // blocked set reaches every path through ``refreshDerived()``.
+            if isBlockedEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyBlockedEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("blocked: envelope refused")
+                }
+                return
+            }
             // ADR-0087 section 13a — the account's own channel reactions and
             // comments, the same way.
             if isChannelReactionEnvelope(bytes: envelope) || isChannelCommentEnvelope(bytes: envelope) {
@@ -2207,6 +2237,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.deviceAckEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0089 section 6 — and every block register, unblocks included.
+        for envelope in (try? syncedState.blockedEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
     }
 
     // MARK: - ADR-0079: the link-record register
@@ -2387,6 +2421,71 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 NSLog("device-ack: register send failed; retried")
             }
         }
+    }
+
+    // MARK: - ADR-0089 section 6: the block register
+
+    static func blocksUnsentKey(accountIdB64: String) -> String {
+        "lakko.blocks.unsent.v1.\(accountIdB64)"
+    }
+
+    private var blocksUnsent: Bool {
+        guard let account = activeAccountIdB64 else { return false }
+        return UserDefaults.standard.object(forKey: Self.blocksUnsentKey(accountIdB64: account)) != nil
+    }
+
+    /// Send every block register again when an earlier send was not
+    /// confirmed (a register a device already holds folds to no change).
+    func flushUnsentBlocks() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.blocksUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.blockedEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("blocked: register send failed; retried")
+        }
+    }
+
+    /// Block or unblock `accountKey` (32 bytes) for the account: write the
+    /// register, persist at once and send it to the account's other devices.
+    /// The block holds on this device at once; a send that fails is owed and
+    /// retried by the poll loop (UX 1.4, "Block saved, sync failed").
+    /// Returns whether the register holds the requested state.
+    @discardableResult
+    public func setBlocked(accountKey: Data, blocked: Bool) -> Bool {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64 else { return false }
+        let envelope: Data?
+        do {
+            envelope = try syncedState.setBlocked(
+                hlc: Hlc.mint(), accountKey: accountKey, blocked: blocked,
+                nowMs: UInt64(max(0, Date().timeIntervalSince1970 * 1000)))
+        } catch {
+            NSLog("blocked: register refused")
+            return false
+        }
+        guard let envelope else {
+            return ((try? syncedState.isBlocked(accountKey: accountKey)) ?? false) == blocked
+        }
+        stateChanged()
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.blocksUnsentKey(accountIdB64: account))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sendLineageEnvelopes([envelope])
+                if self.activeAccountIdB64 == account {
+                    UserDefaults.standard.removeObject(forKey: Self.blocksUnsentKey(accountIdB64: account))
+                }
+            } catch {
+                if self.activeAccountIdB64 == account {
+                    UserDefaults.standard.set(true, forKey: Self.blocksUnsentKey(accountIdB64: account))
+                }
+                NSLog("blocked: register send failed; retried")
+            }
+        }
+        return true
     }
 
     // MARK: - ADR-0076: the own-username register

@@ -293,23 +293,57 @@ pub(crate) fn decode_hash(b64: &str) -> Result<[u8; OPRF_HASH_LEN], HandlerError
 /// (entering), or deletes both (leaving). Entering Everyone without a
 /// username is a `409`: the name lookup only ever returns accounts whose
 /// username is public. Entering without a public record, or leaving with
-/// one, is a `400`. Idempotent.
+/// one, is a `400`. Entering while a moderator hid the account from search
+/// is `403 {"error":"hidden-from-search"}` (ADR-0089 step 5); leaving is
+/// always allowed. Idempotent.
 pub(crate) async fn put_visibility(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
     Json(req): Json<VisibilityRequest>,
-) -> Result<StatusCode, HandlerError> {
+) -> Result<StatusCode, axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    put_visibility_inner(&state, &authed, req)
+        .await
+        .map_err(|e| match e {
+            VisibilityRefusal::Hidden => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": crate::moderation::CODE_HIDDEN })),
+            )
+                .into_response(),
+            VisibilityRefusal::Other(e) => e.into_response(),
+        })
+}
+
+/// Why `PUT /discovery/visibility` refused.
+enum VisibilityRefusal {
+    /// A moderator hid the account from search.
+    Hidden,
+    /// Any other refusal, as a status and a plain-text body.
+    Other(HandlerError),
+}
+
+impl From<HandlerError> for VisibilityRefusal {
+    fn from(e: HandlerError) -> Self {
+        Self::Other(e)
+    }
+}
+
+async fn put_visibility_inner(
+    state: &AppState,
+    authed: &AuthenticatedAccount,
+    req: VisibilityRequest,
+) -> Result<StatusCode, VisibilityRefusal> {
     if req.name_terms_b64.len() > MAX_NAME_TERMS {
-        return Err(bad_request(format!("at most {MAX_NAME_TERMS} name terms")));
+        return Err(bad_request(format!("at most {MAX_NAME_TERMS} name terms")).into());
     }
     if !req.public && !req.name_terms_b64.is_empty() {
-        return Err(bad_request("name terms are published only in Everyone"));
+        return Err(bad_request("name terms are published only in Everyone").into());
     }
     let record = match (req.public, req.public_record_b64.as_deref()) {
         (true, Some(b64)) => Some(decode_public_record(b64)?),
-        (true, None) => return Err(bad_request("Everyone requires a public record")),
+        (true, None) => return Err(bad_request("Everyone requires a public record").into()),
         (false, Some(_)) => {
-            return Err(bad_request("a public record is published only in Everyone"));
+            return Err(bad_request("a public record is published only in Everyone").into());
         },
         (false, None) => None,
     };
@@ -340,6 +374,14 @@ pub(crate) async fn put_visibility(
     let mut tx = sqlx::Connection::begin(&mut *conn)
         .await
         .map_err(db_err("begin visibility"))?;
+    // ADR-0089 step 5: a moderator removed this account from search.
+    if req.public
+        && crate::moderation::is_hidden(&mut *tx, account)
+            .await
+            .map_err(db_err("read moderation hidden"))?
+    {
+        return Err(VisibilityRefusal::Hidden);
+    }
     // The current name only (ADR-0076): a retired row stays hidden.
     sqlx::query("UPDATE usernames SET is_public = ? WHERE account_id = ? AND retired_at IS NULL")
         .bind(req.public)
@@ -358,10 +400,10 @@ pub(crate) async fn put_visibility(
         .await
         .map_err(db_err("check username"))?;
         if has_username.is_none() {
-            return Err((
+            return Err(VisibilityRefusal::Other((
                 StatusCode::CONFLICT,
                 "register a username before choosing Everyone".to_string(),
-            ));
+            )));
         }
     }
     publish(&mut tx, TARGET_PERSON, account, record.as_deref(), &terms)

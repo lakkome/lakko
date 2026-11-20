@@ -1431,6 +1431,9 @@ public final class PeopleSearchModel: ObservableObject {
     @Published public private(set) var asksNetwork = false
 
     public let session: PeopleSearchSession
+    /// ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 — search
+    /// does not list a suspended account. Injectable for tests.
+    public var isSuspended: @MainActor (Data) -> Bool = { SuspensionMarks.shared.isSuspended($0) }
     private let sleep: @Sendable (UInt64) async throws -> Void
     private var query = ""
     private var generation = 0
@@ -1548,6 +1551,9 @@ public final class PeopleSearchModel: ObservableObject {
         let merged = PeopleSearch.merge([local, answer?.people ?? []], ownAccountKey: nil).map { person in
             person.reach != .contact && session.ports.isContact(person) ? person.asContact : person
         }.filter { !listed.contains($0.accountKey) }
+        // ADR-0089 step 4 — a person known suspended is dropped as their
+        // standing arrives; nothing waits for the check.
+        let visible = SuspensionMarkRules.searchVisible(merged, key: \.accountKey, isSuspended: isSuspended)
         let localKeys = Set(local.map(\.accountKey))
         func isLocal(_ person: FoundPerson) -> Bool {
             localKeys.contains(person.accountKey) || person.reach == .contact
@@ -1556,8 +1562,14 @@ public final class PeopleSearchModel: ObservableObject {
             person.reach == .contact && (!showsLocalContacts || chatPeers.contains(person.accountKey))
         }
         return (
-            merged.filter { isLocal($0) && !listedAbove($0) },
-            merged.filter { !isLocal($0) })
+            visible.filter { isLocal($0) && !listedAbove($0) },
+            visible.filter { !isLocal($0) })
+    }
+
+    /// ADR-0089 step 4 — every person the current answer names, before the
+    /// suspension filter: what the screen asks the log about.
+    public var suspensionCheckKeys: [Data] {
+        (local + (answer?.people ?? [])).map(\.accountKey)
     }
 
     /// The network part's state, `nil` while nothing was answered.

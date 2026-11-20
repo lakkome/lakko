@@ -191,12 +191,13 @@ class FreshAuthTest {
         val finish = json.parseToJsonElement(
             json.encodeToString(
                 KeyResetFinishRequest.serializer(),
-                KeyResetFinishRequest("GRANT", "UPLOAD", "PUBKEY"),
+                KeyResetFinishRequest("GRANT", "UPLOAD", "PUBKEY", "PROOF"),
             ),
         ).jsonObject
         assertEquals("GRANT", finish["fresh_grant"]?.jsonPrimitive?.content)
         assertEquals("UPLOAD", finish["recovery_upload"]?.jsonPrimitive?.content)
         assertEquals("PUBKEY", finish["new_signature_pubkey_b64"]?.jsonPrimitive?.content)
+        assertEquals("PROOF", finish["identity_proof_b64"]?.jsonPrimitive?.content)
     }
 
     @Test

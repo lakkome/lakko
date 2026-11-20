@@ -75,6 +75,7 @@
  * offer (answered busy) — refuses while it is taken. Link-call decisions are in
  * `link-call-host.ts`.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import {
   createContext,
   createEffect,
@@ -176,7 +177,7 @@ import {
   type Participant,
   type QualityTier,
 } from "../state/call-state";
-import { loadWasm } from "../wasm";
+import { loadWasm, wasmSync } from "../wasm";
 import Call from "../routes/Call";
 import { Icon } from "../ui/icons";
 import { IncomingCallScreen } from "./IncomingCallScreen";
@@ -258,6 +259,7 @@ import { t } from "../l10n";
 import { callFailureReason, callFailureText } from "./call-errors";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
+import { blockVerdictForSender } from "../moderation/block-rules";
 
 /** A 1x1 call that ended, for the chat view's "Last call ended" line. */
 export interface EndedCallNotice {
@@ -1167,6 +1169,18 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("inbound call signaling did not parse; dropped", err);
+      return;
+    }
+    // ADR-0089 step 3 - a suspended account makes no call and answers none:
+    // an offer rings nothing (the other side's offer runs out on its own).
+    if (parsed.kind === "offer" && accountSuspended()) return;
+    // ADR-0089 section 6 - a one-to-one call from a blocked person does not
+    // ring: declined silently, with no missed-call row (the shared rule).
+    if (
+      parsed.kind === "offer" &&
+      blockVerdictForSender(wasm, "incoming-call", item.row.senderPersonKey ?? item.row.senderMemberKey) ===
+        "decline-silently"
+    ) {
       return;
     }
     try {
@@ -3748,7 +3762,15 @@ function GroupCallBanner(): JSX.Element {
       groups.map((g) => g.groupIdB64),
       clock(),
       viewer,
-    ).map((l) => ({ groupIdB64: l.groupIdB64, callIdHex: l.call.callIdHex }));
+    )
+      // ADR-0089 section 6 - a group call a blocked person started is not
+      // announced on other screens (it does not ring); the chat still shows
+      // it, and anyone in the group can join.
+      .filter(
+        (l) =>
+          blockVerdictForSender(wasmSync(), "incoming-call", l.call.initiatorPersonKey) !== "decline-silently",
+      )
+      .map((l) => ({ groupIdB64: l.groupIdB64, callIdHex: l.call.callIdHex }));
   });
 
   // While a call is offered as joinable, ask the SFU every
@@ -3769,6 +3791,8 @@ function GroupCallBanner(): JSX.Element {
   const banner = createMemo(() => {
     const s = auth.state();
     if (s.kind !== "session") return null;
+    // ADR-0089 step 3: a suspended account is offered no call to join.
+    if (accountSuspended()) return null;
     foregroundVersion();
     const live = liveCalls();
     return selectGroupCallBanner({

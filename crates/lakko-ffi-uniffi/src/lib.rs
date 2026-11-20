@@ -69,6 +69,7 @@ pub mod link_founded;
 pub mod link_refusal;
 pub mod mailbox;
 pub mod mnemonic;
+pub mod moderation;
 pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;
@@ -791,6 +792,20 @@ pub enum FfiError {
     /// know which journal to read. Nothing else is ever in it.
     #[error("{0}")]
     MembershipGroupStillActive(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0089 reporting and moderation. APPENDED last: a `flat_error`
+    // lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// A report or a message attestation was refused (`moderation.rs`). The
+    /// message is `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_moderation::ModerationError` (`malformed`, `wrong-domain`,
+    /// `unknown-version`, `unknown-value`, `invalid`, `bad-signature`,
+    /// `assertion`, `not-authorised`, `cannot-open`) or of
+    /// `lakko_attachments::AttestError` (`bad-group-id`,
+    /// `not-a-chat-envelope`, `key-mismatch`, ...).
+    #[error("{0}")]
+    Moderation(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -2777,6 +2792,15 @@ impl Group {
                 account_key: m.account_key,
             })
             .collect())
+    }
+
+    /// The device binding of the leaf at `leaf` (ADR-0050), empty for a leaf
+    /// that is its account key, or `None` for a leaf not in the roster. A
+    /// report carries it beside a message the leaf signed (ADR-0089
+    /// section 1).
+    pub fn device_binding_at(&self, leaf: u32) -> Result<Option<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.device_binding_at(leaf))
     }
 
     /// This member's ADR-0022 role in the group, or `None` when the group has
@@ -5913,6 +5937,7 @@ pub fn verify_witness_cosig(
     lakko_transparency::verify_witness_cosig(
         &cosig,
         &witness_key,
+        lakko_transparency::LogId::Kt,
         &expected_tree_root,
         expected_log_size,
     )
@@ -5964,6 +5989,7 @@ pub fn verify_witness_quorum(
         &cosig_refs,
         &key_refs,
         threshold as usize,
+        lakko_transparency::LogId::Kt,
         &expected_tree_root,
         expected_log_size,
     )
@@ -7927,7 +7953,15 @@ mod tests {
             .collect();
         let all_cosigs: Vec<Vec<u8>> = sks
             .iter()
-            .map(|sk| lakko_transparency::sign_witness_cosig(sk, &tree_root_arr, log_size).to_vec())
+            .map(|sk| {
+                lakko_transparency::sign_witness_cosig(
+                    sk,
+                    lakko_transparency::LogId::Kt,
+                    &tree_root_arr,
+                    log_size,
+                )
+                .to_vec()
+            })
             .collect();
 
         // Three distinct valid co-sigs satisfy both a 3-of-3 and a 1-of-3 quorum.

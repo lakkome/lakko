@@ -44,9 +44,16 @@
  * the plaintext carries the same expiry (an attacker who swapped the column
  * to a future value gains nothing: the server-side HMAC binds the real
  * one). Flag day: a row of the single-token shape reads as absent.
+ *
+ * ADR-0089 (a suspended account): the same row holds the restricted session
+ * in place of the pair, with `m: 1` in the plaintext; `t` / `e` are then the
+ * `s1` restricted token and its expiry. `getSessionPair` reads only a pair
+ * and `getSuspendedSession` only a restricted session, so a reader of the
+ * one never mistakes the other for it.
  */
 import type { DeviceCipher } from "./device-cipher";
 import type { SessionPair } from "./session-pair";
+import type { RestrictedSession } from "./suspension";
 
 import { accountSessionWritable } from "./account-store-gate";
 
@@ -70,6 +77,8 @@ interface Plain {
   r: string;
   re: number;
   g: string;
+  /** `1` for a restricted session (ADR-0089). */
+  m?: 1;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -100,14 +109,45 @@ export async function putSessionPair(
   pair: SessionPair,
   deviceKey: DeviceCipher,
 ): Promise<void> {
+  await putPlain(
+    accountIdB64,
+    {
+      t: pair.sessionToken,
+      e: pair.sessionExpiresAtMs,
+      r: pair.refreshToken,
+      re: pair.refreshExpiresAtMs,
+      g: pair.keyGeneration.toString(),
+    },
+    deviceKey,
+  );
+}
+
+/**
+ * ADR-0089: persist the restricted session of a suspended account in the
+ * account's one session row, replacing the pair (or an earlier restricted
+ * session), so a restart stays in suspended mode.
+ */
+export async function putSuspendedSession(
+  accountIdB64: string,
+  restricted: RestrictedSession,
+  deviceKey: DeviceCipher,
+): Promise<void> {
+  await putPlain(
+    accountIdB64,
+    {
+      t: restricted.restrictedToken,
+      e: restricted.restrictedExpiresAtMs,
+      r: restricted.refreshToken,
+      re: restricted.refreshExpiresAtMs,
+      g: restricted.keyGeneration.toString(),
+      m: 1,
+    },
+    deviceKey,
+  );
+}
+
+async function putPlain(accountIdB64: string, plain: Plain, deviceKey: DeviceCipher): Promise<void> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plain: Plain = {
-    t: pair.sessionToken,
-    e: pair.sessionExpiresAtMs,
-    r: pair.refreshToken,
-    re: pair.refreshExpiresAtMs,
-    g: pair.keyGeneration.toString(),
-  };
   const plaintext = new TextEncoder().encode(JSON.stringify(plain));
   const ct = new Uint8Array(
     await deviceKey.encrypt(iv, plaintext),
@@ -127,7 +167,7 @@ export async function putSessionPair(
       tx.objectStore(STORE).put({
         accountId: accountIdB64,
         ciphertext: envelope,
-        expiresAtMs: pair.refreshExpiresAtMs,
+        expiresAtMs: plain.re,
       } satisfies TokenRecord);
     });
   } finally {
@@ -150,6 +190,38 @@ export async function getSessionPair(
   accountIdB64: string,
   deviceKey: DeviceCipher,
 ): Promise<SessionPair | null> {
+  const plain = await readPlain(accountIdB64, deviceKey);
+  if (plain === null || plain.m === 1) return null;
+  return {
+    sessionToken: plain.t,
+    sessionExpiresAtMs: plain.e,
+    refreshToken: plain.r,
+    refreshExpiresAtMs: plain.re,
+    keyGeneration: BigInt(plain.g),
+  };
+}
+
+/**
+ * ADR-0089: the persisted restricted session of a suspended account, or
+ * `null` when the row holds a pair, nothing, or a dead credential. Throws on
+ * a decrypt failure, like {@link getSessionPair}.
+ */
+export async function getSuspendedSession(
+  accountIdB64: string,
+  deviceKey: DeviceCipher,
+): Promise<RestrictedSession | null> {
+  const plain = await readPlain(accountIdB64, deviceKey);
+  if (plain === null || plain.m !== 1) return null;
+  return {
+    restrictedToken: plain.t,
+    restrictedExpiresAtMs: plain.e,
+    refreshToken: plain.r,
+    refreshExpiresAtMs: plain.re,
+    keyGeneration: BigInt(plain.g),
+  };
+}
+
+async function readPlain(accountIdB64: string, deviceKey: DeviceCipher): Promise<Plain | null> {
   const db = await openDb();
   try {
     const row: TokenRecord | undefined = await new Promise(
@@ -194,11 +266,12 @@ export async function getSessionPair(
       return null;
     }
     return {
-      sessionToken: decoded.t,
-      sessionExpiresAtMs: decoded.e,
-      refreshToken: decoded.r,
-      refreshExpiresAtMs: decoded.re,
-      keyGeneration: BigInt(decoded.g),
+      t: decoded.t,
+      e: decoded.e,
+      r: decoded.r,
+      re: decoded.re,
+      g: decoded.g,
+      ...(decoded.m === 1 ? { m: 1 as const } : {}),
     };
   } finally {
     db.close();

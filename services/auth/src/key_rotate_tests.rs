@@ -65,6 +65,7 @@ async fn rotate(
             "fresh_grant": fresh,
             "recovery_upload": upload,
             "new_signature_pubkey_b64": b64u(&pubkey(new_key)),
+            "identity_proof_b64": identity_proof(&account_of_token(&bearer), new_key),
             "supersession_proof_b64": proof_b64,
             "revoke_device_ids_b64": revoke,
         }),
@@ -227,6 +228,7 @@ async fn a_rotation_needs_the_grant_and_a_recorded_key() {
         &json!({
             "recovery_upload": registration_upload(&state, &account.id, KIND_RECOVERY, b"x"),
             "new_signature_pubkey_b64": b64u(&pubkey(&k1)),
+            "identity_proof_b64": identity_proof(&account.id, &k1),
             "supersession_proof_b64": proof(&k0, &k1),
         }),
     )
@@ -238,6 +240,11 @@ async fn a_rotation_needs_the_grant_and_a_recorded_key() {
 
     // Malformed bodies are 400 and cost nothing.
     for (field, value) in [
+        ("identity_proof_b64", json!(null)),
+        (
+            "identity_proof_b64",
+            json!(identity_proof(&account.id, &k0)),
+        ),
         ("supersession_proof_b64", json!(b64u(&[0u8; 144]))),
         ("new_signature_pubkey_b64", json!(b64u(&[1u8; 31]))),
         ("revoke_device_ids_b64", json!([b64u(&OWNER_DEVICE)])),
@@ -251,6 +258,7 @@ async fn a_rotation_needs_the_grant_and_a_recorded_key() {
             "fresh_grant": grant(&session),
             "recovery_upload": registration_upload(&state, &account.id, KIND_RECOVERY, b"x"),
             "new_signature_pubkey_b64": b64u(&pubkey(&k1)),
+            "identity_proof_b64": identity_proof(&account.id, &k1),
             "supersession_proof_b64": proof(&k0, &k1),
         });
         body[field] = value;
@@ -923,7 +931,7 @@ async fn a_lost_recall_answer_can_be_asked_again() {
     other.as_object_mut().unwrap().remove("device_id_b64");
     refused(other).await;
     let mut other = request.clone();
-    other["new_signature_pubkey_b64"] = json!(b64u(&pubkey(&fresh_key())));
+    swap_new_key(&mut other);
     refused(other).await;
     let mut other = request.clone();
     other["anchor_seq"] = json!(2);
@@ -961,6 +969,8 @@ async fn a_lost_recall_answer_can_be_asked_again() {
     let stranger_account = new_account(&state, b"pw", &fresh_seed(), &fresh_key()).await;
     let mut other = request.clone();
     other["account_id_b64"] = json!(b64u(&stranger_account.id));
+    // With the new key's proof for that account, so the body is well formed.
+    other["identity_proof_b64"] = json!(identity_proof(&stranger_account.id, &k1));
     refused(other).await;
 
     // The account moves on (the recalled owner resets): the old request is

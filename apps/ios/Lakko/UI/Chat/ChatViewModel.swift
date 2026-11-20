@@ -1612,6 +1612,48 @@ public final class ChatViewModel: ObservableObject {
         ProfileDirectory.shared.resolve(signatureKeyB64: signatureKeyB64)?.name
     }
 
+    /// ADR-0089 section 6 — the person blocked in this one-to-one (the
+    /// banner replaces the composer), or `nil`.
+    var blockedOneToOnePeer: Data? { repository.blockedOneToOnePeer(groupIdHex: groupIdHex) }
+
+    /// ADR-0089 — the other person's account key in a one-to-one, or `nil`.
+    var oneToOnePeerKey: Data? { repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) }
+
+    /// ADR-0089 — whether a message's menu offers Report: someone else's
+    /// landed message whose author resolved.
+    func canReport(_ message: ChatMessage) -> Bool {
+        guard message.direction == .incoming, message.messageId > 0,
+              let author = message.authorKeyB64, let key = base64Decode(author) else { return false }
+        return key.count == 32
+    }
+
+    /// ADR-0089 / UX 2.1 — the report a message's menu opens: the message's
+    /// author (a person), with that message included and that person's other
+    /// messages offered. `nil` for a message whose author did not resolve.
+    func reportRequest(for message: ChatMessage) -> ReportRequest? {
+        guard canReport(message), let author = message.authorKeyB64, let key = base64Decode(author) else { return nil }
+        let name = personName(signatureKeyB64: author) ?? ResolvedDisplayName.placeholderSomeone
+        return ReportRequest(
+            target: .person(accountKey: key), targetName: name,
+            conversationKind: presentsAsGroup ? .group : .oneToOne,
+            groupIdHex: groupIdHex, initialMessageIds: [message.messageId],
+            candidates: ReportCandidates.from(messages, onlyAuthor: author, name: { _ in nil }),
+            followUp: .block, personName: name)
+    }
+
+    /// ADR-0089 / UX 2.1 — Report from a group's info: the group by its
+    /// `@name`, any message but the reporter's own offered, `Leave the group`
+    /// as the follow-up. `nil` for a group with no `@name`.
+    func groupReportRequest() -> ReportRequest? {
+        guard let handle = groupHandle?.handle else { return nil }
+        return ReportRequest(
+            target: .group(handle: handle), targetName: conversationTitle,
+            conversationKind: .group, groupIdHex: groupIdHex,
+            candidates: ReportCandidates.from(
+                messages, onlyAuthor: nil, name: { $0.flatMap { self.personName(signatureKeyB64: $0) } }),
+            followUp: .leave)
+    }
+
     /// ADR-0048 — the resolved name of the other person in a 1x1 chat, or `nil`
     /// for a group or an unreadable roster.
     var oneToOnePeerName: String? {

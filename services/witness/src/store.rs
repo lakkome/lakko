@@ -3,8 +3,9 @@
 
 //! Witness cosign state + the consistency-gated cosign logic (ADR-0020).
 //!
-//! The witness keeps ONE piece of log state — its last-co-signed
-//! `(tree_root, log_size)`. Before co-signing a new operator root it verifies
+//! The witness keeps ONE piece of state per log it co-signs (witness v2,
+//! ADR-0089 section 5) — its last-co-signed `(tree_root, log_size)` for that
+//! log. Before co-signing a new operator root it verifies
 //! the root is operator-signed AND that a Merkle consistency proof shows the
 //! new root append-only-extends its high-water. Two divergent forks cannot both
 //! extend a single root, so the operator cannot get a co-signature on a fork —
@@ -13,7 +14,7 @@
 use anyhow::Context as _;
 use lakko_crypto::signing::{SigningKey, VerifyingKey};
 use lakko_transparency::{
-    sign_witness_cosig, verify_consistency, SignedRoot, TreeHash, WITNESS_COSIG_LEN,
+    sign_witness_cosig, verify_consistency, LogId, SignedRoot, TreeHash, WITNESS_COSIG_LEN,
 };
 use sqlx::MySqlPool;
 use tokio::sync::Mutex;
@@ -52,42 +53,54 @@ pub(crate) enum CosignError {
     Db(String),
 }
 
-/// The witness's Ed25519 key + its serialised cosign state.
+/// The witness's Ed25519 key + its serialised cosign state, one high-water per
+/// log. Each log has its own mutex, so a cosign for one log never waits on the
+/// other.
 pub(crate) struct WitnessStore {
     witness_key: SigningKey,
-    state: Mutex<HighWater>,
+    kt: Mutex<HighWater>,
+    moderation: Mutex<HighWater>,
 }
 
 impl WitnessStore {
-    /// Load the witness key + the last-co-signed high-water, seeding the single
-    /// state row at the empty tree (`log_size = 0`, all-zero root) on first boot.
+    /// Load the witness key + the last-co-signed high-water of every log,
+    /// seeding each log's row at the empty tree (`log_size = 0`, all-zero root)
+    /// on first boot.
     ///
     /// # Errors
     ///
     /// Propagates sqlx errors / a corrupt (non-32-byte) stored root.
     pub(crate) async fn load(pool: &MySqlPool, witness_key: SigningKey) -> anyhow::Result<Self> {
-        sqlx::query("INSERT IGNORE INTO witness_state (id, tree_root, log_size) VALUES (1, ?, 0)")
-            .bind(&[0u8; 32][..])
-            .execute(pool)
-            .await
-            .context("seed witness_state")?;
+        let kt = load_high_water(pool, LogId::Kt).await?;
+        let moderation = load_high_water(pool, LogId::Moderation).await?;
+        Ok(Self::from_parts(witness_key, kt, moderation))
+    }
 
-        let (root_bytes, log_size): (Vec<u8>, u64) =
-            sqlx::query_as("SELECT tree_root, log_size FROM witness_state WHERE id = 1")
-                .fetch_one(pool)
-                .await
-                .context("read witness_state")?;
-        let tree_root: TreeHash = root_bytes.as_slice().try_into().map_err(|_| {
-            anyhow::anyhow!("witness_state.tree_root is not 32 bytes — corruption?")
-        })?;
-
-        Ok(Self {
+    /// Build a store from already-loaded state (also used by route tests that
+    /// never reach the database).
+    fn from_parts(witness_key: SigningKey, kt: HighWater, moderation: HighWater) -> Self {
+        Self {
             witness_key,
-            state: Mutex::new(HighWater {
-                tree_root,
-                log_size,
-            }),
-        })
+            kt: Mutex::new(kt),
+            moderation: Mutex::new(moderation),
+        }
+    }
+
+    /// A store at the empty tree for every log (route tests).
+    #[cfg(test)]
+    pub(crate) fn empty_for_tests(witness_key: SigningKey) -> Self {
+        let empty = HighWater {
+            tree_root: [0u8; 32],
+            log_size: 0,
+        };
+        Self::from_parts(witness_key, empty, empty)
+    }
+
+    fn state_for(&self, log: LogId) -> &Mutex<HighWater> {
+        match log {
+            LogId::Kt => &self.kt,
+            LogId::Moderation => &self.moderation,
+        }
     }
 
     /// The witness's verifying key — published at `GET /witness/key` + pinned by
@@ -97,7 +110,7 @@ impl WitnessStore {
     }
 
     /// Verify the operator-signed `new_root` append-only-extends the witness
-    /// high-water, then co-sign + advance. Returns the co-signature wire blob.
+    /// high-water of `log`, then co-sign (binding `log`) + advance. Returns the co-signature wire blob.
     ///
     /// Serialised under a mutex so the consistency check + advance are atomic —
     /// two concurrent cosigns can never both advance past a fork.
@@ -109,6 +122,7 @@ impl WitnessStore {
     pub(crate) async fn cosign(
         &self,
         pool: &MySqlPool,
+        log: LogId,
         operator: &VerifyingKey,
         new_root: &SignedRoot,
         consistency_proof: &[TreeHash],
@@ -118,7 +132,7 @@ impl WitnessStore {
             .verify(operator)
             .map_err(|_| CosignError::BadOperatorSignature)?;
 
-        let mut hw = self.state.lock().await;
+        let mut hw = self.state_for(log).lock().await;
 
         // 2. No rollback below what we already co-signed.
         if new_root.log_size < hw.log_size {
@@ -144,17 +158,25 @@ impl WitnessStore {
         }
 
         // 4. Co-sign the (tree_root, log_size).
-        let cosig = sign_witness_cosig(&self.witness_key, &new_root.tree_root, new_root.log_size);
+        let cosig = sign_witness_cosig(
+            &self.witness_key,
+            log,
+            &new_root.tree_root,
+            new_root.log_size,
+        );
 
         // 5. Advance the high-water on real growth (an idempotent same-size
         //    re-cosign leaves it untouched).
         if new_root.log_size > hw.log_size {
-            sqlx::query("UPDATE witness_state SET tree_root = ?, log_size = ? WHERE id = 1")
-                .bind(&new_root.tree_root[..])
-                .bind(new_root.log_size)
-                .execute(pool)
-                .await
-                .map_err(|e| CosignError::Db(e.to_string()))?;
+            sqlx::query(
+                "UPDATE witness_log_state SET tree_root = ?, log_size = ? WHERE log_id = ?",
+            )
+            .bind(&new_root.tree_root[..])
+            .bind(new_root.log_size)
+            .bind(log.byte())
+            .execute(pool)
+            .await
+            .map_err(|e| CosignError::Db(e.to_string()))?;
             hw.tree_root = new_root.tree_root;
             hw.log_size = new_root.log_size;
         }
@@ -163,16 +185,43 @@ impl WitnessStore {
     }
 }
 
+/// Read (seeding at the empty tree on first boot) one log's high-water.
+async fn load_high_water(pool: &MySqlPool, log: LogId) -> anyhow::Result<HighWater> {
+    sqlx::query(
+        "INSERT IGNORE INTO witness_log_state (log_id, tree_root, log_size) VALUES (?, ?, 0)",
+    )
+    .bind(log.byte())
+    .bind(&[0u8; 32][..])
+    .execute(pool)
+    .await
+    .context("seed witness_log_state")?;
+
+    let (root_bytes, log_size): (Vec<u8>, u64) =
+        sqlx::query_as("SELECT tree_root, log_size FROM witness_log_state WHERE log_id = ?")
+            .bind(log.byte())
+            .fetch_one(pool)
+            .await
+            .context("read witness_log_state")?;
+    let tree_root: TreeHash = root_bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!("witness_log_state.tree_root is not 32 bytes — corruption?")
+    })?;
+    Ok(HighWater {
+        tree_root,
+        log_size,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lakko_crypto::signing::SigningKey;
-    use lakko_transparency::{merkle, verify_witness_cosig, SignedRoot};
+    use lakko_transparency::{merkle, verify_witness_cosig, LogId, SignedRoot};
     use sqlx::mysql::MySqlPoolOptions;
 
     /// The split-view defence end-to-end: a consistent extension is co-signed,
     /// a same-size fork is refused. DB-gated on `LAKKO_WITNESS_TEST_DATABASE_URL`.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn cosign_accepts_extension_refuses_fork() {
         let Ok(url) = std::env::var("LAKKO_WITNESS_TEST_DATABASE_URL") else {
             eprintln!(
@@ -188,10 +237,10 @@ mod tests {
             .await
             .expect("connect test DB");
         crate::MIGRATIONS.run(&pool).await.expect("run migrations");
-        sqlx::query("DELETE FROM witness_state")
+        sqlx::query("DELETE FROM witness_log_state")
             .execute(&pool)
             .await
-            .expect("clear witness_state");
+            .expect("clear witness_log_state");
 
         let operator = SigningKey::from_seed(&[0x77; 32]);
         let operator_vk = operator.verifying_key();
@@ -219,13 +268,14 @@ mod tests {
         let cosig3 = store
             .cosign(
                 &pool,
+                LogId::Kt,
                 &operator_vk,
                 &r3,
                 &lakko_transparency::consistency_proof(0, &leaves[..3]),
             )
             .await
             .expect("genesis co-sign");
-        verify_witness_cosig(&cosig3, &witness_vk, &r3.tree_root, 3)
+        verify_witness_cosig(&cosig3, &witness_vk, LogId::Kt, &r3.tree_root, 3)
             .expect("the witness co-sig verifies against the witness key");
 
         // 2. A consistent extension to size 6 is co-signed.
@@ -233,6 +283,7 @@ mod tests {
         store
             .cosign(
                 &pool,
+                LogId::Kt,
                 &operator_vk,
                 &r6,
                 &lakko_transparency::consistency_proof(3, &leaves[..6]),
@@ -252,7 +303,9 @@ mod tests {
             timestamp_unix: 1_700_000_001,
             signature: operator.sign(&payload),
         };
-        let res = store.cosign(&pool, &operator_vk, &forked_root, &[]).await;
+        let res = store
+            .cosign(&pool, LogId::Kt, &operator_vk, &forked_root, &[])
+            .await;
         assert!(
             matches!(res, Err(CosignError::NotConsistent)),
             "a same-size fork must be refused (split-view defence)"
@@ -270,16 +323,42 @@ mod tests {
         };
         assert!(
             matches!(
-                store.cosign(&pool, &operator_vk, &bad_root, &[]).await,
+                store
+                    .cosign(&pool, LogId::Kt, &operator_vk, &bad_root, &[])
+                    .await,
                 Err(CosignError::BadOperatorSignature)
             ),
             "a root not signed by the pinned operator is refused"
         );
 
-        sqlx::query("DELETE FROM witness_state")
+        // 5. The moderation log has its own high-water: the KT log at size 6
+        //    does not stop a moderation genesis at size 3, and the cosig binds
+        //    the moderation log (it does not verify as a KT cosig).
+        let m3 = store
+            .cosign(
+                &pool,
+                LogId::Moderation,
+                &operator_vk,
+                &r3,
+                &lakko_transparency::consistency_proof(0, &leaves[..3]),
+            )
+            .await
+            .expect("moderation genesis co-sign");
+        verify_witness_cosig(&m3, &witness_vk, LogId::Moderation, &r3.tree_root, 3)
+            .expect("moderation cosig verifies for the moderation log");
+        assert!(verify_witness_cosig(&m3, &witness_vk, LogId::Kt, &r3.tree_root, 3).is_err());
+
+        // 6. A reload reads both rows back.
+        let reloaded = WitnessStore::load(&pool, SigningKey::from_seed(&[0x88; 32]))
+            .await
+            .expect("reload");
+        assert_eq!(reloaded.kt.lock().await.log_size, 6);
+        assert_eq!(reloaded.moderation.lock().await.log_size, 3);
+
+        sqlx::query("DELETE FROM witness_log_state")
             .execute(&pool)
             .await
-            .expect("clear witness_state");
+            .expect("clear witness_log_state");
         pool.close().await;
     }
 }

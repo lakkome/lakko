@@ -465,13 +465,18 @@ public struct GenesisAttestRequest: Codable, Equatable {
     /// (Ed25519) public key. The server binds THIS key to the authenticated
     /// account inside the signed attestation.
     public let pubkeyB64: String
+    /// ADR-0089 F3 — URL-safe base64 (no pad) of `signIdentityProof` by the
+    /// key in ``pubkeyB64`` over the account id (``IdentityProof``).
+    public let identityProofB64: String
 
-    public init(pubkeyB64: String) {
+    public init(pubkeyB64: String, identityProofB64: String) {
         self.pubkeyB64 = pubkeyB64
+        self.identityProofB64 = identityProofB64
     }
 
     enum CodingKeys: String, CodingKey {
         case pubkeyB64 = "pubkey_b64"
+        case identityProofB64 = "identity_proof_b64"
     }
 }
 
@@ -822,17 +827,24 @@ public struct KeyResetFinishRequest: Codable, Equatable {
     /// URL-safe base64 (no pad) of the NEW AccountIdentity Ed25519 public
     /// key the attestation binds.
     public let newSignaturePubkeyB64: String
+    /// ADR-0089 F3 — `signIdentityProof` by the NEW key over the account id.
+    public let identityProofB64: String
 
-    public init(freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String) {
+    public init(
+        freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
+        identityProofB64: String
+    ) {
         self.freshGrant = freshGrant
         self.recoveryUpload = recoveryUpload
         self.newSignaturePubkeyB64 = newSignaturePubkeyB64
+        self.identityProofB64 = identityProofB64
     }
 
     enum CodingKeys: String, CodingKey {
         case freshGrant = "fresh_grant"
         case recoveryUpload = "recovery_upload"
         case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
+        case identityProofB64 = "identity_proof_b64"
     }
 }
 
@@ -886,12 +898,16 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
     /// ADR-0075 section 3 — `true` when this rotation is "Save a recovery
     /// phrase"; absent otherwise.
     public let phraseSaved: Bool?
+    /// ADR-0089 F3 — `signIdentityProof` by the NEW key over the account id.
+    public let identityProofB64: String
 
     public init(
         freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
-        supersessionProofB64: String, revokeDeviceIdsB64: [String], phraseSaved: Bool? = nil
+        supersessionProofB64: String, revokeDeviceIdsB64: [String], phraseSaved: Bool? = nil,
+        identityProofB64: String
     ) {
         self.phraseSaved = phraseSaved
+        self.identityProofB64 = identityProofB64
         self.freshGrant = freshGrant
         self.recoveryUpload = recoveryUpload
         self.newSignaturePubkeyB64 = newSignaturePubkeyB64
@@ -906,6 +922,7 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
         case supersessionProofB64 = "supersession_proof_b64"
         case revokeDeviceIdsB64 = "revoke_device_ids_b64"
         case phraseSaved = "phrase_saved"
+        case identityProofB64 = "identity_proof_b64"
     }
 }
 

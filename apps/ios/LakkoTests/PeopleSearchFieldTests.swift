@@ -1007,4 +1007,23 @@ final class PeopleSearchFieldTests: XCTestCase {
         await shared.addContact(person(2, reach: .contact))
         XCTAssertEqual(rec.sent, [])
     }
+
+    // MARK: - ADR-0089 step 4 — suspended accounts
+
+    func testSearchDropsAPersonKnownSuspendedAndKeepsTheRest() async {
+        let rec = Recorder()
+        rec.answer = PeopleSearchAnswer(people: [person(1, reach: .open), person(2, name: "Ben", reach: .open)])
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        XCTAssertEqual(model.rows(showsLocalContacts: false).network.map(\.accountKey).count, 2,
+                       "shown at once, before any standing is known")
+        XCTAssertEqual(Set(model.suspensionCheckKeys), [person(1).accountKey, person(2).accountKey])
+
+        var suspended: Set<Data> = []
+        model.isSuspended = { suspended.contains($0) }
+        suspended = [person(1).accountKey]
+        XCTAssertEqual(model.rows(showsLocalContacts: false).network.map(\.accountKey), [person(2).accountKey])
+        XCTAssertEqual(Set(model.suspensionCheckKeys), [person(1).accountKey, person(2).accountKey],
+                       "the check keys stay the unfiltered answer")
+    }
 }

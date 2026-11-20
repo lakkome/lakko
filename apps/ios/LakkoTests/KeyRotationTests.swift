@@ -616,7 +616,8 @@ final class KeyRotationRunnerTests: XCTestCase {
                 world.note("own-pending")
                 world.keep(pending)
             },
-            commit: { _, _, material, proof, revokes in
+            commit: { _, _, material, proof, revokes, accountId in
+                XCTAssertEqual(accountId.count, 16, "the identity proof names the account")
                 world.note("commit")
                 if let error = world.commitError { throw error }
                 world.committed(revokes: revokes, proof: proof)
@@ -644,7 +645,8 @@ final class KeyRotationRunnerTests: XCTestCase {
             handOverChannels: { _ in try step("channels") },
             rekeyReach: { try step("reach") },
             resendProfile: { try step("profile") },
-            commitSavingPhrase: { _, _, material, proof in
+            commitSavingPhrase: { _, _, material, proof, accountId in
+                XCTAssertEqual(accountId.count, 16, "the identity proof names the account")
                 world.note("commit-saving-phrase")
                 if let error = world.commitError { throw error }
                 world.committed(revokes: [], proof: proof)

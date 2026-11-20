@@ -132,11 +132,12 @@ describe("the callers (source)", () => {
     const src = read("../auth/AuthContext.tsx");
     expect(src).not.toMatch(/subscribeToPush\(\)/);
     expect(src).not.toMatch(/subscribePushFor\(\)/);
-    // Signup, the session landing, a guest account that was kept, recover.
+    // Signup, the session landing, a guest account that was kept, recover,
+    // and the end of a suspension (ADR-0089).
     // Each goes through `subscribePushFor`, the one caller of
     // `subscribeToPush`, which names the account and passes the "is this
     // account still signed in" check with it.
-    expect(src.match(/subscribePushFor\([A-Za-z0-9.]+\)\.catch/g)?.length).toBe(4);
+    expect(src.match(/subscribePushFor\([A-Za-z0-9.]+\)\.catch/g)?.length).toBe(5);
     expect(src.match(/subscribeToPush\(/g)?.length).toBe(1);
     expect(src).toMatch(/return subscribeToPush\(accountIdB64, \(\) => \{/);
   });

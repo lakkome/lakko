@@ -2057,6 +2057,17 @@ public enum DiscoveryClientError: Error {
     /// address to slow down. Never to be shown as "link invalid".
     case rateLimited(endpoint: String)
 
+    /// ADR-0089 step 5 — whether `error` is discovery's
+    /// `403 {"error":"hidden-from-search"}`: moderators removed the account
+    /// from search, so the Everyone record is not published.
+    public static func isHiddenFromSearch(_ error: Error) -> Bool {
+        guard case .http(let status, _, let body)? = error as? DiscoveryClientError, status == 403 else {
+            return false
+        }
+        struct Envelope: Decodable { let error: String }
+        return (try? JSONDecoder().decode(Envelope.self, from: Data(body.utf8)))?.error == "hidden-from-search"
+    }
+
     /// Whether `error` is, or wraps, a ``rateLimited(endpoint:)`` refusal.
     /// Looks through the repository wrappers (`ChatError.wrapped`,
     /// `ContactsError.wrapped`) so a screen can pick the "try again later"

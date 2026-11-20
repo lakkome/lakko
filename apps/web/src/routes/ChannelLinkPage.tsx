@@ -8,6 +8,7 @@
  * `Subscribe`. A publisher invitation (the co-publisher link) shows `Accept`
  * instead. Rendered by `JoinGroup.tsx` when the link opens to a channel.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { publisherInviteLine } from "../chat/ChannelInviteCard";
 import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
@@ -158,6 +159,9 @@ export function ChannelLinkPage(props: { readonly slug: string; readonly opened:
                 owner's device approves, whether or not this page is open. */}
             <p role="status">{t("channels.join.waiting")}</p>
           </Match>
+          {/* ADR-0089 step 3: a suspended account subscribes to nothing and
+              takes on no channel. */}
+          <Match when={accountSuspended()}>{null}</Match>
           <Match when={props.opened.publisherInvite}>
             <button type="button" class="primary" disabled={phase() === "busy"} onClick={() => void accept()}>
               {phase() === "busy" ? t("channels.join.waiting") : t("channels.publishers.accept")}

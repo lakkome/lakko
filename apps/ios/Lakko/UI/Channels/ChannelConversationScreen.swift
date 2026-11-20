@@ -37,6 +37,8 @@ struct ChannelConversationScreen: View {
     @EnvironmentObject private var inviteIntake: InviteIntake
     @ObservedObject private var l10n = Localization.shared
     @Environment(\.dismiss) private var dismiss
+    /// ADR-0089 step 3 — a suspended account reads; it does not post.
+    @Environment(\.accountSuspended) private var accountSuspended
 
     @State private var editing: ChannelTimelineItem?
     @State private var editText = ""
@@ -50,6 +52,8 @@ struct ChannelConversationScreen: View {
     @State private var width: CGFloat = 360
     @State private var onScreen: Set<UInt64> = []
     @FocusState private var composerFocused: Bool
+    /// ADR-0089 / UX 2.1 — the report sheet opened from a post's menu.
+    @State private var reportRequest: ReportRequest?
 
     private func onEnded() {
         if let onEndedHere { onEndedHere() } else { dismiss() }
@@ -180,6 +184,14 @@ struct ChannelConversationScreen: View {
             .onChange(of: onScreen) { _, _ in markNewestRead() }
             .onDisappear { media.chatHidden() }
             .sheet(item: $picker) { request in pickerSheet(request) }
+            // ADR-0089 / UX 2.3 — `Unsubscribe`, when checked, goes with the
+            // report.
+            .reportSheet($reportRequest) { follow in
+                guard follow == .unsubscribe else { return }
+                ChannelUnsubscribe.stopFollowing(state: state, channelId: channelId)
+                state.onUnsubscribedHere?(channelId)
+                onEnded()
+            }
             .sheet(item: $editing) { item in
                 EditMessageSheet(
                     text: $editText,
@@ -341,7 +353,7 @@ struct ChannelConversationScreen: View {
                 timeLabel: entry.timeLabel,
                 // Section 12 — a post is a card with the width of the pane.
                 maxBubbleWidth: width,
-                actionsAvailable: model.access == .publisher || model.access == .reading,
+                actionsAvailable: (model.access == .publisher || model.access == .reading) && model.writable,
                 readState: nil,
                 onPreview: openPreview,
                 onEdit: {
@@ -360,6 +372,14 @@ struct ChannelConversationScreen: View {
                 onShowReactors: { _ in anonymousNote = true },
                 onJoinCallInvite: { inviteIntake.handle($0) },
                 onOpenOwnLink: { inviteIntake.handle($0) },
+                // ADR-0089 / UX 2.1 — a subscriber reports the channel from a
+                // post, with that post included.
+                onReport: model.access == .reading && model.writable
+                    ? {
+                        reportRequest = model.reportRequest(
+                            title: title, includingCursor: item.cursor, subscriber: true)
+                    }
+                    : nil,
                 channelPost: role
             )
             ChannelCommentsView(
@@ -387,9 +407,25 @@ struct ChannelConversationScreen: View {
 
     @ViewBuilder
     private var bottomBar: some View {
+        if let removal = model.removal {
+            // ADR-0089 step 5 — a removed channel: the posts stay, nothing is
+            // written; the line says why only when the log proved it (C-92).
+            ChannelRemovedLine(status: removal)
+        } else {
+            liveBottomBar
+        }
+    }
+
+    @ViewBuilder
+    private var liveBottomBar: some View {
         switch model.access {
+        case .publisher where accountSuspended:
+            SuspendedComposerLine()
         case .publisher:
             composer
+        case .notSubscribed where accountSuspended:
+            // Subscribing writes to the channels service: not offered.
+            SuspendedComposerLine()
         case .notSubscribed:
             subscribeBar
         case .subscribing:
@@ -628,6 +664,27 @@ struct ChannelConversationScreen: View {
             await model.stageAttachment(
                 bytes: bytes, mime: PhotoVideoPrep.sniffInlineImageMime(bytes), name: "file-\(stamp)")
         }
+    }
+}
+
+/// ADR-0089 step 5 / UX `reporting-and-moderation.md` section 3 — where a
+/// removed channel's composer or `Subscribe` was: `suspended.channel_removed`
+/// once the moderation log verified the removal, else the neutral
+/// `channels.unavailable`.
+struct ChannelRemovedLine: View {
+    let status: ChannelRemovals.Status
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        Text(l10n.t(status.lineKey))
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(12)
+            .background(Color.lakkoBackground)
+            .overlay(alignment: .top) { Rectangle().fill(Color.lakkoBorder).frame(height: 1) }
+            .accessibilityElement(children: .combine)
     }
 }
 

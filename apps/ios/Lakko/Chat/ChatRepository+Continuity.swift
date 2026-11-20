@@ -656,7 +656,8 @@ extension ChatRepository {
                     resendOriginMessageId: parts.resendOriginMessageId))
             _ = try await withCommitLock(groupIdHex: successorHex) { [self] in
                 try await sealAndPublishLocked(
-                    groupIdHex: successorHex, plaintextBytes: envelope, wake: .message)
+                    groupIdHex: successorHex, plaintextBytes: envelope, wake: .message,
+                    attest: true)
             }
             // It landed: a failure of a later message resumes after it.
             marks.advanceResendCursor(oldGroupIdB64: oldB64, to: id)
@@ -684,11 +685,20 @@ extension ChatRepository {
     /// `eventSenders` is the application sender of each event, in order
     /// (`PollMessagesResult.eventSenders`).
     func silentlyFiltered(
-        _ events: [IncomingChatEvent],
+        _ incoming: [IncomingChatEvent],
         resendOrigins: [Int64: ResendMarker.Origin],
-        eventSenders: [MemberIdentity?],
+        eventSenders incomingSenders: [MemberIdentity?],
         groupIdHex: String
     ) -> [IncomingChatEvent] {
+        // ADR-0089 section 6 — in a one-to-one with a blocked person, what
+        // they send is not kept: messages, signals, profile updates and calls
+        // (UX `reporting-and-moderation.md` 1.2). In a group nothing is
+        // dropped here; their messages collapse when drawn.
+        let (events, eventSenders) = isOneToOne(groupIdHex: groupIdHex)
+            ? BlockRouting.keptInOneToOne(
+                incoming, senders: incomingSenders,
+                isBlocked: { BlockList.shared.isBlocked(b64: $0) })
+            : (incoming, incomingSenders)
         let superseded = Set(supersededKeyMap().keys)
         if superseded.isEmpty && resendOrigins.isEmpty { return events }
         let kept = ResetRepair.keptAfterSupersededSenders(
@@ -926,7 +936,8 @@ extension ChatRepository {
                         reply: reply, forward: decoded.forward)
                     let result = try await withCommitLock(groupIdHex: headHex) { [self] in
                         try await sealAndPublishLocked(
-                            groupIdHex: headHex, plaintextBytes: envelope, wake: .message)
+                            groupIdHex: headHex, plaintextBytes: envelope, wake: .message,
+                            attest: true)
                     }
                     groups[headHex]?.markSent(
                         localId: localId, messageId: result.messageId, createdAt: result.createdAt)

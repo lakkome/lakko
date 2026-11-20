@@ -423,8 +423,8 @@ public final class ChatClient {
     /// when it is a chat body carrying both halves of one. Read off the same
     /// authenticated plaintext the event is built from.
     static func resendOrigin(of processed: ProcessedMessage) -> ResendMarker.Origin? {
-        guard case .application(let data, _, _) = processed else { return nil }
-        let parsed = AttachmentBridge.parseBodyEnvelopeBytes(data)
+        guard case .application(let raw, _, _) = processed else { return nil }
+        let parsed = AttachmentBridge.parseBodyEnvelopeBytes(unwrapAttested(plaintext: raw))
         guard parsed.kind == .chat,
               let groupIdB64 = parsed.resendOriginGroupB64, !groupIdB64.isEmpty,
               let messageId = parsed.resendOriginMessageId else { return nil }
@@ -438,6 +438,29 @@ public final class ChatClient {
     /// an MLS handshake row (a commit, a proposal), which has no application
     /// sender and must be applied whoever sent it, and for a leaf that does
     /// not resolve.
+    /// ADR-0089 section 1 — what a report's evidence needs of an application
+    /// row that is a chat message: the attestation verdict, the attested
+    /// plaintext as received, the sender leaf's signature key and the leaf's
+    /// device binding, all read now, while the roster is the epoch's (C-68).
+    /// `nil` for anything that is not a chat message (an op, a signal, a
+    /// service envelope, call signaling) and for a leaf that does not
+    /// resolve. A failed or absent attestation drops nothing: the message is
+    /// shown as before and the verdict rides along.
+    static func messageEvidence(of processed: ProcessedMessage, group: Group) -> MessageEvidence? {
+        guard case .application(let raw, let senderLeaf, _) = processed, let senderLeaf,
+              !looksLikeCallSignaling(raw) else { return nil }
+        guard AttachmentBridge.parseBodyEnvelopeBytes(unwrapAttested(plaintext: raw)).kind == .chat,
+              let groupId = try? group.groupId(),
+              let leafKey = (try? group.members())?.first(where: { $0.leafIndex == senderLeaf })?
+                .signaturePublicKey
+        else { return nil }
+        let binding = (try? group.deviceBindingAt(leaf: senderLeaf)).flatMap { $0 }
+        return MessageEvidence(
+            attestation: MessageEvidence.Verdict(
+                messageAttestation(plaintext: raw, groupId: groupId, senderLeafKey: leafKey)),
+            plaintext: raw, leafKey: leafKey, binding: binding ?? Data())
+    }
+
     static func applicationSender(of processed: ProcessedMessage, group: Group) -> MemberIdentity? {
         guard case .application(_, let senderLeaf, _) = processed else { return nil }
         return senderLeaf.flatMap { AuthorIdentity.resolve(group: group, leafIndex: $0) }
@@ -455,6 +478,7 @@ public final class ChatClient {
         var touchedMlsState = false
         var resendOrigins: [Int64: ResendMarker.Origin] = [:]
         var eventSenders: [MemberIdentity?] = []
+        var evidence: [Int64: MessageEvidence] = [:]
         for message in raw.messages {
             cursor = message.id
 
@@ -500,6 +524,10 @@ public final class ChatClient {
             if let origin = Self.resendOrigin(of: processed) {
                 resendOrigins[message.id] = origin
             }
+            // ADR-0089 section 1 — read at receipt, like the author.
+            if let held = Self.messageEvidence(of: processed, group: group) {
+                evidence[message.id] = held
+            }
             // Resolved on the line after the apply, like the event's own
             // author: the one moment the roster is the row's epoch.
             eventSenders.append(Self.applicationSender(of: processed, group: group))
@@ -523,7 +551,8 @@ public final class ChatClient {
             hasMore: raw.hasMore,
             touchedMlsState: touchedMlsState,
             resendOrigins: resendOrigins,
-            eventSenders: eventSenders
+            eventSenders: eventSenders,
+            evidence: evidence
         )
     }
 
@@ -586,7 +615,13 @@ public final class ChatClient {
         conversationIdHex: String? = nil
     ) -> IncomingChatEvent {
         switch processed {
-        case .application(let data, let senderLeaf, _):
+        case .application(let raw, let senderLeaf, _):
+            // ADR-0089 section 1 — a chat plaintext arrives wrapped in its
+            // attestation; every arm below reads the envelope inside. A
+            // plaintext with no wrapper (a signal, a service envelope) comes
+            // back unchanged, and a malformed wrapper stays whole and
+            // classifies as a service envelope, which is dropped.
+            let data = unwrapAttested(plaintext: raw)
             // Phase 3a8/9 — sniff for call-signaling proto
             // bytes before running the chat-envelope parser.
             // Cheap unambiguous discriminator: the proto's
@@ -1669,6 +1704,10 @@ public struct PollMessagesResult: Equatable {
     /// application row came from, `nil` for an MLS handshake row. Empty when
     /// the producer resolved none (then nothing is dropped by sender).
     public let eventSenders: [MemberIdentity?]
+    /// ADR-0089 section 1 — what a report needs of each chat row of this
+    /// batch, by DS message id, read at receipt (the leaf may be reused
+    /// later, C-68). The repository keeps it for rows from someone else.
+    public let evidence: [Int64: MessageEvidence]
 
     public init(
         events: [IncomingChatEvent],
@@ -1676,8 +1715,10 @@ public struct PollMessagesResult: Equatable {
         hasMore: Bool,
         touchedMlsState: Bool = false,
         resendOrigins: [Int64: ResendMarker.Origin] = [:],
-        eventSenders: [MemberIdentity?] = []
+        eventSenders: [MemberIdentity?] = [],
+        evidence: [Int64: MessageEvidence] = [:]
     ) {
+        self.evidence = evidence
         self.eventSenders = eventSenders
         self.events = events
         self.cursor = cursor

@@ -350,8 +350,34 @@ private fun ChannelTimelineView(
     // Section 13a (phase B) — the comment count the service keeps per post.
     val commentCounts = remember(channelId) { mutableStateMapOf<Long, Long>() }
     var refreshTick by remember(channelId) { mutableIntStateOf(0) }
+    // ADR-0089 step 5 — a channel moderators removed: kept and readable,
+    // nothing that writes, network reads once per period.
+    val removedChannels by me.lakko.app.channels.RemovedChannels.state.collectAsState()
+    val removal = removedChannels[channelId.lowercase()]
+    val removed = removal != null
+
+    /** The posts already on the device, with no network read. */
+    suspend fun readHeld() {
+        failure = null
+        phase = ReaderPhase.Active
+        reader.readHeld()?.let {
+            timeline = it
+            return
+        }
+        if (timeline != null) return
+        val account = state.boundAccount ?: return
+        val logged = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            me.lakko.app.feed.FeedSealedStore.loadChannelPostLog(context.applicationContext, account)
+                .channels[channelId.lowercase()]?.posts.orEmpty()
+        }
+        timeline = me.lakko.app.channels.timelineFromPostLog(logged)
+    }
 
     suspend fun readNow() {
+        if (!me.lakko.app.channels.RemovedChannels.mayAsk(channelId)) {
+            readHeld()
+            return
+        }
         try {
             val read = reader.read()
             timeline = read
@@ -382,6 +408,10 @@ private fun ChannelTimelineView(
                 me.lakko.app.channels.ChannelRemovalWatch.endEverywhere(state, channelId, name, null)
                 return
             }
+            if (me.lakko.app.channels.RemovedChannels.isRemovedError(e)) {
+                readHeld()
+                return
+            }
             Log.w(TAG, "channel read failed", e)
             if (timeline == null) failure = UiText("channels.posts.error.load")
         }
@@ -391,7 +421,7 @@ private fun ChannelTimelineView(
     // every few seconds while open. A publisher only reads.
     LaunchedEffect(channelId, attempt) {
         failure = null
-        if (!isPublisher) {
+        if (!isPublisher && !me.lakko.app.channels.RemovedChannels.isRemoved(channelId)) {
             try {
                 val kp = state.subscriberKeysByChannel.value[channelId]
                     ?: ChannelsComposer.freshSubscriberKeys().also { state.setSubscriberKeys(channelId, it) }
@@ -406,15 +436,19 @@ private fun ChannelTimelineView(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                Log.w(TAG, "subscribe failed", e)
-                failure = me.lakko.app.chat.anonTokenFailureText(e, me.lakko.app.chat.AllowanceKind.SUBSCRIBE)
-                    ?: UiText("channels.subscribe.error.prefix")
-                phase = ReaderPhase.Failed
-                return@LaunchedEffect
+                if (!me.lakko.app.channels.RemovedChannels.isRemovedError(e)) {
+                    Log.w(TAG, "subscribe failed", e)
+                    failure = me.lakko.app.chat.anonTokenFailureText(e, me.lakko.app.chat.AllowanceKind.SUBSCRIBE)
+                        ?: UiText("channels.subscribe.error.prefix")
+                    phase = ReaderPhase.Failed
+                    return@LaunchedEffect
+                }
             }
         }
         readNow()
-        if (!isPublisher) {
+        if (me.lakko.app.channels.RemovedChannels.isRemoved(channelId)) {
+            // Nothing is uploaded to a removed channel.
+        } else if (!isPublisher) {
             me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)
         } else {
             me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
@@ -423,7 +457,9 @@ private fun ChannelTimelineView(
         while (true) {
             delay(if (phase == ReaderPhase.Active) READ_INTERVAL_MS else SEED_WAIT_MS)
             ticks += 1
-            if (!isPublisher && (phase != ReaderPhase.Active || ticks % ENVELOPE_RECHECK_EVERY == 0)) {
+            if (!isPublisher && !me.lakko.app.channels.RemovedChannels.isRemoved(channelId) &&
+                (phase != ReaderPhase.Active || ticks % ENVELOPE_RECHECK_EVERY == 0)
+            ) {
                 state.subscriberKeysByChannel.value[channelId]?.let {
                     catchUpEnvelopes(state, client, channelId, ChannelsComposer.bytesToHex(it.publicKey))
                 }
@@ -432,6 +468,12 @@ private fun ChannelTimelineView(
         }
     }
     LaunchedEffect(refreshTick) { if (refreshTick > 0) readNow() }
+    // A restore (the channel answered normally again): read at once.
+    var wasRemoved by remember(channelId) { mutableStateOf(removed) }
+    LaunchedEffect(removed) {
+        if (wasRemoved && !removed) refreshTick += 1
+        wasRemoved = removed
+    }
 
     // ---- the publisher's composer (section 13: what a message can carry)
     val mediaHub = remember(channelId) { me.lakko.app.media.ChatMediaHub(context, scope) }
@@ -598,6 +640,7 @@ private fun ChannelTimelineView(
                                 post = post,
                                 width = width,
                                 isPublisher = isPublisher,
+                                writable = !removed,
                                 mediaHub = mediaHub,
                                 chips = chips[post.cursor].orEmpty(),
                                 feedback = feedback,
@@ -620,6 +663,27 @@ private fun ChannelTimelineView(
                                 },
                                 onEdit = { editing = post },
                                 onDelete = { deleting = post },
+                                // ADR-0089 — the post menu reports the channel.
+                                onReport = {
+                                    me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                                        me.lakko.app.ui.moderation.ReportRequest(
+                                            me.lakko.app.moderation.channelReportSubject(
+                                                channelIdHex = channelId,
+                                                name = channelName,
+                                                conversationKind = me.lakko.app.moderation.ReportConversationKind.CHANNEL,
+                                                other = listOfNotNull(
+                                                    post.wire?.let { w ->
+                                                        me.lakko.app.moderation.ReportOtherEvidence.ChannelPost(channelBytes, w)
+                                                    },
+                                                ),
+                                                subscribed = !isPublisher,
+                                            ),
+                                            leaveOrUnsubscribe = {
+                                                me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
+                                            },
+                                        ),
+                                    )
+                                },
                                 saved = me.lakko.app.chat.isSavedIn(
                                     savedList,
                                     me.lakko.app.chat.SavedKey(channelId.lowercase(), post.cursor),
@@ -724,7 +788,16 @@ private fun ChannelTimelineView(
                 }
             }
         }
-        if (isPublisher) {
+        // ADR-0089 section 4 - a suspended account posts nothing.
+        val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
+        val removedLine = me.lakko.app.channels.channelRemovedLineKey(removal)
+        if (removedLine != null) {
+            // ADR-0089 step 5 — for everyone: the line in place of anything
+            // that writes.
+            RemovedChannelLine(removedLine)
+        } else if (isPublisher && suspendedReadOnly) {
+            me.lakko.app.ui.suspension.SuspendedComposerLine()
+        } else if (isPublisher) {
             // Section 12 — the owner and publishers have the group's
             // composer. A subscriber has none: the timeline runs to the
             // bottom, and they write under a post.
@@ -784,7 +857,7 @@ private fun ChannelTimelineView(
             }
         }
     }
-    if (isPublisher) VideoNoteOverlay(recorder)
+    if (isPublisher && !removed) VideoNoteOverlay(recorder)
 
     if (pickerOpen) {
         ChannelEmojiPicker(
@@ -922,10 +995,15 @@ private fun PostBlock(
     onToggleReaction: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    /** ADR-0089 step 5 — `false` for a channel moderators removed: no
+     *  reactions, no comments. */
+    writable: Boolean = true,
     saved: Boolean = false,
     canSave: Boolean = false,
     onToggleSaved: (ChatMessage) -> Unit = {},
     onForward: ((ChatMessage) -> Unit)? = null,
+    /** ADR-0089 — a subscriber reports the channel with this post included. */
+    onReport: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val time = remember(post.tsMs) {
@@ -964,16 +1042,19 @@ private fun PostBlock(
             savedMessage = saved,
             onToggleSaved = { onToggleSaved(msg) },
             channelPost = ChannelPostActions(
-                publisher = isPublisher,
+                publisher = isPublisher && writable,
                 canForward = onForward != null,
                 canSave = canSave,
+                canReact = writable,
             ),
+            onReport = if (isPublisher) null else onReport,
         )
         if (chips.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (chip in chips) {
                     Surface(
-                        onClick = { onToggleReaction(chip.emoji) },
+                        onClick = { if (writable) onToggleReaction(chip.emoji) },
+                        enabled = writable,
                         shape = RoundedCornerShape(12.dp),
                         color = if (chip.own) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                     ) {
@@ -986,7 +1067,9 @@ private fun PostBlock(
                 }
             }
         }
-        CommentsBlock(post = post, isPublisher = isPublisher, feedback = feedback, count = commentCount, mediaHub = mediaHub)
+        if (writable) {
+            CommentsBlock(post = post, isPublisher = isPublisher, feedback = feedback, count = commentCount, mediaHub = mediaHub)
+        }
     }
 }
 
@@ -1182,7 +1265,15 @@ private fun CommentsBlock(
             replyTo?.let { r ->
                 Text("${r.name}: ${r.text}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // ADR-0089 section 4 - a suspended account writes no comments.
+            val commentsReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
+            if (commentsReadOnly) {
+                Text(
+                    t("suspended.self.composer"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = field,
                     onValueChange = { field = it },
@@ -1336,5 +1427,18 @@ private fun ChannelEmojiPicker(
         onEmoji = onEmoji,
         onGif = onGif,
         onDismiss = onDismiss,
+    )
+}
+
+/** ADR-0089 step 5 — the line at the foot of a removed channel: the removal
+ *  when the log proved it, the neutral line otherwise. */
+@Composable
+private fun RemovedChannelLine(key: String) {
+    Text(
+        t(key),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
     )
 }

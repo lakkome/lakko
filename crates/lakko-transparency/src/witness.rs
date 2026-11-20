@@ -38,26 +38,85 @@ use crate::merkle::TreeHash;
 /// Domain separator for the witness co-signature. Distinct from the operator's
 /// root signing payload (which is un-prefixed `tree_root ‖ log_size ‖
 /// timestamp`) and from the supersession / leaf-genesis domains.
-const WITNESS_DOMAIN: &[u8] = b"lakko/transparency/witness/v1";
+///
+/// Version 2 (ADR-0089 section 5) binds the name of the log being co-signed,
+/// so one witness key can serve several logs and a co-signature for one log
+/// never verifies for another. Version 1 (no log name) is refused; there is
+/// no dual format.
+const WITNESS_DOMAIN: &[u8] = b"lakko/transparency/witness/v2";
 
 /// Co-signature wire-format version.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 /// Wire length of a witness co-signature:
 /// `version(1) ‖ tree_root(32) ‖ log_size(8 BE) ‖ signature(64)`.
 pub const WITNESS_COSIG_LEN: usize = 1 + 32 + 8 + SIGNATURE_LEN;
 
+/// The append-only logs a witness co-signs (ADR-0089 section 5). A closed set:
+/// the log's name is part of every co-signature, so adding a log is a code
+/// change, never a configuration value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum LogId {
+    /// The key-transparency log (`services/transparency`).
+    Kt = 1,
+    /// The moderation log (`services/moderation`).
+    Moderation = 2,
+}
+
+impl LogId {
+    /// Every log, in wire-byte order.
+    pub const ALL: [Self; 2] = [Self::Kt, Self::Moderation];
+
+    /// The name bound into the co-signature's signing input.
+    #[must_use]
+    pub const fn name(self) -> &'static [u8] {
+        match self {
+            Self::Kt => b"lakko/kt-log/v1",
+            Self::Moderation => b"lakko/moderation-log/v1",
+        }
+    }
+
+    /// The value used for this log in JSON request bodies (`"kt"`,
+    /// `"moderation"`).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Kt => "kt",
+            Self::Moderation => "moderation",
+        }
+    }
+
+    /// Parse the JSON value; `None` for anything else.
+    #[must_use]
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|log| log.wire_name() == name)
+    }
+
+    /// The one-byte identifier (1 = KT, 2 = moderation), used as a database
+    /// key by the witness.
+    #[must_use]
+    pub const fn byte(self) -> u8 {
+        self as u8
+    }
+}
+
 /// The signing pre-image a witness co-signs:
-/// `DOMAIN ‖ version ‖ tree_root(32) ‖ log_size(8 BE)`.
+/// `DOMAIN ‖ version ‖ name_len(1) ‖ log name ‖ tree_root(32) ‖ log_size(8 BE)`.
 ///
-/// It binds the `(tree_root, log_size)` that uniquely identifies a tree state
-/// (two forks differ in `tree_root` at the same `log_size`). The operator's own
-/// timestamp is NOT covered — the witness attests the tree state, not the
-/// operator's clock.
-fn cosig_signing_input(tree_root: &TreeHash, log_size: u64) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(WITNESS_DOMAIN.len() + 1 + 32 + 8);
+/// It binds the log and the `(tree_root, log_size)` that uniquely identifies a
+/// tree state (two forks differ in `tree_root` at the same `log_size`). The
+/// operator's own timestamp is NOT covered — the witness attests the tree
+/// state, not the operator's clock.
+fn cosig_signing_input(log: LogId, tree_root: &TreeHash, log_size: u64) -> Vec<u8> {
+    let name = log.name();
+    let mut payload = Vec::with_capacity(WITNESS_DOMAIN.len() + 2 + name.len() + 32 + 8);
     payload.extend_from_slice(WITNESS_DOMAIN);
     payload.push(VERSION);
+    // Names are fixed constants well under 256 bytes.
+    #[allow(clippy::cast_possible_truncation)]
+    payload.push(name.len() as u8);
+    payload.extend_from_slice(name);
     payload.extend_from_slice(tree_root);
     payload.extend_from_slice(&log_size.to_be_bytes());
     payload
@@ -72,10 +131,11 @@ fn cosig_signing_input(tree_root: &TreeHash, log_size: u64) -> Vec<u8> {
 #[must_use]
 pub fn sign_witness_cosig(
     witness_key: &SigningKey,
+    log: LogId,
     tree_root: &TreeHash,
     log_size: u64,
 ) -> [u8; WITNESS_COSIG_LEN] {
-    let sig = witness_key.sign(&cosig_signing_input(tree_root, log_size));
+    let sig = witness_key.sign(&cosig_signing_input(log, tree_root, log_size));
     let mut out = [0u8; WITNESS_COSIG_LEN];
     out[0] = VERSION;
     let mut off = 1;
@@ -88,7 +148,9 @@ pub fn sign_witness_cosig(
 }
 
 /// Verify a witness co-signature against the pinned `witness_key`, binding it to
-/// the `(expected_tree_root, expected_log_size)` the caller is verifying.
+/// the `log` and the `(expected_tree_root, expected_log_size)` the caller is
+/// verifying. The log is not in the blob; it enters the signature check, so a
+/// co-signature for another log fails as [`Error::WitnessCosigInvalid`].
 ///
 /// The blob is self-describing; this checks (in order) the length, the version,
 /// that its embedded `(tree_root, log_size)` matches what the caller expects (so
@@ -106,6 +168,7 @@ pub fn sign_witness_cosig(
 pub fn verify_witness_cosig(
     bytes: &[u8],
     witness_key: &[u8],
+    log: LogId,
     expected_tree_root: &TreeHash,
     expected_log_size: u64,
 ) -> Result<()> {
@@ -135,7 +198,7 @@ pub fn verify_witness_cosig(
     let vk = VerifyingKey::from_bytes(witness_key).map_err(|_| Error::WitnessCosigInvalid)?;
     let signature = Signature::from_bytes(sig_bytes).map_err(|_| Error::WitnessCosigInvalid)?;
     vk.verify(
-        &cosig_signing_input(&embedded_root, embedded_size),
+        &cosig_signing_input(log, &embedded_root, embedded_size),
         &signature,
     )
     .map_err(|_| Error::WitnessCosigInvalid)
@@ -192,6 +255,7 @@ pub fn verify_witness_quorum(
     cosigs: &[&[u8]],
     pinned_keys: &[&[u8]],
     threshold: usize,
+    log: LogId,
     expected_tree_root: &TreeHash,
     expected_log_size: u64,
 ) -> Result<()> {
@@ -210,7 +274,7 @@ pub fn verify_witness_quorum(
             continue;
         }
         let key_has_valid_cosig = cosigs.iter().any(|&cosig| {
-            verify_witness_cosig(cosig, key, expected_tree_root, expected_log_size).is_ok()
+            verify_witness_cosig(cosig, key, log, expected_tree_root, expected_log_size).is_ok()
         });
         if key_has_valid_cosig {
             satisfied.push(key);
@@ -239,9 +303,9 @@ mod tests {
         let wk = SigningKey::from_seed(&[0x33; 32]);
         let vk = wk.verifying_key().to_bytes();
         let tr = root_at(0xAB);
-        let cosig = sign_witness_cosig(&wk, &tr, 42);
+        let cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         assert_eq!(cosig.len(), WITNESS_COSIG_LEN);
-        verify_witness_cosig(&cosig, &vk, &tr, 42).expect("witness co-sig verifies");
+        verify_witness_cosig(&cosig, &vk, LogId::Kt, &tr, 42).expect("witness co-sig verifies");
     }
 
     #[test]
@@ -251,9 +315,9 @@ mod tests {
             .verifying_key()
             .to_bytes();
         let tr = root_at(0xAB);
-        let cosig = sign_witness_cosig(&wk, &tr, 42);
+        let cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         assert!(matches!(
-            verify_witness_cosig(&cosig, &other, &tr, 42),
+            verify_witness_cosig(&cosig, &other, LogId::Kt, &tr, 42),
             Err(Error::WitnessCosigInvalid)
         ));
     }
@@ -263,15 +327,15 @@ mod tests {
         let wk = SigningKey::from_seed(&[0x33; 32]);
         let vk = wk.verifying_key().to_bytes();
         let tr = root_at(0xAB);
-        let cosig = sign_witness_cosig(&wk, &tr, 42);
+        let cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         // A co-sig spliced onto a DIFFERENT root.
         assert!(matches!(
-            verify_witness_cosig(&cosig, &vk, &root_at(0xCD), 42),
+            verify_witness_cosig(&cosig, &vk, LogId::Kt, &root_at(0xCD), 42),
             Err(Error::WitnessCosigBindingMismatch)
         ));
         // Same root, DIFFERENT size — a fork at a different point.
         assert!(matches!(
-            verify_witness_cosig(&cosig, &vk, &tr, 43),
+            verify_witness_cosig(&cosig, &vk, LogId::Kt, &tr, 43),
             Err(Error::WitnessCosigBindingMismatch)
         ));
     }
@@ -281,10 +345,10 @@ mod tests {
         let wk = SigningKey::from_seed(&[0x33; 32]);
         let vk = wk.verifying_key().to_bytes();
         let tr = root_at(0xAB);
-        let mut cosig = sign_witness_cosig(&wk, &tr, 42);
+        let mut cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         cosig[WITNESS_COSIG_LEN - 1] ^= 0x01;
         assert!(matches!(
-            verify_witness_cosig(&cosig, &vk, &tr, 42),
+            verify_witness_cosig(&cosig, &vk, LogId::Kt, &tr, 42),
             Err(Error::WitnessCosigInvalid)
         ));
     }
@@ -296,10 +360,10 @@ mod tests {
         let wk = SigningKey::from_seed(&[0x33; 32]);
         let vk = wk.verifying_key().to_bytes();
         let tr = root_at(0xAB);
-        let mut cosig = sign_witness_cosig(&wk, &tr, 42);
+        let mut cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         cosig[1] ^= 0x01; // first byte of the embedded tree_root
         assert!(matches!(
-            verify_witness_cosig(&cosig, &vk, &tr, 42),
+            verify_witness_cosig(&cosig, &vk, LogId::Kt, &tr, 42),
             Err(Error::WitnessCosigBindingMismatch)
         ));
     }
@@ -309,9 +373,9 @@ mod tests {
         let wk = SigningKey::from_seed(&[0x33; 32]);
         let vk = wk.verifying_key().to_bytes();
         let tr = root_at(0xAB);
-        let cosig = sign_witness_cosig(&wk, &tr, 42);
+        let cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         assert!(matches!(
-            verify_witness_cosig(&cosig[..WITNESS_COSIG_LEN - 1], &vk, &tr, 42),
+            verify_witness_cosig(&cosig[..WITNESS_COSIG_LEN - 1], &vk, LogId::Kt, &tr, 42),
             Err(Error::WitnessCosigBadLength { .. })
         ));
     }
@@ -321,10 +385,10 @@ mod tests {
         let wk = SigningKey::from_seed(&[0x33; 32]);
         let vk = wk.verifying_key().to_bytes();
         let tr = root_at(0xAB);
-        let mut cosig = sign_witness_cosig(&wk, &tr, 42);
+        let mut cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
         cosig[0] = 0xFF;
         assert!(matches!(
-            verify_witness_cosig(&cosig, &vk, &tr, 42),
+            verify_witness_cosig(&cosig, &vk, LogId::Kt, &tr, 42),
             Err(Error::WitnessCosigBadVersion(0xFF))
         ));
     }
@@ -335,7 +399,7 @@ mod tests {
         // (tree_root, log_size) bytes the OPERATOR signs un-prefixed produce a
         // different message — the two signature kinds never cross-validate.
         let tr = root_at(0xAB);
-        let input = cosig_signing_input(&tr, 42);
+        let input = cosig_signing_input(LogId::Kt, &tr, 42);
         assert!(input.starts_with(WITNESS_DOMAIN));
         assert_ne!(input.len(), 32 + 8); // not the operator's bare payload
     }
@@ -363,13 +427,13 @@ mod tests {
         let (sks, vks) = witnesses(&[1, 2, 3]);
         let cosigs: Vec<[u8; WITNESS_COSIG_LEN]> = sks
             .iter()
-            .map(|sk| sign_witness_cosig(sk, &tr, 7))
+            .map(|sk| sign_witness_cosig(sk, LogId::Kt, &tr, 7))
             .collect();
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         // 3-of-3 and 2-of-3 both satisfied by three distinct valid co-sigs.
-        verify_witness_quorum(&cosig_refs, &key_refs, 3, &tr, 7).expect("3-of-3 met");
-        verify_witness_quorum(&cosig_refs, &key_refs, 2, &tr, 7).expect("2-of-3 met");
+        verify_witness_quorum(&cosig_refs, &key_refs, 3, LogId::Kt, &tr, 7).expect("3-of-3 met");
+        verify_witness_quorum(&cosig_refs, &key_refs, 2, LogId::Kt, &tr, 7).expect("2-of-3 met");
     }
 
     #[test]
@@ -378,13 +442,13 @@ mod tests {
         let (sks, vks) = witnesses(&[1, 2, 3]);
         // Only two of the three pinned witnesses actually co-signed.
         let cosigs = [
-            sign_witness_cosig(&sks[0], &tr, 7),
-            sign_witness_cosig(&sks[1], &tr, 7),
+            sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7),
+            sign_witness_cosig(&sks[1], LogId::Kt, &tr, 7),
         ];
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &key_refs, 3, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &key_refs, 3, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet {
                 achieved: 2,
                 required: 3
@@ -399,19 +463,19 @@ mod tests {
         // co-sig cannot inflate the quorum to 2.
         let tr = root_at(0xAB);
         let (sks, vks) = witnesses(&[9]);
-        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let c = sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7);
         let cosigs = [c, c]; // same witness's co-sig, twice
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &key_refs, 2, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &key_refs, 2, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet {
                 achieved: 1,
                 required: 2
             })
         ));
         // The same single distinct key does satisfy a threshold of 1.
-        verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7).expect("1-of-1 met");
+        verify_witness_quorum(&cosig_refs, &key_refs, 1, LogId::Kt, &tr, 7).expect("1-of-1 met");
     }
 
     #[test]
@@ -420,13 +484,13 @@ mod tests {
         // once — distinctness is over keys, not slots.
         let tr = root_at(0xAB);
         let (sks, vks) = witnesses(&[9]);
-        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let c = sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7);
         let cosigs = [c];
         let cosig_refs = as_refs(&cosigs);
         let key = vks[0];
         let pinned: [&[u8]; 2] = [&key, &key]; // same key twice
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &pinned, 2, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &pinned, 2, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet {
                 achieved: 1,
                 required: 2
@@ -439,14 +503,14 @@ mod tests {
         // A malformed / bad co-sig does not block an otherwise-met quorum.
         let tr = root_at(0xAB);
         let (sks, vks) = witnesses(&[1, 2, 3]);
-        let c1 = sign_witness_cosig(&sks[0], &tr, 7);
-        let c2 = sign_witness_cosig(&sks[1], &tr, 7);
-        let c3 = sign_witness_cosig(&sks[2], &tr, 7);
+        let c1 = sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7);
+        let c2 = sign_witness_cosig(&sks[1], LogId::Kt, &tr, 7);
+        let c3 = sign_witness_cosig(&sks[2], LogId::Kt, &tr, 7);
         let garbage = [0xAAu8; WITNESS_COSIG_LEN];
         let short = [0x00u8; 3];
         let cosigs: [&[u8]; 5] = [&garbage, &c1, &short, &c2, &c3];
         let key_refs = as_refs(&vks);
-        verify_witness_quorum(&cosigs, &key_refs, 3, &tr, 7)
+        verify_witness_quorum(&cosigs, &key_refs, 3, LogId::Kt, &tr, 7)
             .expect("3 distinct valid despite two junk co-sigs");
     }
 
@@ -457,23 +521,23 @@ mod tests {
         let tr = root_at(0xAB);
         let other = root_at(0xCD);
         let (sks, vks) = witnesses(&[1]);
-        let c = sign_witness_cosig(&sks[0], &other, 7); // signed over `other`
+        let c = sign_witness_cosig(&sks[0], LogId::Kt, &other, 7); // signed over `other`
         let cosigs = [c];
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &key_refs, 1, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet {
                 achieved: 0,
                 required: 1
             })
         ));
         // Same witness, right root but a different log_size — also excluded.
-        let c_size = sign_witness_cosig(&sks[0], &tr, 8);
+        let c_size = sign_witness_cosig(&sks[0], LogId::Kt, &tr, 8);
         let cosigs2 = [c_size];
         let cosig_refs2 = as_refs(&cosigs2);
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs2, &key_refs, 1, &tr, 7),
+            verify_witness_quorum(&cosig_refs2, &key_refs, 1, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet { achieved: 0, .. })
         ));
     }
@@ -483,12 +547,12 @@ mod tests {
         let tr = root_at(0xAB);
         let (_pinned_sks, vks) = witnesses(&[1]); // pin witness 1
         let intruder = SigningKey::from_seed(&[0x77; 32]); // not pinned
-        let c = sign_witness_cosig(&intruder, &tr, 7);
+        let c = sign_witness_cosig(&intruder, LogId::Kt, &tr, 7);
         let cosigs = [c];
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &key_refs, 1, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet {
                 achieved: 0,
                 required: 1
@@ -500,13 +564,13 @@ mod tests {
     fn zero_threshold_fails_closed() {
         let tr = root_at(0xAB);
         let (sks, vks) = witnesses(&[1]);
-        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let c = sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7);
         let cosigs = [c];
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         // A zero quorum must NOT trivially pass even with a valid co-sig present.
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &key_refs, 0, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &key_refs, 0, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumBadThreshold)
         ));
     }
@@ -516,14 +580,14 @@ mod tests {
         let tr = root_at(0xAB);
         let (sks, vks) = witnesses(&[1, 2]);
         let cosigs = [
-            sign_witness_cosig(&sks[0], &tr, 7),
-            sign_witness_cosig(&sks[1], &tr, 7),
+            sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7),
+            sign_witness_cosig(&sks[1], LogId::Kt, &tr, 7),
         ];
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
         // Only two pinned keys exist; a threshold of 3 can never be reached.
         assert!(matches!(
-            verify_witness_quorum(&cosig_refs, &key_refs, 3, &tr, 7),
+            verify_witness_quorum(&cosig_refs, &key_refs, 3, LogId::Kt, &tr, 7),
             Err(Error::WitnessQuorumNotMet {
                 achieved: 2,
                 required: 3
@@ -537,11 +601,76 @@ mod tests {
         // would, proving the quorum generalises the single-witness primitive.
         let tr = root_at(0xAB);
         let (sks, vks) = witnesses(&[5]);
-        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let c = sign_witness_cosig(&sks[0], LogId::Kt, &tr, 7);
         let cosigs = [c];
         let cosig_refs = as_refs(&cosigs);
         let key_refs = as_refs(&vks);
-        verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7).expect("1-of-1 met");
-        verify_witness_cosig(&c, &vks[0], &tr, 7).expect("single-witness path also verifies");
+        verify_witness_quorum(&cosig_refs, &key_refs, 1, LogId::Kt, &tr, 7).expect("1-of-1 met");
+        verify_witness_cosig(&c, &vks[0], LogId::Kt, &tr, 7)
+            .expect("single-witness path also verifies");
+    }
+
+    // --- v2: the log name is bound (ADR-0089 section 5) ---
+
+    #[test]
+    fn cosig_for_one_log_never_verifies_for_the_other() {
+        let wk = SigningKey::from_seed(&[0x33; 32]);
+        let vk = wk.verifying_key().to_bytes();
+        let tr = root_at(0xAB);
+        for (signed, other) in [
+            (LogId::Kt, LogId::Moderation),
+            (LogId::Moderation, LogId::Kt),
+        ] {
+            let cosig = sign_witness_cosig(&wk, signed, &tr, 42);
+            verify_witness_cosig(&cosig, &vk, signed, &tr, 42).expect("same log verifies");
+            assert!(matches!(
+                verify_witness_cosig(&cosig, &vk, other, &tr, 42),
+                Err(Error::WitnessCosigInvalid)
+            ));
+            let cosigs: [&[u8]; 1] = [&cosig];
+            let keys: [&[u8]; 1] = [&vk];
+            assert!(matches!(
+                verify_witness_quorum(&cosigs, &keys, 1, other, &tr, 42),
+                Err(Error::WitnessQuorumNotMet { achieved: 0, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn version_one_blob_is_refused() {
+        let wk = SigningKey::from_seed(&[0x33; 32]);
+        let vk = wk.verifying_key().to_bytes();
+        let tr = root_at(0xAB);
+        let mut cosig = sign_witness_cosig(&wk, LogId::Kt, &tr, 42);
+        assert_eq!(cosig[0], 2);
+        cosig[0] = 1;
+        assert!(matches!(
+            verify_witness_cosig(&cosig, &vk, LogId::Kt, &tr, 42),
+            Err(Error::WitnessCosigBadVersion(1))
+        ));
+    }
+
+    #[test]
+    fn signing_input_layout_is_pinned() {
+        let tr = [0x11u8; 32];
+        let input = cosig_signing_input(LogId::Moderation, &tr, 7);
+        let mut expected = b"lakko/transparency/witness/v2".to_vec();
+        expected.push(2);
+        expected.push(23);
+        expected.extend_from_slice(b"lakko/moderation-log/v1");
+        expected.extend_from_slice(&tr);
+        expected.extend_from_slice(&7u64.to_be_bytes());
+        assert_eq!(input, expected);
+    }
+
+    #[test]
+    fn log_id_wire_names_round_trip() {
+        for log in LogId::ALL {
+            assert_eq!(LogId::from_wire_name(log.wire_name()), Some(log));
+        }
+        assert_eq!(LogId::from_wire_name("KT"), None);
+        assert_eq!(LogId::from_wire_name(""), None);
+        assert_eq!(LogId::Kt.byte(), 1);
+        assert_eq!(LogId::Moderation.byte(), 2);
     }
 }

@@ -28,6 +28,7 @@
  * `lakko-channels` Rust crate via WASM bindings (follow-
  * up sub-sprint G4-2-crypto).
  */
+import { CHANNEL_REMOVED, guardedChannelFetch as writeGuardedFetch } from "../moderation/channel-removal";
 import { t } from "../l10n";
 
 import { anonTokens, anonymousFetchInit } from "../tokens/anon-token-pool";
@@ -133,6 +134,9 @@ const CHANNEL_ERROR_KEYS: Readonly<Record<string, string>> = {
   "post-too-large": "channels.error.post_too_large",
   "empty-post": "channels.error.empty_post",
   "envelope-not-ready": "channels.error.not_let_in",
+  // ADR-0089 step 5: moderators removed the channel; nothing is said about
+  // why until the log verified it (the conversation's own line does that).
+  [CHANNEL_REMOVED]: "channels.unavailable",
 };
 
 /** One sentence for the user about a channels error: what happened, not the
@@ -258,7 +262,7 @@ async function fetchJson<T>(
   url: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const resp = await fetch(url, init);
+  const resp = await writeGuardedFetch(url, init);
   if (!resp.ok) {
     throw await parseError(resp);
   }
@@ -484,7 +488,7 @@ export async function sendAsPublisher(
     if (req.contentType !== undefined) headers["content-type"] = req.contentType;
     const init: RequestInit = { method: req.method, headers };
     if (req.method !== "GET" && req.method !== "HEAD") init.body = exactBody(req.body);
-    return fetch(url, init);
+    return writeGuardedFetch(url, init);
   };
 
   const known = roleByOwnerKey.get(key);
@@ -629,7 +633,7 @@ export async function subscribe(
   let resp: Response;
   try {
     resp = await anonTokens.spend("channel-subscribe", (headerName, headerValue) =>
-      fetch(
+      writeGuardedFetch(
         url,
         anonymousFetchInit({
           method: "POST",
@@ -814,7 +818,7 @@ export async function fetchPublicSeed(
 ): Promise<Uint8Array | null> {
   let resp: Response;
   try {
-    resp = await fetch(`${base}/v1/channels/${channelIdHex}/public-seed/${epoch}`);
+    resp = await writeGuardedFetch(`${base}/v1/channels/${channelIdHex}/public-seed/${epoch}`);
   } catch {
     throw unreachable(0);
   }
@@ -928,7 +932,7 @@ export async function subscribeWithAccess(
         const p = access.inviteProof();
         headers[p.headerName] = p.value;
       }
-      return fetch(url, anonymousFetchInit({ method: "POST", headers, body: json }));
+      return writeGuardedFetch(url, anonymousFetchInit({ method: "POST", headers, body: json }));
     });
   } catch (err) {
     if (err instanceof TypeError) throw unreachable(0);
@@ -1392,7 +1396,7 @@ export async function searchDirectory(
   let resp: Response;
   try {
     resp = await anonTokens.spend("directory-search", (headerName, headerValue) =>
-      fetch(url, anonymousFetchInit({ method: "GET", headers: { [headerName]: headerValue } })),
+      writeGuardedFetch(url, anonymousFetchInit({ method: "GET", headers: { [headerName]: headerValue } })),
     );
   } catch (err) {
     if (err instanceof TypeError) throw unreachable(0);
@@ -1454,7 +1458,7 @@ export async function putMemberCard(
   signature: string,
   base: string = DEFAULT_BASE,
 ): Promise<void> {
-  const resp = await fetch(
+  const resp = await writeGuardedFetch(
     `${base}/v1/channels/${channelIdHex}/members/${subscriberPubkeyHex}`,
     {
       method: "PUT",
@@ -1477,7 +1481,7 @@ export async function deleteMemberCard(
   signature: string,
   base: string = DEFAULT_BASE,
 ): Promise<void> {
-  const resp = await fetch(
+  const resp = await writeGuardedFetch(
     `${base}/v1/channels/${channelIdHex}/members/${subscriberPubkeyHex}`,
     { method: "DELETE", headers: { [MEMBER_CARD_SIG_HEADER]: signature } },
   );
@@ -1499,7 +1503,7 @@ export async function unsubscribeSubscriber(
   signature: { readonly headerName: string; readonly value: string },
   base: string = DEFAULT_BASE,
 ): Promise<void> {
-  const resp = await fetch(
+  const resp = await writeGuardedFetch(
     `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}`,
     { method: "DELETE", headers: { [signature.headerName]: signature.value } },
   );

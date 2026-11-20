@@ -177,6 +177,11 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {{ fromSeed: (seed: Uint8Array) => any }} Identity
  * @property {{ load: (identity: any, groupId: Uint8Array) => any }} Group
  * @property {(bytes: Uint8Array) => any} parseBodyEnvelope
+ * @property {(bytes: Uint8Array) => Uint8Array} [unwrapAttested]
+ *   ADR-0089 section 1 - the envelope inside an attested chat plaintext, or
+ *   the plaintext unchanged. Run before every classifier below; the
+ *   signature is not checked here (a preview is not evidence). Optional so
+ *   an older deps object still loads.
  * @property {(bytes: Uint8Array) => any} [decodePushRoutingSecret]
  *   ADR-0042 / ADR-0044 — the fail-closed push-routing-secret envelope
  *   codec. THROWS when the bytes are not that envelope. Used only to
@@ -339,6 +344,11 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   nothing for the message. Optional; absent, `false` and a throw all mean
  *   "not held", so the message is previewed as any other (the marker's
  *   fail-safe direction: a notification too many, never one too few).
+ * @property {(accountId: string, deviceKey: any) => Promise<readonly string[] | null>} [lookupBlockedKeys]
+ *   ADR-0089 section 6 - READ-ONLY: the account keys (standard base64) this
+ *   account blocked, from the encrypted sync row the app wrote. A frame from
+ *   one of them neither rings nor becomes a preview. Read once per wake.
+ *   Optional; absent, `null` and a throw mean "none blocked".
  * @property {(accountId: string) => Promise<readonly string[] | null>} [lookupSupersededKeys]
  *   ADR-0073 R.5 / R.8 — READ-ONLY: the account keys (standard base64) an
  *   accepted reset retired, from the plaintext mirror the app writes
@@ -750,6 +760,8 @@ export async function decryptPushWake(wake, deps) {
     const words = readWords(deps.notificationWords ?? null);
     // ADR-0073 R.8 — the retired keys, read once for the batch.
     const retired = await supersededKeySet(deps, accountId);
+    // ADR-0089 section 6 - the blocked people, read once for the batch.
+    const blocked = await blockedKeySet(deps, accountId, deviceKey);
     // The ids the app's message log holds for this group, read at most once
     // and only when a row does not decrypt.
     /** @type {Set<number> | null} */
@@ -772,6 +784,16 @@ export async function decryptPushWake(wake, deps) {
         if (held === null) held = await heldMessageIds(deps, accountId, deviceKey, groupHex);
         if (!held.has(message.id)) unreadableRows += 1;
         continue;
+      }
+      // ADR-0089 section 1 - every classifier below reads the envelope
+      // inside an attested plaintext.
+      processed = attestedView(deps.wasm, processed);
+      // ADR-0089 section 6 - nothing from a blocked person acts: no ring, no
+      // preview, no reaction notice. Resolved to the PERSON key against the
+      // roster of the epoch the frame decrypted at.
+      if (blocked.size > 0) {
+        const senderPerson = personKeyAtLeaf(group, processed?.senderLeaf);
+        if (senderPerson !== null && blocked.has(senderPerson) && blockedNotificationDropped(deps.wasm)) continue;
       }
       // Nothing from a superseded sender acts: no ring, no preview. The
       // sender is resolved to its PERSON key against the roster of the
@@ -1677,6 +1699,109 @@ async function supersededKeySet(deps, accountId) {
     out.clear();
   }
   return out;
+}
+
+/**
+ * ADR-0089 section 6 - the account keys this account blocked (standard
+ * base64), as a set, from the encrypted sync row the app wrote. Never
+ * throws; every miss is the empty set, so nothing is held back (a missed
+ * block costs one notification, never a lost one).
+ *
+ * @param {DecryptPushDeps} deps
+ * @param {string} accountId
+ * @param {any} deviceKey
+ * @returns {Promise<Set<string>>}
+ */
+async function blockedKeySet(deps, accountId, deviceKey) {
+  const out = new Set();
+  if (typeof deps.lookupBlockedKeys !== "function") return out;
+  try {
+    const keys = await deps.lookupBlockedKeys(accountId, deviceKey);
+    if (!Array.isArray(keys)) return out;
+    for (const k of keys) if (typeof k === "string" && k.length > 0) out.add(k);
+  } catch {
+    out.clear();
+  }
+  return out;
+}
+
+/**
+ * ADR-0089 section 6 - the shared block rule's answer for a notification
+ * from a blocked person (`drop`). A core without the rule answers `true`: the
+ * person blocked them, and a notification is never the safe side of that.
+ *
+ * @param {DecryptWasm} wasm
+ * @returns {boolean}
+ */
+function blockedNotificationDropped(wasm) {
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.blockVerdict !== "function") return true;
+  try {
+    return wasm.blockVerdict("notification", true) === "drop";
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * ADR-0089 section 1 - a view of a processed frame whose `applicationData`
+ * is the envelope inside the attested wrapper. Only the three fields this
+ * file reads are carried. A frame with no application data, or a core with
+ * no `unwrapAttested`, is returned as it is.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {any} processed
+ * @returns {any}
+ */
+export function attestedView(wasm, processed) {
+  if (processed === null || typeof processed !== "object") return processed;
+  const data = processed.applicationData;
+  if (!(data instanceof Uint8Array)) return processed;
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.unwrapAttested !== "function") {
+    return processed;
+  }
+  let inner = data;
+  try {
+    inner = wasm.unwrapAttested(data);
+  } catch {
+    inner = data;
+  }
+  return { kind: processed.kind, applicationData: inner, senderLeaf: processed.senderLeaf };
+}
+
+/**
+ * ADR-0089 section 6 - the account keys blocked in the decrypted sync row
+ * (`src/devices/sync/sync-state-store.ts`), as standard base64. Anything
+ * unreadable is the empty list.
+ *
+ * @param {any} payload
+ * @param {any} wasm
+ * @returns {string[]}
+ */
+export function blockedKeysFromSyncStateRow(payload, wasm) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 2) return [];
+  if (typeof payload.s !== "string" || payload.s.length === 0) return [];
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.SyncedState !== "function") return [];
+  let state = null;
+  try {
+    const raw = atob(payload.s);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    state = wasm.SyncedState.fromBytes(bytes);
+    if (typeof state.blockedAccounts !== "function") return [];
+    const flat = state.blockedAccounts();
+    if (!(flat instanceof Uint8Array) || flat.length % 32 !== 0) return [];
+    const out = [];
+    for (let i = 0; i < flat.length; i += 32) {
+      let bin = "";
+      for (const b of flat.subarray(i, i + 32)) bin += String.fromCharCode(b);
+      out.push(btoa(bin));
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    if (state !== null && typeof state.free === "function") state.free();
+  }
 }
 
 /**

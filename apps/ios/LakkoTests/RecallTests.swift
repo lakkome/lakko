@@ -167,13 +167,13 @@ final class RecallRulesTests: XCTestCase {
             try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(RecallFinishRequest(
                 sessionId: "s", accountIdB64: "a", anchorSeq: 3, loginFinish: "lf", passwordUpload: "pu",
                 recoveryUpload: "ru", newSignaturePubkeyB64: "pk", deviceIdB64: deviceId,
-                statementB64: "st"))) as? [String: Any])
+                statementB64: "st", identityProofB64: "ip"))) as? [String: Any])
         }
         let without = try body(nil)
         XCTAssertEqual(
             Set(without.keys),
             ["session_id", "account_id_b64", "anchor_seq", "login_finish", "password_upload", "recovery_upload",
-             "new_signature_pubkey_b64", "statement_b64"])
+             "new_signature_pubkey_b64", "statement_b64", "identity_proof_b64"])
         XCTAssertEqual(try body("ZGV2")["device_id_b64"] as? String, "ZGV2")
         XCTAssertEqual(without["anchor_seq"] as? Int, 3)
     }

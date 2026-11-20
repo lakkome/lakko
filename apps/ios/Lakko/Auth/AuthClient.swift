@@ -249,20 +249,28 @@ public final class AuthClient {
     ///
     /// Returns the RAW 153-byte attestation (URL-safe-no-pad decoded from the
     /// response), ready to hand to `DiscoveryClient.uploadIdentityBundle`.
+    ///
+    /// ADR-0089 F3: `identity` is the account identity whose key is
+    /// recorded; the request carries its `signIdentityProof` over
+    /// `accountId` (``IdentityProof``).
     public func mintGenesisAttestation(
         sessionToken: String,
-        identityPubkey: Data
+        identity: Identity,
+        accountId: Data
     ) async throws -> Data {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
+        let identityPubkey = identity.signaturePublicKey()
         guard identityPubkey.count == 32 else {
             throw AuthClientError.argument("identityPubkey must be 32 bytes (Ed25519)")
         }
+        let proof = try IdentityProof.b64(identity: identity, accountId: accountId)
         let resp: GenesisAttestResponse = try await post(
             endpoint: "/auth/genesis/attest",
             body: GenesisAttestRequest(
-                pubkeyB64: base64UrlEncodeNoPad(identityPubkey)
+                pubkeyB64: base64UrlEncodeNoPad(identityPubkey),
+                identityProofB64: proof
             ),
             bearer: sessionToken
         )
@@ -574,13 +582,22 @@ public final class AuthClient {
             serverResponseB64: startResp.response
         )
         let deviceId = LandingDevice.usable(deviceId)
-        let finishResp = try await loginFinish(
-            LoginFinishRequest(
-                sessionId: startResp.sessionId,
-                finalize: out.finalizeB64(),
-                deviceIdB64: deviceId.map(base64UrlEncodeNoPad)
+        let finishResp: LoginFinishResponse
+        do {
+            finishResp = try await loginFinish(
+                LoginFinishRequest(
+                    sessionId: startResp.sessionId,
+                    finalize: out.finalizeB64(),
+                    deviceIdB64: deviceId.map(base64UrlEncodeNoPad)
+                )
             )
-        )
+        } catch var suspended as AccountSuspendedError {
+            // ADR-0089 step 3 — the password was right and the account is
+            // suspended: the export key goes with the credentials, so the
+            // device key is written as on any sign-in.
+            suspended.exportKey = out.exportKey()
+            throw suspended
+        }
         guard finishResp.ok else {
             throw AuthClientError.http(
                 status: 200,
@@ -897,11 +914,15 @@ public final class AuthClient {
     /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401`, `403`, `400`,
     /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
     /// ``AuthClientError/network(endpoint:underlying:)``.
+    ///
+    /// ADR-0089 F3: the finish carries `signIdentityProof` by the identity
+    /// `seed` seeds (which must be `newSignaturePubkey`) over `accountId`.
     public func resetAccountKeys(
         sessionToken: String,
         freshGrant: String,
         seed: Data,
-        newSignaturePubkey: Data
+        newSignaturePubkey: Data,
+        accountId: Data
     ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
@@ -915,6 +936,8 @@ public final class AuthClient {
         guard newSignaturePubkey.count == 32 else {
             throw AuthClientError.argument("newSignaturePubkey must be 32 bytes (Ed25519)")
         }
+        let identityProof = try IdentityProof.b64(
+            seed: seed, accountId: accountId, expectedPubkey: newSignaturePubkey)
         let reg = try OpaqueRegister.startRecovery(seed: seed)
         let start = try await keyResetStart(
             sessionToken: sessionToken,
@@ -928,7 +951,8 @@ public final class AuthClient {
             KeyResetFinishRequest(
                 freshGrant: freshGrant,
                 recoveryUpload: upload,
-                newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey)
+                newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey),
+                identityProofB64: identityProof
             )
         )
         guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
@@ -969,7 +993,8 @@ public final class AuthClient {
         newSignaturePubkey: Data,
         supersessionProof: Data,
         revokeDeviceIds: [Data],
-        phraseSaved: Bool = false
+        phraseSaved: Bool = false,
+        accountId: Data
     ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
@@ -989,6 +1014,9 @@ public final class AuthClient {
         guard revokeDeviceIds.count <= KeyRotationWire.maxRevokedDevices else {
             throw AuthClientError.argument("at most 8 device ids may be revoked with a rotation")
         }
+        // ADR-0089 F3: by the NEW key, over the account id.
+        let identityProof = try IdentityProof.b64(
+            seed: seed, accountId: accountId, expectedPubkey: newSignaturePubkey)
         let reg = try OpaqueRegister.startRecovery(seed: seed)
         let start: KeyResetStartResponse = try await post(
             endpoint: "/account/keys/rotate/start",
@@ -1005,7 +1033,8 @@ public final class AuthClient {
                 newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey),
                 supersessionProofB64: base64UrlEncodeNoPad(supersessionProof),
                 revokeDeviceIdsB64: revokeDeviceIds.map(base64UrlEncodeNoPad),
-                phraseSaved: phraseSaved ? true : nil),
+                phraseSaved: phraseSaved ? true : nil,
+                identityProofB64: identityProof),
             bearer: sessionToken)
         guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
               attestation.count == KeyResetResult.attestationLength else {
@@ -1150,6 +1179,10 @@ public final class AuthClient {
         }
         let oldSeed = attempt.record.oldSeed
         let accountIdB64 = base64UrlEncodeNoPad(accountId)
+        // ADR-0089 F3: by the NEW key (the one `newSeed` seeds), over the
+        // account id. Computed once, so a re-sent finish is byte-identical.
+        let identityProof = try IdentityProof.b64(
+            seed: attempt.newSeed, accountId: accountId, expectedPubkey: attempt.newSignaturePubkey)
 
         let login = try attempt.oldPhraseSeed.map { try OpaqueLogin.startRecovery(seed: $0) }
             ?? OpaqueLogin.startPassword(password: attempt.oldPassword)
@@ -1231,7 +1264,8 @@ public final class AuthClient {
                     recoveryUpload: recoveryUpload,
                     newSignaturePubkeyB64: base64UrlEncodeNoPad(attempt.newSignaturePubkey),
                     deviceIdB64: deviceId.map(base64UrlEncodeNoPad),
-                    statementB64: base64UrlEncodeNoPad(statement)))
+                    statementB64: base64UrlEncodeNoPad(statement),
+                    identityProofB64: identityProof))
             return try await RecallFinishRetry.sendIdentical(body: body) { bytes in
                 try await self.postRaw(endpoint: "/account/recall/finish", body: bytes)
             }
@@ -1552,6 +1586,11 @@ public final class AuthClient {
             )
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
+            // ADR-0089 step 3 — read before the body is truncated: the
+            // landing's credentials do not fit the diagnostic text.
+            if let suspended = AccountSuspendedError.from(status: httpResponse.statusCode, body: data) {
+                throw suspended
+            }
             let bodyText = truncate(String(data: data, encoding: .utf8) ?? "<binary>")
             throw AuthClientError.http(
                 status: httpResponse.statusCode,
@@ -1584,6 +1623,9 @@ public final class AuthClient {
             throw AuthClientError.http(status: 0, endpoint: endpoint, body: "non-HTTP response")
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
+            if let suspended = AccountSuspendedError.from(status: httpResponse.statusCode, body: data) {
+                throw suspended
+            }
             throw AuthClientError.http(
                 status: httpResponse.statusCode,
                 endpoint: endpoint,

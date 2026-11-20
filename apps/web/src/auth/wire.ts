@@ -305,6 +305,9 @@ export interface KeyResetFinishRequest {
    *  signature public key: the key the reset installs, bound into the
    *  attestation. */
   new_signature_pubkey_b64: string;
+  /** URL-safe base64 (no pad) of the 64-byte identity proof
+   *  (`signIdentityProof`) by the NEW key over the account id. */
+  identity_proof_b64: string;
 }
 
 /** `POST /account/keys/reset/finish` response body: the attestation plus the
@@ -394,6 +397,8 @@ export interface RecallFinishRequest {
   password_upload: string;
   recovery_upload: string;
   new_signature_pubkey_b64: string;
+  /** The identity proof by the NEW key over `account_id_b64`. */
+  identity_proof_b64: string;
   device_id_b64?: string;
   /** The `recall` statement over the nonce, the new key and both uploads. */
   statement_b64: string;
@@ -419,6 +424,8 @@ export interface GenesisAttestRequest {
   /** URL-safe base64 (no pad) of the client's 32-byte Ed25519 genesis
    *  identity pubkey. */
   pubkey_b64: string;
+  /** The identity proof by that key over the account id. */
+  identity_proof_b64: string;
 }
 
 /** `POST /auth/genesis/attest` response body. */

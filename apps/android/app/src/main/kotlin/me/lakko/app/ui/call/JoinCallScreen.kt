@@ -953,6 +953,13 @@ private fun JoinCallPanel(
             }
             when (ui.phase) {
                 JoinCallPhase.Idle -> {
+                    // ADR-0089 section 4 — calls are not offered to a
+                    // suspended account: no Join, only the way out.
+                    val callsSuspended by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
+                    if (callsSuspended) {
+                        CenteredText(t("suspended.self.body"), muted = true)
+                        CloseButton(onExit)
+                    } else {
                     // Section 9.1 — a guest (no session yet, or a guest
                     // account from an earlier link) is asked for their name
                     // in the call before Join.
@@ -989,6 +996,7 @@ private fun JoinCallPanel(
                         offer()
                     } else if (ui.busyMessage == null) {
                         CloseButton(onExit)
+                    }
                     }
                 }
                 JoinCallPhase.Starting -> {

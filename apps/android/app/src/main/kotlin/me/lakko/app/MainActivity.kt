@@ -177,6 +177,11 @@ class MainActivity : ComponentActivity() {
         // ADR-0061 — the interface language: stored choice, else the system
         // language, else English. Loaded before the first frame.
         me.lakko.app.l10n.Localization.init(applicationContext)
+        // ADR-0089 F2: the standing proofs refuse a moderator list older
+        // than the one this device has seen (the report sheet's floor).
+        me.lakko.app.moderation.ModeratorListCache.installFloor(
+            me.lakko.app.moderation.ModeratorListVersionStore(applicationContext),
+        )
 
         // G3-sframe-native N-5 — runtime probe for the public
         // org.webrtc.RtpSender.setFrameEncryptor /
@@ -399,6 +404,12 @@ class MainActivity : ComponentActivity() {
                             pushIntake = pushIntake,
                             antiCensorship = antiCensorship,
                             releaseChecker = releaseChecker,
+                        )
+                        // ADR-0089 — the block dialog, the report sheet and the
+                        // notice after a report, for every screen.
+                        me.lakko.app.ui.moderation.ModerationHost(
+                            contactsRepository = contactsRepository,
+                            chatRepository = chatRepository,
                         )
                     }
                 }
@@ -656,6 +667,67 @@ private fun AppRoot(
             me.lakko.app.ui.devices.RecallRoot(repository = authRepository, ui = recallUi)
         }
         return
+    }
+
+    // ADR-0089 section 4 (docs/ux/reporting-and-moderation.md section 4) -
+    // the account is suspended. The suspended screen replaces the app until
+    // "Read my chats"; then the app runs read-only with a row back to it.
+    // While the app is in front the refresh route is asked now and every ten
+    // minutes; a normal pair ends the mode without a word.
+    val suspension by authRepository.suspension.collectAsStateWithLifecycle()
+    val suspendedUi = suspension
+    if (suspendedUi != null) {
+        val suspensionLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        LaunchedEffect(suspendedUi.accountIdB64, suspensionLifecycle) {
+            suspensionLifecycle.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    authRepository.keepCheckingSuspension()
+                }
+            }
+        }
+        if (!suspendedUi.reading) {
+            val signOutScope = androidx.compose.runtime.rememberCoroutineScope()
+            InsetRoot {
+                me.lakko.app.ui.suspension.SuspendedScreen(
+                    repository = authRepository,
+                    ui = suspendedUi,
+                    onSignOut = {
+                        signOutScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            // As every sign-out: the push binding first, then
+                            // the runtimes that could write a store back.
+                            me.lakko.app.push.PushSignOut.clearFirst(chatRepository.context)
+                            me.lakko.app.calls.AppCallHost.reset()
+                            contactsRepository.clear()
+                            deviceGroupSync.clear()
+                            chatRepository.clear()
+                            authRepository.signOutSuspended()
+                        }
+                    },
+                    deleteDialog = { onClose ->
+                        val deleteVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
+                            key = "suspended-delete-${suspendedUi.accountIdB64}",
+                            factory = singletonViewModelFactory {
+                                me.lakko.app.webauthn.PasskeysViewModel(
+                                    repo = authRepository,
+                                    // After the erasure: the same local wipe
+                                    // Delete account always runs.
+                                    onAccountDeleted = {
+                                        me.lakko.app.push.PushSignOut.clearFirst(chatRepository.context)
+                                        me.lakko.app.calls.AppCallHost.reset()
+                                        contactsRepository.clear()
+                                        deviceGroupSync.clear()
+                                        chatRepository.forgetDevice()
+                                        authRepository.forgetDevice()
+                                    },
+                                )
+                            },
+                        )
+                        me.lakko.app.webauthn.DeleteAccountConfirmation(viewModel = deleteVm, onClose = onClose)
+                    },
+                )
+            }
+            return
+        }
     }
 
     // docs/ux/call-links.md section 9 — a guest account (made to join a call
@@ -1343,6 +1415,11 @@ private fun SessionRoot(
         // runtime alongside the chat bootstrap so the poll
         // loop starts at the same moment chat surfaces become
         // usable. Idempotent for the same account id.
+        // ADR-0089 step 4 — this account is never marked suspended by the
+        // marks other people get (its own standing is the suspended screen).
+        // Bound at every landing; sign-out and forget device clear it with
+        // the kept standings (`DeviceGroupSyncRepository.clear`).
+        me.lakko.app.moderation.SuspensionMarks.bindOwnAccountKey { chatRepository.ownPersonKeyB64() }
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             deviceGroupSync.bootstrap(secrets)
         }
@@ -2274,6 +2351,7 @@ private fun SessionRoot(
                         onNewChat = { navController.navigate(Routes.NEW_CHAT) },
                         onCreateGroup = { navController.navigate(Routes.NEW_GROUP) },
                         onCreateChannel = { navController.navigate(Routes.CHANNEL_NEW) },
+                        onShowSuspension = { authRepository.suspensionShowScreen() },
                         // A tap on a search result opens the channel's page;
                         // it subscribes nobody.
                         onSubscribeToChannel = { id, handle ->
@@ -2658,6 +2736,8 @@ private fun SessionRoot(
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
                         onOpenWhoCanFindMe = { navController.navigate(Routes.WHO_CAN_FIND_ME) },
+                        onOpenBlockedPeople = { navController.navigate(Routes.BLOCKED_PEOPLE) },
+                        onOpenYourReports = { navController.navigate(Routes.YOUR_REPORTS) },
                         onSetQuickReaction = { emoji ->
                             quickReactionScope.launch { runCatching { deviceGroupSync.setQuickReaction(emoji) } }
                         },
@@ -2687,6 +2767,17 @@ private fun SessionRoot(
                         onDone = { navController.popBackStack() },
                         onBack = { navController.popBackStack() },
                     )
+                }
+
+                // ADR-0089 — Settings > Privacy > Blocked people / Your reports.
+                composable(Routes.BLOCKED_PEOPLE) {
+                    me.lakko.app.ui.moderation.BlockedPeopleScreen(
+                        contactsRepository = contactsRepository,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(Routes.YOUR_REPORTS) {
+                    me.lakko.app.ui.moderation.YourReportsScreen(onBack = { navController.popBackStack() })
                 }
 
                 composable(Routes.WHO_CAN_FIND_ME) {
@@ -3355,6 +3446,8 @@ private object Routes {
     fun channelInfo(channelId: String): String = "channel/$channelId/info"
     const val PROFILE = "settings/profile"
     const val WHO_CAN_FIND_ME = "settings/privacy/who-can-find-me"
+    const val BLOCKED_PEOPLE = "settings/privacy/blocked"
+    const val YOUR_REPORTS = "settings/privacy/reports"
     const val PASSKEYS = "settings/passkeys"
     const val DELETE_ACCOUNT = "settings/delete-account"
     const val PASSWORD = "settings/password"

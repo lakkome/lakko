@@ -68,6 +68,8 @@ export const paths = {
       | "privacy"
       | "privacy-groups"
       | "privacy-contacts"
+      | "privacy-blocked"
+      | "privacy-reports"
       | "security"
       | "notifications"
       | "folders"

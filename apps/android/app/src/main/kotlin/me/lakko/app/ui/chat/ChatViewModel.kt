@@ -1040,7 +1040,10 @@ public class ChatViewModel(
         me.lakko.app.chat.pinMenuFor(
             sharedPinned = mutableSharedPins.value[messageId]?.pinned == true,
             personalPinned = messageId in mutablePersonalPins.value,
-            mayShared = mutablePinAuthority.value,
+            mayShared = me.lakko.app.chat.sharedPinOffered(
+                mutablePinAuthority.value,
+                me.lakko.app.auth.SuspensionGate.readOnly.value,
+            ),
         )
 
     /** Perform one pin action on [messageId]. A personal action is local and
@@ -2014,6 +2017,9 @@ public class ChatViewModel(
         } catch (_: Throwable) {
             null
         }
+
+    /** ADR-0089 — the other person's account key (base64) in a one-to-one, else `null`. */
+    public fun oneToOnePeerPersonKey(): String? = repo.oneToOnePeerPersonKey(groupIdHex)
 
     public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String {
         val resolved = profileNames.resolve(identity)

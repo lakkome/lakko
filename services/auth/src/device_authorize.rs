@@ -211,6 +211,17 @@ pub(crate) async fn redeem(
         return Err(ApiError::InvalidCredential);
     };
 
+    // ADR-0089 section 4: the grant is spent (it is the proof, and single
+    // use), and a suspended account's new device lands in suspended mode.
+    crate::suspension::refuse_landing_if_suspended(
+        &state,
+        &account_id,
+        key_generation,
+        &device_id,
+        crate::suspension::LandingGrant::None,
+    )
+    .await?;
+
     tracing::info!("device-authorize: grant redeemed, issuing session token",);
 
     let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;

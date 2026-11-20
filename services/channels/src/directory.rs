@@ -163,15 +163,6 @@ pub fn normalize_search_query(raw: &str) -> Result<String, SearchQueryError> {
     Ok(q.to_lowercase())
 }
 
-/// Whether a moderation reason code is well formed: 1-64 of `[a-z0-9-]`.
-#[must_use]
-pub fn is_reason_code(reason: &str) -> bool {
-    (1..=64).contains(&reason.len())
-        && reason
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,15 +283,5 @@ mod tests {
             normalize_search_query("ab\ncd"),
             Err(SearchQueryError::ControlCharacter)
         );
-    }
-
-    #[test]
-    fn reason_codes_are_short_kebab_ascii() {
-        assert!(is_reason_code("spam"));
-        assert!(is_reason_code("illegal-content-2"));
-        assert!(!is_reason_code(""));
-        assert!(!is_reason_code("Spam"));
-        assert!(!is_reason_code("has space"));
-        assert!(!is_reason_code(&"a".repeat(65)));
     }
 }

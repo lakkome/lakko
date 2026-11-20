@@ -98,7 +98,8 @@ enum ChannelPostLog {
                 }
                 if case .text(let text) = outcome {
                     fresh.append(
-                        PersistedChannelPost(cursor: p.cursor, serverTsMs: p.serverTsMs, text: text))
+                        PersistedChannelPost(
+                            cursor: p.cursor, serverTsMs: p.serverTsMs, text: text, payloadB64: p.payloadB64))
                 }
                 cursor = p.cursor
             }
@@ -115,6 +116,10 @@ struct PersistedChannelPost: Codable, Equatable {
     /// Server receive time, unix ms.
     let serverTsMs: Int64
     let text: String
+    /// ADR-0089 — the post as it was received (base64url ChannelPost wire),
+    /// so a report from the channel's info can carry it as evidence. `nil`
+    /// for a post logged before the field existed.
+    var payloadB64: String? = nil
 }
 
 /// One channel's slice of the log.

@@ -570,9 +570,21 @@ public final class JoinCallLandingViewModel: ObservableObject {
 ///
 /// It never shows the live call itself: that is the root's full-screen call
 /// (`CallHostOverlay`), on this screen and every other one.
+/// ADR-0089 step 3 — what the call-link landing offers while the account
+/// is suspended: no name field and no Join, one line and Close.
+enum JoinCallSuspension {
+    static func offersJoin(suspended: Bool) -> Bool { !suspended }
+}
+
 public struct JoinCallLandingScreen: View {
     @StateObject private var viewModel: JoinCallLandingViewModel
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 3 — a suspended account joins no calls.
+    @Environment(\.accountSuspended) private var accountSuspended
+
+    /// Suspended mode, from the environment or, where this landing is shown
+    /// outside the session root, from the token provider.
+    private var suspended: Bool { accountSuspended || SessionTokenProvider.shared.isSuspended }
     private let onDone: () -> Void
     /// The guest's one question (`docs/ux/call-links.md` section 5), when the
     /// session is a guest account: drawn whenever the guest is not in the
@@ -683,6 +695,12 @@ public struct JoinCallLandingScreen: View {
     @ViewBuilder
     private func content(_ decoded: JoinCallLandingViewModel.Decoded) -> some View {
         switch viewModel.phase {
+        case .idle where !JoinCallSuspension.offersJoin(suspended: suspended):
+            Text(l10n.t("suspended.self.body"))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            closeButton
         case .idle:
             if viewModel.showsGuestNameField(decoded) {
                 // `docs/ux/call-links.md` section 9.1 — the name everyone in

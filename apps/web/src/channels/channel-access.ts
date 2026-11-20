@@ -55,6 +55,7 @@ import {
   SUBSCRIBER_REMOVED,
   subscribeWithAccess,
 } from "./api";
+import { CHANNEL_REMOVED } from "../moderation/channel-removal";
 import {
   bytesToHex,
   channelIdFromHex,
@@ -913,7 +914,9 @@ export async function catchUpChannel(idHex: string): Promise<void> {
         }
       }
     } catch (err) {
-      if (apiError.is(err) && (err.code === SUBSCRIBER_REMOVED || err.status === 410)) {
+      // ADR-0089 step 5: a channel moderators removed is NOT this device
+      // being removed from it; it stays (`moderation/channel-removal.ts`).
+      if (apiError.is(err) && (err.code === SUBSCRIBER_REMOVED || (err.status === 410 && err.code !== CHANNEL_REMOVED))) {
         await onRemoved?.(idHex);
         return;
       }

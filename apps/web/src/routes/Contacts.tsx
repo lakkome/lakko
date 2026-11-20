@@ -72,7 +72,6 @@ import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   loadAccepted,
   restoreRemovedContact,
-  removeAccepted,
   subscribeAcceptedChanged,
   upsertAccepted,
   type AcceptedContact,
@@ -88,8 +87,7 @@ import { forgetSentIntro } from "../contacts/sent-request-intros";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
-import { onContactRemoved } from "../reach/reach-service";
-import { forgetChosenContact } from "../settings/visibility-actions";
+import { removeContactByKey } from "../contacts/remove-contact";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
@@ -303,17 +301,9 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
 
   // ---- rename / remove ------------------------------------------
   function onRemoveAccepted(contact: AcceptedContact): void {
-    setAccepted(removeAccepted(contact.signaturePubkeyB64));
-    // ADR-0060 section 1 — a removed contact keeps the `contact` key we handed
-    // them; rotating it (and the `fof` key) makes it stop working at once.
-    void onContactRemoved(base64Decode(contact.signaturePubkeyB64));
-    // Adding them back brings them in switched off (who-can-find-me 4.1).
-    if (contact.accountIdHex !== undefined) {
-      void forgetChosenContact(contact.accountIdHex).catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.warn("[privacy] a removed contact stayed in the chosen list", err);
-      });
-    }
+    // The one way a removal runs (`contacts/remove-contact.ts`): the row, the
+    // rotated `contact` key (ADR-0060 section 1), the chosen list.
+    setAccepted(removeContactByKey(contact.signaturePubkeyB64));
   }
   /** ADR-0048 §5 — the viewer's LOCAL RENAME of a contact. A blank value
    *  clears it, so the contact's own name shows again. Re-upserts by the

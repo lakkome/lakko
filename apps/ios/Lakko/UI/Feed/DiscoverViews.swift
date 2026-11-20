@@ -144,6 +144,15 @@ struct DiscoverCardView: View {
     @State private var busy = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 / UX 2.1 — Report from the card's menu, its listing included.
+    @State private var reportRequest: ReportRequest?
+
+    private var cardReport: ReportRequest? {
+        guard let id = ChannelsClient.hexToData(card.channelIdHex), id.count == 16 else { return nil }
+        return ReportRequest(
+            target: .channel(channelId: id), targetName: card.name, conversationKind: .discover,
+            fixedEvidence: card.listingWire.map { [FfiEvidenceItem.listing(wire: $0)] } ?? [])
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -222,15 +231,22 @@ struct DiscoverCardView: View {
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
         // Lakko's own long-press menu, never the system context menu.
         .lakkoLongPressMenu {
-            guard model.relation(card.channelIdHex) == .none else { return [] }
-            var items: [LakkoMenuItem] = [
-                .action(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) },
-            ]
-            if let topic = card.topic {
-                items.append(.action(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) })
+            var items: [LakkoMenuItem] = []
+            if model.relation(card.channelIdHex) == .none {
+                items.append(.action(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) })
+                if let topic = card.topic {
+                    items.append(.action(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) })
+                }
+            }
+            // ADR-0089 / UX 2.1 — never on a channel this account owns.
+            if model.relation(card.channelIdHex) != .own, let report = cardReport {
+                items.append(.action(l10n.t("report.action"), systemImage: "flag", destructive: true) {
+                    reportRequest = report
+                })
             }
             return items
         }
+        .reportSheet($reportRequest)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(l10n.t("discover.card.a11y", texts: ["name": card.name]))
     }

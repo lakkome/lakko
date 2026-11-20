@@ -88,6 +88,12 @@ lakko-anon-token-server.workspace = true
 # secret (the push-gw pattern). Already in the workspace graph.
 subtle = "2"
 
+# ADR-0089 step 5 - a moderator's statement is checked here against the
+# moderator list under the pinned root before a channel is delisted, blocked,
+# removed or restored. Already in the lock file (services/auth,
+# services/moderation).
+lakko-moderation.workspace = true
+
 # ADR-0060 member cards. The server still treats every
 # ChannelPost, seed envelope and card as opaque bytes
 # (ADR-0010 — no payload inspection). From lakko-channels
@@ -107,3 +113,5 @@ lakko-crypto.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
 lakko-anon-token-server = { workspace = true, features = ["testing"] }
+# ADR-0089 step 5: the statement route tests sign with a software key.
+lakko-moderation = { workspace = true, features = ["software-authenticator"] }

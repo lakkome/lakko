@@ -25,11 +25,13 @@ import { ModalLayer } from "../ui/ModalLayer";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { useWebauthnClient } from "./use-webauthn-client";
 import {
+  WebauthnClient,
   WebauthnHttpError,
   WebauthnUserCancelledError,
   actionHashForDeleteAccount,
 } from "./webauthn-client";
 import { DiscoveryClient } from "../discovery/client";
+import { StorageClient } from "../storage/client";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
 import { t, type L10nArgs } from "../l10n";
@@ -192,9 +194,45 @@ export function AccountCard(): JSX.Element {
  * is the proof, and no passkey sign-in precedes it. An account without one
  * proves the password unless a proof is live.
  */
-function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Element {
+/** Whose account the dialog deletes, and with what. */
+export interface DeleteAccountTarget {
+  readonly accountId: Uint8Array;
+  /** The bearer of every deletion request: the access token, or a suspended
+   *  account's restricted session (ADR-0089), which opens auth's
+   *  `DELETE /account`, discovery's `DELETE /discovery/account` and
+   *  storage's `DELETE /backup` and nothing else. */
+  readonly bearer: string;
+  readonly usernameKnown: boolean;
+  /** The local cleanup once the servers deleted the account. */
+  readonly finish: () => Promise<void>;
+}
+
+export function DeleteAccountDialog(props: {
+  readonly onClose: () => void;
+  /** ADR-0089: a suspended account on a device that holds none of its keys
+   *  passes its own target; otherwise the signed-in session is the target. */
+  readonly target?: DeleteAccountTarget;
+}): JSX.Element {
   const auth = useAuth();
-  const { client } = useWebauthnClient();
+  const target = (): DeleteAccountTarget | null => {
+    if (props.target !== undefined) return props.target;
+    const secrets = auth.identitySecrets();
+    if (secrets === null) return null;
+    const s = auth.state();
+    return {
+      accountId: secrets.accountId,
+      bearer: secrets.sessionToken,
+      usernameKnown: s.kind === "session" && s.account.username.trim().length > 0,
+      finish: () => auth.forgetDevice(),
+    };
+  };
+  const client = (): WebauthnClient | null => {
+    const tg = target();
+    if (tg === null) return null;
+    const c = new WebauthnClient();
+    c.setSessionToken(tg.bearer);
+    return c;
+  };
   const [busy, setBusy] = createSignal(false);
   const [noPassword, setNoPassword] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -204,11 +242,8 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
     // The passkey case is the dialog's own (the gesture for this deletion).
     offerPasskey: false,
     busy,
-    sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
-    usernameKnown: () => {
-      const s = auth.state();
-      return s.kind === "session" && s.account.username.trim().length > 0;
-    },
+    sessionToken: () => target()?.bearer ?? null,
+    usernameKnown: () => target()?.usernameKnown === true,
   });
   const surface = () =>
     deleteSurfaceView({
@@ -242,7 +277,7 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
   async function onDelete(): Promise<void> {
     if (!canDelete()) return;
     const c = client();
-    const secrets = auth.identitySecrets();
+    const secrets = target();
     if (c === null || secrets === null) {
       setError(t("common.error.session_not_ready"));
       return;
@@ -269,7 +304,7 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       // one it has no record of lives until it expires or is used up.
       try {
         const links = new DiscoveryClient();
-        links.setSessionToken(secrets.sessionToken);
+        links.setSessionToken(secrets.bearer);
         await revokeAllMintedLinks(links, base64Encode(secrets.accountId));
       } catch {
         /* best-effort: the deletion does not wait on a link */
@@ -293,14 +328,23 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       }
       try {
         const d = new DiscoveryClient();
-        d.setSessionToken(secrets.sessionToken);
+        d.setSessionToken(secrets.bearer);
         await d.deleteAccount();
+      } catch {
+        /* best-effort */
+      }
+      // The encrypted backup goes with the account (ADR-0089: a suspended
+      // account's restricted session opens this route too).
+      try {
+        const storage = new StorageClient();
+        storage.setSessionToken(secrets.bearer);
+        await storage.deleteBackup();
       } catch {
         /* best-effort */
       }
       gate.clear();
       // Wipes this device and lands on the sign-in screen.
-      await auth.forgetDevice();
+      await secrets.finish();
     } catch (err) {
       // ADR-0074 section 1.3: while the account can still be taken back
       // after a key reset, the server refuses the deletion and names the

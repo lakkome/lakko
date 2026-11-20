@@ -505,6 +505,11 @@ pub(crate) async fn delete_account(
         .execute(&mut *tx)
         .await
         .map_err(ApiError::Db)?;
+    // ADR-0089 F3: the account's identity-key history goes with it, unless
+    // the account is suspended now (then it stays taken until the end).
+    crate::identity_target::on_account_deleted(&mut tx, &auth.0, crate::session::now_ms())
+        .await
+        .map_err(ApiError::Db)?;
     sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(auth.0.as_slice())
         .execute(&mut *tx)
@@ -778,6 +783,18 @@ pub(crate) async fn auth_finish(
         .await
         .map_err(ApiError::Db)?;
     }
+
+    // ADR-0089 section 4: a suspended account lands in suspended mode. Checked
+    // after the signature counter above, which is part of authenticating
+    // (clone detection), and before anything is issued.
+    crate::suspension::refuse_landing_if_suspended(
+        &state,
+        &account_id,
+        key_generation,
+        &device_id,
+        crate::suspension::LandingGrant::Fresh,
+    )
+    .await?;
 
     // Issue the session pair at the account's current key generation
     // (ADR-0073) — the same shape every login route returns — and, because
@@ -1109,39 +1126,123 @@ pub(crate) struct AuthenticatedDevice {
 /// expired, an account that no longer exists — is the plain bodiless `401`
 /// it always was. Stamps an [`AuthenticatedAccount`] and an
 /// [`AuthenticatedDevice`] into the request extensions on success.
+///
+/// ADR-0089 section 4: an account that is suspended is refused with `403
+/// {"error":"account-suspended"}` after those checks; the suspension is read
+/// in the same query as the generation.
 pub(crate) async fn require_session(
     State(state): State<AppState>,
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::response::Response> {
+    let verified = bearer_credential(&state, &request, BearerKinds::AccessOnly)
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    let suspended = admit_credential(&state, &verified).await?;
+    if suspended {
+        // ADR-0089 section 4: a suspended account's access token opens no
+        // bearer route. No credentials in this body; the client calls the
+        // refresh route, whose `403` carries the restricted session.
+        tracing::debug!("webauthn auth: bearer of a suspended account refused");
+        return Err(ApiError::AccountSuspended(None).into_response());
+    }
+    insert_principal(&mut request, &verified, false);
+    Ok(next.run(request).await)
+}
+
+/// Bearer middleware of the four routes a suspended account may call
+/// ([ADR-0089] section 4): read the suspension, send an appeal, delete the
+/// account, sign out (plus the passkey action ceremony, which is how an
+/// account with a passkey deletes itself; `webauthn_action::action_start`
+/// accepts only the delete-account action while the account is suspended).
+///
+/// Accepts an access token (`v3`) OR a restricted session (`s1`), with the
+/// same generation and device-floor checks as [`require_session`], and
+/// stamps the same extensions plus a [`SessionStanding`].
+///
+/// [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+pub(crate) async fn require_session_or_restricted(
+    State(state): State<AppState>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::response::Response> {
+    let verified = bearer_credential(&state, &request, BearerKinds::AccessOrRestricted)
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    let suspended = admit_credential(&state, &verified).await?;
+    insert_principal(&mut request, &verified, suspended);
+    Ok(next.run(request).await)
+}
+
+/// Which credential kinds a bearer middleware accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BearerKinds {
+    /// `v3` only.
+    AccessOnly,
+    /// `v3`, or the `s1` restricted session of a suspended account.
+    AccessOrRestricted,
+}
+
+/// What a bearer route knows about the account's standing (ADR-0089).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SessionStanding {
+    /// The account is suspended now.
+    pub(crate) suspended: bool,
+}
+
+/// Parse and verify the `Authorization: Bearer` credential. `None` for
+/// every failure, which the caller answers with the plain bodiless `401`.
+fn bearer_credential(
+    state: &AppState,
+    request: &axum::extract::Request,
+    kinds: BearerKinds,
+) -> Option<lakko_auth_token::VerifiedToken> {
     use axum::http::header;
-    let plain = || StatusCode::UNAUTHORIZED.into_response();
-    let header_value = request
+    let Some(header_value) = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            tracing::debug!("webauthn auth middleware: missing Authorization header");
-            plain()
-        })?;
-    let token = header_value.strip_prefix("Bearer ").ok_or_else(|| {
+    else {
+        tracing::debug!("webauthn auth middleware: missing Authorization header");
+        return None;
+    };
+    let Some(token) = header_value.strip_prefix("Bearer ") else {
         tracing::warn!("webauthn auth middleware: Authorization missing Bearer prefix");
-        plain()
-    })?;
-    let verified = state
-        .session_token_secret
-        .verify(token, crate::session::now_ms())
+        return None;
+    };
+    let now = crate::session::now_ms();
+    let secret = &state.session_token_secret;
+    let verified = match kinds {
+        BearerKinds::AccessOnly => secret.verify(token, now),
+        BearerKinds::AccessOrRestricted => secret
+            .verify(token, now)
+            .or_else(|_| secret.verify_restricted(token, now)),
+    };
+    verified
         .map_err(|e| {
             tracing::warn!(error = %e, "webauthn auth: session-token verify failed");
-            plain()
-        })?;
-    let current = crate::session::key_generation_of(&state.db, &verified.account_id)
-        .await
-        .map_err(|e| ApiError::Db(e).into_response())?
-        .ok_or_else(|| {
-            tracing::debug!("webauthn auth: token names an account that does not exist");
-            plain()
-        })?;
+        })
+        .ok()
+}
+
+/// The generation check (ADR-0073) and the device floor (ADR-0074) of a
+/// verified credential, in that order (see [`require_session`] for why), and
+/// whether the account is suspended (ADR-0089), read with the generation in
+/// one query.
+async fn admit_credential(
+    state: &AppState,
+    verified: &lakko_auth_token::VerifiedToken,
+) -> Result<bool, axum::response::Response> {
+    let plain = || StatusCode::UNAUTHORIZED.into_response();
+    let (current, suspended) = crate::suspension::generation_and_suspension(
+        &state.db,
+        &verified.account_id,
+        crate::session::now_ms(),
+    )
+    .await
+    .map_err(|e| ApiError::Db(e).into_response())?
+    .ok_or_else(|| {
+        tracing::debug!("webauthn auth: token names an account that does not exist");
+        plain()
+    })?;
     if verified.key_generation < current {
         tracing::info!(
             token_generation = verified.key_generation,
@@ -1161,7 +1262,7 @@ pub(crate) async fn require_session(
         );
         return Err(plain());
     }
-    match crate::session::floor_verdict(&state.db, &verified)
+    match crate::session::floor_verdict(&state.db, verified)
         .await
         .map_err(|e| ApiError::Db(e).into_response())?
     {
@@ -1175,6 +1276,14 @@ pub(crate) async fn require_session(
             return Err(ApiError::DeviceRevoked.into_response());
         },
     }
+    Ok(suspended)
+}
+
+fn insert_principal(
+    request: &mut axum::extract::Request,
+    verified: &lakko_auth_token::VerifiedToken,
+    suspended: bool,
+) {
     request
         .extensions_mut()
         .insert(AuthenticatedAccount(verified.account_id));
@@ -1182,7 +1291,9 @@ pub(crate) async fn require_session(
         device_id: verified.device_id,
         key_generation: verified.key_generation,
     });
-    Ok(next.run(request).await)
+    request
+        .extensions_mut()
+        .insert(SessionStanding { suspended });
 }
 
 // ----------------------------------------------------------------
@@ -1415,6 +1526,11 @@ pub(crate) enum ApiError {
         /// Unix milliseconds at which the last open anchor expires.
         until_ms: i64,
     },
+    /// ADR-0089 section 4: the account is suspended. `403` with the body
+    /// `{"error":"account-suspended"}`, plus, when the route authenticated
+    /// the person (a landing route, the refresh route), the restricted
+    /// session and a refresh credential ([`crate::suspension::SuspendedBody`]).
+    AccountSuspended(Option<Box<crate::suspension::SuspendedBody>>),
     /// A refusal that is a status and one stable JSON body code,
     /// `{"error": <code>}`, with nothing else to carry. Used by the
     /// ADR-0075 recovery-email routes (`recovery-email-disabled`,
@@ -1547,6 +1663,9 @@ impl IntoResponse for ApiError {
                     })),
                 )
                     .into_response();
+            },
+            Self::AccountSuspended(body) => {
+                return crate::suspension::suspended_response(body.map(|b| *b));
             },
             Self::Coded(status, code) => {
                 return (status, axum::Json(serde_json::json!({ "error": code }))).into_response();

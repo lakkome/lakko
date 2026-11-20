@@ -151,6 +151,19 @@ public fun accountSegmentOfAccessToken(token: String): String? =
 public fun deviceSegmentOfAccessToken(token: String): String? =
     accessTokenSegments(token)?.get(DEVICE_SEGMENT_INDEX)?.takeIf { it.isNotEmpty() }
 
+/**
+ * The account segment of an access token or of an ADR-0089 restricted
+ * session (`s1.`, the same seven segments): what ties the suspended pair of
+ * an account to the one installed for it. `null` for anything else.
+ */
+public fun accountSegmentOfSessionToken(token: String): String? {
+    accountSegmentOfAccessToken(token)?.let { return it }
+    if (!token.startsWith(RESTRICTED_TOKEN_PREFIX)) return null
+    val parts = token.split('.')
+    if (parts.size != ACCESS_TOKEN_SEGMENTS) return null
+    return parts[ACCOUNT_SEGMENT_INDEX].takeIf { it.isNotEmpty() }
+}
+
 /** The all-zero device id as a token spells it: "no device identity yet". */
 public val UNBOUND_DEVICE_SEGMENT: String = "A".repeat(43)
 

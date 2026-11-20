@@ -24,6 +24,14 @@
  *   4. `401 device-revoked` (ADR-0074), from the refresh route or from any
  *      bearer route, raises `device-revoked` once: this device was removed
  *      from the account, signs out and wipes everything.
+ *   5. `403 account-suspended` (ADR-0089 section 4): from a bearer route of
+ *      auth it costs one refresh; the refresh answers with a restricted
+ *      session, which the provider holds in place of the pair and announces
+ *      as `suspended`. While it holds one, every request this account's
+ *      tokens would carry is answered here, locally, with the same `403`,
+ *      except the few routes a suspended account may use, which go out with
+ *      the live restricted token. A refresh that answers a pair again ends
+ *      it (`pair`).
  *
  * A caller may pass a token the provider has since replaced (a component
  * that captured `identitySecrets().sessionToken` before a refresh): the
@@ -37,12 +45,15 @@
  * modules: the refresh transport and the persistence are injected by
  * `AuthContext`, which also subscribes to the events.
  */
-import { bearerRefusal, CODE_KEY_GENERATION_SUPERSEDED, errorCodeOf, refreshRefusal } from "./session-401";
-import { tokenDecision, type SessionPair } from "./session-pair";
+import { bearerRefusal, CODE_ACCOUNT_SUSPENDED, CODE_KEY_GENERATION_SUPERSEDED, errorCodeOf, refreshRefusal } from "./session-401";
+import { REFRESH_AHEAD_MS, tokenDecision, type SessionPair } from "./session-pair";
+import type { RestrictedSession } from "./suspension";
 
 /** What the refresh transport answers. A network failure throws. */
 export type RefreshTransportResult =
   | { readonly kind: "pair"; readonly pair: SessionPair }
+  /** ADR-0089: `403 account-suspended` with the restricted session. */
+  | { readonly kind: "suspended"; readonly restricted: RestrictedSession }
   | { readonly kind: "refused"; readonly status: number; readonly errorCode: string | null };
 
 /** The ports `AuthContext` injects. */
@@ -52,6 +63,8 @@ export interface SessionTokenProviderPorts {
   /** Persist a refreshed pair under the device key. Best effort: a failure
    *  is logged by the port, the in-memory pair still serves this page. */
   readonly persist: (accountIdB64: string, pair: SessionPair) => Promise<void>;
+  /** Persist a restricted session (ADR-0089) the same way. */
+  readonly persistRestricted?: (accountIdB64: string, restricted: RestrictedSession) => Promise<void>;
   readonly now?: () => number;
   readonly fetchImpl?: typeof fetch;
 }
@@ -71,6 +84,9 @@ export type RefreshOutcome =
   | "invalid"
   /** The request never got an answer; the pair is kept. */
   | "network"
+  /** ADR-0089: the account is suspended. The restricted session is held in
+   *  place of the pair and `suspended` was raised. */
+  | "suspended"
   /** No pair is installed, or the refresh credential has expired. */
   | "none";
 
@@ -79,7 +95,46 @@ export type SessionEvent =
   | { readonly kind: "pair"; readonly accountIdB64: string; readonly pair: SessionPair }
   | { readonly kind: "superseded"; readonly accountIdB64: string }
   | { readonly kind: "device-revoked"; readonly accountIdB64: string }
-  | { readonly kind: "refresh-invalid"; readonly accountIdB64: string };
+  | { readonly kind: "refresh-invalid"; readonly accountIdB64: string }
+  /** ADR-0089: the refresh answered `403 account-suspended`. Raised on every
+   *  such answer (the periodic check included), with the newest restricted
+   *  session; the listener decides whether anything changes. */
+  | {
+      readonly kind: "suspended";
+      readonly accountIdB64: string;
+      readonly restricted: RestrictedSession;
+    };
+
+/**
+ * The routes a restricted session opens (ADR-0089 section 4), as `METHOD
+ * path` with the `/api/<service>` prefix every client of this app uses (the
+ * web through nginx, the desktop through its host). Every other request
+ * carrying a token of a suspended account is answered locally.
+ *
+ * Auth: read the suspension, send one appeal, delete the account, sign out,
+ * the passkey ceremony of the deletion, and the anonymous-token issuance
+ * (`blob-read` only, decided by auth: files in chats still open). Discovery
+ * and storage: the deletion of the account's rows and of its backup.
+ */
+export const RESTRICTED_ROUTES: readonly string[] = [
+  "GET /api/auth/account/suspension",
+  "POST /api/auth/account/suspension/appeal",
+  "DELETE /api/auth/account",
+  "POST /api/auth/auth/session/logout",
+  "POST /api/auth/auth/action/start",
+  "POST /api/auth/auth/action/finish",
+  "POST /api/auth/auth/tokens",
+  "DELETE /api/discovery/discovery/account",
+  "DELETE /api/storage/backup",
+];
+
+/** The local answer to a request a suspended account may not make. */
+function suspendedResponse(): Response {
+  return new Response(JSON.stringify({ error: CODE_ACCOUNT_SUSPENDED }), {
+    status: 403,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 type Listener = (event: SessionEvent) => void;
 
@@ -87,6 +142,9 @@ export class SessionTokenProvider {
   private ports: SessionTokenProviderPorts | null = null;
   private account: string | null = null;
   private held: SessionPair | null = null;
+  /** ADR-0089: the restricted session held in place of the pair while the
+   *  account is suspended. Never both. */
+  private restrictedHeld: RestrictedSession | null = null;
   /** Access tokens this page replaced through a refresh: a caller holding
    *  one still gets the live token. Bounded by the number of refreshes in a
    *  page lifetime (one per 15 minutes by design). */
@@ -113,14 +171,47 @@ export class SessionTokenProvider {
     if (this.held !== null && this.held.sessionToken !== pair.sessionToken) {
       this.replaced.add(this.held.sessionToken);
     }
+    // The suspension ended: a capture of the restricted token resolves to
+    // the live access token from here on.
+    if (this.restrictedHeld !== null && this.account === accountIdB64) {
+      this.replaced.add(this.restrictedHeld.restrictedToken);
+    }
+    this.restrictedHeld = null;
     this.account = accountIdB64;
     this.held = pair;
+  }
+
+  /**
+   * ADR-0089: hold `restricted` for `accountIdB64` in place of a pair (a
+   * landing answered `403 account-suspended`, or a refresh did). The access
+   * token held until now, and an earlier restricted token, keep resolving to
+   * the live restricted session on the routes it opens and are answered
+   * locally everywhere else.
+   */
+  installRestricted(accountIdB64: string, restricted: RestrictedSession): void {
+    this.supersededHeld = null;
+    if (this.account !== accountIdB64) this.replaced.clear();
+    else {
+      if (this.held !== null) this.replaced.add(this.held.sessionToken);
+      if (this.restrictedHeld !== null && this.restrictedHeld.restrictedToken !== restricted.restrictedToken) {
+        this.replaced.add(this.restrictedHeld.restrictedToken);
+      }
+    }
+    this.account = accountIdB64;
+    this.held = null;
+    this.restrictedHeld = restricted;
+  }
+
+  /** The restricted session held while the account is suspended, or `null`. */
+  restricted(): RestrictedSession | null {
+    return this.restrictedHeld;
   }
 
   /** Sign-out, wipe, or a session that ended: hold nothing. */
   clear(): void {
     this.account = null;
     this.held = null;
+    this.restrictedHeld = null;
     this.replaced.clear();
   }
 
@@ -162,9 +253,28 @@ export class SessionTokenProvider {
 
   /** Whether a refresh could be attempted right now. */
   refreshAvailable(): boolean {
+    if (this.restrictedHeld !== null) return this.restrictedHeld.refreshExpiresAtMs > this.now();
     return (
       this.held !== null && tokenDecision(this.held, this.now()) !== "refresh-expired"
     );
+  }
+
+  /**
+   * ADR-0089: the restricted token to send now, refreshed when it has at
+   * most `REFRESH_AHEAD_MS` left. `null` when none is held, when its refresh
+   * credential expired, when the refresh was refused, or when the refresh
+   * answered a pair (the suspension ended; the caller reads `peek()`).
+   */
+  async currentRestricted(): Promise<string | null> {
+    const held = this.restrictedHeld;
+    if (held === null) return null;
+    const now = this.now();
+    if (held.refreshExpiresAtMs <= now) return null;
+    if (held.restrictedExpiresAtMs - now > REFRESH_AHEAD_MS) return held.restrictedToken;
+    const outcome = await this.refreshOnce();
+    if (outcome === "suspended") return this.restrictedHeld?.restrictedToken ?? null;
+    if (outcome === "network" && held.restrictedExpiresAtMs > this.now()) return held.restrictedToken;
+    return null;
   }
 
   /**
@@ -204,25 +314,39 @@ export class SessionTokenProvider {
   private async runRefresh(): Promise<RefreshOutcome> {
     const ports = this.ports;
     const held = this.held;
+    const restricted = this.restrictedHeld;
     const account = this.account;
-    if (ports === null || held === null || account === null) return "none";
-    if (held.refreshExpiresAtMs <= this.now()) return "none";
+    if (ports === null || account === null) return "none";
+    const credential = held ?? restricted;
+    if (credential === null) return "none";
+    if (credential.refreshExpiresAtMs <= this.now()) return "none";
     let result: RefreshTransportResult;
     try {
-      result = await ports.refresh(held.refreshToken);
+      result = await ports.refresh(credential.refreshToken);
     } catch {
       return "network";
     }
     // A sign-out or another landing while the refresh was out owns the
     // state now; a late answer must not overwrite it.
-    if (this.held !== held || this.account !== account) {
-      return this.held === null ? "none" : "refreshed";
+    if (this.held !== held || this.restrictedHeld !== restricted || this.account !== account) {
+      if (this.held !== null) return "refreshed";
+      return this.restrictedHeld !== null ? "suspended" : "none";
+    }
+    if (result.kind === "suspended") {
+      this.installRestricted(account, result.restricted);
+      void ports.persistRestricted?.(account, result.restricted).catch(() => {
+        /* the port logs */
+      });
+      this.emit({ kind: "suspended", accountIdB64: account, restricted: result.restricted });
+      return "suspended";
     }
     if (result.kind === "refused") {
       if (result.status !== 401) return "network";
       const verdict = refreshRefusal(result.errorCode);
       this.clear();
-      if (verdict === "superseded") this.supersededHeld = { accountIdB64: account, pair: held };
+      if (verdict === "superseded" && held !== null) {
+        this.supersededHeld = { accountIdB64: account, pair: held };
+      }
       this.emit(
         verdict === "superseded"
           ? { kind: "superseded", accountIdB64: account }
@@ -266,6 +390,37 @@ export class SessionTokenProvider {
     this.emit({ kind: "device-revoked", accountIdB64: account });
   }
 
+  /** `true` for the live restricted token and for any token of this account
+   *  it replaced (the access token held before the suspension, an older
+   *  restricted token). */
+  private ownsSuspendedToken(token: string): boolean {
+    const r = this.restrictedHeld;
+    if (r === null) return false;
+    return r.restrictedToken === token || this.replaced.has(token);
+  }
+
+  /**
+   * ADR-0089: a request carrying a token of the suspended account. The routes
+   * a restricted session opens go out with the live restricted token (or,
+   * when the refresh just ended the suspension, the new access token); every
+   * other one is answered here with `403 account-suspended` and never
+   * leaves the device.
+   */
+  private async fetchWhileSuspended(
+    input: RequestInfo | URL,
+    init: RequestInit | undefined,
+    headers: Headers,
+    fetchImpl: typeof fetch,
+  ): Promise<Response> {
+    const route = routeOf(input, init?.method);
+    if (route === null || !RESTRICTED_ROUTES.includes(route)) return suspendedResponse();
+    const token = (await this.currentRestricted()) ?? this.peek();
+    if (token === null) return suspendedResponse();
+    const h = new Headers(headers);
+    h.set("authorization", `Bearer ${token}`);
+    return fetchImpl(input, { ...init, headers: h });
+  }
+
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -302,6 +457,9 @@ export class SessionTokenProvider {
     const fetchImpl = this.ports?.fetchImpl ?? ((i, o) => globalThis.fetch(i, o));
     const headers = new Headers(init?.headers);
     const sent = bearerOf(headers.get("authorization"));
+    if (sent !== null && this.restrictedHeld !== null && this.ownsSuspendedToken(sent)) {
+      return this.fetchWhileSuspended(input, init, headers, fetchImpl);
+    }
     if (sent === null || !this.manages(sent)) return fetchImpl(input, init);
 
     const send = (token: string): Promise<Response> => {
@@ -314,11 +472,18 @@ export class SessionTokenProvider {
     const first = await send(live);
     const verdict = bearerRefusal({
       status: first.status,
-      errorCode: first.status === 401 ? errorCodeOf(await peekBody(first)) : null,
+      errorCode:
+        first.status === 401 || first.status === 403 ? errorCodeOf(await peekBody(first)) : null,
       retried: false,
       refreshAvailable: this.refreshAvailable(),
     });
     if (verdict === "pass" || verdict === "report") return first;
+    if (verdict === "suspended") {
+      // The refresh answers with the restricted session and raises
+      // `suspended`; this request is refused as it is.
+      await this.refreshOnce();
+      return first;
+    }
     if (verdict === "superseded") {
       // An answer to a token this device has since replaced says nothing
       // about the one it holds: this device's own key rotation looks exactly
@@ -357,6 +522,22 @@ export class SessionTokenProvider {
     }
     return second;
   }
+}
+
+/** `METHOD path` of a request (the path without query), or `null` when the
+ *  URL cannot be read. */
+export function routeOf(input: RequestInfo | URL, method: string | undefined): string | null {
+  let raw: string;
+  if (typeof input === "string") raw = input;
+  else if (input instanceof URL) raw = input.href;
+  else raw = input.url;
+  let path: string;
+  try {
+    path = new URL(raw, "http://local.invalid").pathname;
+  } catch {
+    return null;
+  }
+  return `${(method ?? "GET").toUpperCase()} ${path}`;
 }
 
 /** The token of a `Bearer <token>` header value, or `null`. */

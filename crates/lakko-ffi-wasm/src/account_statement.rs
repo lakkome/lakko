@@ -379,6 +379,38 @@ pub fn account_statement_len() -> u32 {
     u32::try_from(ACCOUNT_STATEMENT_LEN).unwrap_or(u32::MAX)
 }
 
+/// The `JsError`-free core of `signIdentityProof`.
+fn identity_proof_inner(account_seed: &[u8; 32], account_id: &[u8]) -> Result<Vec<u8>, String> {
+    let account: [u8; 16] = account_id
+        .try_into()
+        .map_err(|_| "bad-account-id-length: account id must be 16 bytes".to_string())?;
+    Ok(lakko_attest::sign_identity_proof(account_seed, &account).to_vec())
+}
+
+/// Sign the identity proof auth requires before it records an identity key
+/// for an account (ADR-0089 security fix F3): `accountIdentity`'s signature
+/// over `"lakko/auth/identity-proof/v1\0" ‖ accountId ‖ pubkey`, `pubkey`
+/// being its own signature public key. Returns the 64-byte proof; send it as
+/// `identity_proof_b64` (base64url without padding) with the genesis mint,
+/// the key reset finish, the key rotation and the recall finish, signed by
+/// the identity being recorded (the NEW identity on a reset, rotation or
+/// recall).
+///
+/// # Errors
+///
+/// Throws `"bad-account-id-length: ..."` when `accountId` is not 16 bytes.
+#[wasm_bindgen(js_name = signIdentityProof)]
+pub fn sign_identity_proof(
+    account_identity: &crate::mls::Identity,
+    account_id: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    identity_proof_inner(
+        &account_identity.mls_identity().ed25519_seed_bytes(),
+        account_id,
+    )
+    .map_err(|msg| JsError::new(&msg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +605,18 @@ mod tests {
             .unwrap_err()
             .starts_with("bad-device-id-length: "));
         assert_eq!(account_statement_header_name(), "x-lakko-account-statement");
+    }
+
+    #[test]
+    fn the_identity_proof_verifies_under_the_seed_key() {
+        let pubkey = SigningKey::from_seed(&SEED).verifying_key().to_bytes();
+        let proof = identity_proof_inner(&SEED, &ACCOUNT).unwrap();
+        assert_eq!(
+            lakko_attest::verify_identity_proof(&proof, &ACCOUNT, &pubkey),
+            Ok(())
+        );
+        assert!(identity_proof_inner(&SEED, &[1; 15])
+            .unwrap_err()
+            .starts_with("bad-account-id-length: "));
     }
 }

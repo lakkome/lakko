@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 
-vi.mock("../wasm", () => ({ loadWasm: async () => wasm }));
+vi.mock("../wasm", () => ({ loadWasm: async () => wasm, wasmIfLoaded: () => wasm }));
 
 import { parseBodyEnvelope } from "./attachments";
 import { planBackgroundEvents } from "./background-events";

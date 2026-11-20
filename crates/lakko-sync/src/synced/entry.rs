@@ -1026,6 +1026,9 @@ pub enum SyncEntry {
     /// The account's quick reaction (UX `reactions-and-emoji.md` D3).
     /// Appended last.
     QuickReaction(super::quick_reaction::QuickReactionEntry),
+    /// A person the account blocked or unblocked (ADR-0089 section 6).
+    /// Appended last.
+    Blocked(super::blocked::BlockedEntry),
 }
 
 /// Which register an entry writes.
@@ -1085,6 +1088,9 @@ pub enum RegisterKey {
     /// The account's one quick-reaction register. Appended last, so the
     /// register order of every older kind is unchanged.
     QuickReaction,
+    /// The block register of this account key (ADR-0089 section 6).
+    /// Appended last.
+    Blocked([u8; super::blocked::BLOCKED_KEY_LEN]),
 }
 
 impl RegisterKey {
@@ -1120,6 +1126,7 @@ const TAG_DEVICE_ACK: u8 = 16;
 const TAG_CHANNEL_REACTION: u8 = 17;
 const TAG_CHANNEL_COMMENT: u8 = 18;
 const TAG_QUICK_REACTION: u8 = 19;
+const TAG_BLOCKED: u8 = 20;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1152,6 +1159,7 @@ impl SyncEntry {
                 RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },
             Self::QuickReaction(_) => RegisterKey::QuickReaction,
+            Self::Blocked(b) => RegisterKey::Blocked(b.account_key),
         }
     }
 
@@ -1185,7 +1193,8 @@ impl SyncEntry {
             | Self::Draft(_)
             | Self::ConversationOrder(_)
             | Self::DeviceAck(_)
-            | Self::ChannelComment(_) => Ok(()),
+            | Self::ChannelComment(_)
+            | Self::Blocked(_) => Ok(()),
         }
     }
 
@@ -1291,6 +1300,12 @@ impl SyncEntry {
             Self::DeviceAck(a) => {
                 out.push(TAG_DEVICE_ACK);
                 a.encode_body(&mut out);
+            },
+            // The state byte follows the key and a block is the larger
+            // byte, so on an exact stamp tie a block beats an unblock.
+            Self::Blocked(b) => {
+                out.push(TAG_BLOCKED);
+                b.encode_body(&mut out);
             },
             // The key comes first and the state byte directly after it, so
             // on an exact stamp tie a removal beats a reaction.
@@ -1466,6 +1481,7 @@ impl SyncEntry {
             TAG_QUICK_REACTION => Self::QuickReaction(
                 super::quick_reaction::QuickReactionEntry::take_body(&mut cur)?,
             ),
+            TAG_BLOCKED => Self::Blocked(super::blocked::BlockedEntry::take_body(&mut cur)?),
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {

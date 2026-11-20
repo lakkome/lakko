@@ -89,6 +89,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-call-jwt/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-backup/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-attest/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-moderation/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-sync/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-push/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-attachments/fuzz/Cargo.toml
@@ -151,6 +152,8 @@ fuzz-list:
     @ls crates/lakko-backup/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-attest:"
     @ls crates/lakko-attest/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-moderation:"
+    @ls crates/lakko-moderation/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-sync:"
     @ls crates/lakko-sync/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-push:"
@@ -480,6 +483,14 @@ dev-channels:
 dev-gif-proxy:
     cargo run -p lakko-svc-gif-proxy
 
+# Run the moderation service locally (ADR-0089) on 127.0.0.1:8094. Reads
+# LAKKO_MODERATION_DATABASE_URL from .env (unset: reports in memory) and the
+# shared LAKKO_ANON_TOKEN_MASTER_SECRET. Without LAKKO_MODERATION_LIST_PATH and
+# LAKKO_MODERATION_ROOT_KEY reporting answers 503; make a test list with
+# tools/moderation-root (keygen, dev-moderator, sign-list).
+dev-moderation:
+    cargo run -p lakko-svc-moderation
+
 # Run the Rust SFU locally (ADR-0011). Requires LAKKO_SFU_JWKS_URL
 # in .env (point it at a running dev auth service's JWKS, or the
 # fixture JWKS from ci/sfu-e2e/). Set LAKKO_SFU_MEDIA_BIND to a
@@ -624,6 +635,34 @@ dev-desktop:
 # `vite build`. Output lands in `apps/web/dist/`.
 build-web:
     cd apps/web && npm run build
+
+# Build the moderators' panel (apps/moderation, ADR-0089 section 7) into
+# apps/moderation/dist/. It has no copy of the design system or the wasm
+# core: it imports apps/web's stylesheet and apps/web/wasm, so the wasm is
+# built first. In production nginx serves the dist from its own static root
+# (/var/www/lakko-moderation-panel, `just deploy-moderation-panel`) and
+# proxies only /panel/api to the moderation service (ADR-0089 F4). For LOCAL
+# DEVELOPMENT only the service also serves it at `/` when
+# LAKKO_MODERATION_PANEL_DIR points at apps/moderation/dist (absolute path),
+# beside the API at /panel/api on LAKKO_MODERATION_PANEL_BIND
+# (default 127.0.0.1:8099); or `cd apps/moderation && npm run dev` serves it
+# on 127.0.0.1:5180 and forwards /panel/api to 127.0.0.1:8099.
+build-moderation-panel:
+    cd apps/web && npm run build:wasm
+    cd apps/moderation && npm install --no-audit --no-fund && npm run build
+
+# Install the built moderators' panel into nginx's static root on the host
+# that serves `moderation.lakko.me` (infra/nginx/sites-available/
+# moderation-panel.conf). The moderation service never serves it in
+# production (ADR-0089 F4). Same staging contract as `deploy-web`: rsync to
+# /tmp, then a root rsync into /var/www/lakko-moderation-panel/ (the VPS
+# sudoers entry must allow that target) and an nginx reload.
+deploy-moderation-panel: build-moderation-panel
+    test -f apps/moderation/dist/index.html
+    rsync -a --delete apps/moderation/dist/ {{vps_user}}@{{vps_host}}:/tmp/lakko-moderation-panel-stage/
+    ssh {{vps_user}}@{{vps_host}} 'set -euo pipefail; \
+        sudo /usr/bin/rsync -a --delete /tmp/lakko-moderation-panel-stage/ /var/www/lakko-moderation-panel/; \
+        sudo /usr/bin/systemctl reload nginx'
 
 # Phase 1.15b — cross-compile `lakko-ffi-uniffi` (cdylib) for
 # Android NDK targets via `cargo-ndk`, drop the `.so` files into
@@ -1055,6 +1094,21 @@ mint-release-manifest latest min_supported:
     cargo run -q -p lakko-release-manifest-tool -- \
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
+
+# ADR-0089 section 3 - generate the OFFLINE moderation root key. Writes the
+# 32-byte private seed to moderation-root.seed (mode 0600, keep it OFFLINE,
+# never commit) and prints the base64url public key to pin on the
+# moderation service and in each client build config.
+gen-moderation-root:
+    cargo run -q -p lakko-moderation-root-tool -- keygen
+
+# ADR-0089 section 3 - sign the moderator list at a version from a JSON file
+# of moderators (see tools/moderation-root/src/main.rs for the format).
+# Example: just sign-moderator-list 2 moderators.json moderation.lakko.me https://moderation.lakko.me
+sign-moderator-list version entries rp_id origin:
+    cargo run -q -p lakko-moderation-root-tool -- \
+        sign-list --version {{version}} --entries {{entries}} --rp-id {{rp_id}} \
+        --origin {{origin}} --key moderation-root.seed --out moderators.bin
 
 # ADR-0026 - put the anti-censorship tunnel on the test stack: obfs-proxy
 # alone, no other service restarted, and a freshly signed bootstrap config.

@@ -163,6 +163,13 @@ public class ReachManager internal constructor(
     /** Whether [visibility] is in effect on the server. */
     public val applyStatus: StateFlow<ReachApplyStatus> = mutableStatus.asStateFlow()
 
+    private val mutableHiddenFromSearch = MutableStateFlow(false)
+
+    /** ADR-0089 step 5 — moderators removed this account from search
+     *  (discovery answered `403 hidden-from-search` to the Everyone record):
+     *  Who can find me says so and Everyone cannot be chosen. */
+    public val hiddenFromSearch: StateFlow<Boolean> = mutableHiddenFromSearch.asStateFlow()
+
     /** The Everyone publication did not land, so the person is not findable
      *  the way the setting says (or still findable after leaving it). Shown
      *  through [applyStatus], whose Retry runs the publication again. */
@@ -276,6 +283,7 @@ public class ReachManager internal constructor(
             if (decision == ReachRekey.MOVE) Log.i(LOG_TAG, "reach keys moved to the rotated account key")
         }
         mutableVisibility.value = decodeVisibility(doc.visibilityHex)
+        mutableHiddenFromSearch.value = doc.hiddenFromSearch
         launchSync()
         while (true) {
             val pending = pendingDeviceSync.poll() ?: break
@@ -294,6 +302,7 @@ public class ReachManager internal constructor(
         doc = ReachDoc()
         everyoneStuck = false
         mutableVisibility.value = null
+        mutableHiddenFromSearch.value = false
         mutableStatus.value = ReachApplyStatus.APPLIED
     }
 
@@ -317,6 +326,7 @@ public class ReachManager internal constructor(
             ),
         )
         doc = store.load(accountIdB64)
+        mutableHiddenFromSearch.value = doc.hiddenFromSearch
     }
 
     /** The bound account's signature public key, or `null`. */
@@ -1471,7 +1481,11 @@ public class ReachManager internal constructor(
 
     public fun notePublishedEveryone(public: Boolean, key: String?) {
         val b = binding.get() ?: return
-        doc = doc.copy(publishedPublic = public, publishedKey = key)
+        // ADR-0089 step 5 — an Everyone record that landed ends the
+        // moderators' hiding; withdrawing says nothing about it.
+        val hidden = if (public) false else doc.hiddenFromSearch
+        doc = doc.copy(publishedPublic = public, publishedKey = key, hiddenFromSearch = hidden)
+        mutableHiddenFromSearch.value = hidden
         if (everyoneStuck) {
             everyoneStuck = false
             if (mutableStatus.value == ReachApplyStatus.FAILED) mutableStatus.value = ReachApplyStatus.APPLIED
@@ -1479,7 +1493,28 @@ public class ReachManager internal constructor(
         scope.launch {
             lock.withLock {
                 if (binding.get() !== b) return@withLock
-                doc = doc.copy(publishedPublic = public, publishedKey = key)
+                doc = doc.copy(publishedPublic = public, publishedKey = key, hiddenFromSearch = hidden)
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
+    /**
+     * ADR-0089 step 5 — discovery refused the Everyone record with
+     * `403 hidden-from-search`. Not a failure to retry: the screen says
+     * moderators removed the account from search, and the setting stays as
+     * the person chose it.
+     */
+    public fun noteHiddenFromSearch() {
+        val b = binding.get() ?: return
+        doc = doc.copy(hiddenFromSearch = true)
+        mutableHiddenFromSearch.value = true
+        if (everyoneStuck) everyoneStuck = false
+        if (mutableStatus.value == ReachApplyStatus.FAILED) mutableStatus.value = ReachApplyStatus.APPLIED
+        scope.launch {
+            lock.withLock {
+                if (binding.get() !== b) return@withLock
+                doc = doc.copy(hiddenFromSearch = true)
                 store.save(b.accountIdB64, doc)
             }
         }

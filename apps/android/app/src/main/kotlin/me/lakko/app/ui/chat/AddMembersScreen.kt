@@ -135,7 +135,7 @@ internal fun AddMembersScreen(
     }
     val networkView = session?.view?.collectAsState()?.value
     val shown = networkView?.shown?.takeIf { networkView.asks }
-    val personRows = remember(shown, memberKeys, waitingKeys, contactRows) {
+    val foundPersonRows = remember(shown, memberKeys, waitingKeys, contactRows) {
         addPersonRows(
             results = shown?.people.orEmpty(),
             memberKeysB64 = memberKeys,
@@ -143,6 +143,13 @@ internal fun AddMembersScreen(
             listedKeysB64 = contactRows.map { it.contact.keyB64 }.toSet(),
             ownKeyB64 = null,
         )
+    }
+    // ADR-0089 step 4 / UX 3 — search does not list a suspended account; a
+    // found row leaves once the moderation log confirms it.
+    val foundPersonKeys = remember(foundPersonRows) { foundPersonRows.mapTo(HashSet()) { it.person.keyB64 } }
+    val suspendedFound by me.lakko.app.ui.suspension.rememberSuspendedAmong(foundPersonKeys)
+    val personRows = remember(foundPersonRows, suspendedFound) {
+        me.lakko.app.moderation.withoutSuspendedRows(foundPersonRows, suspendedFound) { it.person.keyB64 }
     }
     val pickedKeys = picks.map { it.keyB64 }.toSet()
 

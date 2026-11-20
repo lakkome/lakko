@@ -178,6 +178,8 @@ import { callNameState } from "../calls/call-name";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import { displayLocale } from "../l10n/display-locale";
+import { blockVerdictForSender } from "../moderation/block-rules";
+import { wasmSync } from "../wasm";
 
 // ============================================================================
 // Small shared pieces
@@ -1730,6 +1732,16 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
+        {/* ADR-0089 section 6 - a blocked person stays in the call; their
+            tile carries a muted label (the shared rule's "label"). */}
+        <Show
+          when={
+            !props.participant.isLocal &&
+            blockVerdictForSender(wasmSync(), "call-tile", props.participant.personKeyB64) === "label"
+          }
+        >
+          <span class="lk-call-tile-blocked">{t("block.call_label")}</span>
+        </Show>
         {/* Section 7.2: a connection is drawn only when it is fair or worse.
             A dot on every healthy tile says nothing, and for other people it
             was never a measurement at all. */}

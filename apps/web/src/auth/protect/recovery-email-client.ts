@@ -14,7 +14,7 @@
  * and are never logged or kept.
  */
 import { base64UrlDecodeNoPad } from "../account-id";
-import { AuthHttpError, AuthNetworkError, DEFAULT_BASE_URL } from "../client";
+import { AuthHttpError, AuthNetworkError, DEFAULT_BASE_URL, authHttpErrorFrom } from "../client";
 import { sessionFetch } from "../session-fetch";
 import { sessionPairOf, type SessionPair, type SessionPairWire } from "../session-pair";
 import { loadWasm } from "../../wasm";
@@ -115,6 +115,8 @@ export class RecoveryEmailClient {
       throw new AuthNetworkError(endpoint, err);
     }
     if (!response.ok) {
+      // ADR-0089: a suspended account's refusal is read whole.
+      if (response.status === 403) throw await authHttpErrorFrom(response, endpoint);
       throw new AuthHttpError(response.status, endpoint, await safeBody(response), retryAfterHeader(response));
     }
     if (response.status === 204) return {};

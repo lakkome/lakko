@@ -146,6 +146,10 @@ public enum SessionRefreshOutcome: Equatable {
     case revoked
     /// `401 refresh-invalid`: the credential is dead; sign in again.
     case invalid
+    /// `403 account-suspended` (ADR-0089 step 3): the account is suspended.
+    /// The landing's pair (the `s1` in the access slot, a new `r2`) is now
+    /// installed and the provider is in suspended mode.
+    case suspended(SuspendedLanding)
     /// No refresh credential, or no account signed in.
     case noCredential
     /// Offline or any other failure; the current pair stays.
@@ -180,6 +184,11 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// `true` once the server answered `device-revoked` (ADR-0074); every
     /// later access is refused without a network call until ``clear()``.
     private var revoked = false
+    /// `true` while the account is suspended (ADR-0089 step 3): the pair's
+    /// access slot holds the `s1`, and only the requests
+    /// ``SuspendedRequestRule`` allows leave the device. Cleared by a
+    /// refresh that answers a normal pair.
+    private var suspended = false
     private var inFlight: Task<SessionRefreshOutcome, Never>?
 
     /// Set by the repository. Absent means a refresh cannot run.
@@ -207,6 +216,22 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// The refresh credential was refused as invalid: sign in again, nothing
     /// is wiped.
     public var onRefreshInvalid: (@Sendable (_ accountIdB64: String) -> Void)?
+    /// ADR-0089 step 3 — auth answered `403 account-suspended` with
+    /// credentials: the landing's pair is installed (each renewal of the
+    /// `s1` fires again, so the caller keeps the newest one).
+    public var onSuspended: (@Sendable (_ landing: SuspendedLanding, _ accountIdB64: String) -> Void)?
+    /// ADR-0089 step 3 — a refresh answered a normal pair while the provider
+    /// was suspended: the suspension ended or was lifted. Fired after
+    /// ``onPairRefreshed``.
+    public var onSuspensionEnded: (@Sendable (_ accountIdB64: String) -> Void)?
+
+    /// The base URLs whose writes a suspended device withholds. Injectable
+    /// for tests.
+    public var suspendedWriteBases: @Sendable () -> [String] = { SuspendedRequestRule.liveWriteBases }
+    /// The routes outside auth that take the `s1`. Injectable for tests.
+    public var suspendedBearerRoutes: @Sendable () -> [SuspendedRequestRule.BearerRoute] = {
+        SuspendedRequestRule.liveBearerRoutes
+    }
 
     public init() {}
 
@@ -215,7 +240,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// Install the session pair for `accountIdB64`. A different account
     /// drops the previous account's tokens; the same account keeps every
     /// earlier access token as known.
-    public func install(_ newPair: SessionPair, accountIdB64 newAccount: String) {
+    public func install(_ newPair: SessionPair, accountIdB64 newAccount: String, suspended isSuspended: Bool = false) {
         lock.lock()
         if accountIdB64 != newAccount {
             knownAccessTokens = []
@@ -224,6 +249,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         pair = newPair
         superseded = false
         revoked = false
+        suspended = isSuspended
         if !newPair.sessionToken.isEmpty {
             knownAccessTokens.insert(newPair.sessionToken)
         }
@@ -238,6 +264,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         knownAccessTokens = []
         superseded = false
         revoked = false
+        suspended = false
         inFlight?.cancel()
         inFlight = nil
         lock.unlock()
@@ -262,6 +289,13 @@ public final class SessionTokenProvider: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return superseded
+    }
+
+    /// Whether the account is suspended (ADR-0089 step 3).
+    public var isSuspended: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return suspended
     }
 
     /// Whether the server refused this session as device-revoked.
@@ -314,6 +348,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         case .refreshFirst:
             switch await refresh() {
             case .refreshed(let fresh): return .token(fresh.sessionToken)
+            case .suspended(let landing): return .token(landing.pair.sessionToken)
             case .superseded: return .superseded
             case .revoked: return .revoked
             case .invalid: return .invalid
@@ -371,6 +406,10 @@ public final class SessionTokenProvider: @unchecked Sendable {
             // client-side note of it moves to the new pair.
             let fresh = try await refresher(refreshToken).naming(deviceIdB64: deviceIdB64)
             outcome = .refreshed(fresh)
+        } catch let refused as AccountSuspendedError {
+            // A bare `account-suspended` (no credentials) cannot come from
+            // the refresh route; read it as a failure and keep the pair.
+            outcome = refused.landing.map { .suspended($0) } ?? .failed("suspended without credentials")
         } catch AuthClientError.http(let status, _, let body) where status == 401 {
             switch SessionTokenRule.classify401(body: Data(body.utf8)) {
             case .deviceRevoked: outcome = .revoked
@@ -390,8 +429,24 @@ public final class SessionTokenProvider: @unchecked Sendable {
             case .refreshed(let fresh):
                 pair = fresh
                 knownAccessTokens.insert(fresh.sessionToken)
+                let wasSuspended = suspended
+                suspended = false
                 let callback = onPairRefreshed
-                fire = { callback?(fresh, account) }
+                let ended = onSuspensionEnded
+                fire = {
+                    callback?(fresh, account)
+                    if wasSuspended { ended?(account) }
+                }
+            case .suspended(let landing):
+                // The landing names the account it was issued for; a body for
+                // another account is not this session's.
+                if landing.accountIdB64 == account {
+                    pair = landing.pair
+                    knownAccessTokens.insert(landing.pair.sessionToken)
+                    suspended = true
+                    let callback = onSuspended
+                    fire = { callback?(landing, account) }
+                }
             case .superseded:
                 // A pair that changed while the refresh was out is not the
                 // one refused.
@@ -468,8 +523,11 @@ public final class SessionTokenProvider: @unchecked Sendable {
         send: (URLRequest) async throws -> (Data, URLResponse)
     ) async throws -> (Data, URLResponse) {
         guard let bearer = Self.bearer(of: request), isKnownAccessToken(bearer) else {
+            try requireAllowedWhileSuspended(request, carriesSessionBearer: false)
             return try await send(request)
         }
+        try requireAllowedWhileSuspended(request, carriesSessionBearer: true)
+        let wasSuspended = isSuspended
         var first = request
         switch await accessToken() {
         case .token(let token):
@@ -481,8 +539,19 @@ public final class SessionTokenProvider: @unchecked Sendable {
         case .invalid, .signedOut:
             break
         }
+        // A refresh taken for this request may have found the account
+        // suspended: the request is judged again.
+        try requireAllowedWhileSuspended(first, carriesSessionBearer: true)
         let (data, response) = try await send(first)
         guard let http = response as? HTTPURLResponse, http.statusCode == 401 else {
+            // ADR-0089 step 3 — a bearer route of auth refused the account as
+            // suspended (with no credentials): one refresh fetches the `s1`
+            // and enters suspended mode. Already suspended, there is nothing
+            // new to learn.
+            if let http = response as? HTTPURLResponse, http.statusCode == 403, !wasSuspended,
+               SuspendedLanding.isSuspendedBody(data) {
+                _ = await refresh()
+            }
             return (data, response)
         }
         let meaning = SessionTokenRule.classify401(body: data)
@@ -522,12 +591,33 @@ public final class SessionTokenProvider: @unchecked Sendable {
                 var retry = request
                 Self.setBearer(fresh.sessionToken, on: &retry)
                 return try await send(retry)
+            case .suspended(let landing):
+                // A route that takes the `s1` refused an expired one: the
+                // renewed `s1` is tried once; any other route is withheld.
+                var retry = request
+                Self.setBearer(landing.pair.sessionToken, on: &retry)
+                try requireAllowedWhileSuspended(retry, carriesSessionBearer: true)
+                return try await send(retry)
             case .superseded, .revoked:
                 return (data, response)
             case .invalid, .noCredential, .failed:
                 return (data, response)
             }
         }
+    }
+
+    /// Throw ``SessionSuspendedError`` for a request a suspended device does
+    /// not send (``SuspendedRequestRule``). A no-op when not suspended.
+    private func requireAllowedWhileSuspended(_ request: URLRequest, carriesSessionBearer: Bool) throws {
+        guard isSuspended else { return }
+        let allowed = SuspendedRequestRule.allows(
+            method: request.httpMethod ?? "GET",
+            url: request.url,
+            carriesSessionBearer: carriesSessionBearer,
+            authBase: authBaseURL(),
+            writeBases: suspendedWriteBases(),
+            bearerRoutes: suspendedBearerRoutes())
+        if !allowed { throw SessionSuspendedError() }
     }
 
     static func bearer(of request: URLRequest) -> String? {

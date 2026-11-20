@@ -63,6 +63,16 @@ public struct ChatScreen: View {
     // result callback. Both routes funnel into
     // ``ChatViewModel/onAttachmentPicked(bytes:mime:name:)``.
     @State private var photoPickerItems: [PhotosPickerItem] = []
+    /// ADR-0089 — the blocked set the banner, the collapsed rows and the
+    /// card follow.
+    @ObservedObject private var blocks = BlockList.shared
+    /// ADR-0089 step 4 — the suspension marks the one-to-one's top banner
+    /// and the member list follow.
+    @ObservedObject private var suspensions = SuspensionMarks.shared
+    /// ADR-0089 / UX 2.2 — the open report sheet.
+    @State private var reportRequest: ReportRequest?
+    /// UX 1.2 — collapsed rows of a blocked person the reader tapped open.
+    @State private var revealedBlocked: Set<Int64> = []
     @State private var fileImporterPresented: Bool = false
     @State private var attachActionSheetPresented: Bool = false
     // Inline preview of an image attachment — set when a
@@ -77,6 +87,9 @@ public struct ChatScreen: View {
     @StateObject private var media: ChatMediaController
     /// ADR-0047 §4 — the caret the emoji picker inserts at.
     @StateObject private var caret = ComposerCaret()
+    /// ADR-0089 step 3 — a suspended account reads its chats: no composer,
+    /// no call controls.
+    @Environment(\.accountSuspended) private var accountSuspended
     /// ADR-0047 §4 — the open picker, if any.
     @State private var picker: PickerRequest?
 
@@ -271,11 +284,38 @@ public struct ChatScreen: View {
                     selected: request.emoji,
                     onOpenPerson: nil)
             }
+            // ADR-0089 / UX 2.2 — the report sheet; the checked follow-up
+            // (Also block / Leave the group) applies when the report goes.
+            .reportSheet($reportRequest) { follow in
+                switch follow {
+                case .block:
+                    if let key = reportRequest.flatMap({ request -> Data? in
+                        if case .person(let k) = request.target { return k }
+                        return nil
+                    }) {
+                        BlockList.shared.block(key)
+                    }
+                case .leave:
+                    viewModel.onLeaveGroup()
+                case .unsubscribe:
+                    break
+                }
+            }
     }
 
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
+            // ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // the other person's account is suspended (verified in the
+            // moderation log): one line at the top, no action, the chat still
+            // works. A blocked person's banner stands alone.
+            if let peer = viewModel.oneToOnePeerKey,
+               SuspensionMarkRules.showsOneToOneBanner(
+                   blocked: viewModel.blockedOneToOnePeer != nil,
+                   suspended: suspensions.isSuspended(peer)) {
+                suspendedPeerBanner(peer)
+            }
             // ADR-0082 / UX 3.6 — "Messages here are in Spanish." at the top
             // of the conversation, a child of this VStack like the pinned bar.
             TranslationBar(conversation: viewModel.groupIdHex, messages: viewModel.messages)
@@ -332,7 +372,7 @@ public struct ChatScreen: View {
             // joinable after a minute, any call after four hours), so the
             // banner re-evaluates on a timer rather than only on a new
             // journal row.
-            if !viewModel.membershipHasEnded {
+            if !viewModel.membershipHasEnded, !accountSuspended {
                 GroupCallBanner(
                     affordance: viewModel.groupCallAffordance(
                         nowMs: Int64(now.timeIntervalSince1970 * 1000)
@@ -359,6 +399,11 @@ public struct ChatScreen: View {
             messagesWidth = width
         }
         .background(Color.lakkoBackground)
+        // ADR-0089 step 4 — ask about the other person when the one-to-one
+        // opens (and when its roster first names them).
+        .task(id: viewModel.oneToOnePeerKey) {
+            if let peer = viewModel.oneToOnePeerKey { _ = await suspensions.standing(peer) }
+        }
         .onReceive(Self.affordanceClock) { date in
             // The time input of the call affordances (banner + toolbar
             // labels): a call nobody joined stops being joinable after a
@@ -553,7 +598,7 @@ public struct ChatScreen: View {
             //
             // `docs/ux/group-and-channel-privacy.md` section 10 — and absent
             // in a group of one: there is nobody to call.
-            if !viewModel.membershipHasEnded, viewModel.hasSomeoneToCall {
+            if !viewModel.membershipHasEnded, viewModel.hasSomeoneToCall, !accountSuspended {
             ToolbarItem(placement: .navigationBarTrailing) {
                 // No `TimelineView` in a toolbar item, ever: one inside a bar
                 // item host re-rendered on every layout pass and dirtied the
@@ -846,6 +891,10 @@ public struct ChatScreen: View {
                             Color.clear.frame(height: 0)
                                 .onAppear { viewModel.noteRowShown(entry.message) }
                             let rowSelection = selectionRowState(for: entry.message)
+                            Group {
+                            if blockedCollapsed(entry.message) {
+                                collapsedBlockedRow(entry.message)
+                            } else {
                             SelectableMessageRow(
                                 state: rowSelection,
                                 accessibilityName: MessageSelection.accessibilityName(
@@ -939,8 +988,16 @@ public struct ChatScreen: View {
                                 // menu does not open.
                                 selecting: selection != nil,
                                 onSelect: { enterSelection(with: entry.message.messageId) },
-                                quotesOwnMessage: viewModel.quotesOwnMessage(entry.message)
+                                quotesOwnMessage: viewModel.quotesOwnMessage(entry.message),
+                                // ADR-0089 / UX 2.1 — Report on someone else's
+                                // message: its author, with this message.
+                                // Built on tap: it reads the whole timeline.
+                                onReport: viewModel.canReport(entry.message)
+                                    ? { reportRequest = viewModel.reportRequest(for: entry.message) }
+                                    : nil
                             )
+                            }
+                            }
                             }
                             // Tighter inside a run, a clear gap between runs.
                             .padding(.top, entry.startsRun ? 10 : 2)
@@ -1456,6 +1513,79 @@ public struct ChatScreen: View {
 
     @ViewBuilder
     private var composer: some View {
+        // ADR-0089 step 3 — a suspended account sends nothing: one muted
+        // line in the composer's slot, no send control.
+        if accountSuspended {
+            SuspendedComposerLine()
+        // ADR-0089 / UX 1.2 — in the one-to-one with a blocked person the
+        // banner replaces the composer.
+        } else if let blocked = blocks.entries.isEmpty ? nil : viewModel.blockedOneToOnePeer {
+            blockedBanner(blocked)
+        } else {
+            unblockedComposer
+        }
+    }
+
+    /// UX 1.2 — in a group, a blocked person's message is one muted row
+    /// (`blockVerdict(.groupMessage)` is `collapse`) until tapped.
+    private func blockedCollapsed(_ message: ChatMessage) -> Bool {
+        guard viewModel.presentsAsGroup, message.direction == .incoming,
+              !revealedBlocked.contains(message.messageId), !blocks.entries.isEmpty else { return false }
+        return blocks.verdict(.groupMessage, b64: message.authorKeyB64) == .collapse
+    }
+
+    private func collapsedBlockedRow(_ message: ChatMessage) -> some View {
+        Button {
+            revealedBlocked.insert(message.messageId)
+        } label: {
+            Text(l10n.t("block.group_row"))
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoTextMuted)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.lakkoSurfaceSunken))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// ADR-0089 step 4 — the suspended peer's banner: inline, sunken, an
+    /// icon and one sentence, no action (Block is on the card).
+    private func suspendedPeerBanner(_ key: Data) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.shield")
+                .foregroundStyle(Color.lakkoTextMuted)
+                .accessibilityHidden(true)
+            Text(l10n.t("suspended.banner", texts: [
+                "name": viewModel.personName(signatureKeyB64: base64Encode(key))
+                    ?? ResolvedDisplayName.placeholderSomeone]))
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(Color.lakkoSurfaceSunken)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func blockedBanner(_ key: Data) -> some View {
+        HStack(spacing: 12) {
+            Text(l10n.t("block.banner", texts: [
+                "name": viewModel.personName(signatureKeyB64: base64Encode(key))
+                    ?? ResolvedDisplayName.placeholderSomeone]))
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoTextMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(l10n.t("block.unblock")) { BlockList.shared.unblock(key) }
+                .foregroundStyle(Color.lakkoAccent)
+        }
+        .padding(12)
+        .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private var unblockedComposer: some View {
         switch viewModel.composerSlot {
         case .composer:
             liveComposer
@@ -2097,6 +2227,9 @@ struct MessageRow: View {
     /// quote names it "You" on this device, whatever name the snapshot
     /// carries (`docs/ux/message-actions.md` section 3.1).
     var quotesOwnMessage: Bool = false
+    /// ADR-0089 — the menu's Report; `nil` where it is not offered (an own
+    /// message, a conversation this device cannot act in).
+    var onReport: (() -> Void)? = nil
     /// ADR-0087 section 12 — this row is a channel post: it is drawn as an
     /// incoming bubble with no sender on every device, takes no reply and no
     /// selection, and offers Edit and Delete to the owner and publishers
@@ -2106,6 +2239,9 @@ struct MessageRow: View {
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
     @Environment(\.messageMenuPresenter) private var menuPresenter
+    /// ADR-0089 step 3 — a suspended account's chips are not taps: a tap
+    /// would send a reaction.
+    @Environment(\.accountSuspended) private var accountSuspended
     /// ADR-0082 — the conversation this row belongs to, for translation and
     /// transcripts; `nil` outside a conversation screen.
     @Environment(\.translationConversation) private var translationConversation
@@ -2440,7 +2576,14 @@ struct MessageRow: View {
             // UX section 2 — on any message that is not deleted.
             // An older segment's row may be saved too (round-6 rule).
             save: saveState,
-            translate: translateState)
+            translate: translateState,
+            canReport: canReport)
+    }
+
+    /// ADR-0089 / UX 2.1 — Report on someone else's landed message.
+    private var canReport: Bool {
+        onReport != nil && actionsAvailable && !isOutgoing && message.direction != .system
+            && !message.deleted && message.messageId > 0 && !isHistoryRow
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -2551,6 +2694,8 @@ struct MessageRow: View {
                     case .ban:
                         // Channel comments only.
                         break
+                    case .report:
+                        onReport?()
                     }
                 }
             )
@@ -2794,7 +2939,7 @@ struct MessageRow: View {
     private var reactionChips: some View {
         ReactionChipFlow(spacing: ReactionChipMetrics.chipSpacing * chatTextScale) {
             ForEach(chipRow.chips, id: \.emoji) { chip in
-                if actionsAvailable {
+                if actionsAvailable && !accountSuspended {
                     // A tap reacts; a long press lists who reacted (Lakko's
                     // own sheet, never the system context menu). Not a
                     // `Button`: its tap would also fire when a long press
@@ -3263,6 +3408,10 @@ struct GroupInfoScreen: View {
     var onOpenContact: (Int64) -> Void = { _ in }
     /// ADR-0061 — observed so a language switch re-renders the panel.
     @ObservedObject var l10n = Localization.shared
+    /// ADR-0089 step 4 — the member list's suspension markers.
+    @ObservedObject private var suspensions = SuspensionMarks.shared
+    /// ADR-0089 step 3 — a suspended account adds and invites nobody.
+    @Environment(\.accountSuspended) private var accountSuspended
 
     /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
     /// it is a presentation concern with no bearing on the request, and nothing
@@ -3291,6 +3440,8 @@ struct GroupInfoScreen: View {
     @State private var rejectAllConfirm = false
     /// ADR-0087 section 11 — the `Delete this group?` confirmation.
     @State private var deleteGroupConfirm = false
+    /// ADR-0089 / UX 2.1 — the report sheet for the group.
+    @State private var reportRequest: ReportRequest?
 
     /// What the screen does after the chat is gone: the row it was reached from
     /// no longer exists, so staying on it would leave the user looking at a
@@ -3346,13 +3497,14 @@ struct GroupInfoScreen: View {
                 canMintInvite: viewModel.canManageMembers,
                 isOwner: viewModel.isOwner,
                 canLeave: viewModel.usesProposalPath && viewModel.ownLeafIndex != nil,
-                membershipEnded: viewModel.membershipHasEnded))
+                membershipEnded: viewModel.membershipHasEnded,
+                hasHandle: viewModel.groupHandle != nil))
     }
 
     var body: some View {
         // Once per render, never per row: this crosses the FFI, and the
         // roster below is a `ForEach` that asks about `.roles` on every member.
-        let sections = groupSections
+        let sections = SuspendedInfo.withoutSending(groupSections, suspended: accountSuspended)
         return List {
                 // ADR-0087 section 18 / UX 4.5.2 — the header photo.
                 // One row, no separator: as two rows the List drew its row
@@ -3773,6 +3925,13 @@ struct GroupInfoScreen: View {
                         ForEach(viewModel.members, id: \.leafIndex) { member in
                             HStack {
                                 memberIdentity(member)
+                                    // ADR-0089 step 4 — ask about the rows on
+                                    // screen.
+                                    .task(id: member.signaturePublicKey) {
+                                        if viewModel.ownLeafIndex != member.leafIndex {
+                                            suspensions.check([member.signaturePublicKey])
+                                        }
+                                    }
                                 Spacer()
                                 // ADR-0022 — the promote / demote toggle. The rule
                                 // makes `.roles` OWNER-only, not owner-or-admin:
@@ -3881,6 +4040,18 @@ struct GroupInfoScreen: View {
                 if !viewModel.membershipHasEnded {
                     ShareChannelsSection(
                         hub: viewModel.sharedChannelsHub, groupIdHex: viewModel.groupIdHex)
+                }
+                // ADR-0089 / UX 2.1 — Report the group, by its `@name`, for
+                // anyone but the owner (the shared rule decides).
+                if sections.contains(.report), viewModel.groupHandle != nil {
+                    Section {
+                        Button(role: .destructive) {
+                            reportRequest = viewModel.groupReportRequest()
+                        } label: {
+                            Label(l10n.t("report.action"), systemImage: "flag")
+                                .foregroundStyle(Color.lakkoDanger)
+                        }
+                    }
                 }
                 switch viewModel.exitBlockState {
                 case .hidden:
@@ -4021,6 +4192,11 @@ struct GroupInfoScreen: View {
             ) {
                 [.danger(l10n.t("chat.leave.confirm")) { viewModel.onLeaveGroup() }, .cancel()]
             }
+            // ADR-0089 / UX 2.3 — `Leave the group`, when checked, goes with
+            // the report.
+            .reportSheet($reportRequest) { follow in
+                if follow == .leave { viewModel.onLeaveGroup() }
+            }
             // ADR-0045 UX §6.2.4 — reached only by a device whose own leaf was
             // retired (ADR-0087 section 9).
             .lakkoDialog(
@@ -4077,8 +4253,19 @@ struct GroupInfoScreen: View {
                 size: 32, placeholderSymbol: "person.fill",
                 photo: viewModel.memberPhoto(member))
             VStack(alignment: .leading, spacing: 2) {
-                Text(viewModel.memberLabel(member))
-                    .foregroundStyle(Color.lakkoText)
+                HStack(spacing: 6) {
+                    Text(viewModel.memberLabel(member))
+                        .foregroundStyle(Color.lakkoText)
+                    // ADR-0089 step 4 — a suspended member: a muted marker
+                    // after the name. The remove control stays as it is.
+                    if SuspensionMarkRules.showsMemberMarker(
+                        isOwnRow: viewModel.ownLeafIndex == member.leafIndex,
+                        suspended: suspensions.isSuspended(member.signaturePublicKey)) {
+                        Text(l10n.t("suspended.member"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
                 // ADR-0045 S4a — NO optimistic update: a member with a pending
                 // removal stays in the roster and is annotated. Dropping the row
                 // would assert they are gone while they are still in the group

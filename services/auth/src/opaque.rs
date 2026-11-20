@@ -1051,6 +1051,22 @@ async fn login_finish_inner(
     // At the generation read with the state row (see `take_login_state`),
     // never at one read now. No row: the account was deleted meanwhile.
     let key_generation = key_generation.ok_or(crate::webauthn::ApiError::InvalidCredential)?;
+    // ADR-0089 section 4: a suspended account lands in suspended mode, not in
+    // a session. The password sign-in's refusal carries the fresh-auth grant
+    // it would have minted (the only use left for it is deleting the account).
+    let landing_grant = if expected_kind == KIND_PASSWORD {
+        crate::suspension::LandingGrant::Fresh
+    } else {
+        crate::suspension::LandingGrant::None
+    };
+    crate::suspension::refuse_landing_if_suspended(
+        state,
+        &account_id,
+        key_generation,
+        &device_id,
+        landing_grant,
+    )
+    .await?;
     let session = crate::session::issue_pair_at(state, &account_id, key_generation, &device_id)?;
     Ok((
         account_id,
@@ -1442,6 +1458,16 @@ pub(crate) async fn password_reset_finish(
     //    under, capture the recall anchor, then replace the envelope.
     let invalid = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
     let proven_generation = key_generation.ok_or_else(invalid)?;
+    // ADR-0089 section 4: a suspended account's password is not replaced; it
+    // lands in suspended mode.
+    crate::suspension::refuse_landing_if_suspended(
+        &state,
+        &account_id,
+        proven_generation,
+        &device_id,
+        crate::suspension::LandingGrant::None,
+    )
+    .await?;
     let mut conn = crate::session::read_committed_conn(&state.db)
         .await
         .map_err(ApiError::Db)?;
@@ -2073,12 +2099,39 @@ mod signup_login_limits_e2e_tests {
         Some(pool)
     }
 
-    /// A real Ed25519 public key per tag: the key reset records the key it
-    /// installs and refuses one that is not a usable point (ADR-0074).
-    fn pk(tag: u8) -> [u8; 32] {
-        lakko_crypto::signing::SigningKey::from_seed(&[tag; 32])
+    /// The seeds of the keys [`pk`] handed out, by public key.
+    fn key_seeds() -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>> {
+        static SEEDS: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>>,
+        > = std::sync::OnceLock::new();
+        SEEDS.get_or_init(Default::default)
+    }
+
+    /// A fresh real Ed25519 public key on every call: the key reset records
+    /// the key it installs and refuses one that is not a usable point
+    /// (ADR-0074), and a key belongs to one account forever in a database
+    /// the tests share across runs (ADR-0089 F3). The tag names the key in
+    /// the test that asks for it; it does not make two calls agree.
+    fn pk(_tag: u8) -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut OsRng, &mut seed);
+        let public = lakko_crypto::signing::SigningKey::from_seed(&seed)
             .verifying_key()
-            .to_bytes()
+            .to_bytes();
+        key_seeds().lock().unwrap().insert(public, seed);
+        public
+    }
+
+    /// The identity proof (ADR-0089 F3) of a key [`pk`] handed out, for the
+    /// account `token` names; `None` for a key it did not hand out.
+    fn proof_for(token: &str, pubkey: &[u8; 32]) -> Option<String> {
+        let account: [u8; 16] = URL_SAFE_NO_PAD
+            .decode(token.split('.').nth(1)?)
+            .ok()?
+            .try_into()
+            .ok()?;
+        let seed = *key_seeds().lock().unwrap().get(pubkey)?;
+        Some(URL_SAFE_NO_PAD.encode(lakko_attest::sign_identity_proof(&seed, &account)))
     }
 
     /// A fresh 16-byte account id, base64 as the wire carries it.
@@ -3260,6 +3313,7 @@ mod signup_login_limits_e2e_tests {
                 "fresh_grant": grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
+                "identity_proof_b64": proof_for(token, pubkey),
             })),
         )
         .await
@@ -3292,6 +3346,7 @@ mod signup_login_limits_e2e_tests {
                 "fresh_grant": grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
+                "identity_proof_b64": proof_for(token, pubkey),
             })),
         )
         .await
@@ -3517,7 +3572,10 @@ mod signup_login_limits_e2e_tests {
                     Method::POST,
                     "/auth/genesis/attest",
                     Some(&token),
-                    Some(&serde_json::json!({ "pubkey_b64": URL_SAFE_NO_PAD.encode(key) })),
+                    Some(&serde_json::json!({
+                        "pubkey_b64": URL_SAFE_NO_PAD.encode(key),
+                        "identity_proof_b64": proof_for(&token, &key),
+                    })),
                 )
                 .await
                 .0
@@ -3969,6 +4027,7 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let upload = reg_finish(cs, &b_new, v["recovery_response"].as_str().unwrap());
+        let key_8b = pk(0x8B);
         let (st, _) = send_json(
             &state,
             Method::POST,
@@ -3978,7 +4037,8 @@ mod signup_login_limits_e2e_tests {
                 "account_id": a_b64,
                 "fresh_grant": b_grant,
                 "recovery_upload": upload,
-                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pk(0x8B)),
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(key_8b),
+                "identity_proof_b64": proof_for(&b_token, &key_8b),
             })),
         )
         .await;
@@ -4120,6 +4180,7 @@ mod signup_login_limits_e2e_tests {
         )
         .unwrap();
         let upload = reg_finish(cs.state, &seed2, &B64.encode(response.message.serialize()));
+        let key_9c = pk(0x9C);
         let (st, body) = send_json(
             &state,
             Method::POST,
@@ -4128,7 +4189,8 @@ mod signup_login_limits_e2e_tests {
             Some(&serde_json::json!({
                 "fresh_grant": grant2,
                 "recovery_upload": upload,
-                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pk(0x9C)),
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(key_9c),
+                "identity_proof_b64": proof_for(&a_token2, &key_9c),
             })),
         )
         .await;

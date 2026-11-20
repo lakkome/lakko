@@ -584,10 +584,11 @@ public final class KeyRotationRunner: ObservableObject {
         /// Keep this device's own prepared rotation as a pending envelope, so
         /// a commit whose answer is lost is adopted like a kept device's.
         public var storeOwnPending: @MainActor (_ pending: PendingKeyRotation, _ accountIdB64: String) throws -> Void
-        /// `POST /account/keys/rotate/{start,finish}`.
+        /// `POST /account/keys/rotate/{start,finish}`. `accountId` is the
+        /// account the ADR-0089 F3 identity proof names.
         public var commit: (
             _ token: String, _ grant: String, _ material: KeyRotationMaterial, _ proof: Data,
-            _ revokeDeviceIds: [Data]
+            _ revokeDeviceIds: [Data], _ accountId: Data
         ) async throws -> KeyResetResult
         /// Step 6: the new seed, phrase and pair replace the old ones; the
         /// old seed goes to the predecessor slot; everything else is kept.
@@ -614,8 +615,9 @@ public final class KeyRotationRunner: ObservableObject {
         /// ADR-0075 section 3 — the commit of "Save a recovery phrase":
         /// `rotate/finish` with `phrase_saved: true` and no device revoked.
         public var commitSavingPhrase: (
-            _ token: String, _ grant: String, _ material: KeyRotationMaterial, _ proof: Data
-        ) async throws -> KeyResetResult = { _, _, _, _ in
+            _ token: String, _ grant: String, _ material: KeyRotationMaterial, _ proof: Data,
+            _ accountId: Data
+        ) async throws -> KeyResetResult = { _, _, _, _, _ in
             throw AuthClientError.argument("saving a recovery phrase is not wired")
         }
         /// The commit of a "Save a recovery phrase" rotation landed: the
@@ -838,7 +840,7 @@ public final class KeyRotationRunner: ObservableObject {
         guard let token = ports.sessionToken() else { return .removedNotRotated(.failed) }
         let committed: KeyResetResult
         do {
-            committed = try await ports.commit(token, grant, material, proof, [deviceId])
+            committed = try await ports.commit(token, grant, material, proof, [deviceId], session.accountId)
         } catch {
             let outcome = KeyRotationPlan.commitOutcome(of: error)
             NSLog("[devices] WARN the key rotation was not committed (%@); the device was removed",
@@ -964,7 +966,7 @@ public final class KeyRotationRunner: ObservableObject {
         }
         let committed: KeyResetResult
         do {
-            committed = try await ports.commitSavingPhrase(token, grant, material, proof)
+            committed = try await ports.commitSavingPhrase(token, grant, material, proof, session.accountId)
         } catch {
             let outcome = KeyRotationPlan.commitOutcome(of: error)
             NSLog("[protect] WARN the recovery phrase was not saved (%@)", String(describing: outcome))
@@ -1182,14 +1184,15 @@ extension KeyRotationRunner.Ports {
                 guard let auth else { throw SessionNotReady() }
                 try auth.storeOwnPendingKeyRotation(pending, accountIdB64: accountIdB64)
             },
-            commit: { token, grant, material, proof, revokeDeviceIds in
+            commit: { token, grant, material, proof, revokeDeviceIds, accountId in
                 try await AuthClient().rotateAccountKeys(
                     sessionToken: token,
                     freshGrant: grant,
                     seed: material.seed,
                     newSignaturePubkey: material.newSignaturePubkey,
                     supersessionProof: proof,
-                    revokeDeviceIds: revokeDeviceIds)
+                    revokeDeviceIds: revokeDeviceIds,
+                    accountId: accountId)
             },
             adopt: { [weak auth] material, session in
                 guard let auth else { throw SessionNotReady() }
@@ -1249,7 +1252,7 @@ extension KeyRotationRunner.Ports {
                     predecessorSeeds: auth.ownPredecessorSeeds(
                         accountIdB64: base64Encode(secrets.accountId)))
             },
-            commitSavingPhrase: { token, grant, material, proof in
+            commitSavingPhrase: { token, grant, material, proof, accountId in
                 try await AuthClient().rotateAccountKeys(
                     sessionToken: token,
                     freshGrant: grant,
@@ -1257,7 +1260,8 @@ extension KeyRotationRunner.Ports {
                     newSignaturePubkey: material.newSignaturePubkey,
                     supersessionProof: proof,
                     revokeDeviceIds: [],
-                    phraseSaved: true)
+                    phraseSaved: true,
+                    accountId: accountId)
             },
             phraseWasSaved: { [weak auth] accountIdB64 in
                 auth?.notePhraseSaved(accountIdB64: accountIdB64)

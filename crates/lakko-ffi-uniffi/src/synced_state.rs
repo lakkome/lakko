@@ -1475,6 +1475,87 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
+    // Blocked people (ADR-0089 section 6)
+    // -----------------------------------------------------------------
+
+    /// Block (`blocked`) or unblock the account whose 32-byte account
+    /// signature key is `account_key`, stamped `hlc`, at wall-clock
+    /// `now_ms`. Returns the envelope to send to the account's other devices
+    /// in a DeviceGroup service envelope, or `None` when nothing changed
+    /// (already so, or a newer register is held).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` when the key is not 32
+    /// bytes; [`FfiError::LockPoisoned`].
+    pub fn set_blocked(
+        &self,
+        hlc: u64,
+        account_key: Vec<u8>,
+        blocked: bool,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let key = fixed::<{ core::BLOCKED_KEY_LEN }>(&account_key, "account key")?;
+        self.with(|s| s.set_blocked(hlc, key, blocked, now_ms))
+    }
+
+    /// Whether the account `account_key` is blocked. A key of another
+    /// length is never blocked.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn is_blocked(&self, account_key: Vec<u8>) -> Result<bool, FfiError> {
+        let Ok(key) = <[u8; core::BLOCKED_KEY_LEN]>::try_from(account_key.as_slice()) else {
+            return Ok(false);
+        };
+        self.with(|s| s.is_blocked(&key))
+    }
+
+    /// Every blocked account, most recently blocked first (the Blocked
+    /// people list).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn blocked_accounts(&self) -> Result<Vec<BlockedAccount>, FfiError> {
+        self.with(|s| {
+            s.blocked_accounts()
+                .into_iter()
+                .map(|(k, at)| BlockedAccount {
+                    account_key: k.to_vec(),
+                    blocked_at_ms: at,
+                })
+                .collect()
+        })
+    }
+
+    /// Every held block register, unblocks included, as envelopes: the
+    /// re-send a device owes on DeviceGroup growth or when a live send did
+    /// not go out.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn blocked_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.blocked_envelopes())
+    }
+
+    /// Decode a block envelope received in a DeviceGroup service envelope
+    /// (route on [`is_blocked_envelope`]) and fold every register in. Fail
+    /// closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `count` / `truncated` /
+    /// `notCanonical` / `trailing`.
+    pub fn apply_blocked_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_blocked_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    // -----------------------------------------------------------------
     // Quick reaction (UX reactions-and-emoji section 6)
     // -----------------------------------------------------------------
 
@@ -2165,6 +2246,33 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
+/// One blocked account (ADR-0089 section 6).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BlockedAccount {
+    /// The blocked account's 32-byte account signature key.
+    pub account_key: Vec<u8>,
+    /// When it was blocked, wall-clock millis.
+    pub blocked_at_ms: u64,
+}
+
+/// `true` when `bytes` open with the block envelope domain (ADR-0089
+/// section 6): the routing question for a DeviceGroup service envelope.
+/// Says nothing about validity; [`SyncedState::apply_blocked_envelope`]
+/// decides that.
+#[uniffi::export]
+#[must_use]
+pub fn is_blocked_envelope(bytes: Vec<u8>) -> bool {
+    core::is_blocked_envelope(&bytes)
+}
+
+/// Longest block envelope (ADR-0089 section 6); below
+/// `deviceGroupServiceEnvelopeMaxLen()`.
+#[uniffi::export]
+#[must_use]
+pub fn blocked_envelope_max_len() -> u32 {
+    u32::try_from(core::BLOCKED_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
 /// `true` when `bytes` open with the device-acknowledgement envelope domain
 /// (`lakko/sync/device-ack/v1`): the routing question for a DeviceGroup
 /// service envelope, asked before the `lakko-contacts` dispatcher. Says
@@ -2715,6 +2823,35 @@ mod tests {
             assert!(rule::normalize_recovery_email(bad).is_err() || bad.ends_with('\n'));
             assert!(core::check_recovery_email_address(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_block_is_set_carried_and_listed() {
+        let a = SyncedState::new();
+        let k = vec![5u8; 32];
+        assert!(!a.is_blocked(k.clone()).unwrap());
+        assert!(a.set_blocked(1, vec![1u8; 31], true, 5).is_err());
+        let sent = a.set_blocked(3, k.clone(), true, 5).unwrap().unwrap();
+        assert!(is_blocked_envelope(sent.clone()));
+        assert!(sent.len() <= blocked_envelope_max_len() as usize);
+        assert!(blocked_envelope_max_len() <= crate::device_group_service_envelope_max_len());
+        assert_eq!(a.set_blocked(4, k.clone(), true, 6).unwrap(), None);
+        let b = SyncedState::new();
+        assert!(b.apply_blocked_envelope(sent.clone()).unwrap());
+        assert!(b.is_blocked(k.clone()).unwrap());
+        assert!(!b.is_blocked(vec![7u8; 3]).unwrap());
+        assert_eq!(
+            b.blocked_accounts().unwrap(),
+            vec![BlockedAccount {
+                account_key: k.clone(),
+                blocked_at_ms: 5
+            }]
+        );
+        assert_eq!(b.blocked_envelopes().unwrap(), vec![sent]);
+        let unblock = a.set_blocked(9, k.clone(), false, 7).unwrap().unwrap();
+        assert!(b.apply_blocked_envelope(unblock).unwrap());
+        assert!(b.blocked_accounts().unwrap().is_empty());
+        assert!(b.apply_blocked_envelope(vec![1, 2]).is_err());
     }
 
     #[test]

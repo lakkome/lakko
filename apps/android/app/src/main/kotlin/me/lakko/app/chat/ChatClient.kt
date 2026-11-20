@@ -28,6 +28,7 @@ import uniffi.lakko_ffi_uniffi.committerBeaconEnvelopeLen
 import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
 import uniffi.lakko_ffi_uniffi.decodeProfileEnvelope
 import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
+import uniffi.lakko_ffi_uniffi.attestMessage
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
 
 /**
@@ -193,8 +194,9 @@ public class ChatClient(
         group: Group,
         plaintext: ByteArray,
         persistRatchet: suspend () -> Unit,
+        attest: Boolean = true,
     ): SendMessageResult =
-        publishPreparedSend(prepareSend(identity, group, plaintext, persistRatchet))
+        publishPreparedSend(prepareSend(identity, group, plaintext, persistRatchet, attest))
 
     /**
      * G-37 — the PROVIDER half of [sendMessage], split out so the caller can
@@ -219,21 +221,43 @@ public class ChatClient(
         group: Group,
         plaintext: ByteArray,
         persistRatchet: suspend () -> Unit,
+        /**
+         * ADR-0089 section 1 — `true` for a chat, edit, delete or reaction
+         * envelope (replies and forwards are chat envelopes): the envelope is
+         * signed by this device's conversation leaf before the MLS encrypt.
+         * `false` for typing, read receipts, call signaling and every
+         * `lakko/` service envelope, which are never attested. A signing
+         * failure aborts the send: a chat message never goes out unsigned.
+         *
+         * Defaults to `true` (ADR-0089 F10): a caller that forgets the
+         * argument signs, and every caller that must not attest says so.
+         */
+        attest: Boolean = true,
     ): PreparedSend {
         if (plaintext.isEmpty()) {
             throw ChatClientArgError("plaintext must be non-empty")
-        }
-
-        val wireBytes = try {
-            group.createApplicationMessage(identity, plaintext)
-        } catch (e: FfiException) {
-            throw ChatError("createApplicationMessage failed", e)
         }
 
         val groupId = try {
             group.groupId()
         } catch (e: FfiException) {
             throw ChatError("group.groupId unavailable", e)
+        }
+
+        val sealed = if (attest) {
+            try {
+                attestMessage(identity, groupId, plaintext)
+            } catch (e: Throwable) {
+                throw ChatError("attestMessage failed", e)
+            }
+        } else {
+            plaintext
+        }
+
+        val wireBytes = try {
+            group.createApplicationMessage(identity, sealed)
+        } catch (e: FfiException) {
+            throw ChatError("createApplicationMessage failed", e)
         }
 
         // SECURITY (nonce-reuse-on-crash) — PERSIST BEFORE
@@ -469,6 +493,9 @@ public class ChatClient(
                     processed = processed,
                     resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
                     resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(rosterOf(group), leaf) },
+                    // ADR-0089 section 1 — the report evidence, read here for
+                    // the same reason as the roster: the leaf may be reused.
+                    evidenceOf = { plaintext, leaf -> me.lakko.app.moderation.receivedEvidence(group, plaintext, leaf) },
                 ),
             )
         }
@@ -803,6 +830,12 @@ internal fun toEvent(
     decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
     decodeSharedChannels: (ByteArray) -> me.lakko.app.discover.SharedList? = ::decodeSharedListOrNull,
     isRegistrarSeed: (ByteArray) -> Boolean = ::registrarSeedArm,
+    /** ADR-0089 section 1 — the envelope inside an attested plaintext (a peek,
+     *  then `unwrapAttested`); a plain plaintext passes through untouched. */
+    unwrapBody: (ByteArray) -> ByteArray = { me.lakko.app.moderation.unwrapForBody(it) },
+    /** ADR-0089 section 1 — the report evidence of a chat row, read at
+     *  receipt; `null` keeps none (the host suite, a swept bundle). */
+    evidenceOf: (ByteArray, UInt?) -> me.lakko.app.moderation.MessageEvidence? = { _, _ -> null },
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -1059,7 +1092,9 @@ internal fun toEvent(
                 // sender — such a message can never be a valid
                 // edit/delete target). It feeds the author-only
                 // edit/delete gate + reaction attribution.
-                val body = parseBody(processed.data)
+                // ADR-0089 section 1 — a chat plaintext is attested; the body
+                // parser reads the envelope inside the wrapper.
+                val body = parseBody(unwrapBody(processed.data))
                 val senderLeaf = processed.senderLeaf
                 // ...and the IDENTITY that leaf names, resolved HERE because
                 // here is where the roster is the one the message was sealed
@@ -1098,6 +1133,7 @@ internal fun toEvent(
                         // ADR-0073 — the re-send marker, only as a whole pair.
                         resendOrigin = resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
                         channelInvite = body.channelInvite?.takeIf { it.isNotEmpty() },
+                        evidence = evidenceOf(processed.data, senderLeaf),
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
                         messageId = messageId,
@@ -1304,6 +1340,9 @@ public sealed interface IncomingChatEvent {
          *  (`chat.message.unsupported`), never core prose. `null` for every
          *  readable message. */
         val unsupportedVersion: Long? = null,
+        /** ADR-0089 section 1 — what a report of this row carries, captured at
+         *  receipt; `null` when the sender leaf could not be resolved. */
+        val evidence: me.lakko.app.moderation.MessageEvidence? = null,
     ) : IncomingChatEvent
 
     /** ADR-0023 — an edit / delete / reaction op carried in the

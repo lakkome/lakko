@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-moderation-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace — cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-moderation = { path = ".." }
+
+# Every decoder of ADR-0089: the report and its clear part (posted by anyone
+# holding a token), the sealed content, the statement and the signed
+# statement (reaching every applying service), the moderator list. Whatever
+# decodes must re-encode to the identical bytes.
+[[bin]]
+name = "moderation_decode"
+path = "fuzz_targets/moderation_decode.rs"
+test = false
+doc = false
+bench = false
+
+# A report opened under a fixed moderator key: the wrap search, both AEAD
+# opens and the content decoder on bytes a reporter chose.
+[[bin]]
+name = "report_open"
+path = "fuzz_targets/report_open.rs"
+test = false
+doc = false
+bench = false
+
+# A signed statement verified against a fixed list (one Ed25519, one P-256
+# moderator): the statement rules, the client-data JSON, the authenticator
+# data and both signature decoders. Nothing may verify.
+[[bin]]
+name = "signed_statement_verify"
+path = "fuzz_targets/signed_statement_verify.rs"
+test = false
+doc = false
+bench = false
+
+# The suspension snapshot: a bucket, a snapshot root and a log leaf decoded
+# from service-chosen bytes, a bucket answer checked under fixed keys, and a
+# mark proved from a bucket answer, a log entry answer and a moderator list
+# cut from the same bytes (`prove_standing`). Whatever decodes must re-encode
+# exactly; nothing may verify or prove.
+[[bin]]
+name = "snapshot_check"
+path = "fuzz_targets/snapshot_check.rs"
+test = false
+doc = false
+bench = false

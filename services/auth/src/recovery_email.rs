@@ -2021,6 +2021,20 @@ pub(crate) async fn password_finish(
     let ticket = load_ticket(&state, &on.config, &req.ticket).await?;
     require_password_mode(&ticket)?;
     let account_id = ticket.account_id;
+    // ADR-0089 section 4: a suspended account's password is not replaced and
+    // the ticket is not spent; the account lands in suspended mode.
+    let generation_now = crate::session::key_generation_of(&state.db, &account_id)
+        .await
+        .map_err(ApiError::Db)?
+        .ok_or_else(ticket_refused)?;
+    crate::suspension::refuse_landing_if_suspended(
+        &state,
+        &account_id,
+        generation_now,
+        &device_id,
+        crate::suspension::LandingGrant::None,
+    )
+    .await?;
 
     let mut conn = crate::session::read_committed_conn(&state.db)
         .await

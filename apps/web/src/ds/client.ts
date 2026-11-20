@@ -54,6 +54,7 @@
  * push-gw after the proof gate passed and the row was appended. No header, no
  * wake. The client never calls push-gw to wake.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   DS_PROOF_HEADER,
@@ -441,6 +442,17 @@ export class DsClient implements StatementSender, CommitSender {
     },
     signer: ProofSigner | null,
   ): Promise<Response> {
+    // ADR-0089 step 3: a suspended account sends nothing from this device.
+    // The Delivery Service does not know accounts, so the client honours the
+    // suspension: every write is refused here as a transport failure (the
+    // loops back off and try again once the suspension has ended); reads go
+    // out as before, so the person can still read their chats.
+    if (req.method !== "GET" && accountSuspended()) {
+      throw new DsNetworkError(
+        `${req.path}${req.query.length === 0 ? "" : `?${req.query}`}`,
+        "the account is suspended",
+      );
+    }
     const headers: Record<string, string> = { ...req.extraHeaders };
     if (req.contentType !== undefined) headers["content-type"] = req.contentType;
     if (signer !== null) {

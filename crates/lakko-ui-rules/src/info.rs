@@ -153,6 +153,16 @@ pub enum InfoSection {
     /// groups and channels is on. Appended last so earlier uniffi ordinals
     /// stay put.
     MembersCanFindMe,
+    /// Block this person (ADR-0089 section 6, UX `reporting-and-moderation.md`
+    /// section 1.1). A person's card only, in the danger block. Appended last
+    /// so earlier uniffi ordinals stay put.
+    Block,
+    /// Unblock a blocked person, in place of [`Self::Block`].
+    Unblock,
+    /// Report to Lakko's moderators (ADR-0089 section 2, UX section 2.1): on
+    /// a person's card, a group's info and a channel's info, never on the
+    /// viewer's own group or channel.
+    Report,
 }
 
 impl InfoSection {
@@ -234,12 +244,16 @@ impl InfoSection {
             Self::Admins => "admins",
             Self::Reactions => "reactions",
             Self::MembersCanFindMe => "members-can-find-me",
+            Self::Block => "block",
+            Self::Unblock => "unblock",
+            Self::Report => "report",
         }
     }
 }
 
 /// What the viewer is to a one-to-one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PersonInfoCapabilities {
     /// This device's membership in the conversation is over (ADR-0045 UX
     /// 6.2).
@@ -258,6 +272,9 @@ pub struct PersonInfoCapabilities {
     /// (`docs/ux/who-can-find-me.md` section 5.1), under either form. The
     /// client reads it from the setting, so this crate never does.
     pub contacts_of_contacts_on: bool,
+    /// The viewer blocked this person (ADR-0089 section 6). Read from the
+    /// account's synced block register.
+    pub is_blocked: bool,
 }
 
 /// What the viewer may do in a group.
@@ -297,6 +314,11 @@ pub struct GroupInfoCapabilities {
     pub can_leave: bool,
     /// This device's membership is over: read-only (ADR-0045 UX 6.2).
     pub membership_ended: bool,
+    /// The group holds an `@name` (ADR-0087). A group is reported by its
+    /// `@name`; one without a name is named on no server, so it is not
+    /// reported as a group and its members' messages are reported instead
+    /// (ADR-0089 open question 3).
+    pub has_handle: bool,
 }
 
 /// What the viewer is to a channel (ADR-0087 section 15). One role, never
@@ -381,7 +403,9 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     let mut sections = Vec::new();
     if caps.membership_ended {
         sections.push(InfoSection::DeleteChat);
-    } else {
+    } else if !caps.is_blocked {
+        // A blocked person is not called: their calls are declined without
+        // a ring, and a call from this side would reach them.
         sections.push(InfoSection::Call);
     }
     // One card, wherever it was opened from. `Message` used to be withheld
@@ -396,9 +420,24 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
             sections.push(InfoSection::TheirContactsCanFindMe);
         }
         sections.push(InfoSection::RenameContact);
-        sections.push(InfoSection::RemoveContact);
-    } else {
+    } else if !caps.is_blocked {
+        // Blocking takes the person off the contact list; adding them back
+        // waits for an unblock (UX `reporting-and-moderation.md` 1.3).
         sections.push(InfoSection::AddContact);
+    }
+    // The danger block: report, block, then remove (UX
+    // `reporting-and-moderation.md` 1.1, 2.1). A conversation this device is
+    // out of is not reported from.
+    if !caps.membership_ended {
+        sections.push(InfoSection::Report);
+    }
+    sections.push(if caps.is_blocked {
+        InfoSection::Unblock
+    } else {
+        InfoSection::Block
+    });
+    if caps.is_contact {
+        sections.push(InfoSection::RemoveContact);
     }
     sections
 }
@@ -442,6 +481,12 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<InfoSection> {
     }
     if caps.is_owner {
         sections.push(InfoSection::TransferOwnership);
+    }
+    // Report, for anyone but the owner: a group is never reported by the
+    // person who runs it (UX `reporting-and-moderation.md` 2.1). Only a group
+    // with an `@name`: nothing else names a group to the moderators.
+    if !caps.is_owner && caps.has_handle {
+        sections.push(InfoSection::Report);
     }
     if caps.can_leave {
         sections.push(InfoSection::LeaveGroup);
@@ -507,7 +552,12 @@ pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> 
             }
         },
         ChannelRole::Publisher => {},
-        ChannelRole::Subscriber => sections.push(InfoSection::Unsubscribe),
+        ChannelRole::Subscriber => {
+            // Report is a subscriber's: the owner and the publishers run
+            // the channel (UX `reporting-and-moderation.md` 2.1).
+            sections.push(InfoSection::Report);
+            sections.push(InfoSection::Unsubscribe);
+        },
     }
     sections
 }
@@ -618,7 +668,11 @@ pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<Inf
     if owner {
         sections.push(InfoSection::GroupType);
     }
-    // The exit block.
+    // The exit block. Report first, for anyone but the owner, and only by
+    // the group's `@name`.
+    if !owner && caps.has_handle {
+        sections.push(InfoSection::Report);
+    }
     if owner {
         if caps.alone {
             sections.push(InfoSection::DeleteGroup);
@@ -641,6 +695,7 @@ mod tests {
             membership_ended: ended,
             is_contact: true,
             contacts_of_contacts_on: false,
+            is_blocked: false,
         }
     }
 
@@ -649,6 +704,7 @@ mod tests {
             membership_ended: ended,
             is_contact: false,
             contacts_of_contacts_on: false,
+            is_blocked: false,
         }
     }
 
@@ -660,6 +716,7 @@ mod tests {
             is_owner: true,
             can_leave: true,
             membership_ended: ended,
+            has_handle: false,
         }
     }
 
@@ -727,6 +784,107 @@ mod tests {
         assert!(!person_info_sections(person(false)).contains(&InfoSection::AddContact));
     }
 
+    /// The danger block of a person's card (UX `reporting-and-moderation.md`
+    /// 1.1, 1.3, 2.1): report, then block or unblock, then remove. A blocked
+    /// person is not called and not offered as a contact again until
+    /// unblocked; an ended conversation is not reported from.
+    #[test]
+    fn a_persons_card_reports_blocks_and_unblocks() {
+        let contact = PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: true,
+            contacts_of_contacts_on: false,
+            is_blocked: false,
+        };
+        assert_eq!(
+            person_info_sections(contact),
+            vec![
+                InfoSection::Call,
+                InfoSection::Message,
+                InfoSection::SafetyNumber,
+                InfoSection::RenameContact,
+                InfoSection::Report,
+                InfoSection::Block,
+                InfoSection::RemoveContact,
+            ]
+        );
+        let blocked = PersonInfoCapabilities {
+            is_contact: false,
+            is_blocked: true,
+            ..contact
+        };
+        assert_eq!(
+            person_info_sections(blocked),
+            vec![
+                InfoSection::Message,
+                InfoSection::SafetyNumber,
+                InfoSection::Report,
+                InfoSection::Unblock,
+            ]
+        );
+        let ended = PersonInfoCapabilities {
+            membership_ended: true,
+            ..contact
+        };
+        let s = person_info_sections(ended);
+        assert!(!s.contains(&InfoSection::Report));
+        assert!(s.contains(&InfoSection::Block));
+        for b in [
+            InfoSection::Block,
+            InfoSection::Unblock,
+            InfoSection::Report,
+        ] {
+            assert!(!b.group_only());
+        }
+    }
+
+    /// A group is reported by anyone in it but its owner, by its `@name`: a
+    /// group with no name is not reported as a group (ADR-0089 open
+    /// question 3).
+    #[test]
+    fn a_group_is_reported_by_anyone_but_its_owner_by_its_name() {
+        let mut g = group(false);
+        g.has_handle = true;
+        assert!(!group_info_sections(g).contains(&InfoSection::Report));
+        g.is_owner = false;
+        assert!(group_info_sections(g).contains(&InfoSection::Report));
+        assert!(!group_info_sections(GroupInfoCapabilities {
+            has_handle: false,
+            ..g
+        })
+        .contains(&InfoSection::Report));
+        assert!(!group_info_sections(GroupInfoCapabilities {
+            membership_ended: true,
+            ..g
+        })
+        .contains(&InfoSection::Report));
+        for role in [ConversationRole::Admin, ConversationRole::Member] {
+            for has_handle in [false, true] {
+                assert_eq!(
+                    conversation_info_sections(ConversationInfoCapabilities {
+                        kind: ConversationInfoKind::Group,
+                        role,
+                        alone: false,
+                        can_transfer: false,
+                        can_leave: true,
+                        has_handle,
+                    })
+                    .contains(&InfoSection::Report),
+                    has_handle
+                );
+            }
+        }
+        assert!(!conversation_info_sections(ConversationInfoCapabilities {
+            kind: ConversationInfoKind::Group,
+            role: ConversationRole::Owner,
+            alone: false,
+            can_transfer: true,
+            can_leave: false,
+            has_handle: true,
+        })
+        .contains(&InfoSection::Report));
+    }
+
     /// The switch needs the setting to include contacts of contacts AND the
     /// person to be a contact, under either state of the conversation: what
     /// ends is the conversation, not the person.
@@ -739,6 +897,7 @@ mod tests {
                         membership_ended,
                         is_contact,
                         contacts_of_contacts_on,
+                        is_blocked: false,
                     });
                     assert_eq!(
                         sections.contains(&InfoSection::TheirContactsCanFindMe),
@@ -759,6 +918,7 @@ mod tests {
             membership_ended: false,
             is_contact: true,
             contacts_of_contacts_on: true,
+            is_blocked: false,
         });
         let at = |wanted| sections.iter().position(|s| *s == wanted).unwrap();
         assert_eq!(
@@ -830,6 +990,7 @@ mod tests {
             is_owner: false,
             can_leave: true,
             membership_ended: false,
+            has_handle: false,
         });
         assert!(admin.contains(&InfoSection::AddMember));
         assert!(!admin.contains(&InfoSection::Roles));
@@ -845,6 +1006,7 @@ mod tests {
             is_owner: false,
             can_leave: true,
             membership_ended: false,
+            has_handle: false,
         });
         assert!(sections.contains(&InfoSection::GroupName));
         assert!(sections.contains(&InfoSection::MemberList));
@@ -874,6 +1036,7 @@ mod tests {
             is_owner: false,
             can_leave: false,
             membership_ended: false,
+            has_handle: false,
         });
         assert!(!legacy.contains(&InfoSection::LeaveGroup));
         // Still a group, and everything readable about it stays readable.
@@ -892,6 +1055,7 @@ mod tests {
             is_owner: false,
             can_leave: false,
             membership_ended: true,
+            has_handle: false,
         });
         assert!(sections.contains(&InfoSection::DeleteChat));
         assert!(!sections.contains(&InfoSection::LeaveGroup));
@@ -1050,6 +1214,7 @@ mod tests {
                 InfoSection::Handle,
                 InfoSection::GroupName,
                 InfoSection::MemberList,
+                InfoSection::Report,
                 InfoSection::LeaveGroup
             ]
         );
@@ -1108,6 +1273,7 @@ mod tests {
                 InfoSection::Handle,
                 InfoSection::ChannelDescription,
                 InfoSection::Subscribers,
+                InfoSection::Report,
                 InfoSection::Unsubscribe
             ]
         );
@@ -1165,6 +1331,7 @@ mod tests {
                     membership_ended: ended,
                     is_contact,
                     contacts_of_contacts_on: true,
+                    is_blocked: false,
                 })
                 .contains(&InfoSection::Reactions));
             }
@@ -1189,6 +1356,7 @@ mod tests {
                     assert!(!s.contains(&InfoSection::Handle));
                     assert!(s.iter().all(|b| b.group_only()
                         || *b == InfoSection::Unsubscribe
+                        || *b == InfoSection::Report
                         || *b == InfoSection::ChannelDescription));
                 }
             }
@@ -1277,6 +1445,7 @@ mod tests {
                 InfoSection::ChannelDescription,
                 InfoSection::Subscribers,
                 InfoSection::MembersCanFindMe,
+                InfoSection::Report,
                 InfoSection::Unsubscribe,
             ]
         );

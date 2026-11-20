@@ -318,16 +318,84 @@ pub enum DirectoryQuery {
     },
 }
 
-/// An operator moderation action (internal listener only, ADR-0059
-/// section 7).
+/// A moderator's channel action (ADR-0089 section 4), applied from a signed
+/// statement the internal listener checked ([`crate::internal`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModerationAction {
-    /// Remove the listing; the owner may list again.
+pub enum ChannelModeration {
+    /// Remove the listing and refuse a new one (`listing-delisted`).
+    Delist,
+    /// Remove the listing and refuse a new one (`listing-blocked`): the
+    /// ADR-0059 block.
+    BlockHandle,
+    /// Every channel route answers `410 channel-removed`; the listing goes.
     Remove,
-    /// Remove the listing and refuse any later listing of the channel.
-    Block,
-    /// Lift a block.
-    Unblock,
+    /// Clear the delist, the block and the removal.
+    Restore,
+}
+
+/// One checked statement to apply to a channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModerationStatement {
+    /// The statement id; applied once.
+    pub statement_id: [u8; 16],
+    /// The moderator-list version it verified under.
+    pub list_version: u64,
+    /// The channel.
+    pub channel: ChannelId,
+    /// The action.
+    pub action: ChannelModeration,
+    /// When the moderator signed it (unix ms): the per-channel order.
+    pub issued_at_ms: u64,
+    /// Its index in the moderation log, served with `410 channel-removed`.
+    pub log_index: u64,
+    /// The reason's stable name.
+    pub reason: &'static str,
+    /// When it is applied (unix ms).
+    pub now_ms: u64,
+}
+
+/// What applying a statement did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModerationOutcome {
+    /// The channel's moderation changed.
+    Changed,
+    /// The statement id was applied before; nothing changed.
+    Repeat,
+    /// A newer statement was already applied to the channel; the id is
+    /// recorded and nothing else changed.
+    Superseded,
+    /// The statement verified under a moderator list older than the newest
+    /// one seen; nothing changed.
+    StaleList,
+}
+
+/// A channel's moderation state, as the in-memory store keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModerationRow {
+    pub(crate) blocked: bool,
+    pub(crate) delisted: bool,
+    pub(crate) removed: bool,
+    pub(crate) log_index: Option<u64>,
+    pub(crate) issued_at_ms: u64,
+}
+
+impl ModerationRow {
+    /// The row after `action`: the flags accumulate, a restore clears them.
+    pub(crate) const fn after(self, action: ChannelModeration, log_index: u64) -> Self {
+        let (blocked, delisted, removed) = match action {
+            ChannelModeration::Delist => (self.blocked, true, self.removed),
+            ChannelModeration::BlockHandle => (true, self.delisted, self.removed),
+            ChannelModeration::Remove => (self.blocked, self.delisted, true),
+            ChannelModeration::Restore => (false, false, false),
+        };
+        Self {
+            blocked,
+            delisted,
+            removed,
+            log_index: Some(log_index),
+            issued_at_ms: self.issued_at_ms,
+        }
+    }
 }
 
 /// Errors the storage layer surfaces.
@@ -415,9 +483,12 @@ pub enum StorageError {
     /// A listing whose `updated_at_ms` is not newer than the stored one.
     #[error("listing is not newer than the stored one")]
     StaleListing,
-    /// The operator blocked this channel from the directory.
+    /// A moderator blocked this channel's handle (ADR-0089 ChannelBlockHandle).
     #[error("channel is blocked from the directory")]
     ListingBlocked,
+    /// A moderator delisted (or removed) this channel (ADR-0089).
+    #[error("channel is delisted from the directory")]
+    ListingDelisted,
     /// A member card names an epoch greater than the channel's
     /// `current_epoch` (ADR-0060): a card is sealed under a seed a reader
     /// already holds, never a future one.
@@ -680,8 +751,9 @@ pub trait ChannelStore: Send + Sync {
     /// `now_ms` as the first-listed time, which a later withdrawal keeps.
     ///
     /// Refused with [`StorageError::UnknownChannel`],
-    /// [`StorageError::ListingBlocked`] or [`StorageError::StaleListing`]
-    /// (not strictly newer than the stored listing).
+    /// [`StorageError::ListingBlocked`], [`StorageError::ListingDelisted`]
+    /// or [`StorageError::StaleListing`] (not strictly newer than the stored
+    /// listing).
     async fn put_listing(
         &self,
         channel: ChannelId,
@@ -708,15 +780,29 @@ pub trait ChannelStore: Send + Sync {
         now_ms: u64,
     ) -> Result<Vec<DirectoryEntry>, StorageError>;
 
-    /// Apply an operator moderation action with a reason code. Works for a
-    /// channel id that does not exist (a block may precede creation).
-    async fn moderate(
+    /// Apply a moderator's checked statement (ADR-0089 step 5), in one
+    /// step: a list older than the newest seen is
+    /// [`ModerationOutcome::StaleList`], an id applied before
+    /// [`ModerationOutcome::Repeat`], a statement older by `issued_at_ms`
+    /// than the newest applied to the channel is recorded and
+    /// [`ModerationOutcome::Superseded`]. Otherwise the flags change (a
+    /// delist, block or removal also drops the listing), the id is recorded
+    /// and the stored list version raised. Works for a channel id that does
+    /// not exist (a moderator may act before the channel is created).
+    async fn apply_moderation(
         &self,
-        channel: ChannelId,
-        action: ModerationAction,
-        reason: &str,
-        now_ms: u64,
-    ) -> Result<(), StorageError>;
+        statement: &ModerationStatement,
+    ) -> Result<ModerationOutcome, StorageError>;
+
+    /// The moderation-log index of the statement that removed `channel`, or
+    /// `None` when it is not removed (ADR-0089 ChannelRemove).
+    async fn removed_channel(&self, channel: ChannelId) -> Result<Option<u64>, StorageError>;
+
+    /// Raise the moderator-list floor (the highest list version seen) to
+    /// `list_version` when it is higher, on its own (ADR-0089 F1: a newer
+    /// list is kept even when the statement beside it is refused). `false`
+    /// when `list_version` is older than the floor (nothing changed).
+    async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, StorageError>;
 
     /// `true` if the channel is registered.
     async fn exists(&self, channel: ChannelId) -> bool;
@@ -1326,8 +1412,12 @@ struct Inner {
     listings: HashMap<ChannelId, StoredListing>,
     /// Channel id → first-listed time; survives a withdrawal.
     first_listed_at: HashMap<ChannelId, u64>,
-    /// Channel id → (blocked, reason, action time).
-    moderation: HashMap<ChannelId, (bool, String, u64)>,
+    /// Channel id → its moderation (ADR-0089).
+    moderation: HashMap<ChannelId, ModerationRow>,
+    /// Moderator statement ids applied.
+    moderation_applied: std::collections::HashSet<[u8; 16]>,
+    /// The highest moderator-list version seen.
+    moderation_list_version: Option<u64>,
     /// Channel id → private flag (ADR-0087); absent = public.
     private: HashMap<ChannelId, bool>,
     /// The last row number handed out (global, like the SQL
@@ -2178,8 +2268,10 @@ impl ChannelStore for InMemoryChannelStore {
         if guard.private.get(&channel).copied().unwrap_or(false) {
             return Err(StorageError::ChannelPrivate);
         }
-        if guard.moderation.get(&channel).is_some_and(|(b, _, _)| *b) {
-            return Err(StorageError::ListingBlocked);
+        match guard.moderation.get(&channel) {
+            Some(m) if m.blocked => return Err(StorageError::ListingBlocked),
+            Some(m) if m.delisted || m.removed => return Err(StorageError::ListingDelisted),
+            _ => {},
         }
         if let Some(stored) = guard.listings.get(&channel) {
             if !lakko_channels::listing::listing_is_newer(
@@ -2223,26 +2315,66 @@ impl ChannelStore for InMemoryChannelStore {
             .collect())
     }
 
-    async fn moderate(
+    async fn apply_moderation(
         &self,
-        channel: ChannelId,
-        action: ModerationAction,
-        reason: &str,
-        now_ms: u64,
-    ) -> Result<(), StorageError> {
+        statement: &ModerationStatement,
+    ) -> Result<ModerationOutcome, StorageError> {
         let mut guard = self.inner.write().await;
-        let blocked = match action {
-            ModerationAction::Remove => guard.moderation.get(&channel).is_some_and(|(b, _, _)| *b),
-            ModerationAction::Block => true,
-            ModerationAction::Unblock => false,
-        };
-        if action != ModerationAction::Unblock {
-            guard.listings.remove(&channel);
+        if guard
+            .moderation_list_version
+            .is_some_and(|v| statement.list_version < v)
+        {
+            return Ok(ModerationOutcome::StaleList);
         }
-        guard
+        if guard.moderation_applied.contains(&statement.statement_id) {
+            return Ok(ModerationOutcome::Repeat);
+        }
+        let current = guard
             .moderation
-            .insert(channel, (blocked, reason.to_string(), now_ms));
-        Ok(())
+            .get(&statement.channel)
+            .cloned()
+            .unwrap_or_default();
+        let outcome = if statement.issued_at_ms < current.issued_at_ms {
+            ModerationOutcome::Superseded
+        } else {
+            let mut next = current.after(statement.action, statement.log_index);
+            next.issued_at_ms = statement.issued_at_ms;
+            if statement.action != ChannelModeration::Restore {
+                guard.listings.remove(&statement.channel);
+            }
+            guard.moderation.insert(statement.channel, next);
+            ModerationOutcome::Changed
+        };
+        guard.moderation_applied.insert(statement.statement_id);
+        guard.moderation_list_version = Some(
+            guard
+                .moderation_list_version
+                .map_or(statement.list_version, |v| v.max(statement.list_version)),
+        );
+        Ok(outcome)
+    }
+
+    async fn removed_channel(&self, channel: ChannelId) -> Result<Option<u64>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .moderation
+            .get(&channel)
+            .filter(|m| m.removed)
+            .map(|m| m.log_index.unwrap_or(0)))
+    }
+
+    async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        match lakko_moderation::apply::list_floor(guard.moderation_list_version, list_version) {
+            Err(_) => Ok(false),
+            Ok(lakko_moderation::apply::FloorStep::Keep) => Ok(true),
+            Ok(lakko_moderation::apply::FloorStep::Raise) => {
+                guard.moderation_list_version = Some(list_version);
+                Ok(true)
+            },
+        }
     }
 
     async fn put_member_card(
@@ -3886,6 +4018,30 @@ mod tests {
         assert_eq!(epochs1, vec![3], "retention 0 floors to 1");
     }
 
+    #[tokio::test]
+    async fn the_list_floor_only_rises() {
+        let s = InMemoryChannelStore::new();
+        assert!(s.raise_moderation_list_floor(2).await.unwrap());
+        assert!(!s.raise_moderation_list_floor(1).await.unwrap());
+        assert!(s.raise_moderation_list_floor(2).await.unwrap());
+        assert!(s.raise_moderation_list_floor(3).await.unwrap());
+        // A statement under a list below the floor changes nothing.
+        let statement = ModerationStatement {
+            statement_id: [1; 16],
+            list_version: 2,
+            channel: cid(41),
+            action: ChannelModeration::Delist,
+            issued_at_ms: 1,
+            log_index: 1,
+            reason: "spam",
+            now_ms: 1,
+        };
+        assert_eq!(
+            s.apply_moderation(&statement).await.unwrap(),
+            ModerationOutcome::StaleList
+        );
+    }
+
     fn stored(name: &str, updated_at_ms: u64) -> StoredListing {
         StoredListing {
             topic: 1,
@@ -3916,21 +4072,64 @@ mod tests {
         s.put_listing(c, stored("C", 1), 300).await.unwrap();
         let entry = s.listing(c, 400).await.unwrap().unwrap();
         assert_eq!(entry.first_listed_at_ms, 100);
-        // A removal keeps a block in force; unblock lifts it.
-        s.moderate(c, ModerationAction::Block, "spam", 1)
-            .await
-            .unwrap();
-        s.moderate(c, ModerationAction::Remove, "dup", 2)
+        // ADR-0089: a delist and a block accumulate, a restore clears them.
+        let apply = |action, id: u8, at| ModerationStatement {
+            statement_id: [id; 16],
+            list_version: 1,
+            channel: c,
+            action,
+            issued_at_ms: at,
+            log_index: u64::from(id),
+            reason: "spam",
+            now_ms: at,
+        };
+        assert_eq!(
+            s.apply_moderation(&apply(ChannelModeration::Delist, 1, 10))
+                .await
+                .unwrap(),
+            ModerationOutcome::Changed
+        );
+        assert!(s.listing(c, 400).await.unwrap().is_none());
+        assert!(matches!(
+            s.put_listing(c, stored("D", 9), 500).await,
+            Err(StorageError::ListingDelisted)
+        ));
+        s.apply_moderation(&apply(ChannelModeration::BlockHandle, 2, 20))
             .await
             .unwrap();
         assert!(matches!(
             s.put_listing(c, stored("D", 9), 500).await,
             Err(StorageError::ListingBlocked)
         ));
-        s.moderate(c, ModerationAction::Unblock, "appeal", 3)
+        assert_eq!(
+            s.apply_moderation(&apply(ChannelModeration::BlockHandle, 2, 20))
+                .await
+                .unwrap(),
+            ModerationOutcome::Repeat
+        );
+        // A Restore older than the block changes nothing.
+        assert_eq!(
+            s.apply_moderation(&apply(ChannelModeration::Restore, 3, 15))
+                .await
+                .unwrap(),
+            ModerationOutcome::Superseded
+        );
+        assert_eq!(s.removed_channel(c).await.unwrap(), None);
+        s.apply_moderation(&apply(ChannelModeration::Remove, 4, 30))
             .await
             .unwrap();
+        assert_eq!(s.removed_channel(c).await.unwrap(), Some(4));
+        s.apply_moderation(&apply(ChannelModeration::Restore, 5, 40))
+            .await
+            .unwrap();
+        assert_eq!(s.removed_channel(c).await.unwrap(), None);
         s.put_listing(c, stored("D", 9), 500).await.unwrap();
+        let mut old_list = apply(ChannelModeration::Delist, 6, 50);
+        old_list.list_version = 0;
+        assert_eq!(
+            s.apply_moderation(&old_list).await.unwrap(),
+            ModerationOutcome::StaleList
+        );
         // Nonces are single use.
         assert!(s.consume_owner_nonce([1; 16], 10).await.unwrap());
         assert!(!s.consume_owner_nonce([1; 16], 11).await.unwrap());

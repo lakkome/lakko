@@ -139,7 +139,12 @@ export class ScopedDiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
     }
-    if (!response.ok) throw new DiscoveryHttpError(response.status, endpoint, "");
+    if (!response.ok) {
+      // The body carries the code a caller branches on (ADR-0089 step 5:
+      // `403 {"error":"hidden-from-search"}`).
+      const body = await response.text().catch(() => "");
+      throw new DiscoveryHttpError(response.status, endpoint, body);
+    }
   }
 
   /** People in Everyone carrying a name term, by the term's LOOKUP KEY (never

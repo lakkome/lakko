@@ -293,7 +293,16 @@ export interface ChatListSummary {
 export function summarizeGroupSlot(
   slot: PersistedGroup | undefined,
   syncedReadUpTo: bigint | null,
+  /** ADR-0089 section 6 - a blocked author's row (kept, collapsed, in a
+   *  group) is never unread, so it raises no badge and no notification, and
+   *  the preview reads as the collapsed row. Absent: nobody is blocked. */
+  isBlockedAuthor?: (keyB64: string) => boolean,
 ): ChatListSummary {
+  const blockedRow = (m: PersistedMessage): boolean =>
+    isBlockedAuthor !== undefined &&
+    m.direction === "incoming" &&
+    typeof m.authorKeyB64 === "string" &&
+    isBlockedAuthor(m.authorKeyB64);
   const messages = slot?.messages ?? [];
   let readUpTo: bigint | null = syncedReadUpTo;
   if (slot?.lastViewedMessageId !== undefined) {
@@ -311,6 +320,7 @@ export function summarizeGroupSlot(
   let unread = 0;
   for (const m of messages) {
     if (m.direction !== "incoming") continue;
+    if (blockedRow(m)) continue;
     const id = idOf(m);
     if (id === null) continue;
     if (historyThrough !== null && id <= historyThrough) continue;
@@ -329,7 +339,7 @@ export function summarizeGroupSlot(
   }
   return {
     unread,
-    preview: last === undefined ? null : previewText(last),
+    preview: last === undefined ? null : blockedRow(last) ? t("block.group_row") : previewText(last),
     previewIsOwn: last?.direction === "outgoing",
     lastAt: last?.createdAt ?? null,
     lastAuthorKeyB64:
@@ -396,6 +406,8 @@ export function eventToPersistedMessage(
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
+      // ADR-0089 section 1 - the report evidence, captured at receipt.
+      ...(e.evidence === undefined ? {} : { evidence: e.evidence }),
     };
   }
   const membership = persistedFromMembership(e.membership);

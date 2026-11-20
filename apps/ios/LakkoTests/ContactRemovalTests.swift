@@ -648,6 +648,64 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(repository.state.pending.count, 1)
     }
 
+    /// ADR-0089 step 4 — a group-carried request from a sender already known
+    /// suspended is dropped unseen before anything else decides; one not yet
+    /// known is filed and its sender asked about.
+    func testAGroupRequestFromAKnownSuspendedSenderIsDroppedFirst() throws {
+        let me = try Identity.fromSeed(seed: Data(repeating: 0x8A, count: 32))
+        let them = try Identity.fromSeed(seed: Data(repeating: 0x8B, count: 32))
+        let repository = makeRepository()
+        repository.allowsGroupMembers = { _ in true }
+        var asked: [Data] = []
+        repository.askedAboutGroupRequestSender = { asked.append($0) }
+        repository.groupRequestSenderSuspended = { $0 == them.signaturePublicKey() }
+        let envelope = try groupEnvelope(from: them, to: me, senderAccountId: Data(repeating: 0x8B, count: 16))
+        XCTAssertFalse(repository.fileGroupContactRequest(
+            groupIdHex: groupHex, envelope: envelope, senderKey: them.signaturePublicKey(),
+            ownX25519Secret: me.x25519SecretKey(), createdAt: "2026-11-20T00:00:00Z"))
+        XCTAssertTrue(repository.state.pending.isEmpty)
+        XCTAssertTrue(asked.isEmpty)
+
+        repository.groupRequestSenderSuspended = { _ in false }
+        XCTAssertTrue(repository.fileGroupContactRequest(
+            groupIdHex: groupHex, envelope: envelope, senderKey: them.signaturePublicKey(),
+            ownX25519Secret: me.x25519SecretKey(), createdAt: "2026-11-20T00:00:01Z"))
+        XCTAssertEqual(repository.state.pending.count, 1)
+        XCTAssertEqual(asked, [them.signaturePublicKey()])
+    }
+
+    /// ADR-0089 step 4 — an undecided link-answer request held from an
+    /// earlier poll is dropped when it is decided and its sender is verified
+    /// suspended; another sender's row is decided as before (here: waits).
+    func testAHeldLinkRequestFromAVerifiedSuspendedSenderIsDroppedWhenDecided() async {
+        let repository = makeRepository()
+        let inbox = LinkRequestInbox(accountIdB64: account)
+        defer { for row in inbox.rows() { inbox.remove(messageId: row.request.messageId) } }
+        let row = { (byte: UInt8) in
+            LinkRequestInbox.Row(
+                request: IncomingContactRequest(
+                    messageId: Int64(byte), fromPubkey: Data(repeating: byte, count: 32), fromAccountId: nil,
+                    fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 0, intro: nil, createdAt: "t"),
+                linkId: Data(repeating: 1, count: 16), linkSecret: Data(repeating: 2, count: 12))
+        }
+        XCTAssertTrue(inbox.add(row(0x91)))
+        XCTAssertTrue(inbox.add(row(0x92)))
+        var asked: [[Data]] = []
+        repository.suspendedRequestSenders = { keys in
+            asked.append(keys)
+            return [Data(repeating: 0x91, count: 32)]
+        }
+        await repository.decideLinkRequests()
+        XCTAssertEqual(asked.count, 1, "every held row asked about at once")
+        XCTAssertEqual(Set(asked.first ?? []), [Data(repeating: 0x91, count: 32), Data(repeating: 0x92, count: 32)])
+        XCTAssertEqual(inbox.rows().map(\.request.messageId), [0x92])
+
+        // An unknown standing decides the row as before.
+        repository.suspendedRequestSenders = { _ in [] }
+        await repository.decideLinkRequests()
+        XCTAssertEqual(inbox.rows().map(\.request.messageId), [0x92])
+    }
+
     func testARequestForAnotherMemberIsDroppedSilently() throws {
         let me = try Identity.fromSeed(seed: Data(repeating: 0x83, count: 32))
         let other = try Identity.fromSeed(seed: Data(repeating: 0x84, count: 32))

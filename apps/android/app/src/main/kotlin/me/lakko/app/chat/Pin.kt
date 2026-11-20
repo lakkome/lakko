@@ -421,6 +421,14 @@ public fun pinMenuFor(
     return PinMenu(label = UiText("chat.message.pin"), actions = pins)
 }
 
+/**
+ * ADR-0089 section 4 — whether this device may pin or unpin for everyone
+ * now: the standing to ([mayShared]), and not while the account is
+ * suspended, since a shared pin is an envelope sent to the chat. A
+ * suspended account keeps `Pin for me` (local only).
+ */
+public fun sharedPinOffered(mayShared: Boolean, suspended: Boolean): Boolean = mayShared && !suspended
+
 /** The sheet row's title. In a one-to-one the shared scope reads `both`. */
 public fun pinActionLabel(action: PinAction, oneToOne: Boolean): UiText = UiText(
     when (action) {

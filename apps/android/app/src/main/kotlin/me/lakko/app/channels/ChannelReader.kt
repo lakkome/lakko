@@ -104,7 +104,26 @@ public class ChannelReader(
         return foldChannelTimeline(rows)
     }
 
-    private suspend fun decode(p: PostView): ChannelRow {
+    /**
+     * ADR-0089 step 5 — the timeline from what this device already holds,
+     * with no network read: the posts read this session (by this reader, or
+     * kept in [ChannelsUiState.postsByChannel]). `null` when nothing is held.
+     */
+    public suspend fun readHeld(): ChannelTimeline? {
+        if (viewed.isEmpty()) {
+            for (p in state.postsByChannel.value[channelId].orEmpty()) viewed[p.cursor.toLong()] = p
+        }
+        if (viewed.isEmpty()) return null
+        val rows = ArrayList<ChannelRow>(viewed.size)
+        for ((cursor, p) in viewed) {
+            val row = rowOf[cursor] ?: decode(p, offline = true)
+            rowOf[cursor] = row
+            rows += row
+        }
+        return foldChannelTimeline(rows)
+    }
+
+    private suspend fun decode(p: PostView, offline: Boolean = false): ChannelRow {
         val cursor = p.cursor.toLong()
         val ts = p.serverTsMs.toLong()
         tsOfPost[cursor] = ts
@@ -116,7 +135,7 @@ public class ChannelReader(
         }
         try {
             val epoch = post.epochId()
-            val seed = seedFor(epoch) ?: publicSeed(epoch)
+            val seed = seedFor(epoch) ?: (if (offline) null else publicSeed(epoch))
                 ?: return ChannelRow(cursor, ts, epoch, ChannelRowContent.Unavailable)
             val plaintext = try {
                 verifyAndDecryptChannelPost(seed, ChannelsComposer.channelIdFromHex(channelId), post)
@@ -124,7 +143,7 @@ public class ChannelReader(
                 return ChannelRow(cursor, ts, epoch, ChannelRowContent.Unavailable)
             }
             epochOfPost[cursor] = epoch
-            return ChannelRow(cursor, ts, epoch, contentOf(plaintext))
+            return ChannelRow(cursor, ts, epoch, contentOf(plaintext), wire = wire)
         } finally {
             post.close()
         }

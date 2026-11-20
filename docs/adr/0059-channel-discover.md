@@ -176,6 +176,16 @@ service envelopes.
 
 ### 7. Moderation
 
+**Superseded as authority by [ADR-0089](0089-reporting-and-moderation.md)
+step 5 (2026-11-20).** The operator's shared-secret route
+`POST /internal/v1/channels/{id}/moderation` is removed. The channels
+service now applies only a moderator statement signed under the pinned
+moderation root (`POST /internal/moderation/statement`, delist / block the
+`@name` / remove / restore), and the shared secret stays only as transport
+authentication between hosts. A removed channel answers
+`410 {"code":"channel-removed","log_index":n}` on every route. The text
+below is history.
+
 - The owner withdraws a listing at any time.
 - The operator can remove a listing and block a `channel_id` from being
   listed again, through the internal listener only (the push-gw internal

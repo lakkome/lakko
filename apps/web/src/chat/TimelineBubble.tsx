@@ -21,6 +21,7 @@
  * button, so pressing play paused it. They are now `MessageMenu.tsx`, opened
  * on a deliberate gesture and rendered outside the bubble.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { createEffect, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
@@ -211,6 +212,9 @@ export interface BubbleHost {
   /** Section 8 — `Select` was chosen in the card: enter the mode with this
    *  message already selected. */
   onSelect: (messageId: number) => void;
+  /** ADR-0089 section 2 - `Report` in the destructive group of the menu on
+   *  someone else's message. Absent: no Report row. */
+  onReport?: ((messageId: number) => void) | undefined;
 }
 
 export function TimelineBubble(
@@ -383,6 +387,9 @@ export function TimelineBubble(
         forward={ev.forward}
         unsupported={ev.unsupportedVersion !== undefined}
         {...props}
+        // ADR-0089 section 2 - never reported: a message from this person's
+        // own other device.
+        onReport={own ? undefined : props.onReport}
       />
     );
   }
@@ -1069,9 +1076,12 @@ function ChatBubbleBody(
                       <span class="lk-bubble-call-invite-title">
                         {t("chat.call_invite.title")}
                       </span>
-                      <A class="lk-button-link primary" href={invite().href}>
-                        {t("chat.call.join_short")}
-                      </A>
+                      {/* ADR-0089 step 3: a suspended account joins no call. */}
+                      <Show when={!accountSuspended()}>
+                        <A class="lk-button-link primary" href={invite().href}>
+                          {t("chat.call.join_short")}
+                        </A>
+                      </Show>
                     </div>
                   )}
                 </Show>
@@ -1253,7 +1263,7 @@ function ChatBubbleBody(
                 };
                 return (
                   <Show
-                    when={props.actionsAvailable}
+                    when={props.actionsAvailable && !accountSuspended()}
                     fallback={
                       <span class="lk-reaction" classList={{ mine: re.mine }} aria-label={label()} onContextMenu={openList}>
                         {chipBody()}
@@ -1405,6 +1415,19 @@ function ChatBubbleBody(
               onDelete={() => {
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);
               }}
+              extraDestructive={
+                !props.isOwn && props.onReport !== undefined && props.messageId !== undefined
+                  ? [
+                      {
+                        label: t("report.action"),
+                        icon: "flag",
+                        onClick: () => {
+                          if (props.messageId !== undefined) props.onReport?.(props.messageId);
+                        },
+                      },
+                    ]
+                  : []
+              }
               onClose={() => setMenuAnchor(null)}
             />
           )}
@@ -1413,6 +1436,7 @@ function ChatBubbleBody(
         <Show
           when={
             props.actionsAvailable &&
+            !accountSuspended() &&
             props.messageId !== undefined &&
             props.fullReactPickerId === props.messageId
           }

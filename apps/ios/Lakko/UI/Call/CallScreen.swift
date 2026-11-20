@@ -387,6 +387,8 @@ private struct QualityIndicator: View {
 /// old grid scroll.
 private struct ParticipantTile: View {
     @ObservedObject var l10n = Localization.shared
+    /// ADR-0089 section 6 — a blocked person's tile carries a muted label.
+    @ObservedObject private var blocks = BlockList.shared
     let participant: CallUiState.Participant
     let size: CGSize
     @ObservedObject var state: CallUiState
@@ -596,6 +598,11 @@ private struct ParticipantTile: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if blockedLabel {
+                Text(l10n.t("block.call_label"))
+                    .foregroundColor(Color.lakkoTextMuted)
+                    .lineLimit(1)
+            }
             // A connection is drawn only when it is fair or worse. A dot on
             // every healthy tile says nothing.
             if CallScreenPresentation.connectionIsWorthShowing(participant.quality) {
@@ -670,6 +677,12 @@ private struct ParticipantTile: View {
     private var displayLabel: String {
         CallPeerName.tileLabel(
             displayName: participant.displayName, isLocal: participant.isLocal)
+    }
+
+    /// The person behind this tile is blocked (`blockVerdict(.callTile)`).
+    private var blockedLabel: Bool {
+        guard !participant.isLocal, let person = state.personKeys[participant.id] else { return false }
+        return blocks.verdict(.callTile, accountKey: person) == .label
     }
 }
 

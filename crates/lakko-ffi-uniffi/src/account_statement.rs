@@ -348,6 +348,33 @@ pub fn account_statement_len() -> u32 {
     u32::try_from(ACCOUNT_STATEMENT_LEN).unwrap_or(u32::MAX)
 }
 
+/// Sign the identity proof auth requires before it records an identity key
+/// for an account (ADR-0089 security fix F3): the identity key's signature
+/// over `"lakko/auth/identity-proof/v1\0" ‖ account_id ‖ pubkey`, where
+/// `pubkey` is `account_identity`'s own signature public key. Returns the
+/// 64-byte proof; the caller sends it as `identity_proof_b64` (base64url
+/// without padding) with the genesis mint, the key reset finish, the key
+/// rotation and the recall finish, signed by the identity being recorded
+/// (the NEW identity on a reset, rotation or recall).
+///
+/// # Errors
+///
+/// [`FfiError::AccountStatement`] with code `bad-account-id-length` when
+/// `account_id` is not 16 bytes.
+#[uniffi::export]
+pub fn sign_identity_proof(
+    account_identity: std::sync::Arc<crate::Identity>,
+    account_id: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let account: [u8; 16] = account_id.as_slice().try_into().map_err(|_| {
+        FfiError::AccountStatement("bad-account-id-length: account id must be 16 bytes".into())
+    })?;
+    Ok(
+        lakko_attest::sign_identity_proof(&account_identity.inner.ed25519_seed_bytes(), &account)
+            .to_vec(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,5 +637,23 @@ mod tests {
             "bad-device-id-length"
         );
         assert_eq!(account_statement_header_name(), "x-lakko-account-statement");
+    }
+
+    #[test]
+    fn the_identity_proof_verifies_under_the_identity_key() {
+        let identity = std::sync::Arc::new(crate::Identity {
+            inner: lakko_mls::Identity::from_seed(&[5; 64]).unwrap(),
+        });
+        let pubkey: [u8; 32] = identity.inner.signature_public_key().try_into().unwrap();
+        let proof = sign_identity_proof(identity.clone(), vec![3; 16]).unwrap();
+        assert_eq!(
+            lakko_attest::verify_identity_proof(&proof, &[3; 16], &pubkey),
+            Ok(())
+        );
+        assert!(lakko_attest::verify_identity_proof(&proof, &[4; 16], &pubkey).is_err());
+        assert!(matches!(
+            sign_identity_proof(identity, vec![3; 15]),
+            Err(FfiError::AccountStatement(m)) if m.starts_with("bad-account-id-length: ")
+        ));
     }
 }

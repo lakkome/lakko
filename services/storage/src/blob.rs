@@ -93,7 +93,8 @@ pub(crate) const MAX_KEEP_BODY: usize = 32 * 1024;
 /// | 400 | `blob-hash-mismatch` | the body does not hash to the path |
 /// | 400 | `blob-length-mismatch` | the body is not `Content-Length` bytes |
 /// | 400 | `keep-malformed` | the keep body is not `{"ids": [hex, ...]}` with 1..=256 ids |
-/// | 404 | `blob-not-found` | no such blob (never stored, deleted, or expired) |
+/// | 404 | `blob-not-found` | no such blob (never stored, deleted, expired, or deleted by a moderator) |
+/// | 410 | `blob-removed` | an upload of an id a moderator deleted (ADR-0089) |
 /// | 403 | `blob-delete-refused` | any delete refusal (no row, no key, bad or stale proof) |
 /// | 503 | `blob-node-unavailable` | the row names another storage node (forwarding is not built) |
 /// | 500 | `internal` | index or file failure |
@@ -118,6 +119,7 @@ pub(crate) enum ApiError {
     LengthMismatch,
     KeepMalformed,
     NotFound,
+    Removed,
     DeleteRefused,
     NodeUnavailable,
     Internal,
@@ -139,6 +141,7 @@ impl ApiError {
             Self::LengthRequired => StatusCode::LENGTH_REQUIRED,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Removed => StatusCode::GONE,
             Self::DeleteRefused => StatusCode::FORBIDDEN,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -162,6 +165,7 @@ impl ApiError {
             Self::LengthMismatch => "blob-length-mismatch",
             Self::KeepMalformed => "keep-malformed",
             Self::NotFound => "blob-not-found",
+            Self::Removed => "blob-removed",
             Self::DeleteRefused => "blob-delete-refused",
             Self::NodeUnavailable => "blob-node-unavailable",
             Self::Internal => "internal",
@@ -403,7 +407,9 @@ async fn stream_into(
 /// refunded when the upload then fails. The body must hash to the path and
 /// be exactly `Content-Length` bytes. A first upload writes the row with the
 /// delete key and the optional idle life; a repeated upload is an access and
-/// keeps the first key and idle life.
+/// keeps the first key and idle life. An id a moderator deleted is refused
+/// with `410 blob-removed` before the body is read (ADR-0089), and again if
+/// the delete lands while the body streams (the stored file is then removed).
 pub(crate) async fn put_blob(
     State(state): State<AppState>,
     AxumPath(hex): AxumPath<String>,
@@ -414,6 +420,9 @@ pub(crate) async fn put_blob(
     // the charge follows the request checks, which cost the client nothing.
     take_pass(&state, &headers, PassKind::Upload, 0, 0)?;
     let id = parse_id(&hex)?;
+    if state.index.is_tombstoned(&id).await? {
+        return Err(ApiError::Removed);
+    }
     let key = delete_key(&headers)?;
     let idle = idle_days(&headers)?;
     let declared = content_length(&headers)?;
@@ -447,6 +456,7 @@ pub(crate) async fn put_blob(
         // `temp` drops here, removing the partial file.
         return Err(ApiError::HashMismatch);
     }
+    let stored = target.clone();
     tokio::task::spawn_blocking(move || temp.persist(&target))
         .await
         .map_err(|_| ApiError::Internal)?
@@ -468,6 +478,12 @@ pub(crate) async fn put_blob(
     let status = match outcome {
         UploadOutcome::Created => StatusCode::CREATED,
         UploadOutcome::Existed => StatusCode::OK,
+        UploadOutcome::Removed => {
+            // A moderator deleted the id while the body streamed: the file
+            // just written must not stay.
+            remove_blob_file(&stored).await;
+            return Err(ApiError::Removed);
+        },
     };
     Ok(status.into_response())
 }
@@ -525,6 +541,38 @@ pub(crate) async fn get_blob(
         state.index.touch(&[id], day).await?;
     }
 
+    let mut response = Response::new(Body::from_stream(crate::stream::ReaderStream::new(file)));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, header::HeaderValue::from(len));
+    Ok(response)
+}
+
+/// A blob's ciphertext for the moderators' panel (ADR-0089 step 5), served
+/// on storage's internal listener behind its shared secret: no pass, and not
+/// an access, so a moderator looking at evidence does not extend the blob's
+/// life. Refusals as `GET /blob/{hex}`: `400 blob-id-malformed`, `404
+/// blob-not-found`, `503 blob-node-unavailable`.
+pub(crate) async fn read_for_moderator(state: &AppState, hex: &str) -> Result<Response, ApiError> {
+    let id = parse_id(hex)?;
+    local_row(state, &id).await?;
+    let path = blob_path(&state.blob_root, &id);
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(file_missing(state, &id).await);
+        },
+        Err(e) => return Err(internal_io("open blob", &e)),
+    };
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| internal_io("stat blob", &e))?
+        .len();
     let mut response = Response::new(Body::from_stream(crate::stream::ReaderStream::new(file)));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -616,16 +664,19 @@ pub(crate) async fn delete_blob(
         return Err(ApiError::NodeUnavailable);
     }
     state.index.remove(&id).await?;
-    match tokio::fs::remove_file(blob_path(&state.blob_root, &id)).await {
+    remove_blob_file(&blob_path(&state.blob_root, &id)).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Remove a blob's file after its row: a missing file is fine, another
+/// failure is logged (the row is gone, so the blob is already unreachable
+/// and the file is an orphan on disk).
+pub(crate) async fn remove_blob_file(path: &Path) {
+    match tokio::fs::remove_file(path).await {
         Ok(()) => {},
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-        Err(e) => {
-            // The row is gone, so the blob is already unreachable; the file
-            // is an orphan on disk.
-            tracing::warn!(error = %e, "delete blob file after its row");
-        },
+        Err(e) => tracing::warn!(error = %e, "delete blob file after its row"),
     }
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[cfg(test)]

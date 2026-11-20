@@ -43,6 +43,7 @@
  *
  * Public route, mirroring the `/i/` contact-invite + `/g/` group-join routes.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import {
   Match,
   Show,
@@ -547,7 +548,15 @@ export default function JoinCall() {
                 </div>
               )}
             </Show>
-            <Show when={phase() === "idle"}>
+            {/* ADR-0089 step 3: a suspended account joins no call. The name
+                field and Join give way to the one line that says so. */}
+            <Show when={phase() === "idle" && accountSuspended()}>
+              <p class="lk-muted">{t("suspended.self.body")}</p>
+              <button type="button" onClick={() => navigate(paths.home, { replace: true })}>
+                {t("common.close")}
+              </button>
+            </Show>
+            <Show when={phase() === "idle" && !accountSuspended()}>
               <Show when={asksGuestName()}>
                 <label>
                   {t("call.link.guest_name.label")}

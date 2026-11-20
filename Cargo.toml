@@ -7,6 +7,7 @@ members = [
     "crates/lakko-core",
     "crates/lakko-crypto",
     "crates/lakko-mls",
+    "crates/lakko-moderation",
     "crates/lakko-proto",
     "crates/lakko-transport",
     "crates/lakko-storage",
@@ -50,6 +51,7 @@ members = [
     "services/ds",
     "services/storage",
     "services/gif-proxy",
+    "services/moderation",
     "services/edge",
     "services/discovery",
     "services/obfs-proxy",
@@ -59,6 +61,7 @@ members = [
     "services/witness",
     "services/transport-rendezvous",
     "tools/release-manifest",
+    "tools/moderation-root",
     "tools/bootstrap-config",
     "tools/l10n",
 ]
@@ -183,6 +186,7 @@ lakko-ds-proof = { path = "crates/lakko-ds-proof", version = "0.0.0" }
 lakko-device-link = { path = "crates/lakko-device-link", version = "0.0.0" }
 lakko-call-jwt = { path = "crates/lakko-call-jwt", version = "0.0.0" }
 lakko-attest = { path = "crates/lakko-attest", version = "0.0.0" }
+lakko-moderation = { path = "crates/lakko-moderation", version = "0.0.0" }
 lakko-sfu-proto = { path = "crates/lakko-sfu-proto", version = "0.0.0" }
 lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-pow-server = { path = "crates/lakko-pow-server", version = "0.0.0" }

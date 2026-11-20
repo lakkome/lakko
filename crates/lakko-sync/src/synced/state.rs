@@ -150,6 +150,10 @@
 
 use std::collections::BTreeMap;
 
+use super::blocked::{
+    compose_blocked_envelope, decode_blocked_envelope, BlockedEntry, BlockedEnvelopeError,
+    BLOCKED_ENVELOPE_MAX_ENTRIES, BLOCKED_KEY_LEN,
+};
 use super::channel_comment::{
     compose_channel_comment_envelope, decode_channel_comment_envelope, ChannelCommentEntry,
     ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT, CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES,
@@ -433,7 +437,8 @@ impl SyncedState {
                 | SyncEntry::DeviceAck(_)
                 | SyncEntry::ChannelReaction(_)
                 | SyncEntry::ChannelComment(_)
-                | SyncEntry::QuickReaction(_) => {},
+                | SyncEntry::QuickReaction(_)
+                | SyncEntry::Blocked(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -950,6 +955,100 @@ impl SyncedState {
             entries
                 .into_iter()
                 .map(|s| (s.hlc, SyncEntry::DeviceAck(s.value))),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Blocked people (ADR-0089 section 6).
+    // -----------------------------------------------------------------
+
+    /// Block (`blocked`) or unblock the account `account_key`, stamped
+    /// `hlc`, at wall-clock `now_ms`. Returns the envelope to send to the
+    /// account's other devices, or `None` when nothing changed: the account
+    /// already stands that way, or a newer register is held.
+    pub fn set_blocked(
+        &mut self,
+        hlc: u64,
+        account_key: [u8; BLOCKED_KEY_LEN],
+        blocked: bool,
+        now_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if self.is_blocked(&account_key) == blocked {
+            return None;
+        }
+        let value = BlockedEntry {
+            account_key,
+            blocked,
+            changed_at_ms: now_ms,
+        };
+        match self.apply(hlc, SyncEntry::Blocked(value.clone())) {
+            Ok(ApplyOutcome::Applied) => compose_blocked_envelope(&[Stamped { hlc, value }]).ok(),
+            _ => None,
+        }
+    }
+
+    /// Whether `account_key` is blocked now.
+    #[must_use]
+    pub fn is_blocked(&self, account_key: &[u8; BLOCKED_KEY_LEN]) -> bool {
+        matches!(
+            self.registers.get(&RegisterKey::Blocked(*account_key)),
+            Some(Held {
+                entry: SyncEntry::Blocked(b),
+                ..
+            }) if b.blocked
+        )
+    }
+
+    /// Every blocked account key with the time it was blocked, most recent
+    /// first (the Blocked people list; ties by key).
+    #[must_use]
+    pub fn blocked_accounts(&self) -> Vec<([u8; BLOCKED_KEY_LEN], u64)> {
+        let mut out: Vec<([u8; BLOCKED_KEY_LEN], u64)> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::Blocked(b) if b.blocked => Some((b.account_key, b.changed_at_ms)),
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
+
+    /// Every held block register, blocked or unblocked, with its original
+    /// stamp, as envelopes of at most [`BLOCKED_ENVELOPE_MAX_ENTRIES`]
+    /// entries: the re-send a device owes on DeviceGroup growth, or when a
+    /// live send did not go out.
+    #[must_use]
+    pub fn blocked_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<BlockedEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::Blocked(b) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: b.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(BLOCKED_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_blocked_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a block envelope and fold every register in with its original
+    /// stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`BlockedEnvelopeError`].
+    pub fn apply_blocked_envelope(&mut self, bytes: &[u8]) -> Result<bool, BlockedEnvelopeError> {
+        let entries = decode_blocked_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::Blocked(s.value))),
         ))
     }
 
@@ -3135,6 +3234,68 @@ mod tests {
         assert!(b
             .apply_device_ack_envelope(b"lakko/sync/device-ack/v1\0\x02")
             .is_err());
+    }
+
+    #[test]
+    fn a_block_is_last_writer_wins_carried_and_persisted() {
+        let mut a = SyncedState::new();
+        let k1 = [1u8; 32];
+        let k2 = [2u8; 32];
+        assert!(!a.is_blocked(&k1));
+        assert_eq!(a.set_blocked(10, k1, false, 1_000), None);
+        let sent1 = a.set_blocked(10, k1, true, 1_000).unwrap_or_default();
+        let sent2 = a.set_blocked(11, k2, true, 2_000).unwrap_or_default();
+        assert!(a.is_blocked(&k1) && a.is_blocked(&k2));
+        // Already blocked: nothing to write.
+        assert_eq!(a.set_blocked(12, k1, true, 3_000), None);
+        assert_eq!(a.blocked_accounts(), vec![(k2, 2_000), (k1, 1_000)]);
+        // Carried, idempotently.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_blocked_envelope(&sent1), Ok(true));
+        assert_eq!(b.apply_blocked_envelope(&sent1), Ok(false));
+        assert_eq!(b.apply_blocked_envelope(&sent2), Ok(true));
+        assert_eq!(b.blocked_envelopes(), a.blocked_envelopes());
+        // Unblock is newer and wins; the stale block arriving later loses.
+        let unblock = a.set_blocked(20, k1, false, 4_000).unwrap_or_default();
+        assert!(!a.is_blocked(&k1));
+        assert_eq!(b.apply_blocked_envelope(&unblock), Ok(true));
+        assert_eq!(b.apply_blocked_envelope(&sent1), Ok(false));
+        assert!(!b.is_blocked(&k1));
+        assert_eq!(b.blocked_accounts(), vec![(k2, 2_000)]);
+        // Never in the snapshot, but persisted, unblocks included.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.blocked_envelopes(), a.blocked_envelopes());
+        assert!(!back.is_blocked(&k1) && back.is_blocked(&k2));
+        assert!(b
+            .apply_blocked_envelope(b"lakko/sync/blocked/v1\0\x02")
+            .is_err());
+    }
+
+    #[test]
+    fn on_an_exact_tie_a_block_beats_an_unblock() {
+        let k = [7u8; 32];
+        let mut a = SyncedState::new();
+        let block = a.set_blocked(5, k, true, 1).unwrap_or_default();
+        let mut b = SyncedState::new();
+        let _ = b.set_blocked(5, k, true, 1);
+        let unblock = b.set_blocked(5, k, false, 1);
+        // b can't write an unblock at the same stamp over its own block.
+        assert_eq!(unblock, None);
+        let mut c = SyncedState::new();
+        assert_eq!(
+            c.apply(
+                5,
+                SyncEntry::Blocked(BlockedEntry {
+                    account_key: k,
+                    blocked: false,
+                    changed_at_ms: 1,
+                })
+            ),
+            Ok(ApplyOutcome::Applied)
+        );
+        assert_eq!(c.apply_blocked_envelope(&block), Ok(true));
+        assert!(c.is_blocked(&k));
     }
 
     #[test]

@@ -107,7 +107,8 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
  * `circle-claim` is ADR-0086: claiming a circle directory;
  * `channel-react` and `channel-comment` are ADR-0087 section 13a: one per
  * write under a channel post (nothing on the web spends them yet: channel
- * reactions and comments are phase B).
+ * reactions and comments are phase B);
+ * `report` is ADR-0089 section 2: one report to Lakko's moderators.
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -125,6 +126,7 @@ export const ANON_TOKEN_CONTEXTS = [
   "circle-claim",
   "channel-react",
   "channel-comment",
+  "report",
 ] as const;
 
 /** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
@@ -156,6 +158,9 @@ export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
   // measured.
   "channel-react": 4,
   "channel-comment": 4,
+  // ADR-0089 section 2: reports to the moderators. Kept on hand so issuance
+  // time says nothing about when a report is sent. Chosen, not measured.
+  report: 2,
 };
 
 /** The pool target of `context`. */
@@ -235,6 +240,22 @@ export class AnonTokenUnavailableError extends Error {
     super(`anon-token ${context}: no token available (${reason})`);
   }
 }
+
+/**
+ * ADR-0089 step 3: the account is suspended. While it is, the restricted
+ * session may draw `blob-read` tokens only (files in chats still open);
+ * every other context answers `403 account-suspended`. Not a failure to
+ * retry: "not now", until the suspension ends.
+ */
+export class AnonTokensSuspendedError extends AnonTokenUnavailableError {
+  override name = "AnonTokensSuspendedError";
+  constructor(context: AnonTokenContext) {
+    super(context, "account suspended");
+  }
+}
+
+/** The one context a suspended account's restricted session may draw. */
+export const SUSPENDED_TOKEN_CONTEXT: AnonTokenContext = "blob-read";
 
 /** Walk `cause` / `variant.cause` chains (the same shape the other
  *  `is*` helpers in this app walk) looking for an instance of `ctor`. */
@@ -413,6 +434,9 @@ interface Bucket {
   /** Unix ms until which the background refill is not retried. */
   backoffUntil: number;
   disabledUntil: number;
+  /** ADR-0089: unix ms until which issuance for this context is not asked
+   *  again, after it answered `403 account-suspended`. */
+  suspendedUntil: number;
   /** The pending scheduled refill of this context. */
   timer: unknown;
   /** Why the last refill of this context failed, for the error a take
@@ -482,6 +506,8 @@ export class AnonTokenPool {
   private readonly refillOnDemand: boolean;
 
   private sessionToken: string | null = null;
+  /** ADR-0089: the account is suspended; only `blob-read` is issued. */
+  private suspended = false;
   /** The load of the stored tokens for the current account, once started. */
   private hydration: Promise<void> | null = null;
   /** Store operations run in order: a write queued before an account's
@@ -535,6 +561,25 @@ export class AnonTokenPool {
     this.sessionToken = token;
     if (fresh || this.hydration === null) this.startHydration(key);
     if (fresh) this.startSchedule();
+  }
+
+  /**
+   * ADR-0089 step 3: the account is (or is no longer) suspended. While it
+   * is, the session is the restricted one and only `blob-read` is drawn: no
+   * other context is refilled, and a take of one finds what is held or is
+   * refused at once ("not now"), never waiting on an issuance.
+   */
+  setSuspended(suspended: boolean): void {
+    if (this.suspended === suspended) return;
+    this.suspended = suspended;
+    if (!suspended) {
+      for (const bucket of this.buckets.values()) bucket.suspendedUntil = 0;
+    }
+  }
+
+  /** Whether issuance of `context` is held back right now. */
+  private heldBack(context: AnonTokenContext, bucket: Bucket, now: number): boolean {
+    return (this.suspended && context !== SUSPENDED_TOKEN_CONTEXT) || bucket.suspendedUntil > now;
   }
 
   /** Drop the held tokens, every refill in flight and the session from
@@ -643,6 +688,7 @@ export class AnonTokenPool {
     const bucket = this.bucket(context);
     const now = this.now();
     if (bucket.exhaustedUntil > now || bucket.disabledUntil > now) return;
+    if (this.heldBack(context, bucket, now)) return;
     try {
       const wasm = await this.wasmLoader();
       const current = this.currentEpoch(wasm);
@@ -687,6 +733,7 @@ export class AnonTokenPool {
       throw new AnonTokenQuotaExhaustedError(context, bucket.exhaustedRetryAfter);
     }
     if (bucket.disabledUntil > now) throw new AnonTokensDisabledError(context);
+    if (this.heldBack(context, bucket, now)) throw new AnonTokensSuspendedError(context);
     if (this.sessionToken === null) {
       throw new AnonTokenUnavailableError(context, "no session");
     }
@@ -845,6 +892,7 @@ export class AnonTokenPool {
         exhaustedRetryAfter: null,
         backoffUntil: 0,
         disabledUntil: 0,
+        suspendedUntil: 0,
         timer: null,
         lastFailure: null,
         initial: null,
@@ -874,6 +922,7 @@ export class AnonTokenPool {
   private async runRefill(context: AnonTokenContext, bucket: Bucket): Promise<void> {
     const session = this.sessionToken;
     if (session === null) throw new AnonTokenUnavailableError(context, "no session");
+    if (this.heldBack(context, bucket, this.now())) throw new AnonTokensSuspendedError(context);
     const generation = this.generation;
     const wasm = await this.wasmLoader();
     // A top-up to the target, in one issuance.
@@ -937,6 +986,10 @@ export class AnonTokenPool {
         bucket.exhaustedRetryAfter = err.retryAfterSecs;
       } else if (err instanceof AnonTokensDisabledError) {
         bucket.disabledUntil = now + DISABLED_BACKOFF_MS;
+      } else if (err instanceof AnonTokensSuspendedError) {
+        // "Not now": not asked again before the backoff, and a take in the
+        // meantime is refused at once instead of waiting on an issuance.
+        bucket.suspendedUntil = now + DISABLED_BACKOFF_MS;
       } else {
         bucket.backoffUntil = now + FAILURE_BACKOFF_MS;
       }
@@ -967,6 +1020,9 @@ export class AnonTokenPool {
     }
     if (response.status === 503 && error.error === "anon-tokens-disabled") {
       throw new AnonTokensDisabledError(context);
+    }
+    if (response.status === 403 && error.error === "account-suspended") {
+      throw new AnonTokensSuspendedError(context);
     }
     if (
       response.status === 400 &&

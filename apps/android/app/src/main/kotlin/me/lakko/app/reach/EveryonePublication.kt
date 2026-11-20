@@ -179,3 +179,28 @@ internal suspend fun publishEveryone(
 }
 
 private const val ACCOUNT_ID_LEN = 16
+
+/** ADR-0089 step 5 — the discovery code for an account moderators removed
+ *  from search. */
+public const val HIDDEN_FROM_SEARCH_CODE: String = "hidden-from-search"
+
+/** Whether [cause] (or a cause under it) is discovery refusing the Everyone
+ *  record with `403 hidden-from-search`. */
+public fun isHiddenFromSearch(cause: Throwable?): Boolean {
+    var c: Throwable? = cause
+    val seen = HashSet<Throwable>()
+    while (c != null && seen.add(c)) {
+        if (c is me.lakko.app.discovery.DiscoveryHttpError && c.status == 403 && c.code == HIDDEN_FROM_SEARCH_CODE) {
+            return true
+        }
+        c = c.cause
+    }
+    return false
+}
+
+/**
+ * ADR-0089 step 5 — whether Everyone can be chosen on Who can find me: not
+ * while moderators keep the account out of search. A setting already on
+ * Everyone stays as the person chose it.
+ */
+public fun everyoneSelectable(hiddenFromSearch: Boolean): Boolean = !hiddenFromSearch

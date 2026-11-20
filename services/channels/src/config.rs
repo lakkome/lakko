@@ -124,10 +124,11 @@ pub struct Config {
     /// is floored to 1 so a rotation cannot strand every
     /// subscriber.
     pub envelope_retention_epochs: usize,
-    /// Where the internal moderation listener binds (ADR-0059 section 7),
+    /// Where the internal moderation listener binds (ADR-0089 step 5),
     /// from `LAKKO_CHANNELS_INTERNAL_BIND`. The listener starts only when
-    /// `LAKKO_CHANNELS_INTERNAL_SECRET` is set; the secret is read by
-    /// `main` and never held here, so this struct's `Debug` cannot print it.
+    /// `LAKKO_CHANNELS_INTERNAL_SECRET` and
+    /// `LAKKO_CHANNELS_MODERATION_ROOT_KEY` are set; both are read by `main`
+    /// and never held here, so this struct's `Debug` cannot print the secret.
     pub internal_bind: SocketAddr,
 }
 

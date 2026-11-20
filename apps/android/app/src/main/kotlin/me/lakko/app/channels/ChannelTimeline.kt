@@ -46,6 +46,8 @@ public data class ChannelRow(
     val tsMs: Long,
     val epoch: UInt,
     val content: ChannelRowContent,
+    /** ADR-0089 section 2 — the post's wire as fetched, what a report of it includes. */
+    val wire: ByteArray? = null,
 )
 
 /** One post as the timeline draws it. */
@@ -60,6 +62,8 @@ public data class ChannelPostItem(
      *  no key for, after the first one it can read. */
     val unavailable: Boolean = false,
     val channelInvite: ByteArray? = null,
+    /** ADR-0089 section 2 — the post's wire, for a report of it. */
+    val wire: ByteArray? = null,
 )
 
 /** The fold's answer. */
@@ -95,6 +99,7 @@ public fun foldChannelTimeline(rows: List<ChannelRow>): ChannelTimeline {
                     attachments = c.attachments,
                     edited = false,
                     channelInvite = c.channelInvite,
+                    wire = row.wire,
                 )
             }
             is ChannelRowContent.Edit -> {

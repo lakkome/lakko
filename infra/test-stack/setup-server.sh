@@ -24,7 +24,7 @@ TURN_URIS="${TURN_URIS:-}"
 
 ENV_DIR=/etc/lakko-test
 ENV_FILE=$ENV_DIR/lakko.env
-DBS=(auth ds discovery push_gw channels storage)
+DBS=(auth ds discovery push_gw channels storage moderation)
 
 id lakkotest >/dev/null 2>&1 || useradd --system --home-dir /var/lib/lakko-test --shell /usr/sbin/nologin lakkotest
 install -d -m 755 -o root -g root /opt/lakko-test /opt/lakko-test/bin
@@ -126,6 +126,73 @@ if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
   echo "LAKKO_CHANNELS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_channels" >> $ENV_FILE
   echo "channels database URL added to the env file"
 fi
+
+# The moderation service (ADR-0089) arrived later: an older env file gains
+# its database URL. The moderator list and root key are installed by hand
+# (see tools/moderation-root); without them reporting answers 503.
+if ! grep -q '^LAKKO_MODERATION_DATABASE_URL=' $ENV_FILE; then
+  echo "LAKKO_MODERATION_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_moderation" >> $ENV_FILE
+  echo "moderation database URL added to the env file"
+fi
+
+# Account suspension (ADR-0089 section 4): auth's internal listener and the
+# moderation service share one secret, generated once and then kept. An env
+# file that already holds either side's value gives it to the other. The root
+# key is copied from the moderation service's only when that one is set (it
+# is installed by hand); without it auth's listener stays off.
+SUSPENSION_SECRET=$(grep -m1 '^LAKKO_AUTH_INTERNAL_SECRET=' $ENV_FILE | cut -d= -f2-)
+if [ -z "$SUSPENSION_SECRET" ]; then
+  SUSPENSION_SECRET=$(grep -m1 '^LAKKO_MODERATION_AUTH_INTERNAL_SECRET=' $ENV_FILE | cut -d= -f2-)
+fi
+if [ -z "$SUSPENSION_SECRET" ]; then
+  SUSPENSION_SECRET=$(openssl rand -base64 32)
+fi
+if ! grep -q '^LAKKO_AUTH_INTERNAL_SECRET=' $ENV_FILE; then
+  echo "LAKKO_AUTH_INTERNAL_SECRET=${SUSPENSION_SECRET}" >> $ENV_FILE
+  echo "auth internal secret added to the env file"
+fi
+if ! grep -q '^LAKKO_MODERATION_AUTH_INTERNAL_SECRET=' $ENV_FILE; then
+  echo "LAKKO_MODERATION_AUTH_INTERNAL_SECRET=${SUSPENSION_SECRET}" >> $ENV_FILE
+fi
+if ! grep -q '^LAKKO_MODERATION_AUTH_INTERNAL_URL=' $ENV_FILE; then
+  echo "LAKKO_MODERATION_AUTH_INTERNAL_URL=http://127.0.0.1:8095" >> $ENV_FILE
+fi
+MODERATION_ROOT=$(grep -m1 '^LAKKO_MODERATION_ROOT_KEY=' $ENV_FILE | cut -d= -f2-)
+if [ -n "$MODERATION_ROOT" ] && ! grep -q '^LAKKO_AUTH_MODERATION_ROOT_KEY=' $ENV_FILE; then
+  echo "LAKKO_AUTH_MODERATION_ROOT_KEY=${MODERATION_ROOT}" >> $ENV_FILE
+  echo "moderation root key copied to auth"
+fi
+
+# The other services that apply moderator actions (ADR-0089 step 5):
+# discovery (names, search, group handles), channels, storage (blob delete).
+# Each pair shares its own secret, generated once and then kept; an env file
+# that already holds either side's value gives it to the other. The root key
+# is copied from the moderation service's when that one is set.
+for PAIR in DISCOVERY:8097 CHANNELS:8093 STORAGE:8098; do
+  SVC=${PAIR%%:*}
+  PORT=${PAIR##*:}
+  PAIR_SECRET=$(grep -m1 "^LAKKO_${SVC}_INTERNAL_SECRET=" $ENV_FILE | cut -d= -f2-)
+  if [ -z "$PAIR_SECRET" ]; then
+    PAIR_SECRET=$(grep -m1 "^LAKKO_MODERATION_${SVC}_INTERNAL_SECRET=" $ENV_FILE | cut -d= -f2-)
+  fi
+  if [ -z "$PAIR_SECRET" ]; then
+    PAIR_SECRET=$(openssl rand -base64 32)
+  fi
+  if ! grep -q "^LAKKO_${SVC}_INTERNAL_SECRET=" $ENV_FILE; then
+    echo "LAKKO_${SVC}_INTERNAL_SECRET=${PAIR_SECRET}" >> $ENV_FILE
+    echo "${SVC} internal secret added to the env file"
+  fi
+  if ! grep -q "^LAKKO_MODERATION_${SVC}_INTERNAL_SECRET=" $ENV_FILE; then
+    echo "LAKKO_MODERATION_${SVC}_INTERNAL_SECRET=${PAIR_SECRET}" >> $ENV_FILE
+  fi
+  if ! grep -q "^LAKKO_MODERATION_${SVC}_INTERNAL_URL=" $ENV_FILE; then
+    echo "LAKKO_MODERATION_${SVC}_INTERNAL_URL=http://127.0.0.1:${PORT}" >> $ENV_FILE
+  fi
+  if [ -n "$MODERATION_ROOT" ] && ! grep -q "^LAKKO_${SVC}_MODERATION_ROOT_KEY=" $ENV_FILE; then
+    echo "LAKKO_${SVC}_MODERATION_ROOT_KEY=${MODERATION_ROOT}" >> $ENV_FILE
+    echo "moderation root key copied to ${SVC}"
+  fi
+done
 
 # The passkey vault (ADR-0072) arrived later still: an older env file gains
 # its key here, generated once and then kept (regenerating it would make

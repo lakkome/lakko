@@ -173,7 +173,7 @@ final class AnonTokenPoolTests: XCTestCase {
             "discovery-lookup", "discovery-register", "invite-consume", "ds-knock",
             "push-register", "channel-subscribe", "directory-search",
             "vault-claim", "blob-upload", "blob-read", "mailbox-write", "call-join",
-            "circle-claim", "channel-react", "channel-comment",
+            "circle-claim", "channel-react", "channel-comment", "report",
         ])
         XCTAssertEqual(AnonTokenRoute.headerName, "x-lakko-anon-token")
     }
@@ -224,6 +224,7 @@ final class AnonTokenPoolTests: XCTestCase {
             .circleClaim: 2,
             .callJoin: 4,
             .channelReact: 4, .channelComment: 4,
+            .report: 2,
         ]
         XCTAssertEqual(Set(expected.keys), Set(AnonTokenContext.allCases), "every context has a pinned policy")
         let issuer = FakeIssuer()

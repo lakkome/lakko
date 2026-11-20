@@ -127,6 +127,10 @@ use crate::AppState;
 /// - `channel-comment` (ADR-0087 section 13a): one token per comment added;
 ///   deleting one's own spends none. 200 a day is chosen, not measured, with
 ///   room to spare over what a person writes in a day.
+/// - `report` (ADR-0089 section 2): one token per report sent to the
+///   moderators. 10 a day is chosen, not measured: a person reports rarely,
+///   and the limit is what keeps one account from flooding the moderation
+///   queue without the queue learning who reported.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 300),
     (TokenContext::DiscoveryRegister, 20),
@@ -143,6 +147,7 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::CircleClaim, 10),
     (TokenContext::ChannelReact, 500),
     (TokenContext::ChannelComment, 200),
+    (TokenContext::Report, 10),
 ];
 
 /// The `call-join` quota per epoch of a young account (ADR-0078 section 2,
@@ -364,6 +369,10 @@ pub(crate) enum TokenApiError {
         remaining: u32,
         retry_after_secs: u64,
     },
+    /// A suspended account asked for a context other than `blob-read`
+    /// (403 `account-suspended`; ADR-0089: it may still read its chats,
+    /// files included, and nothing else).
+    Suspended,
     /// Store or unreachable crypto failure (500 `internal`).
     Internal,
 }
@@ -374,6 +383,10 @@ impl IntoResponse for TokenApiError {
             Self::Disabled => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 json!({ "error": "anon-tokens-disabled" }),
+            ),
+            Self::Suspended => (
+                StatusCode::FORBIDDEN,
+                json!({ "error": "account-suspended" }),
             ),
             Self::UnknownContext => (
                 StatusCode::BAD_REQUEST,
@@ -473,11 +486,17 @@ pub(crate) struct IssueRes {
 pub(crate) async fn issue_tokens(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    Extension(standing): Extension<crate::webauthn::SessionStanding>,
     Json(req): Json<IssueReq>,
 ) -> Result<Json<IssueRes>, TokenApiError> {
     let issuer = issuer(&state)?;
     let context =
         TokenContext::from_name(&req.context).map_err(|_| TokenApiError::UnknownContext)?;
+    // ADR-0089 step 3: a suspended account reads its chats, attachments
+    // included, so it may still draw `blob-read` passes; nothing else.
+    if standing.suspended && context != TokenContext::BlobRead {
+        return Err(TokenApiError::Suspended);
+    }
     let epoch = issuer.server.current_epoch();
     if let Some(e) = req.epoch {
         if e != epoch {

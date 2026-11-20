@@ -27,6 +27,7 @@
 //! crate.
 
 pub mod av_align;
+pub mod block;
 pub mod call_bar;
 pub mod call_group;
 pub mod capture;

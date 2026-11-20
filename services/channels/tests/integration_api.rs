@@ -1209,7 +1209,10 @@ async fn spawn_with_internal() -> (SocketAddr, SocketAddr) {
     let (a, b) = (public.local_addr().unwrap(), internal.local_addr().unwrap());
     let internal_app = lakko_svc_channels::internal::internal_router(
         Arc::clone(&state),
-        Arc::new(INTERNAL_SECRET.to_vec()),
+        lakko_svc_channels::internal::InternalConfig {
+            secret: Arc::new(INTERNAL_SECRET.to_vec()),
+            root_key: moderation::root_public(),
+        },
     );
     let app = router(state);
     tokio::spawn(async move {
@@ -1722,8 +1725,105 @@ async fn items_carry_the_band_not_the_count_and_unknown_topics_file_under_other(
     assert!(items[0].get("count").is_none());
 }
 
+/// Moderator statements for the ADR-0089 tests: a software security key on a
+/// list signed by a test root.
+mod moderation {
+    use lakko_crypto::signing::SigningKey;
+    use lakko_moderation::apply::StatementBody;
+    use lakko_moderation::moderators::{ModeratorEntry, ModeratorList};
+    use lakko_moderation::software_authenticator::SoftwareAuthenticator;
+    use lakko_moderation::statement::{reason_commitment, Action, Statement};
+    use lakko_moderation::target::Target;
+    use lakko_moderation::Reason;
+
+    const ROOT_SEED: [u8; 32] = [0x42; 32];
+    const MODERATOR_SEED: [u8; 32] = [0x17; 32];
+
+    pub(crate) fn root_public() -> [u8; 32] {
+        SigningKey::from_seed(&ROOT_SEED).verifying_key().to_bytes()
+    }
+
+    fn list() -> ModeratorList {
+        ModeratorList {
+            list_version: 3,
+            issued_at_ms: 1,
+            rp_id: "moderation.example".into(),
+            origin: "https://moderation.example".into(),
+            entries: vec![ModeratorEntry {
+                moderator_id: [1; 16],
+                name: "m".into(),
+                key: SoftwareAuthenticator::from_seed(&MODERATOR_SEED).moderator_key(),
+                credential_id: vec![1],
+                x25519_public: [9; 32],
+                added_at_ms: 0,
+                revoked_at_ms: 0,
+            }],
+        }
+    }
+
+    /// A fixed point an hour ago, the same for every statement of the test
+    /// process: statements are refused 24 h after their issue, so tests
+    /// order them by offsets from here.
+    fn base_ms() -> u64 {
+        static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *BASE.get_or_init(|| super::now_ms() - 3_600_000)
+    }
+
+    /// The list under version `version`, signed by the root, as pushed to
+    /// `/internal/moderation/list`.
+    pub(crate) fn list_body(version: u64) -> serde_json::Value {
+        let mut l = list();
+        l.list_version = version;
+        serde_json::to_value(lakko_moderation::apply::ListBody::new(
+            &l.sign(&ROOT_SEED).unwrap(),
+        ))
+        .unwrap()
+    }
+
+    /// The statement body for `action` on the channel `channel_hex`, issued
+    /// `issued_at_ms` after [`base_ms`], logged at `log_index`.
+    pub(crate) fn body(
+        action: Action,
+        channel_hex: &str,
+        issued_at_ms: u64,
+        log_index: u64,
+    ) -> serde_json::Value {
+        let issued_at_ms = base_ms() + issued_at_ms;
+        let list = list();
+        let mut salt = [0u8; 16];
+        lakko_crypto::random::fill(&mut salt);
+        let mut id = [0u8; 16];
+        lakko_crypto::random::fill(&mut id);
+        let statement = Statement {
+            statement_id: id,
+            action,
+            target: Target::new(action.target_kind(), &hex::decode(channel_hex).unwrap()).unwrap(),
+            reason_commitment: reason_commitment(Reason::Spam, &salt),
+            until_ms: 0,
+            issued_at_ms,
+            moderator_id: [1; 16],
+            list_version: 3,
+        };
+        let signed = SoftwareAuthenticator::from_seed(&MODERATOR_SEED)
+            .sign_statement(&list, &statement)
+            .unwrap()
+            .encode()
+            .unwrap();
+        serde_json::to_value(StatementBody::new(
+            &signed,
+            &list.sign(&ROOT_SEED).unwrap(),
+            log_index,
+            Reason::Spam,
+            &salt,
+        ))
+        .unwrap()
+    }
+}
+
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // one statement after another, each checked
 async fn moderation_runs_only_on_the_internal_listener() {
+    use lakko_moderation::statement::Action;
     let (addr, internal) = spawn_with_internal().await;
     let client = reqwest::Client::new();
     create(&client, addr, CHANNEL_HEX).await;
@@ -1738,14 +1838,37 @@ async fn moderation_runs_only_on_the_internal_listener() {
         .status(),
         204
     );
-    let moderate = format!("http://{internal}/internal/v1/channels/{CHANNEL_HEX}/moderation");
+    let statement_url = format!("http://{internal}/internal/moderation/statement");
     let secret = base64::engine::general_purpose::STANDARD.encode(INTERNAL_SECRET);
+    let send = |body: serde_json::Value| {
+        let client = client.clone();
+        let url = statement_url.clone();
+        let secret = secret.clone();
+        async move {
+            client
+                .post(&url)
+                .header("x-lakko-internal-secret", &secret)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
 
-    // Not on the public router.
+    // Not on the public router, and the old shared-secret route is gone.
+    let block = moderation::body(Action::ChannelBlockHandle, CHANNEL_HEX, 10, 1);
+    let resp = client
+        .post(format!("http://{addr}/internal/moderation/statement"))
+        .json(&block)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
     let resp = client
         .post(format!(
-            "http://{addr}/internal/v1/channels/{CHANNEL_HEX}/moderation"
+            "http://{internal}/internal/v1/channels/{CHANNEL_HEX}/moderation"
         ))
+        .header("x-lakko-internal-secret", &secret)
         .json(&json!({ "action": "block", "reason": "spam" }))
         .send()
         .await
@@ -1753,30 +1876,35 @@ async fn moderation_runs_only_on_the_internal_listener() {
     assert_eq!(resp.status(), 404);
     // Without the secret, refused.
     let resp = client
-        .post(&moderate)
-        .json(&json!({ "action": "block", "reason": "spam" }))
+        .post(&statement_url)
+        .json(&block)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
-    // A bad reason code is refused.
-    let resp = client
-        .post(&moderate)
-        .header("x-lakko-internal-secret", &secret)
-        .json(&json!({ "action": "block", "reason": "Not A Code" }))
-        .send()
-        .await
-        .unwrap();
+    // A statement for another service is refused.
+    let wrong = moderation::body(Action::Suspend, &"ab".repeat(32), 10, 1);
+    let resp = send(wrong).await;
     assert_eq!(resp.status(), 400);
+    assert_eq!(error_of(resp).await, "wrong-service");
+    // A reason that does not open the commitment.
+    let mut mismatch = block.clone();
+    mismatch["reason"] = json!(lakko_moderation::Reason::Hate.as_u8());
+    let resp = send(mismatch).await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(error_of(resp).await, "reason-mismatch");
 
-    let resp = client
-        .post(&moderate)
-        .header("x-lakko-internal-secret", &secret)
-        .json(&json!({ "action": "block", "reason": "spam" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 204);
+    let resp = send(block.clone()).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap(),
+        json!({ "applied": true })
+    );
+    let resp = send(block).await;
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap(),
+        json!({ "applied": false, "repeat": true })
+    );
     let resp = client
         .get(format!("http://{addr}/v1/directory/listing/{CHANNEL_HEX}"))
         .send()
@@ -1793,14 +1921,14 @@ async fn moderation_runs_only_on_the_internal_listener() {
     assert_eq!(resp.status(), 403);
     assert_eq!(code_of(resp).await, "listing-blocked");
 
-    let resp = client
-        .post(&moderate)
-        .header("x-lakko-internal-secret", &secret)
-        .json(&json!({ "action": "unblock", "reason": "appeal-granted" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 204);
+    // A Restore made before the block changes nothing.
+    let resp = send(moderation::body(Action::ChannelRestore, CHANNEL_HEX, 5, 2)).await;
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap(),
+        json!({ "applied": false, "superseded": true })
+    );
+    let resp = send(moderation::body(Action::ChannelRestore, CHANNEL_HEX, 20, 3)).await;
+    assert_eq!(resp.status(), 200);
     let resp = put_listing(
         &client,
         addr,
@@ -1809,6 +1937,100 @@ async fn moderation_runs_only_on_the_internal_listener() {
     )
     .await;
     assert_eq!(resp.status(), 204);
+
+    // A delist refuses a new listing with its own code.
+    let resp = send(moderation::body(Action::ChannelDelist, CHANNEL_HEX, 30, 4)).await;
+    assert_eq!(resp.status(), 200);
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(CHANNEL_HEX, "Again", 1, "en", 4),
+    )
+    .await;
+    assert_eq!(resp.status(), 403);
+    assert_eq!(code_of(resp).await, "listing-delisted");
+}
+
+#[tokio::test]
+async fn a_removed_channel_answers_410_on_every_route_until_restored() {
+    use lakko_moderation::statement::Action;
+    let (addr, internal) = spawn_with_internal().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    create(&client, addr, OTHER_CHANNEL_HEX).await;
+    let statement_url = format!("http://{internal}/internal/moderation/statement");
+    let secret = base64::engine::general_purpose::STANDARD.encode(INTERNAL_SECRET);
+    let resp = client
+        .post(&statement_url)
+        .header("x-lakko-internal-secret", &secret)
+        .json(&moderation::body(
+            Action::ChannelRemove,
+            CHANNEL_HEX,
+            10,
+            41,
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for (method, path) in [
+        ("GET", format!("/v1/channels/{CHANNEL_HEX}/posts?after=0")),
+        ("POST", format!("/v1/channels/{CHANNEL_HEX}/posts")),
+        ("GET", format!("/v1/channels/{CHANNEL_HEX}/epoch")),
+        (
+            "GET",
+            format!("/v1/channels/{CHANNEL_HEX}/reactions?posts=1"),
+        ),
+        ("PUT", format!("/v1/channels/{CHANNEL_HEX}/listing")),
+        ("DELETE", format!("/v1/channels/{CHANNEL_HEX}")),
+        ("GET", format!("/v1/directory/listing/{CHANNEL_HEX}")),
+    ] {
+        let resp = client
+            .request(method.parse().unwrap(), format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 410, "{method} {path}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "channel-removed", "{method} {path}");
+        assert_eq!(body["log_index"], 41, "{method} {path}");
+    }
+    // Another channel is untouched.
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{OTHER_CHANNEL_HEX}/epoch"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(&statement_url)
+        .header("x-lakko-internal-secret", &secret)
+        .json(&moderation::body(
+            Action::ChannelRestore,
+            CHANNEL_HEX,
+            20,
+            42,
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn error_of(resp: reqwest::Response) -> String {
+    let v: serde_json::Value = resp.json().await.unwrap();
+    v["error"].as_str().unwrap_or_default().to_string()
 }
 
 #[tokio::test]
@@ -2782,4 +3004,159 @@ async fn a_public_channel_serves_its_seed_openly_and_going_private_withdraws_it(
         .unwrap();
     let count: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(count["count"], 1);
+}
+
+#[tokio::test]
+async fn a_percent_encoded_id_does_not_pass_the_removal_check() {
+    use lakko_moderation::statement::Action;
+    let (addr, internal) = spawn_with_internal().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let resp = client
+        .post(format!("http://{internal}/internal/moderation/statement"))
+        .header(
+            "x-lakko-internal-secret",
+            base64::engine::general_purpose::STANDARD.encode(INTERNAL_SECRET),
+        )
+        .json(&moderation::body(Action::ChannelRemove, CHANNEL_HEX, 10, 7))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // Every character of the id percent-encoded, and one upper-case escape.
+    let encoded = CHANNEL_HEX.bytes().fold(String::new(), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "%{b:02x}");
+        out
+    });
+    let mixed = format!("%{:02X}{}", CHANNEL_HEX.as_bytes()[0], &CHANNEL_HEX[1..]);
+    for id in [encoded, mixed] {
+        for path in [
+            format!("/v1/channels/{id}/epoch"),
+            format!("/v1/channels/{id}/posts?after=0"),
+            format!("/v1/directory/listing/{id}"),
+        ] {
+            let resp = client
+                .get(format!("http://{addr}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 410, "{path}");
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert_eq!(body["code"], "channel-removed", "{path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failed_removal_lookup_refuses_the_request() {
+    // A store whose database cannot be reached: every lookup fails.
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .connect_lazy("mysql://nobody:none@127.0.0.1:1/none")
+        .unwrap();
+    let store = Arc::new(lakko_svc_channels::SqlChannelStore::new(pool));
+    let state = AppState::new(test_config(), store, token_verifier());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router(state)).await;
+    });
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "moderation-check-failed");
+    // A path that names no channel is not checked.
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn the_list_floor_is_raised_by_a_push_and_by_a_statement() {
+    use lakko_moderation::statement::Action;
+    let (addr, internal) = spawn_with_internal().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let secret = base64::engine::general_purpose::STANDARD.encode(INTERNAL_SECRET);
+    let post = |path: &'static str, body: serde_json::Value| {
+        let client = client.clone();
+        let secret = secret.clone();
+        async move {
+            client
+                .post(format!("http://{internal}{path}"))
+                .header("x-lakko-internal-secret", &secret)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let list = "/internal/moderation/list";
+    let statement = "/internal/moderation/statement";
+    // The statements here verify under version 3.
+    let resp = post(list, moderation::list_body(3)).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap(),
+        json!({ "list_version": 3 })
+    );
+    // A list under another root.
+    let mut forged = moderation::list_body(3);
+    forged["moderator_list_b64"] = json!("AAAA");
+    let resp = post(list, forged).await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(error_of(resp).await, "bad-list");
+    // A newer list raised the floor: a statement under version 3 is stale.
+    let resp = post(list, moderation::list_body(4)).await;
+    assert_eq!(resp.status(), 200);
+    let resp = post(list, moderation::list_body(3)).await;
+    assert_eq!(resp.status(), 409);
+    assert_eq!(error_of(resp).await, "stale-list");
+    let resp = post(
+        statement,
+        moderation::body(Action::ChannelDelist, CHANNEL_HEX, 10, 1),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    assert_eq!(error_of(resp).await, "stale-list");
+    // Without the secret.
+    let resp = client
+        .post(format!("http://{internal}{list}"))
+        .json(&moderation::list_body(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn a_statement_from_the_future_is_refused() {
+    use lakko_moderation::statement::Action;
+    let (addr, internal) = spawn_with_internal().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    // Two hours after the base, an hour from now: past the 5 minutes a
+    // statement may run ahead. (The 24 h stale side is the crate's
+    // `check_fresh`, and discovery's tests send one.)
+    let body = moderation::body(Action::ChannelDelist, CHANNEL_HEX, 2 * 3_600_000, 1);
+    let resp = client
+        .post(format!("http://{internal}/internal/moderation/statement"))
+        .header(
+            "x-lakko-internal-secret",
+            base64::engine::general_purpose::STANDARD.encode(INTERNAL_SECRET),
+        )
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_eq!(error_of(resp).await, "future-statement");
 }

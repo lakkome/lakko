@@ -37,6 +37,8 @@ export interface ModalLayerProps {
   /** Backdrop, `Esc`, and the close button all arrive here. */
   readonly onClose: () => void;
   readonly children: JSX.Element;
+  /** An extra class on the dialog (a bottom sheet on a phone width). */
+  readonly class?: string;
 }
 
 let nextLayerId = 0;
@@ -67,7 +69,7 @@ export const ModalLayer: Component<ModalLayerProps> = (props) => {
   return (
     <dialog
       ref={el}
-      class="lk-layer"
+      class={props.class === undefined ? "lk-layer" : `lk-layer ${props.class}`}
       aria-labelledby={titleId}
       onClose={() => props.onClose()}
       onCancel={(e) => {

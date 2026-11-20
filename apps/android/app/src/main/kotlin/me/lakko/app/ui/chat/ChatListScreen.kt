@@ -199,8 +199,13 @@ public fun ChatListScreen(
     /** `docs/ux/identity-recovery.md` 7.2 — what the list says after a restore. */
     restoredChats: me.lakko.app.backup.RestoredChatsHint = me.lakko.app.backup.RestoredChatsHint.NONE,
     onOpenContacts: () -> Unit = {},
+    /** ADR-0089 section 4 - the row at the top of the list while the account
+     *  is suspended opens the suspended screen again. */
+    onShowSuspension: () -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
+    // ADR-0089 section 4 - read-only while the account is suspended.
+    val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // ADR-0087 section 5 — public groups and channels in search.
     // The groups and channels this device is in, read as snapshot state so a
     // card or a result row says Open as soon as a join lands.
@@ -384,6 +389,7 @@ public fun ChatListScreen(
                             onCreateGroup = onCreateGroup,
                             onCreateChannel = onCreateChannel,
                             onOpenSaved = onOpenSaved,
+                            readOnly = suspendedReadOnly,
                         )
                     }
                 },
@@ -410,6 +416,9 @@ public fun ChatListScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
+                if (suspendedReadOnly) {
+                    me.lakko.app.ui.suspension.SuspendedListRow(onOpen = onShowSuspension)
+                }
                 SearchField(
                     query = query,
                     onQueryChange = { query = it },
@@ -902,23 +911,27 @@ private fun CreateMenu(
     onCreateGroup: () -> Unit,
     onCreateChannel: () -> Unit,
     onOpenSaved: (() -> Unit)? = null,
+    /** ADR-0089 section 4 - suspended: nothing to create, Saved only. */
+    readOnly: Boolean = false,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-        DropdownMenuItem(
-            text = { Text(t("chats.create.chat")) },
-            leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
-            onClick = { onDismiss(); onNewChat() },
-        )
-        DropdownMenuItem(
-            text = { Text(t("chats.create.group")) },
-            leadingIcon = { Icon(Icons.Filled.Groups, contentDescription = null) },
-            onClick = { onDismiss(); onCreateGroup() },
-        )
-        DropdownMenuItem(
-            text = { Text(t("chats.create.channel")) },
-            leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
-            onClick = { onDismiss(); onCreateChannel() },
-        )
+        if (!readOnly) {
+            DropdownMenuItem(
+                text = { Text(t("chats.create.chat")) },
+                leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
+                onClick = { onDismiss(); onNewChat() },
+            )
+            DropdownMenuItem(
+                text = { Text(t("chats.create.group")) },
+                leadingIcon = { Icon(Icons.Filled.Groups, contentDescription = null) },
+                onClick = { onDismiss(); onCreateGroup() },
+            )
+            DropdownMenuItem(
+                text = { Text(t("chats.create.channel")) },
+                leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
+                onClick = { onDismiss(); onCreateChannel() },
+            )
+        }
         if (onOpenSaved != null) {
             DropdownMenuItem(
                 text = { Text(t("saved.title")) },

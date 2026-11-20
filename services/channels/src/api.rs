@@ -45,7 +45,12 @@
 //! The gate runs before the body is parsed. The reads (posts, envelopes,
 //! epoch) stay open: what they serve is sealed or public.
 //! Moderation is not here: it is served on the internal listener
-//! ([`crate::internal`]).
+//! ([`crate::internal`]). Its effects are: a channel a moderator removed
+//! answers every route that names it (`/v1/channels/{id}/...`,
+//! `/v1/directory/listing/{id}`) with `410 {"code": "channel-removed",
+//! "detail", "log_index"}` from a layer that runs before the handlers
+//! (ADR-0089 step 5); a delisted or blocked channel's listing is refused with
+//! `403 listing-delisted` / `403 listing-blocked`.
 //!
 //! Every error path returns a JSON envelope with a stable
 //! machine-readable `code` so clients can branch without
@@ -2095,6 +2100,14 @@ async fn put_listing(
             )),
         )
             .into_response(),
+        Err(StorageError::ListingDelisted) => (
+            StatusCode::FORBIDDEN,
+            Json(err(
+                "listing-delisted",
+                "Lakko's moderators removed this channel from the directory",
+            )),
+        )
+            .into_response(),
         Err(StorageError::ChannelPrivate) => channel_private(),
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
@@ -2380,6 +2393,98 @@ async fn deleted_channel_layer(
             resp
         },
     }
+}
+
+/// The channel id a request path names, if it names one: `/v1/channels/{id}`
+/// and everything under it, and `/v1/directory/listing/{id}`. A malformed id
+/// names none (the handler answers `bad-channel-id`).
+///
+/// The id segment is percent-decoded first, as the router's `Path`
+/// extractor decodes it before the handler sees it: matching the raw text
+/// would let `%61b...` reach the handler of channel `ab...` past the removal
+/// check (ADR-0089 F7).
+fn channel_of_path(path: &str) -> Option<ChannelId> {
+    let rest = path
+        .strip_prefix("/v1/channels/")
+        .or_else(|| path.strip_prefix("/v1/directory/listing/"))?;
+    let id = percent_decode(rest.split('/').next()?)?;
+    ChannelId::from_hex(&id).ok()
+}
+
+/// Decode `%XX` escapes; `None` for a malformed escape or a result that is
+/// not UTF-8 (neither can be a channel id).
+fn percent_decode(segment: &str) -> Option<String> {
+    if !segment.contains('%') {
+        return Some(segment.to_owned());
+    }
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `503 moderation-check-failed`: the removal check could not be made, so
+/// the request is refused rather than let past it (ADR-0089 F7).
+fn moderation_check_failed() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "code": "moderation-check-failed",
+            "detail": "the channel's moderation state could not be read; try again",
+        })),
+    )
+        .into_response()
+}
+
+/// `410 channel-removed`: a moderator removed the channel (ADR-0089
+/// ChannelRemove). `log_index` names the statement in the moderation log, so
+/// a client can verify the removal against the log's snapshot.
+pub(crate) fn channel_removed(log_index: u64) -> Response {
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "code": "channel-removed",
+            "detail": "Lakko's moderators removed this channel",
+            "log_index": log_index,
+        })),
+    )
+        .into_response()
+}
+
+/// Answer every route of a removed channel with `410 channel-removed`
+/// (ADR-0089 step 5). Runs BEFORE the handlers, so nothing a removed
+/// channel's publisher or reader sends reaches the store; one primary-key
+/// read per request that names a channel (the id percent-decoded, as the
+/// handler will see it). A store failure refuses the request with `503
+/// moderation-check-failed`: a removed channel must not be served because
+/// the check could not be made (fail closed).
+async fn removed_channel_layer(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(channel) = channel_of_path(req.uri().path()) {
+        match state.store.removed_channel(channel).await {
+            Ok(Some(log_index)) => return channel_removed(log_index),
+            Ok(None) => {},
+            Err(e) => {
+                tracing::error!(error = %e, "removed-channel lookup failed");
+                return moderation_check_failed();
+            },
+        }
+    }
+    next.run(req).await
 }
 
 /// `PUT /v1/channels/:channel_id/access` — set the channel's flag
@@ -2915,6 +3020,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             deleted_channel_layer,
+        ))
+        // ADR-0089 step 5: every route of a removed channel is a 410 before
+        // any handler runs. Added last, so it runs first.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            removed_channel_layer,
         ))
         .with_state(state)
 }

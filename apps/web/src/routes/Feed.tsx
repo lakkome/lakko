@@ -109,6 +109,7 @@ import { MediaAttachment } from "../media/MediaBubbles";
 import { createMediaHub, mediaKey } from "../media/media-hub";
 import { ownAvatarLabel } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
+import { signalsWithheldFrom } from "../moderation/block-conversation";
 import { Icon } from "../ui/icons";
 import { composeForwardEnvelope, reencryptAttachmentRef, type AttachmentRefBytes } from "../chat/attachments";
 import { appendToGroupSlot } from "../chat/background-log";
@@ -693,6 +694,8 @@ export default function Feed(): JSX.Element {
     for (const [hex, upTo] of advanced) {
       const entry = chats.groups().find((g) => syncGroupIdHex(g.group.groupId) === hex);
       if (entry === undefined || readIsActive(entry.group) === false) continue;
+      // ADR-0089 section 6 - no read receipt to a blocked person.
+      if (signalsWithheldFrom(entry.group, chats.identity())) continue;
       const secrets = auth.identitySecrets();
       if (secrets !== null && chats.identity() !== null) {
         // A read receipt wakes nobody (ADR-0024), so it rides the control path.

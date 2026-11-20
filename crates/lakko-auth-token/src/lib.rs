@@ -7,19 +7,20 @@
 //!
 //! # Wire format
 //!
-//! Three credentials, dotted strings ([ADR-0073] section 3.1 and its
+//! Four credentials, dotted strings ([ADR-0073] section 3.1 and its
 //! 2026-10-04 amendment; [ADR-0074] section 0.4 for the device and the issue
-//! time):
+//! time; [ADR-0089] section 4 for the restricted session):
 //!
 //! ```text
 //! access      = v3.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
 //! refresh     = r2.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
+//! restricted  = s1.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
 //! fresh grant = k1.<account_id>.<key_generation>.<expires_at_ms>.<tag>
 //! ```
 //!
 //! Where:
 //!
-//! - `v3` / `r2` / `k1` is the version marker, which also tells the kinds
+//! - `v3` / `r2` / `s1` / `k1` is the version marker, which also tells the kinds
 //!   apart. `v1`, `v2` and `r1` are refused: there are no users and no tokens
 //!   to keep valid, so each was retired on a flag day.
 //! - `account_id` is base64url-no-pad of the raw 16-byte UUIDv7 account id
@@ -49,6 +50,11 @@
 //! "lakko/fresh-auth-grant/v1", secret)`, for the same reason: a grant is
 //! neither a bearer nor a refresh credential, and neither of those is a grant.
 //! A grant names no device: it is proof about the person, not the device.
+//! The restricted-session tag is computed under a fourth key,
+//! `BLAKE3-derive-key("lakko/suspended-session/v1", secret)`: a restricted
+//! session is what a suspended account holds instead of an access token, and
+//! auth accepts it on four routes only (read the suspension, send an appeal,
+//! delete the account, sign out). No other verifier accepts it.
 //!
 //! # Why a custom format and not JWT
 //!
@@ -88,6 +94,7 @@
 //!
 //! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
 //! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
+//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -145,8 +152,18 @@ pub const FRESH_GRANT_VERSION: &str = "k1";
 /// BLAKE3-derive-key(FRESH_GRANT_KEY_DOMAIN, secret)`.
 pub const FRESH_GRANT_KEY_DOMAIN: &str = "lakko/fresh-auth-grant/v1";
 
-/// Number of dot-separated segments in an access token and a refresh
-/// credential.
+/// Version marker of a restricted session (a suspended account's credential,
+/// ADR-0089 section 4). [`TokenSecret::verify_restricted`] refuses any other
+/// marker, and [`TokenSecret::verify`] / [`TokenSecret::verify_refresh`]
+/// refuse this one.
+pub const RESTRICTED_VERSION: &str = "s1";
+
+/// BLAKE3 derive-key context of the restricted-session key:
+/// `restricted_key = BLAKE3-derive-key(RESTRICTED_KEY_DOMAIN, secret)`.
+pub const RESTRICTED_KEY_DOMAIN: &str = "lakko/suspended-session/v1";
+
+/// Number of dot-separated segments in an access token, a refresh credential
+/// and a restricted session.
 const SESSION_SEGMENTS: usize = 7;
 
 /// Number of dot-separated segments in a fresh-auth grant.
@@ -200,6 +217,7 @@ pub struct TokenSecret {
     bytes: Vec<u8>,
     refresh_key: [u8; 32],
     fresh_grant_key: [u8; 32],
+    restricted_key: [u8; 32],
 }
 
 impl TokenSecret {
@@ -218,10 +236,12 @@ impl TokenSecret {
         }
         let refresh_key = blake3::derive_key(REFRESH_KEY_DOMAIN, &bytes);
         let fresh_grant_key = blake3::derive_key(FRESH_GRANT_KEY_DOMAIN, &bytes);
+        let restricted_key = blake3::derive_key(RESTRICTED_KEY_DOMAIN, &bytes);
         Ok(Self {
             bytes,
             refresh_key,
             fresh_grant_key,
+            restricted_key,
         })
     }
 
@@ -304,6 +324,35 @@ impl TokenSecret {
         )
     }
 
+    /// Issue a restricted session for a suspended account at
+    /// `key_generation`, naming `device_id` and stamped `issued_at_ms`, tagged
+    /// under the derived restricted key. Only auth's restricted-capable routes
+    /// accept it ([`Self::verify_restricted`]); its lifetime is the access
+    /// token's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError::WrongAccountIdLength`] if `account_id`
+    /// is not exactly [`ACCOUNT_ID_LEN`] bytes.
+    pub fn issue_restricted(
+        &self,
+        account_id: &[u8],
+        key_generation: u64,
+        device_id: &[u8; DEVICE_ID_LEN],
+        issued_at_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<String, TokenError> {
+        Self::issue_session(
+            &self.restricted_key,
+            RESTRICTED_VERSION,
+            account_id,
+            key_generation,
+            device_id,
+            issued_at_ms,
+            expires_at_ms,
+        )
+    }
+
     /// Issue a fresh-auth grant for the given account at `key_generation`,
     /// tagged under the derived fresh-grant key. Auth mints one only in the
     /// answer of a successful password or passkey login; only its
@@ -358,6 +407,19 @@ impl TokenSecret {
     /// See [`Self::verify`].
     pub fn verify_refresh(&self, token: &str, now_ms: i64) -> Result<VerifiedToken, TokenError> {
         Self::verify_session(&self.refresh_key, REFRESH_VERSION, token, now_ms)
+    }
+
+    /// Verify a restricted session (a suspended account's credential) at the
+    /// given wall-clock instant, under the derived restricted key. Same error
+    /// vocabulary as [`Self::verify`]; an access token or a refresh credential
+    /// presented here is [`TokenError::UnsupportedVersion`], and a fresh-auth
+    /// grant is [`TokenError::Malformed`] (its segment count differs).
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_restricted(&self, token: &str, now_ms: i64) -> Result<VerifiedToken, TokenError> {
+        Self::verify_session(&self.restricted_key, RESTRICTED_VERSION, token, now_ms)
     }
 
     /// Verify a fresh-auth grant at the given wall-clock instant, under the
@@ -580,6 +642,7 @@ impl std::fmt::Debug for TokenSecret {
             .field("len", &self.bytes.len())
             .field("refresh_key_len", &self.refresh_key.len())
             .field("fresh_grant_key_len", &self.fresh_grant_key.len())
+            .field("restricted_key_len", &self.restricted_key.len())
             .finish()
     }
 }
@@ -615,7 +678,8 @@ pub enum TokenError {
     Malformed(String),
     /// Version segment did not match the kind being verified
     /// ([`VERSION`] for an access token, [`REFRESH_VERSION`] for a refresh
-    /// credential, [`FRESH_GRANT_VERSION`] for a fresh-auth grant).
+    /// credential, [`RESTRICTED_VERSION`] for a restricted session,
+    /// [`FRESH_GRANT_VERSION`] for a fresh-auth grant).
     #[error("unsupported token version: {0}")]
     UnsupportedVersion(String),
     /// Token expired (or was issued for the past — either way the
@@ -640,8 +704,9 @@ pub enum TokenError {
 pub mod fuzz_api {
     use super::{TokenSecret, MIN_SECRET_LEN};
 
-    /// Drive [`TokenSecret::verify`], [`TokenSecret::verify_refresh`] AND
-    /// [`TokenSecret::verify_fresh_grant`] on an attacker-controlled
+    /// Drive [`TokenSecret::verify`], [`TokenSecret::verify_refresh`],
+    /// [`TokenSecret::verify_fresh_grant`] AND
+    /// [`TokenSecret::verify_restricted`] on an attacker-controlled
     /// credential string.
     ///
     /// A client or peer presents an access token to a service on every
@@ -670,7 +735,8 @@ pub mod fuzz_api {
         let access = secret.verify(token, 0).is_ok();
         let refresh = secret.verify_refresh(token, 0).is_ok();
         let grant = secret.verify_fresh_grant(token, 0).is_ok();
-        access || refresh || grant
+        let restricted = secret.verify_restricted(token, 0).is_ok();
+        access || refresh || grant || restricted
     }
 }
 
@@ -1190,7 +1256,7 @@ mod tests {
     }
 
     /// The fuzz entry point accepts nothing it was not issued, and accepts
-    /// each of the three kinds it was.
+    /// each of the four kinds it was.
     #[test]
     fn fuzz_entry_point_accepts_only_issued_credentials() {
         let secret = TokenSecret::new(vec![0x11; MIN_SECRET_LEN]).unwrap();
@@ -1198,11 +1264,117 @@ mod tests {
         let access = secret.issue(&id, 1, &DEVICE, 0, 1).unwrap();
         let refresh = secret.issue_refresh(&id, 1, &DEVICE, 0, 1).unwrap();
         let grant = secret.issue_fresh_grant(&id, 1, 1).unwrap();
-        for good in [&access, &refresh, &grant] {
+        let restricted = secret.issue_restricted(&id, 1, &DEVICE, 0, 1).unwrap();
+        for good in [&access, &refresh, &grant, &restricted] {
             assert!(fuzz_api::verify_token(good.as_bytes()));
         }
         assert!(!fuzz_api::verify_token(b"v3.a.b.c.d.e.f"));
         assert!(!fuzz_api::verify_token(&[0xFF, 0xFE]));
+    }
+
+    #[test]
+    fn restricted_round_trip_carries_every_field() {
+        let secret = test_secret();
+        let token = secret
+            .issue_restricted(&sample_account_id(), 4, &DEVICE, ISSUED, FAR_FUTURE)
+            .unwrap();
+        assert!(token.starts_with("s1."));
+        let got = secret.verify_restricted(&token, NOW).unwrap();
+        assert_eq!(got.account_id.to_vec(), sample_account_id());
+        assert_eq!(got.key_generation, 4);
+        assert_eq!(got.device_id, DEVICE);
+        assert_eq!(got.issued_at_ms, ISSUED);
+    }
+
+    /// A restricted session is accepted only by `verify_restricted`, and
+    /// `verify_restricted` accepts none of the other three kinds.
+    #[test]
+    fn restricted_is_not_interchangeable_with_any_other_kind() {
+        let secret = test_secret();
+        let id = sample_account_id();
+        let restricted = secret
+            .issue_restricted(&id, 1, &DEVICE, ISSUED, FAR_FUTURE)
+            .unwrap();
+        assert!(matches!(
+            secret.verify(&restricted, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "s1"
+        ));
+        assert!(matches!(
+            secret.verify_refresh(&restricted, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "s1"
+        ));
+        assert!(matches!(
+            secret.verify_fresh_grant(&restricted, NOW).unwrap_err(),
+            TokenError::Malformed(_)
+        ));
+
+        let access = access(&secret, 1);
+        let refresh = refresh(&secret, 1);
+        let grant = secret.issue_fresh_grant(&id, 1, FAR_FUTURE).unwrap();
+        assert!(matches!(
+            secret.verify_restricted(&access, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "v3"
+        ));
+        assert!(matches!(
+            secret.verify_restricted(&refresh, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "r2"
+        ));
+        assert!(matches!(
+            secret.verify_restricted(&grant, NOW).unwrap_err(),
+            TokenError::Malformed(_)
+        ));
+
+        // An access token relabelled `s1` keeps its access tag, which is not a
+        // restricted tag: the relabelling is a forgery, not a conversion.
+        let relabelled = format!("s1{}", access.strip_prefix("v3").unwrap());
+        assert!(matches!(
+            secret.verify_restricted(&relabelled, NOW).unwrap_err(),
+            TokenError::BadSignature
+        ));
+        let relabelled = format!("v3{}", restricted.strip_prefix("s1").unwrap());
+        assert!(matches!(
+            secret.verify(&relabelled, NOW).unwrap_err(),
+            TokenError::BadSignature
+        ));
+    }
+
+    #[test]
+    fn restricted_refusals() {
+        let secret = test_secret();
+        let id = sample_account_id();
+        let expired = secret
+            .issue_restricted(&id, 1, &DEVICE, ISSUED, NOW)
+            .unwrap();
+        assert!(matches!(
+            secret.verify_restricted(&expired, NOW).unwrap_err(),
+            TokenError::Expired { .. }
+        ));
+        let other = TokenSecret::new(vec![9u8; MIN_SECRET_LEN]).unwrap();
+        let foreign = other
+            .issue_restricted(&id, 1, &DEVICE, ISSUED, FAR_FUTURE)
+            .unwrap();
+        assert!(matches!(
+            secret.verify_restricted(&foreign, NOW).unwrap_err(),
+            TokenError::BadSignature
+        ));
+        assert!(matches!(
+            secret
+                .issue_restricted(&[0u8; 8], 1, &DEVICE, ISSUED, FAR_FUTURE)
+                .unwrap_err(),
+            TokenError::WrongAccountIdLength { .. }
+        ));
+    }
+
+    #[test]
+    fn restricted_key_is_the_documented_derivation() {
+        let raw = vec![7u8; MIN_SECRET_LEN];
+        let secret = TokenSecret::new(raw.clone()).unwrap();
+        assert_eq!(
+            secret.restricted_key,
+            blake3::derive_key("lakko/suspended-session/v1", &raw)
+        );
+        assert_ne!(secret.restricted_key, secret.refresh_key);
+        assert_ne!(secret.restricted_key, secret.fresh_grant_key);
     }
 
     #[test]

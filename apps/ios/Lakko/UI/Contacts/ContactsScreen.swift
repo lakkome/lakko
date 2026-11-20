@@ -36,12 +36,23 @@ public struct ContactsScreen: View {
     @ObservedObject private var profiles = ProfileDirectory.shared
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    @Environment(\.accountSuspended) private var accountSuspended
 
     @State private var query = ""
     @State private var inviteLinksPresented = false
     @State private var scanPresented = false
     @State private var addMenuOpen = false
     @State private var sentExpanded = false
+    /// ADR-0089 / UX 1.1 — the request whose `Block` asks for confirmation.
+    @State private var blockingRequest: BlockingRequest?
+    /// ADR-0089 / UX 2.1 — the report sheet for a request.
+    @State private var reportRequest: ReportRequest?
+
+    struct BlockingRequest: Identifiable {
+        let id = UUID()
+        let accountKey: Data
+        let name: String
+    }
 
     public init(
         viewModel: ContactsViewModel,
@@ -187,8 +198,10 @@ public struct ContactsScreen: View {
                     } description: {
                         Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
-                        Button(l10n.t("contacts.add.share_invite")) { inviteLinksPresented = true }
-                            .buttonStyle(.borderedProminent)
+                        if !accountSuspended {
+                            Button(l10n.t("contacts.add.share_invite")) { inviteLinksPresented = true }
+                                .buttonStyle(.borderedProminent)
+                        }
                     }
                 }
             }
@@ -202,8 +215,11 @@ public struct ContactsScreen: View {
         .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                addMenu
+            // ADR-0089 step 3 — a suspended account adds no contacts.
+            if !accountSuspended {
+                ToolbarItem(placement: .topBarTrailing) {
+                    addMenu
+                }
             }
         }
         .lakkoActionSheet(isPresented: $addMenuOpen) {
@@ -214,6 +230,21 @@ public struct ContactsScreen: View {
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
+        }
+        // ADR-0089 / UX 1.2 — Block asks first.
+        .lakkoDialog(item: $blockingRequest) { pending in
+            LakkoDialogContent(
+                title: l10n.t("block.confirm.title", texts: ["name": pending.name]),
+                message: l10n.t("block.confirm.body"),
+                actions: [
+                    .danger(l10n.t("block.action")) { viewModel.block(accountKey: pending.accountKey) },
+                    .cancel(),
+                ])
+        }
+        .reportSheet($reportRequest) { follow in
+            guard follow == .block, let request = reportRequest,
+                  case .person(let key) = request.target else { return }
+            viewModel.block(accountKey: key)
         }
         .sheet(isPresented: $scanPresented) {
             ScanLinkSheet(
@@ -283,7 +314,13 @@ public struct ContactsScreen: View {
                         failed: viewModel.acceptFailed.contains(request.messageId),
                         accepting: viewModel.accepting.contains(request.messageId),
                         onAccept: { viewModel.onAcceptClicked(messageId: request.messageId) },
-                        onDecline: { viewModel.onDeclineClicked(messageId: request.messageId) }
+                        onDecline: { viewModel.onDeclineClicked(messageId: request.messageId) },
+                        onBlock: { name in
+                            blockingRequest = BlockingRequest(accountKey: request.fromPubkey, name: name)
+                        },
+                        onReport: { name in
+                            reportRequest = viewModel.reportRequest(forRequest: request, name: name)
+                        }
                     )
                 }
             } header: {
@@ -499,6 +536,11 @@ struct IncomingRequestRow: View {
     let accepting: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
+    /// ADR-0089 / UX 1.1, 2.1 — the row's overflow: Block and Report, each
+    /// handed the name the row shows.
+    var onBlock: (String) -> Void = { _ in }
+    var onReport: (String) -> Void = { _ in }
+    @State private var overflowOpen = false
 
     var body: some View {
         ResolvedName(signatureKey: request.fromPubkey) { resolved in
@@ -542,8 +584,27 @@ struct IncomingRequestRow: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .disabled(accepting)
+                        Button { overflowOpen = true } label: {
+                            Image(systemName: "ellipsis")
+                                .frame(minWidth: 28, minHeight: 28)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(accepting)
+                        .accessibilityLabel(l10n.t("common.more_options"))
                     }
                     .padding(.top, 2)
+                    .lakkoActionSheet(isPresented: $overflowOpen) {
+                        let name = resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name
+                        return [
+                            .action(l10n.t("block.action"), systemImage: "hand.raised", destructive: true) {
+                                onBlock(name)
+                            },
+                            .action(l10n.t("report.action"), systemImage: "flag", destructive: true) {
+                                onReport(name)
+                            },
+                        ]
+                    }
                     if failed {
                         Text(l10n.t("contacts.request.accept_failed"))
                             .font(.footnote)

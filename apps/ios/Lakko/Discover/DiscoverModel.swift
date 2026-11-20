@@ -200,7 +200,8 @@ final class DiscoverModel: ObservableObject {
                     GroupFollowers(
                         groupIdHex: $0.key, groupTitle: deps.groupTitle($0.key),
                         count: $0.value.count, contactNames: names)
-                })
+                },
+                listingWire: listing.flatMap { Data(base64UrlNoPadListing: $0.listingB64) })
         }
     }
 

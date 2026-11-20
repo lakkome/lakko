@@ -519,6 +519,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // membership refusal.
                 is FfiException.L10n,
                 is FfiException.Circle,
+                // ADR-0089 - a refused attestation or report; not a
+                // membership refusal.
+                is FfiException.Moderation,
                 // The local three-word check of the recovery phrase and the
                 // keys a passkey restores; not membership refusals.
                 is FfiException.PhraseCheck,

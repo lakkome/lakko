@@ -19,6 +19,8 @@ struct ChannelCommentsView: View {
     /// The message menu every message and post uses (quick reactions on top,
     /// then the actions that apply), opened on a comment too.
     @Environment(\.messageMenuPresenter) private var menuPresenter
+    /// ADR-0089 step 3 — a suspended account reads the comments only.
+    @Environment(\.accountSuspended) private var accountSuspended
     /// Each comment's last on-screen frame, for where the menu draws it.
     @State private var frames = CommentFrames()
     @State private var draft = ""
@@ -33,14 +35,16 @@ struct ChannelCommentsView: View {
     private var total: Int {
         max(Int(clamping: model.commentCountByPost[item.cursor] ?? 0), comments.count)
     }
-    private var canWrite: Bool { model.access == .reading || model.access == .publisher }
+    private var canWrite: Bool {
+        !accountSuspended && model.writable && (model.access == .reading || model.access == .publisher)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if thread?.loading == true, comments.isEmpty {
                 // Loading: a thin line under the post, no spinner.
                 Rectangle().fill(Color.lakkoBorder).frame(height: 1).frame(maxWidth: 120)
-            } else if thread?.failedToLoad == true {
+            } else if thread?.failedToLoad == true, model.writable {
                 HStack(spacing: 8) {
                     Text(l10n.t("channels.comments.failed"))
                         .font(.footnote)
@@ -65,7 +69,7 @@ struct ChannelCommentsView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.lakkoAccent)
-                } else if model.access == .reading || model.access == .publisher {
+                } else if model.writable, model.access == .reading || model.access == .publisher {
                     Button { model.expandComments(item) } label: {
                         Text(l10n.t(total == 0 ? "channels.comments.comment" : "channels.comments.write"))
                             .font(.footnote)
@@ -74,7 +78,7 @@ struct ChannelCommentsView: View {
                     .foregroundStyle(Color.lakkoTextMuted)
                 }
             } else {
-                if thread?.mayHaveMore == true {
+                if thread?.mayHaveMore == true, model.writable {
                     Button { Task { await model.loadComments(item, more: true) } } label: {
                         Text(l10n.t("channels.comments.more")).font(.footnote.weight(.medium))
                     }
@@ -223,7 +227,12 @@ struct ChannelCommentsView: View {
 
     @ViewBuilder
     private var field: some View {
-        if model.access == .reading || model.access == .publisher {
+        if accountSuspended {
+            SuspendedComposerLine()
+        } else if !model.writable {
+            // ADR-0089 step 5 — a removed channel: the line is under the posts.
+            EmptyView()
+        } else if model.access == .reading || model.access == .publisher {
             VStack(alignment: .leading, spacing: 4) {
                 if let replyTo {
                     HStack {

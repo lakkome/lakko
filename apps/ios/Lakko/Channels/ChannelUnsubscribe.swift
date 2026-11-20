@@ -32,11 +32,52 @@ enum ChannelUnsubscribe {
     /// ADR-0087 section 9 — the account's other devices said this channel
     /// ended. A channel this device publishes is not its to drop: unsubscribing
     /// is a subscriber's act.
+    ///
+    /// ADR-0089 step 5 — the exception is a channel moderators removed: its
+    /// owner or publisher left it on another device, so it goes here too,
+    /// once this device learns the service holds it removed (from what it
+    /// already knows, else from one read, which a removed channel answers
+    /// with `410 channel-removed`).
     @MainActor
-    static func endedElsewhere(state: ChannelsUiState, channelIdHex: String) {
-        guard let channel = state.channels.first(where: { $0.id.lowercased() == channelIdHex.lowercased() }),
-              state.keysByChannel[channel.id] == nil else { return }
-        stopFollowing(state: state, channelId: channel.id)
+    static func endedElsewhere(
+        state: ChannelsUiState, channelIdHex: String,
+        removals: ChannelRemovals = .shared,
+        probeRemoved: @escaping @MainActor (String) async -> Bool = { id in
+            do {
+                _ = try await ChannelsClient().fetchEpoch(channelIdHex: id)
+                return false
+            } catch {
+                return ChannelsApiError.isChannelRemoved(error)
+            }
+        }
+    ) {
+        guard let channel = state.channels.first(where: { $0.id.lowercased() == channelIdHex.lowercased() })
+        else { return }
+        guard state.keysByChannel[channel.id] != nil else {
+            stopFollowing(state: state, channelId: channel.id)
+            return
+        }
+        let id = channel.id
+        if removals.isRemoved(id) {
+            leaveRemoved(state: state, channelId: id)
+            return
+        }
+        Task { @MainActor in
+            guard await probeRemoved(id), state.channels.contains(where: { $0.id == id }) else { return }
+            leaveRemoved(state: state, channelId: id)
+        }
+    }
+
+    /// ADR-0089 step 5 — the owner or a publisher takes a channel moderators
+    /// removed out of the list: the row, its posts and its keys go here; the
+    /// channels service is not asked (it answers 410 for the channel). The
+    /// caller tells the account's other devices.
+    @MainActor
+    static func leaveRemoved(state: ChannelsUiState, channelId: String) {
+        ChannelMemberCards.forgetUploads(channelId: channelId)
+        state.clearSubscriberKeys(channelId)
+        state.removeOrphanedChannel(channelId)
+        ReachCenter.shared.sync()
     }
 
     /// The signed request for leaving `channelId` with `keys`, stamped

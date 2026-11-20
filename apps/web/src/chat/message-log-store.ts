@@ -215,6 +215,22 @@ export interface PersistedMessage {
    * row written before this field) is a commit row that is not drawn.
    */
   readonly membership?: PersistedMembership;
+  /**
+   * ADR-0089 section 1 - on an incoming row only: what a report needs of the
+   * message, captured at receipt (the attestation verdict, the raw attested
+   * plaintext, the sender leaf key and its device binding). Optional without
+   * a version bump: a row without it is a message whose evidence is gone,
+   * which a report leaves out. Never written on a deleted row.
+   */
+  readonly evidence?: PersistedEvidence;
+}
+
+/** ADR-0089 section 1 - the report evidence of one received message. */
+export interface PersistedEvidence {
+  readonly attestation: "verified" | "failed" | "absent";
+  readonly plaintextB64: string;
+  readonly leafKeyB64: string;
+  readonly bindingB64: string | null;
 }
 
 /** ADR-0052 decision 2 — a persisted forward attribution. */

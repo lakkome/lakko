@@ -43,8 +43,30 @@ pub(crate) struct AuthenticatedAccount(pub(crate) [u8; 16]);
 /// via response-shape probing.
 pub(crate) async fn require_session(
     State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    admit(&state, request, next, false).await
+}
+
+/// [`require_session`], also accepting the `s1` restricted session of a
+/// suspended account ([ADR-0089] step 3). Used on `DELETE /backup` alone, so a
+/// suspended person who deletes the account also removes the backup.
+///
+/// [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+pub(crate) async fn require_session_or_restricted(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    admit(&state, request, next, true).await
+}
+
+async fn admit(
+    state: &AppState,
     mut request: Request,
     next: Next,
+    restricted_too: bool,
 ) -> Result<Response, StatusCode> {
     let header_value = request
         .headers()
@@ -67,14 +89,23 @@ pub(crate) async fn require_session(
     // The key generation the v2 token carries (ADR-0073) is not applied here:
     // storage has no database to hold a floor and keeps the stateless verify,
     // so its revocation latency is the access-token TTL.
-    let account_id = state
-        .session_token_secret
-        .verify(token, now_ms)
-        .map_err(|e| {
+    let account_id = match state.session_token_secret.verify(token, now_ms) {
+        Ok(v) => v.account_id,
+        Err(_) if restricted_too => {
+            state
+                .session_token_secret
+                .verify_restricted(token, now_ms)
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "session-token verify failed");
+                    StatusCode::UNAUTHORIZED
+                })?
+                .account_id
+        },
+        Err(e) => {
             tracing::warn!(error = %e, "session-token verify failed");
-            StatusCode::UNAUTHORIZED
-        })?
-        .account_id;
+            return Err(StatusCode::UNAUTHORIZED);
+        },
+    };
 
     request
         .extensions_mut()

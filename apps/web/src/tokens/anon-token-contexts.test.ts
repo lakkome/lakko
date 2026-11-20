@@ -48,6 +48,7 @@ describe("the token contexts against the core", () => {
       "circle-claim",
       "channel-react",
       "channel-comment",
+      "report",
     ]);
   });
 

@@ -62,6 +62,7 @@
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
+pub mod blocked;
 pub mod channel_comment;
 pub mod channel_reaction;
 pub mod device_ack;
@@ -73,6 +74,12 @@ pub mod quick_reaction;
 pub mod recovery_email;
 pub mod state;
 
+pub use blocked::{
+    compose_blocked_envelope, decode_blocked_envelope, is_blocked_envelope, BlockedEntry,
+    BlockedEnvelopeError, BLOCKED_ENVELOPE_DOMAIN_V1, BLOCKED_ENVELOPE_MAX_ENTRIES,
+    BLOCKED_ENVELOPE_MAX_LEN, BLOCKED_ENVELOPE_MIN_LEN, BLOCKED_ENVELOPE_VERSION_V1,
+    BLOCKED_KEY_LEN,
+};
 pub use channel_comment::{
     compose_channel_comment_envelope, decode_channel_comment_envelope, is_channel_comment_envelope,
     ChannelCommentEntry, ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT,

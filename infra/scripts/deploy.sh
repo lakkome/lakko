@@ -8,7 +8,7 @@
 # What it does:
 #   1. git pull in /home/lakkome/lakko
 #   2. cargo build --release for all service binaries (auth, ds, storage,
-#      discovery, push-gw, channels, sfu, gif-proxy)
+#      discovery, push-gw, channels, sfu, gif-proxy, moderation)
 #   3. install binaries into /usr/local/bin/ (requires sudo, see sudoers below)
 #   4. systemctl restart lakko.target
 #
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 REPO=/home/lakkome/lakko
-SERVICES=(auth ds storage discovery push-gw channels sfu gif-proxy)
+SERVICES=(auth ds storage discovery push-gw channels sfu gif-proxy moderation)
 
 if [[ "${EUID}" -eq 0 ]]; then
     echo "ERROR: run as lakkome, not as root. The script invokes sudo only for the steps that need it." >&2

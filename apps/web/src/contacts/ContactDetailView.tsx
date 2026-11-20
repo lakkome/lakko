@@ -38,12 +38,13 @@
  * the GROUP panel only, which a one-to-one had just stopped opening - so an
  * ended one-to-one had no way to be closed at all.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { AutoTranslateSwitch } from "../translation/ConversationControls";
 import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
 import { DELETE_CHAT_CONTROL } from "../chat/membership-ended";
-import { personInfoSections } from "../chat/conversation-info";
+import { personInfoSections, sectionsWhileSuspended } from "../chat/conversation-info";
 import { uiRules } from "../chat/ui-rules";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
@@ -59,6 +60,12 @@ import { createLiveText } from "../l10n/live-text";
 import { computeSafetyNumber } from "./safety";
 import { messageAction, type MessageAction } from "./message-action";
 import { safetyNumberRows } from "./safety-number-format";
+import { isBlockedKeyB64 } from "../moderation/block-registry";
+import { isSuspendedKeyB64 } from "../moderation/suspension-marks";
+import { personMark } from "../moderation/suspension-rules";
+import { blockPerson, confirmBlock, unblockPerson } from "../moderation/block-actions";
+import { openReport } from "../moderation/report-session";
+import { CONVERSATION_CARD } from "../moderation/report-model";
 
 export interface ContactDetailViewProps {
   /** The person's Ed25519 identity key, base64 - who this screen is about. */
@@ -131,6 +138,50 @@ export interface ContactDetailViewProps {
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
+  /** ADR-0089 section 6 - the block register's answer for this person. */
+  const blocked = (): boolean => isBlockedKeyB64(props.personKeyB64);
+  const [blockBusy, setBlockBusy] = createSignal(false);
+  const [blockError, setBlockError] = createLiveText();
+  async function onBlock(): Promise<void> {
+    if (!(await confirmBlock(name()))) return;
+    setBlockBusy(true);
+    setBlockError(null);
+    try {
+      await blockPerson(props.personKeyB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[block] not written", err instanceof Error ? err.name : "unknown");
+      setBlockError(() => t("common.error.unavailable"));
+    } finally {
+      setBlockBusy(false);
+    }
+  }
+  async function onUnblock(): Promise<void> {
+    setBlockBusy(true);
+    setBlockError(null);
+    try {
+      await unblockPerson(props.personKeyB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[block] not written", err instanceof Error ? err.name : "unknown");
+      setBlockError(() => t("common.error.unavailable"));
+    } finally {
+      setBlockBusy(false);
+    }
+  }
+  /** Report from the card (UX 2.1): messages the reporter picks, optional,
+   *  from the one-to-one when there is one. */
+  function onReport(): void {
+    const conversation = props.conversationId ?? null;
+    openReport({
+      target: { kind: "person", accountKeyB64: props.personKeyB64, name: name() },
+      conversationKind: CONVERSATION_CARD,
+      pickFrom:
+        conversation === null
+          ? null
+          : { kind: "chat", groupIdB64: conversation, authorKeyB64: props.personKeyB64 },
+    });
+  }
   const contactsOfContactsOn = (): boolean => {
     const s = visibilitySetting();
     return s !== null && props.accountIdHex !== null && showsTheirContactsSwitch(viewOf(s));
@@ -138,11 +189,16 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
   const sections = createMemo(() =>
-    personInfoSections(uiRules(), {
-      membershipEnded: props.membershipEnded,
-      isContact: props.isContact,
-      contactsOfContactsOn: contactsOfContactsOn(),
-    }),
+    // ADR-0089 step 3: a suspended account adds no contact and calls nobody.
+    sectionsWhileSuspended(
+      personInfoSections(uiRules(), {
+        membershipEnded: props.membershipEnded,
+        isContact: props.isContact,
+        contactsOfContactsOn: contactsOfContactsOn(),
+        isBlocked: blocked(),
+      }),
+      accountSuspended(),
+    ),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
@@ -275,7 +331,8 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     // is gated on `is_active()` and raises, so the tiles would fail closed
     // anyway; a control that always errors is the shape 6.1.1 rejects, and a
     // call control asserts a live E2EE session there is not.
-    const calls = !sections().includes("call")
+    // ADR-0089 step 3: a suspended account places no call.
+    const calls = !sections().includes("call") || accountSuspended()
       ? []
       : [
           {
@@ -338,6 +395,15 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           </Show>
           <Show when={resolved().usernameNotVerified}>
             <div class="lk-meta">{t("contacts.detail.username_not_verified")}</div>
+          </Show>
+          {/* ADR-0089 UX 1.4 - a muted line under a blocked person's name. */}
+          <Show when={blocked()}>
+            <div class="lk-meta">{t("block.card_line")}</div>
+          </Show>
+          {/* ADR-0089 step 4, UX 3 - a muted line under a suspended person's
+              name; a block's line wins. */}
+          <Show when={personMark(blocked(), isSuspendedKeyB64(props.personKeyB64)) === "suspended"}>
+            <div class="lk-meta">{t("suspended.card_line")}</div>
           </Show>
         </header>
 
@@ -496,6 +562,50 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           </section>
         </Show>
 
+        {/* ADR-0089 UX 1.1 / 2.1 - the danger block: Report, then Block or
+            Unblock, then Remove contact (the shared rule's order). */}
+        <Show when={sections().includes("report")}>
+          <section class="lk-card danger">
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="flag" size={18} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-title">{t("report.action")}</span>
+              </div>
+              <button type="button" class="danger lk-card-row-action" onClick={onReport}>
+                {t("report.action")}
+              </button>
+            </div>
+          </section>
+        </Show>
+        <Show when={sections().includes("block") || sections().includes("unblock")}>
+          <section class="lk-card danger">
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="shieldAlert" size={18} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-title">
+                  {sections().includes("unblock") ? t("block.unblock") : t("block.action")}
+                </span>
+              </div>
+              <button
+                type="button"
+                class="danger lk-card-row-action"
+                disabled={blockBusy()}
+                onClick={() => void (sections().includes("unblock") ? onUnblock() : onBlock())}
+              >
+                {blockBusy()
+                  ? t("common.saving")
+                  : sections().includes("unblock")
+                    ? t("block.unblock")
+                    : t("block.action")}
+              </button>
+            </div>
+            <Show when={blockError()}>{(m) => <div class="form-error">{m()}</div>}</Show>
+          </section>
+        </Show>
         <Show when={sections().includes("remove-contact")}>
           <section class="lk-card danger">
             <div class="lk-card-row">

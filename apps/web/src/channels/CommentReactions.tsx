@@ -8,6 +8,7 @@
  * tap adds or takes off; a long press or a right click shows the anonymity
  * note. Adding a NEW emoji is the comment menu's `React`.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
@@ -144,6 +145,8 @@ export function CommentReactions(props: {
               type="button"
               class="lk-reaction"
               classList={{ mine: chip.mine }}
+              // ADR-0089 step 3: the counts stay; a suspended account reacts to nothing.
+              disabled={accountSuspended()}
               aria-label={
                 chip.mine
                   ? t("chat.reaction.chip_yours_a11y", { emoji: chip.emoji })

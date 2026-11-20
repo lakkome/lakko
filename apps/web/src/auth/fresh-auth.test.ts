@@ -541,10 +541,13 @@ describe("the grant stays in memory and reaches every gated route", () => {
 
   it("the three minting routes feed the holder; the other landings do not", () => {
     const ctx = read("./AuthContext.tsx");
-    expect(ctx.match(/freshGrants\.put\(/g)?.length).toBe(6);
+    expect(ctx.match(/freshGrants\.put\(/g)?.length).toBe(8);
     // login, signup, passkey sign-in, the two proof routes, and the recall
     // (ADR-0074: `recall/finish` answers a grant; the old password proved
-    // it). The guest sign-up keeps none.
+    // it). The guest sign-up keeps none. ADR-0089: a suspended account's
+    // refusal carries the grant only on the password and passkey sign-ins
+    // (the server decides), kept by `landSuspended` and by the password
+    // proof.
     for (const landing of ["async recoverWithTotp(", "async recoverWithThreeWords("]) {
       const start = ctx.indexOf(landing);
       const end = ctx.indexOf("\n    async ", start + 10);

@@ -15,6 +15,7 @@
  * The reads (`GET .../reactions?posts=`, `GET .../comments`) carry no
  * session, no token and no proof.
  */
+import { guardedChannelFetch as writeGuardedFetch } from "../moderation/channel-removal";
 import { anonTokens, anonymousFetchInit } from "../tokens/anon-token-pool";
 import { apiError, noteIfChannelDeleted, sendAsPublisher } from "./api";
 import { loadWasm, type Wasm } from "../wasm";
@@ -57,7 +58,7 @@ async function errorOf(resp: Response): Promise<FeedbackApiError> {
 
 async function send(url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return await writeGuardedFetch(url, init);
   } catch {
     throw new FeedbackApiError(0, "unreachable");
   }
@@ -109,7 +110,7 @@ export async function addReactionRow(
   let resp: Response;
   try {
     resp = await anonTokens.spend("channel-react", (headerName, headerValue) =>
-      fetch(
+      writeGuardedFetch(
         url,
         anonymousFetchInit({
           method: "POST",
@@ -199,7 +200,7 @@ export async function addCommentReactionRow(
   let resp: Response;
   try {
     resp = await anonTokens.spend("channel-react", (headerName, headerValue) =>
-      fetch(
+      writeGuardedFetch(
         url,
         anonymousFetchInit({
           method: "POST",
@@ -285,7 +286,7 @@ export async function addCommentRow(
   let resp: Response;
   try {
     resp = await anonTokens.spend("channel-comment", (headerName, headerValue) =>
-      fetch(
+      writeGuardedFetch(
         url,
         anonymousFetchInit({
           method: "POST",

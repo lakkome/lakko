@@ -41,6 +41,9 @@ struct PeopleSearchSection: View {
     let isHeld: (String) -> Bool
     let onOpenHeld: (String) -> Void
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 4 — a person found suspended leaves the list as the
+    /// answer arrives.
+    @ObservedObject private var suspensions = SuspensionMarks.shared
 
     init(
         model: PeopleSearchModel,
@@ -142,6 +145,11 @@ struct PeopleSearchSection: View {
                     .multilineTextAlignment(.center)
             }
         }
+        // ADR-0089 step 4 — ask about every person found; the rows are shown
+        // at once and a suspended one drops out when its standing arrives.
+        .task(id: model.suspensionCheckKeys) {
+            suspensions.check(model.suspensionCheckKeys)
+        }
     }
 
     /// What a found channel's row reads: its name when one is known, else its
@@ -173,6 +181,8 @@ private struct FoundPersonRow: View {
     let onAskAgain: (() -> Void)?
     let onOpen: () -> Void
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 3 — a suspended account adds nobody.
+    @Environment(\.accountSuspended) private var accountSuspended
 
     var body: some View {
         HStack(spacing: 12) {
@@ -214,12 +224,12 @@ private struct FoundPersonRow: View {
                 Text(l10n.t("search.people.request_sent"))
                     .font(.subheadline)
                     .foregroundStyle(Color.lakkoTextMuted)
-                if let onAskAgain {
+                if let onAskAgain, !accountSuspended {
                     Button(l10n.t("contacts.search.ask_again"), action: onAskAgain)
                         .buttonStyle(.borderless)
                 }
             }
-        } else if person.canAddContact {
+        } else if person.canAddContact, !accountSuspended {
             switch state {
             case .idle, .failed:
                 Button(l10n.t("search.people.add_contact"), action: onAdd)

@@ -138,6 +138,11 @@ pub(crate) struct RotateFinishReq {
     /// URL-safe base64 of the NEW identity's 32-byte Ed25519 signature
     /// public key.
     pub(crate) new_signature_pubkey_b64: String,
+    /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
+    /// over the account id and that key (`signIdentityProof`, ADR-0089 F3).
+    /// Absent or invalid: `400 identity-proof-invalid`.
+    #[serde(default)]
+    pub(crate) identity_proof_b64: Option<String>,
     /// URL-safe base64 of the 145-byte supersession proof: the OLD identity
     /// key (the one auth has recorded) signing the new one.
     pub(crate) supersession_proof_b64: String,
@@ -288,6 +293,11 @@ pub(crate) async fn finish(
             .await?;
     let upload = decode_registration_upload(&payload.recovery_upload)?;
     let new_signature_pubkey = decode_new_pubkey(&payload.new_signature_pubkey_b64)?;
+    crate::identity_target::require_identity_proof(
+        payload.identity_proof_b64.as_deref(),
+        &account_id,
+        &new_signature_pubkey,
+    )?;
     let proof = decode_proof(&payload.supersession_proof_b64)?;
     let revoke_ids = decode_revoke_ids(&payload.revoke_device_ids_b64, &caller.device_id)?;
     let registration_bytes = ServerRegistration::<LakkoCipherSuite>::finish(upload)
@@ -358,12 +368,15 @@ pub(crate) async fn finish(
     .await
     .map_err(ApiError::Db)?;
 
-    // 3. The generation and the identity key, in one statement.
+    // 3. The new key's target, claimed for this account (ADR-0089 F3), then
+    //    the generation and the identity key, in one statement.
+    crate::identity_target::claim(&mut tx, &account_id, &new_signature_pubkey, now).await?;
     let bumped = sqlx::query(
         "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
-         identity_pubkey = ? WHERE id = ?",
+         identity_pubkey = ?, identity_target = ? WHERE id = ?",
     )
     .bind(&new_signature_pubkey[..])
+    .bind(&crate::identity_target::target_of(&new_signature_pubkey)[..])
     .bind(account_id.as_slice())
     .execute(&mut *tx)
     .await

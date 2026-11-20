@@ -1853,6 +1853,7 @@ internal fun incomingContactRequestFromWire(
             replyGrant = replyGrant,
             linkAnswer = linkAnswer,
             viaGroupIdHex = viaGroupIdHex,
+            wire = wire,
         )
     }
 }
@@ -1893,6 +1894,9 @@ public data class IncomingContactRequest(
     /** `docs/ux/who-can-find-me.md` section 6.4 — the group the request was
      *  sent inside (hex), shown as "Via {group}"; `null` for a mailbox row. */
     val viaGroupIdHex: String? = null,
+    /** ADR-0089 section 2 — the verified request's wire as received, what a
+     *  report of the request includes. Not part of equality. */
+    val wire: ByteArray? = null,
 ) {
     /** The DS stamp ([createdAt], server-set) as Unix ms, or `null` when it
      *  does not parse. For a request through an invite link it decides the

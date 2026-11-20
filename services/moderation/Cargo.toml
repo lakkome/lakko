@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-moderation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Report intake and receipts for Lakko's moderators (ADR-0089)"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lakko-svc-moderation"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# ADR-0078 section 11: the request span that records the route template.
+lakko-log-hygiene.workspace = true
+
+# The report format, the moderator list and its root check (ADR-0089).
+lakko-moderation.workspace = true
+
+# A report spends one anonymous token of context `report` (ADR-0089
+# section 2) through the shared gate and spent-set.
+lakko-anon-token.workspace = true
+lakko-anon-token-server.workspace = true
+
+# The moderation log: the KT log's Merkle construction, its signed root and
+# the witness v2 co-signatures under the `moderation` log (ADR-0089 section 5).
+lakko-transparency.workspace = true
+# The log's Ed25519 operator key.
+lakko-crypto.workspace = true
+
+axum = { version = "0.8", features = ["macros"] }
+# `fs` serves the built panel app (ADR-0089 step 5).
+tower-http = { version = "0.6", features = ["trace", "limit", "fs"] }
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+] }
+async-trait = "0.1"
+base64 = "0.22"
+rand = "0.8"
+
+# The witness fan-out and the forward to auth's internal listener.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+futures.workspace = true
+# Constant-time comparison of the internal shared secret.
+subtle = "2"
+
+# .env loading — debug builds only.
+dotenvy = "0.15"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+lakko-anon-token-server = { workspace = true, features = ["testing"] }
+# Signs statements in the route tests.
+lakko-moderation = { workspace = true, features = ["software-authenticator"] }

@@ -43,6 +43,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -771,6 +772,19 @@ private fun GroupTile(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            // ADR-0089 / UX 1.2 — a blocked person stays in the call; their
+            // tile carries a muted "Blocked" label.
+            val register by me.lakko.app.moderation.BlockRegister.state.collectAsStateWithLifecycle()
+            if (!participant.isLocal && register?.isBlocked(participant.personKeyB64) == true &&
+                me.lakko.app.moderation.labelsCallTile(participant.personKeyB64) { true }
+            ) {
+                Text(
+                    text = strings["block.call_label"],
+                    color = LakkoDark.textMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
+            }
             // Section 7.2: a connection is drawn only when it is fair or worse.
             // A dot on every healthy tile says nothing, and for other people it
             // was never a measurement at all.

@@ -172,6 +172,7 @@ pub fn verify_witness_cosig(
     lakko_transparency::verify_witness_cosig(
         cosig,
         witness_key,
+        lakko_transparency::LogId::Kt,
         &expected_tree_root,
         expected_log_size,
     )
@@ -247,6 +248,7 @@ fn verify_witness_quorum_inner(
         &cosig_refs,
         &key_refs,
         threshold as usize,
+        lakko_transparency::LogId::Kt,
         &expected_tree_root,
         expected_log_size,
     )
@@ -416,7 +418,14 @@ mod tests {
             .collect();
         let cosigs_flat: Vec<u8> = sks
             .iter()
-            .flat_map(|sk| lakko_transparency::sign_witness_cosig(sk, &tree_root, log_size))
+            .flat_map(|sk| {
+                lakko_transparency::sign_witness_cosig(
+                    sk,
+                    lakko_transparency::LogId::Kt,
+                    &tree_root,
+                    log_size,
+                )
+            })
             .collect();
 
         // 3-of-3 and 1-of-3 both met by three distinct valid co-sigs.

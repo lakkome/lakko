@@ -384,6 +384,68 @@ mod tests {
             .expect("issue")
     }
 
+    /// ADR-0089 step 3: a suspended account's restricted session deletes the
+    /// backup (account deletion) and does nothing else here.
+    #[tokio::test]
+    async fn the_restricted_session_only_deletes() {
+        let (app, _tmp, secret) = test_app();
+        let token = mint_token(&secret, &TEST_ACCOUNT_ID);
+        let put = Request::builder()
+            .method("PUT")
+            .uri("/backup")
+            .header("authorization", format!("Bearer {token}"))
+            .body(AxumBody::from(b"v1".to_vec()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(put).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let s1 = secret
+            .issue_restricted(&TEST_ACCOUNT_ID[..], 1, &[0u8; 32], 0, now_ms + 3_600_000)
+            .unwrap();
+        for method in ["GET", "PUT"] {
+            let req = Request::builder()
+                .method(method)
+                .uri("/backup")
+                .header("authorization", format!("Bearer {s1}"))
+                .body(AxumBody::from(b"v2".to_vec()))
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED,
+                "{method}"
+            );
+        }
+        let del = Request::builder()
+            .method("DELETE")
+            .uri("/backup")
+            .header("authorization", format!("Bearer {s1}"))
+            .body(AxumBody::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(del).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let get = Request::builder()
+            .method("GET")
+            .uri("/backup")
+            .header("authorization", format!("Bearer {token}"))
+            .body(AxumBody::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(get).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
     /// PUT with a valid bearer + body bytes round-trips to GET.
     #[tokio::test]
     async fn put_then_get_round_trips() {

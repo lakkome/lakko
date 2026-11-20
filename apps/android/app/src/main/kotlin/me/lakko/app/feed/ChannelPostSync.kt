@@ -141,6 +141,9 @@ public class ChannelPostSync(
         var changed = log.channels.size != before.channels.size
 
         for (channel in readable) {
+            // ADR-0089 step 5 — a removed channel keeps its slot; its posts
+            // are asked once per period only.
+            if (!me.lakko.app.channels.RemovedChannels.mayAsk(channel.idHex)) continue
             val deps = object : ChannelSyncDeps {
                 override suspend fun fetchPage(channelIdHex: String, after: Long, limit: Int): ChannelPostPage {
                     val res = client.fetchPosts(channelIdHex, after.coerceAtLeast(0L).toULong(), limit)

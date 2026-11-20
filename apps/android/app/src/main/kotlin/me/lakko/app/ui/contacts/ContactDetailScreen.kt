@@ -21,6 +21,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Block
+import kotlinx.coroutines.launch
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PersonRemove
@@ -189,6 +192,7 @@ public fun ContactDetailScreen(
     var draftName by remember { mutableStateOf("") }
     var confirmingRemove by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
+    val blockScope = androidx.compose.runtime.rememberCoroutineScope()
 
     // Section 4 — an ended membership turns the actions over. Read when the
     // screen opens (and again if the contact's chat link changes): the state
@@ -206,14 +210,25 @@ public fun ContactDetailScreen(
     val reach = remember(contactsRepository) { me.lakko.app.reach.ReachManager.get(appContext) }
     val visibility by reach.visibility.collectAsStateWithLifecycle()
     val contactsOfContactsOn = visibility?.toModel()?.contactsPartOn == true
-    val sections = remember(membershipEnded, isContact, contactsOfContactsOn) {
+    // ADR-0089 section 6 — the block register's answer for this person.
+    val blockRegister by me.lakko.app.moderation.BlockRegister.state.collectAsStateWithLifecycle()
+    val contactKeyB64 = contact?.request?.fromPubkey?.let { java.util.Base64.getEncoder().encodeToString(it) }
+    val isBlocked = blockRegister?.isBlocked(contactKeyB64) == true
+    // ADR-0089 step 4 / UX 3 — whether the moderation log confirms this
+    // person's account is suspended; asked when the card opens.
+    val isSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(contactKeyB64)
+    // ADR-0089 section 4 - no calls and no adding people while suspended.
+    val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
+    val sections = remember(membershipEnded, isContact, contactsOfContactsOn, isBlocked, suspendedReadOnlyInfo) {
+        me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
         personInfoSections(
             PersonInfoCapabilities(
                 membershipEnded = membershipEnded,
                 isContact = isContact,
                 contactsOfContactsOn = contactsOfContactsOn,
+                isBlocked = isBlocked,
             ),
-        )
+        ))
     }
     // Read through `nameVersion` so a profile or a username arriving later
     // renames in place.
@@ -275,6 +290,34 @@ public fun ContactDetailScreen(
                     if (chat != null) viewModel.onAddContactBack(c.request.fromPubkey, chat)
                 },
                 onDeleteChat = { confirmingDelete = true },
+                isBlocked = isBlocked,
+                isSuspended = isSuspended,
+                onBlock = {
+                    contactKeyB64?.let {
+                        me.lakko.app.ui.moderation.ModerationRequests.askBlock(
+                            me.lakko.app.ui.moderation.BlockRequest(it, resolvedName.primary),
+                        )
+                    }
+                },
+                onUnblock = {
+                    contactKeyB64?.let { key ->
+                        blockScope.launch { me.lakko.app.ui.moderation.applyBlock(contactsRepository, key, blocked = false) }
+                    }
+                },
+                onReport = {
+                    contactKeyB64?.let { key ->
+                        me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                            me.lakko.app.ui.moderation.ReportRequest(
+                                me.lakko.app.moderation.personReportSubject(
+                                    accountKeyB64 = key,
+                                    name = resolvedName.primary,
+                                    conversationKind = me.lakko.app.moderation.ReportConversationKind.CARD,
+                                    groupIdHex = groupIdHex,
+                                ),
+                            ),
+                        )
+                    }
+                },
                 theirContactsRow = {
                     // A contact with no known account id cannot be chosen.
                     c.request.fromAccountId?.takeIf { it.size == CONTACT_ACCOUNT_ID_LEN }?.let { id ->
@@ -371,6 +414,12 @@ private fun ContactDetailBody(
     onDeleteChat: () -> Unit,
     theirContactsRow: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    isBlocked: Boolean = false,
+    /** ADR-0089 step 4 — the moderation log confirms this account suspended. */
+    isSuspended: Boolean = false,
+    onBlock: () -> Unit = {},
+    onUnblock: () -> Unit = {},
+    onReport: () -> Unit = {},
 ) {
         Column(
             modifier = modifier,
@@ -404,6 +453,23 @@ private fun ContactDetailBody(
             if (name.usernameNotVerified) {
                 Text(
                     t("contacts.detail.username_not_verified"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // ADR-0089 / UX 1.4 — a muted line under a blocked person's name.
+            if (isBlocked) {
+                Text(
+                    t("block.card_line"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // ADR-0089 step 4 / UX 3 — a muted line for a suspended account;
+            // the block line wins when both apply.
+            if (me.lakko.app.moderation.suspendedCardLineShows(blocked = isBlocked, suspended = isSuspended)) {
+                Text(
+                    t("suspended.card_line"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -533,6 +599,35 @@ private fun ContactDetailBody(
             }
             // Section 2.1 — who-can-find-me 5.1.
             if (InfoSection.THEIR_CONTACTS_CAN_FIND_ME in sections) theirContactsRow()
+            // ADR-0089 — the danger block: Report, then Block or Unblock, then
+            // Remove contact (the order the rule returns).
+            if (InfoSection.REPORT in sections) {
+                HorizontalDivider()
+                DetailRow(
+                    title = t("report.action"),
+                    supporting = null,
+                    icon = Icons.Filled.Flag,
+                    onClick = onReport,
+                    danger = true,
+                )
+            }
+            if (InfoSection.BLOCK in sections) {
+                DetailRow(
+                    title = t("block.action"),
+                    supporting = null,
+                    icon = Icons.Filled.Block,
+                    onClick = onBlock,
+                    danger = true,
+                )
+            }
+            if (InfoSection.UNBLOCK in sections) {
+                DetailRow(
+                    title = t("block.unblock"),
+                    supporting = null,
+                    icon = Icons.Filled.Block,
+                    onClick = onUnblock,
+                )
+            }
             if (InfoSection.REMOVE_CONTACT in sections) {
                 HorizontalDivider()
                 DetailRow(

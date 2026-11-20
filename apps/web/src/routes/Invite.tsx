@@ -33,6 +33,7 @@
  *
  * A public route: an invite URL can be opened by anyone, signed in or not.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import {
   createMemo,
   createResource,
@@ -85,6 +86,8 @@ import { personKeysOf } from "../chat/person-key";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { loadWasm } from "../wasm";
+import { isSuspendedKeyB64, standingWithin } from "../moderation/suspension-marks";
+import { REQUEST_STANDING_BOUND_MS, dropsRequestFrom, inviteOffersAdd } from "../moderation/suspension-rules";
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 
@@ -444,15 +447,24 @@ function AddPanel(props: {
       : { groupIdB64: g.groupIdB64, href: paths.chat(base64UrlEncodeNoPad(g.group.groupId)) };
   };
 
-  // ADR-0005 section 13.4 — a referral link presses Add by itself.
+  /** ADR-0089 step 4, UX 3 - the moderation log confirms the inviter's
+   *  account is suspended: the page says so and offers no Add. */
+  const inviterSuspended = (): boolean => isSuspendedKeyB64(base64Encode(cap.ownerSignaturePubkey));
+
+  // ADR-0005 section 13.4 — a referral link presses Add by itself, once the
+  // inviter's standing is known (bounded: an unchecked standing adds as
+  // before).
   onMount(() => {
-    if (cap.bootstrapReferral) void onAdd();
+    if (!cap.bootstrapReferral) return;
+    void standingWithin(base64Encode(cap.ownerSignaturePubkey), REQUEST_STANDING_BOUND_MS).then((standing) => {
+      if (!dropsRequestFrom(standing)) void onAdd();
+    });
   });
 
   async function onAdd(): Promise<void> {
     const secrets = auth.identitySecrets();
     const s = auth.state();
-    if (secrets === null || s.kind !== "session" || busy()) return;
+    if (secrets === null || s.kind !== "session" || busy() || inviterSuspended()) return;
     const account = s.account.accountId;
     setError(null);
     setBusy(true);
@@ -528,12 +540,19 @@ function AddPanel(props: {
         label={props.label}
         personKey={base64Encode(props.invite.cap.ownerSignaturePubkey)}
       >
+        <Show when={inviterSuspended()}>
+          <p class="lk-meta">{t("suspended.cannot_add")}</p>
+        </Show>
         <div class="lk-actions">
-          <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>
-            <Show when={busy()} fallback={t("invite.contact.page.add")}>
-              <InlineSpinner />
-            </Show>
-          </button>
+          {/* ADR-0089 step 3: a suspended account adds no contact; step 4:
+              nor is a suspended inviter added. */}
+          <Show when={inviteOffersAdd(accountSuspended(), inviterSuspended())}>
+            <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>
+              <Show when={busy()} fallback={t("invite.contact.page.add")}>
+                <InlineSpinner />
+              </Show>
+            </button>
+          </Show>
           <button type="button" disabled={busy()} onClick={() => navigate(paths.home)}>
             {t("invite.contact.page.not_now")}
           </button>

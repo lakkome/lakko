@@ -19,6 +19,8 @@ struct CallInvitationCard: View {
     let onJoin: () -> Void
 
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 3 — a suspended account joins no calls: no Join pill.
+    @Environment(\.accountSuspended) private var accountSuspended
 
     var body: some View {
         HStack(spacing: 10) {
@@ -33,6 +35,7 @@ struct CallInvitationCard: View {
                 .font(.body.weight(.semibold))
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if !accountSuspended {
             Button(action: onJoin) {
                 Text(l10n.t("chat.call.join_short"))
                     .font(.subheadline.weight(.semibold))
@@ -47,6 +50,7 @@ struct CallInvitationCard: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier(CallInvitationCard.joinAccessibilityID)
+            }
         }
         .frame(minWidth: 220)
         .accessibilityElement(children: .contain)

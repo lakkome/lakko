@@ -285,7 +285,31 @@ private fun ReadyPanel(state: InviteLandingState.Ready, onAdd: () -> Unit, onNot
         )
     }
     Spacer(Modifier.height(24.dp))
-    Button(onClick = onAdd, enabled = !state.adding, modifier = Modifier.fillMaxWidth()) {
+    // ADR-0089 step 4 / UX 3 — a link from an account the moderation log
+    // confirms suspended has no Add.
+    val inviterKeyB64 = remember(invite.ownerSignaturePubkey) {
+        invite.ownerSignaturePubkey.takeIf { it.size == 32 }?.let { java.util.Base64.getEncoder().encodeToString(it) }
+    }
+    val inviterSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(inviterKeyB64)
+    // ADR-0089 section 4 - a suspended account adds no contacts.
+    val addReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
+    if (inviterSuspended || state.inviterSuspended) {
+        Text(
+            t("suspended.cannot_add"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(8.dp))
+    } else if (addReadOnly) {
+        Text(
+            t("suspended.self.body"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(8.dp))
+    } else Button(onClick = onAdd, enabled = !state.adding, modifier = Modifier.fillMaxWidth()) {
         if (state.adding) {
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
         } else {

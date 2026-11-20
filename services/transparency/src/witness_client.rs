@@ -60,6 +60,9 @@ struct SignedRootWire {
 
 #[derive(Serialize)]
 struct CosignReq {
+    /// Which log the root belongs to (witness v2, ADR-0089 section 5): always
+    /// the KT log here.
+    log: &'static str,
     new_root: SignedRootWire,
     consistency_proof_b64: Vec<String>,
 }
@@ -144,6 +147,7 @@ impl WitnessClient {
         proof: &[TreeHash],
     ) -> anyhow::Result<Vec<u8>> {
         let req = CosignReq {
+            log: lakko_transparency::LogId::Kt.wire_name(),
             new_root: SignedRootWire {
                 tree_root_b64: B64.encode(root.tree_root),
                 log_size: root.log_size,

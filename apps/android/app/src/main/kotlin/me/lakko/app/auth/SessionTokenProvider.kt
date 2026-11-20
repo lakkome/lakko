@@ -36,6 +36,13 @@ import kotlinx.coroutines.sync.withLock
  *     the sign-in screen, nothing is wiped.
  *   * A refresh that could not be made (offline, 5xx) keeps the current
  *     token; the caller fails as it did before a refresh existed.
+ *   * A refresh answered `403 account-suspended` (ADR-0089 section 4)
+ *     reports the restricted credentials it carries to [install]'s
+ *     `onSuspended` and marks the session suspended: from then on the
+ *     provider refreshes nothing by itself (the suspension controller asks
+ *     the refresh route on its own schedule), and a plain `401` is not
+ *     retried. A later refresh that brings a normal pair reports
+ *     `onResumed`.
  *
  * Persistence is the installer's ([Installed.persist] runs with every pair
  * the refresh brings), so the pair lands where the session token always was.
@@ -56,8 +63,12 @@ public class SessionTokenProvider(
         @Volatile var pair: SessionPair,
         val persist: (SessionPair) -> Unit,
         val onRefusal: (SessionRefusal) -> Unit,
+        val onSuspended: (SuspendedCredentials) -> Unit,
+        val onResumed: (SessionPair) -> Unit,
         /** Set once a refusal was reported, so it is reported once. */
         @Volatile var refused: Boolean = false,
+        /** ADR-0089 - the account is suspended; the pair is the `s1` one. */
+        @Volatile var suspended: Boolean = false,
     )
 
     private val refreshMutex = Mutex()
@@ -79,13 +90,47 @@ public class SessionTokenProvider(
         pair: SessionPair,
         persist: (SessionPair) -> Unit,
         onRefusal: (SessionRefusal) -> Unit,
+        onSuspended: (SuspendedCredentials) -> Unit = {},
+        onResumed: (SessionPair) -> Unit = {},
     ) {
         installed = Installed(
-            accountSegment = accountSegmentOfAccessToken(pair.accessToken),
+            accountSegment = accountSegmentOfSessionToken(pair.accessToken),
             pair = pair,
             persist = persist,
             onRefusal = onRefusal,
+            onSuspended = onSuspended,
+            onResumed = onResumed,
+            suspended = pair.accessToken.startsWith(RESTRICTED_TOKEN_PREFIX),
         )
+    }
+
+    /**
+     * ADR-0089 section 4 - serve the restricted pair of [credentials] (the
+     * `s1` in the access slot, the `r2` in the refresh slot) as the
+     * suspended session of the installed account. A no-op when nothing is
+     * installed or the credentials name another account.
+     */
+    public fun serveSuspended(credentials: SuspendedCredentials) {
+        val inst = installed ?: return
+        val pair = credentials.asSessionPair()
+        if (accountSegmentOfSessionToken(pair.accessToken) != inst.accountSegment) return
+        inst.pair = pair
+        inst.suspended = true
+    }
+
+    /** Whether the installed session is suspended. */
+    public fun isSuspended(): Boolean = installed?.suspended == true
+
+    /**
+     * ADR-0089 - a bearer route of auth answered `403 account-suspended`
+     * with no credentials: refresh once to get them (the refresh route
+     * answers the same `403` with the restricted session, which reaches
+     * `onSuspended`). A no-op once the session is known to be suspended.
+     */
+    public suspend fun suspendedFromBearerRoute() {
+        val inst = installed ?: return
+        if (inst.suspended || inst.refused) return
+        refreshIfStillCurrent(inst.pair.accessToken)
     }
 
     /** A landing (or a reset) handed the same account a newer pair. Keeps
@@ -93,9 +138,10 @@ public class SessionTokenProvider(
      *  installed or the pair names another account. */
     public fun update(pair: SessionPair) {
         val inst = installed ?: return
-        if (accountSegmentOfAccessToken(pair.accessToken) != inst.accountSegment) return
+        if (accountSegmentOfSessionToken(pair.accessToken) != inst.accountSegment) return
         inst.pair = pair
         inst.refused = false
+        inst.suspended = pair.accessToken.startsWith(RESTRICTED_TOKEN_PREFIX)
     }
 
     /**
@@ -168,6 +214,9 @@ public class SessionTokenProvider(
     public suspend fun current(): String? {
         val inst = installed ?: return null
         val pair = inst.pair
+        // Suspended: nothing to refresh to; the restricted session is served
+        // as it is (the controller keeps it live).
+        if (inst.suspended) return pair.accessToken
         if (tokenActionAt(pair.accessExpiresAtMs, clock()) == TokenAction.Use) return pair.accessToken
         return refreshIfStillCurrent(pair.accessToken)?.accessToken ?: installed?.pair?.accessToken
     }
@@ -180,7 +229,8 @@ public class SessionTokenProvider(
      * without a second refresh.
      */
     public suspend fun afterUnauthorized(usedToken: String): String? {
-        installed ?: return null
+        val inst = installed ?: return null
+        if (inst.suspended) return null
         return refreshIfStillCurrent(usedToken)?.accessToken
     }
 
@@ -211,6 +261,18 @@ public class SessionTokenProvider(
                 // [update] replaced the pair while this was out: the refusal
                 // is of the old pair, not of the session.
                 if (inst.pair !== sent) return@withLock inst.pair
+                // ADR-0089 section 4 - the account is suspended: the answer
+                // carries the restricted session. Not a sign-out, not a wipe.
+                val suspension = err.suspended
+                if (suspension != null &&
+                    accountSegmentOfSessionToken(suspension.restrictedToken) == inst.accountSegment
+                ) {
+                    log("session refresh answered: the account is suspended")
+                    inst.pair = suspension.asSessionPair()
+                    inst.suspended = true
+                    inst.onSuspended(suspension)
+                    return@withLock null
+                }
                 when (sessionRefusalOf(err.status, err.code)) {
                     SessionRefusal.KeysReset -> {
                         log("session refresh refused: the account keys were reset elsewhere")
@@ -243,12 +305,15 @@ public class SessionTokenProvider(
                 log("session refresh could not be made: ${err.cause?.javaClass?.simpleName}")
                 return@withLock null
             }
+            val wasSuspended = inst.suspended
             inst.pair = fresh
+            inst.suspended = false
             try {
                 inst.persist(fresh)
             } catch (cause: Throwable) {
                 log("session pair persist after refresh failed: ${cause.javaClass.simpleName}")
             }
+            if (wasSuspended) inst.onResumed(fresh)
             fresh
         }
 }

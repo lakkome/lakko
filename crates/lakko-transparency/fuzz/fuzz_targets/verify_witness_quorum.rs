@@ -19,7 +19,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use lakko_crypto::signing::SigningKey;
-use lakko_transparency::{verify_witness_quorum, TreeHash};
+use lakko_transparency::{verify_witness_quorum, LogId, TreeHash};
 
 /// Split the attacker-controlled input into at most this many candidate co-sig
 /// slices, so a single run exercises the per-key `.any()` loop over several
@@ -48,13 +48,17 @@ fuzz_target!(|data: &[u8]| {
 
     // Cover the fail-closed zero threshold, the satisfiable range, and an
     // unsatisfiable threshold above the pinned-key count; none may panic.
-    for threshold in [0usize, 1, 2, 3, 4] {
-        let _ = verify_witness_quorum(
-            &cosigs,
-            &pinned,
-            threshold,
-            &expected_tree_root,
-            expected_log_size,
-        );
+    // Both logs: the log name enters the signature check (witness v2).
+    for log in LogId::ALL {
+        for threshold in [0usize, 1, 2, 3, 4] {
+            let _ = verify_witness_quorum(
+                &cosigs,
+                &pinned,
+                threshold,
+                log,
+                &expected_tree_root,
+                expected_log_size,
+            );
+        }
     }
 });

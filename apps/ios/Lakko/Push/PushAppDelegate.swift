@@ -29,6 +29,22 @@ import UserNotifications
 public final class PushAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
+    /// ADR-0089 section 6 — whether a conversation's notifications are not
+    /// shown over a running app (a one-to-one with a person this account
+    /// blocked, `blockVerdict(.notification)`). Wired by the composition
+    /// root; `nil` shows everything.
+    @MainActor public static var conversationSuppressed: ((String) -> Bool)?
+
+    /// The conversation a notification's wake names, through the bound
+    /// account's route rows (the account gate of ``VoipPushRegistrar``).
+    static func conversation(of userInfo: [AnyHashable: Any]) -> String? {
+        let wake = VoipWakePayload.parse(userInfo)
+        guard let accountIdB64 = PushAccountBinding.boundAccount(
+                wakeSubscriptionIdHex: wake.subscriptionIdHex, binding: PushAccountBindingStore.live.current()),
+              let wakeHex = wake.groupHex?.lowercased() else { return nil }
+        return PushRoutingStore().lookupRoute(
+            accountIdB64: accountIdB64, pushGidHex: wakeHex, subscriptionIdHex: wake.subscriptionIdHex)
+    }
 
     public func application(
         _ application: UIApplication,
@@ -128,9 +144,20 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
             completionHandler([])
             return
         }
-        // Everything else: the decrypted message preview the NSE wrote
-        // (ADR-0041).
-        completionHandler([.banner, .sound, .badge])
+        // ADR-0089 section 6 — nothing of a blocked person's is shown over
+        // a running app. (The extension cannot read the synced block
+        // register, so this is the foreground half only.)
+        let userInfo = content.userInfo
+        Task { @MainActor in
+            if let groupIdHex = Self.conversation(of: userInfo),
+               Self.conversationSuppressed?(groupIdHex) == true {
+                completionHandler([])
+                return
+            }
+            // Everything else: the decrypted message preview the NSE wrote
+            // (ADR-0041).
+            completionHandler([.banner, .sound, .badge])
+        }
     }
 
     /// Called when the user taps a notification. The wake hint

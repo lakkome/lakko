@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-moderation-root-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Offline tool (ADR-0089 section 3): generate the moderation root key and sign the moderator list."
+
+[[bin]]
+name = "lakko-moderation-root"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# `dev-sign` signs with a software EdDSA "security key" (test stacks only).
+lakko-moderation = { workspace = true, features = ["software-authenticator"] }
+lakko-crypto.workspace = true
+base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+rand = "0.8"

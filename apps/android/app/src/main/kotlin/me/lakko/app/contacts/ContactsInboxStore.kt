@@ -694,6 +694,8 @@ private data class StoredPendingRequest(
     /** ADR-0079 - the dead-link note, kept with the request. */
     /** `docs/ux/who-can-find-me.md` 6.4 - the group the request came in. */
     val viaGroupIdHex: String? = null,
+    /** ADR-0089 section 2 — the request's wire, the evidence of a report. */
+    val wireB64: String? = null,
 )
 
 /** JSON for [pending]; `java.util.Base64` for the byte fields so the codec
@@ -710,6 +712,7 @@ internal fun encodePendingRequests(pending: List<IncomingContactRequest>): Strin
                 intro = r.intro,
                 createdAt = r.createdAt,
                 viaGroupIdHex = r.viaGroupIdHex,
+                wireB64 = r.wire?.let { base64Encode(it) },
             )
         },
     )
@@ -727,6 +730,7 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
                 intro = s.intro,
                 createdAt = s.createdAt,
                 viaGroupIdHex = s.viaGroupIdHex,
+                wire = s.wireB64?.let { base64Decode(it) },
             )
         }
     } catch (_: Exception) {

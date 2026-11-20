@@ -546,6 +546,16 @@ pub(crate) async fn recover(
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
     tracing::info!("totp: code accepted, issuing session token");
     let key_generation = key_generation.ok_or(ApiError::InvalidCredential)?;
+    // ADR-0089 section 4: after the code was accepted (the replay counter is
+    // part of authenticating), before anything is issued.
+    crate::suspension::refuse_landing_if_suspended(
+        &state,
+        &account_id,
+        key_generation,
+        &device_id,
+        crate::suspension::LandingGrant::None,
+    )
+    .await?;
     let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     Ok(Json(RecoverRes {
         account_id_b64,

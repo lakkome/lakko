@@ -303,6 +303,15 @@ enum AccountLocalDataWipe {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
+        // ADR-0089 — the evidence kept for reports, and the reports this
+        // device sent (device-only, never synced, never in the backup).
+        step("message-evidence") { MessageEvidenceStore.shared.deleteAll(accountIdB64: accountIdB64) }
+        step("sent-reports") { ReportHistoryStore.shared.deleteAll(accountIdB64: accountIdB64) }
+        step("blocked-sender-mirror") { BlockedSenderMirror.clear(accountIdB64: accountIdB64) }
+        // ADR-0089 step 4 — the in-memory suspension marks (nothing of them
+        // is on disk).
+        step("suspension-marks") { SuspensionMarks.shared.reset() }
+        step("channel-removals") { ChannelRemovals.shared.reset() }
         // ADR-0082 section 5 — the translations, transcripts and
         // per-conversation translation choices, and the audio extracted for a
         // transcription still under way.

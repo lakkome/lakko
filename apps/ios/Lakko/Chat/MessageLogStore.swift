@@ -57,7 +57,7 @@ public final class MessageLogStore {
     /// Keychain account marker — one wrap key per app
     /// installation (not per Lakko account). Per-account
     /// isolation comes from the file path, not the wrap key.
-    private static let wrapKeyAccount: String = "wrap-key"
+    static let wrapKeyAccount: String = "wrap-key"
 
     /// Container subdirectory holding the per-account envelopes.
     private static let subdir: String = "lakko-message-logs"

@@ -42,7 +42,10 @@
 //! ## The recorded key ([ADR-0074] section 0.1)
 //!
 //! The first mint for an account records the attested key in
-//! `accounts.identity_pubkey`, in one conditional statement. From then on the
+//! `accounts.identity_pubkey`, under the account's row lock, after the key's
+//! own identity proof over the account id verified and its target was
+//! claimed for the account (`crate::identity_target`, ADR-0089 F3: a key
+//! belongs to one account). From then on the
 //! route attests **only that key**: any other is answered `409
 //! {"error":"identity-key-mismatch"}`. So a session can no longer obtain a
 //! genesis attestation for an arbitrary key, and auth holds the public key a
@@ -150,7 +153,9 @@ fn now_unix_secs() -> i64 {
 /// # Errors
 ///
 /// [`ApiError::BadInput`] when `pubkey_b64` is not 32-byte URL-safe base64 of
-/// a usable Ed25519 key; [`ApiError::IdentityKeyMismatch`] (`409`) when the
+/// a usable Ed25519 key; `400 identity-proof-invalid` when the identity proof
+/// is absent or does not verify; `409 identity-key-taken` when another
+/// account holds the key; [`ApiError::IdentityKeyMismatch`] (`409`) when the
 /// account's recorded key is another one; [`ApiError::InvalidCredential`]
 /// when the account was deleted meanwhile; [`ApiError::Db`].
 ///
@@ -162,25 +167,52 @@ pub(crate) async fn genesis_attest(
     Json(req): Json<GenesisAttestReq>,
 ) -> Result<Json<GenesisAttestRes>, ApiError> {
     let pubkey = decode_pubkey(&req.pubkey_b64)?;
+    // ADR-0089 F3: the caller holds the key it asks auth to record.
+    crate::identity_target::require_identity_proof(
+        req.identity_proof_b64.as_deref(),
+        &auth.0,
+        &pubkey,
+    )?;
 
     // ADR-0074 section 0.1: record the key on the first mint, attest only the
-    // recorded key afterwards. The conditional write and the read-back are
-    // two statements; the write is atomic, so whichever of two racing first
-    // mints loses reads the winner's key and is refused when its own differs.
-    sqlx::query("UPDATE accounts SET identity_pubkey = ? WHERE id = ? AND identity_pubkey IS NULL")
-        .bind(&pubkey[..])
-        .bind(&auth.0[..])
-        .execute(&state.db)
-        .await
-        .map_err(ApiError::Db)?;
-    let recorded = crate::devices::identity_pubkey_of(&state.db, &auth.0)
-        .await
-        .map_err(ApiError::Db)?
-        .ok_or(ApiError::InvalidCredential)?;
-    if recorded != pubkey {
-        tracing::info!("genesis attest: a key other than the recorded one refused");
-        return Err(ApiError::IdentityKeyMismatch);
+    // recorded key afterwards. Under the account's row lock, so two racing
+    // first mints record exactly one key; the history row (ADR-0089 F3) is
+    // claimed in the same transaction, so a key another account holds is
+    // refused and nothing is recorded.
+    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    let recorded: Option<Option<Vec<u8>>> =
+        sqlx::query_scalar("SELECT identity_pubkey FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(&auth.0[..])
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    match recorded {
+        None => return Err(ApiError::InvalidCredential),
+        Some(Some(key)) if key.as_slice() != pubkey.as_slice() => {
+            tracing::info!("genesis attest: a key other than the recorded one refused");
+            return Err(ApiError::IdentityKeyMismatch);
+        },
+        Some(Some(_)) => {
+            // The recorded key: make sure its history row is there.
+            crate::identity_target::claim(&mut tx, &auth.0, &pubkey, crate::session::now_ms())
+                .await?;
+        },
+        Some(None) => {
+            crate::identity_target::claim(&mut tx, &auth.0, &pubkey, crate::session::now_ms())
+                .await?;
+            sqlx::query(
+                "UPDATE accounts SET identity_pubkey = ?, identity_target = ? \
+                 WHERE id = ? AND identity_pubkey IS NULL",
+            )
+            .bind(&pubkey[..])
+            .bind(&crate::identity_target::target_of(&pubkey)[..])
+            .bind(&auth.0[..])
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+        },
     }
+    tx.commit().await.map_err(ApiError::Db)?;
 
     // Derived from the AUTHENTICATED account id — the bridge that lets the
     // transparency gate bind the attestation to the KT-log leaf without ever
@@ -211,6 +243,12 @@ pub(crate) struct GenesisAttestReq {
     /// (Ed25519). The server binds it to the authenticated account; it does
     /// not independently verify the key is "correct" (it cannot, invariant #2).
     pub pubkey_b64: String,
+    /// URL-safe base64 (any of the four spellings is read) of the 64-byte
+    /// identity proof (`signIdentityProof`): the key's own signature over the
+    /// account id and the key (ADR-0089 F3). Absent or invalid: `400
+    /// identity-proof-invalid`.
+    #[serde(default)]
+    pub identity_proof_b64: Option<String>,
 }
 
 /// Response body for `POST /auth/genesis/attest`.

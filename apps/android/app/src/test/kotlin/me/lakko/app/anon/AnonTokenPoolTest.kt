@@ -128,6 +128,7 @@ class AnonTokenPoolTest {
         target: (AnonTokenContext) -> Int = ::anonPoolTargetFor,
         forgotten: Set<String> = emptySet(),
         refillOnEmptyTake: Boolean = false,
+        issuable: (AnonTokenContext) -> Boolean = { true },
     ) = AnonTokenPool(
         core = core,
         api = api,
@@ -142,6 +143,7 @@ class AnonTokenPoolTest {
         sleep = parked,
         random = { 0.0 },
         refillOnEmptyTake = refillOnEmptyTake,
+        issuable = issuable,
     )
 
     /** What a store on disk keeps, without the disk: one pool per account. */
@@ -175,6 +177,54 @@ class AnonTokenPoolTest {
     private val lookupTarget = anonPoolTargetFor(AnonTokenContext.DISCOVERY_LOOKUP)
     private val push = AnonTokenContext.PUSH_REGISTER
 
+    // ------------------------------------------------------------ a suspended account (ADR-0089 section 4)
+
+    @Test
+    fun aSuspendedAccountIsIssuedBlobReadOnlyAndTheRestIsNotAskedFor() = runTest {
+        val core = FakeCore()
+        val api = FakeApi()
+        val pool = pool(core, api, { alice }, issuable = { anonIssuable(it, suspended = true) })
+        pool.bindSession()
+        settle()
+        assertEquals(listOf(AnonTokenContext.BLOB_READ), core.begun.map { it.first }.distinct())
+        assertEquals(anonPoolTargetFor(AnonTokenContext.BLOB_READ), pool.held(AnonTokenContext.BLOB_READ))
+        assertEquals(0, pool.held(lookup))
+        // A take of another context fails at once ("not now"), sending nothing.
+        val before = api.sessions.size
+        val failure = runCatching { pool.take(lookup) }.exceptionOrNull()
+        assertTrue(failure is AnonTokenUnavailable)
+        assertEquals(before, api.sessions.size)
+        assertEquals(AnonTokenContext.BLOB_READ, pool.take(AnonTokenContext.BLOB_READ).context)
+    }
+
+    @Test
+    fun anIssuerAnsweringSuspendedIsNotNowAndIsAskedOncePerScheduledPass() = runTest {
+        val core = FakeCore()
+        val api = FakeApi()
+        repeat(3) { api.script(lookup, AnonIssueOutcome.Suspended) }
+        val pool = pool(core, api, { alice }, target = { if (it == lookup) 4 else 0 })
+        pool.bindSession()
+        settle()
+        assertEquals(1, core.issuesFor(lookup).size)
+        assertEquals(0, pool.held(lookup))
+        val failure = runCatching { pool.take(lookup) }.exceptionOrNull()
+        assertTrue(failure is AnonTokenUnavailable)
+        // No retry loop: the next attempt is the next scheduled pass.
+        settle()
+        assertEquals(1, core.issuesFor(lookup).size)
+        pool.runScheduledRefills()
+        settle()
+        assertEquals(2, core.issuesFor(lookup).size)
+    }
+
+    @Test
+    fun onlyBlobReadIsIssuableWhileSuspended() {
+        for (context in AnonTokenContext.entries) {
+            assertEquals(context.wire, context == AnonTokenContext.BLOB_READ, anonIssuable(context, suspended = true))
+            assertTrue(context.wire, anonIssuable(context, suspended = false))
+        }
+    }
+
     // ------------------------------------------------------------ the schedule (ADR-0078 section 8)
 
     @Test
@@ -201,6 +251,7 @@ class AnonTokenPoolTest {
                 AnonTokenContext.CIRCLE_CLAIM to 2,
                 AnonTokenContext.CHANNEL_REACT to 16,
                 AnonTokenContext.CHANNEL_COMMENT to 8,
+                AnonTokenContext.REPORT to 2,
             ),
             firstBatch,
         )
@@ -308,6 +359,7 @@ class AnonTokenPoolTest {
                 "circle-claim",
                 "channel-react",
                 "channel-comment",
+                "report",
             ),
             AnonTokenContext.entries.map { it.wire },
         )

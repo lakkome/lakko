@@ -86,6 +86,8 @@ public enum ContactsInboxMerge {
         case alreadyPending
         /// The sender is already an accepted contact (by signature key).
         case alreadyAccepted
+        /// ADR-0089 section 6 — the sender is blocked: dropped unseen.
+        case blocked
     }
 
     public struct Result: Equatable {
@@ -142,7 +144,8 @@ public enum ContactsInboxMerge {
         fetched: [IncomingContactRequest],
         pending: [IncomingContactRequest],
         accepted: [AcceptedContact],
-        currentKey: (Data) -> Data = { $0 }
+        currentKey: (Data) -> Data = { $0 },
+        isBlocked: (Data) -> Bool = { _ in false }
     ) -> Result {
         var pendingIds = Set(pending.map(\.messageId))
         let acceptedKeys = Set(accepted.map { currentKey($0.request.fromPubkey) })
@@ -154,7 +157,9 @@ public enum ContactsInboxMerge {
         var dropped: [(request: IncomingContactRequest, reason: DropReason)] = []
         for request in fetched {
             let person = currentKey(request.fromPubkey)
-            if pendingIds.contains(request.messageId) {
+            if isBlocked(request.fromPubkey) || isBlocked(person) {
+                dropped.append((request, .blocked))
+            } else if pendingIds.contains(request.messageId) {
                 dropped.append((request, .alreadyPending))
             } else if acceptedKeys.contains(person) {
                 dropped.append((request, .alreadyAccepted))

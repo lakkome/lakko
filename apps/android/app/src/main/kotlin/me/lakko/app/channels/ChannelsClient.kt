@@ -75,15 +75,22 @@ public class ChannelsClient(
     }
 
     private val client: HttpClient = if (engine != null) {
-        HttpClient(engine) { install(ContentNegotiation) { json(jsonCodec) } }
+        HttpClient(engine) {
+            install(ContentNegotiation) { json(jsonCodec) }
+            install(ChannelRestoreWatch)
+        }
     } else {
-        HttpClient(lakkoHttpEngine()) { install(ContentNegotiation) { json(jsonCodec) } }
+        HttpClient(lakkoHttpEngine()) {
+            install(ContentNegotiation) { json(jsonCodec) }
+            install(ChannelRestoreWatch)
+        }
     }
 
     /** Subscribe's client: no session, its own pool. */
     private val anonClient: HttpClient =
         HttpClient(anonEngine ?: engine ?: AnonymousHttp.engine) {
             install(ContentNegotiation) { json(jsonCodec) }
+            install(ChannelRestoreWatch)
         }
 
     override fun close() {
@@ -266,6 +273,10 @@ public class ChannelsClient(
             header(signatureHeaderName, signatureHeaderValue)
         }
         if (response.status.isSuccess() || response.status.value == 404) return
+        // ADR-0089 step 5 / ADR-0087 section 15 — a removed or deleted
+        // channel (`410`) holds no subscription to drop: the unsubscribe is
+        // done, and it neither fails nor marks the channel again.
+        if (response.status.value == 410) return
         throw decodeError(response, "unsubscribe")
     }
 
@@ -1322,7 +1333,15 @@ public class ChannelsClient(
                 // any channels route: the owner deleted that channel.
                 if (e.status == 410 && e.code == "channel-deleted") {
                     channelIdInPath(response.call.request.url.encodedPath)?.let { id ->
+                        RemovedChannels.noteAnswered(id)
                         runCatching { onChannelDeleted?.invoke(id) }
+                    }
+                }
+                // ADR-0089 step 5 — moderators removed the channel: nothing
+                // ends on the device; the channel is marked and the log asked.
+                if (e.status == 410 && e.code == RemovedChannels.CODE) {
+                    channelIdInPath(response.call.request.url.encodedPath)?.let { id ->
+                        runCatching { RemovedChannels.noteRemoved(id) }
                     }
                 }
             }
@@ -1457,3 +1476,18 @@ public class ChannelsApiException(
     public val code: String,
     public val detail: String,
 ) : Exception("$code (HTTP $status): $detail")
+
+/**
+ * ADR-0089 step 5 — a removed channel answers `410 channel-removed` on every
+ * route, so a success on any route naming the channel means it was restored:
+ * the removal is forgotten and everything comes back as before.
+ */
+internal val ChannelRestoreWatch = io.ktor.client.plugins.api.createClientPlugin("ChannelRestoreWatch") {
+    onResponse { response ->
+        if (response.status.isSuccess()) {
+            ChannelsClient.channelIdInPath(response.call.request.url.encodedPath)?.let { id ->
+                RemovedChannels.noteAnswered(id)
+            }
+        }
+    }
+}

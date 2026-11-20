@@ -30,6 +30,8 @@
  * (see `services/auth/src/opaque.rs::login_finish_inner`).
  */
 import { loadWasm } from "../wasm";
+import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import { identityProofB64, identityProofOfSeedB64 } from "./identity-proof";
 import {
   base64Decode,
   base64Encode,
@@ -43,6 +45,7 @@ import { sessionFetch } from "./session-fetch";
 import { sendRecallFinish, sendWithStaleRetry, staleServerTimeMs } from "./statement-stale";
 import { sessionPairOf, type SessionPair } from "./session-pair";
 import { freshGrantOf, type FreshGrant } from "./fresh-auth";
+import { isSuspendedBody, suspendedLandingOf, type SuspendedLanding } from "./suspension";
 import type {
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
@@ -293,6 +296,54 @@ export class AuthHttpError extends Error {
   }
 }
 
+/**
+ * ADR-0089 section 4: the account is suspended. Auth answers `403
+ * {"error":"account-suspended"}`; a route that authenticated the person
+ * (a sign-in, a recovery, the refresh) adds the restricted session, which
+ * `landing` carries. The credentials never reach `body` or the message: an
+ * error may be logged.
+ */
+export class AccountSuspendedError extends AuthHttpError {
+  override name = "AccountSuspendedError";
+  constructor(
+    endpoint: string,
+    /** The restricted session of a landing route's refusal, or `null` for a
+     *  bearer route's (no credentials). */
+    public readonly landing: SuspendedLanding | null,
+  ) {
+    super(403, endpoint, '{"error":"account-suspended"}');
+  }
+}
+
+/** The `SuspendedLanding` an error carries, or `null`. */
+export function suspendedLandingFrom(err: unknown): SuspendedLanding | null {
+  return err instanceof AccountSuspendedError ? err.landing : null;
+}
+
+/**
+ * The error of a refused response. A `403 account-suspended` is read whole
+ * (its credentials do not fit the 512-character truncation) and becomes an
+ * {@link AccountSuspendedError}; anything else is an `AuthHttpError` with the
+ * truncated body, as before.
+ */
+export async function authHttpErrorFrom(response: Response, endpoint: string): Promise<AuthHttpError> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    text = "<unreadable body>";
+  }
+  if (response.status === 403 && isSuspendedBody(text)) {
+    return new AccountSuspendedError(endpoint, suspendedLandingOf(text));
+  }
+  return new AuthHttpError(
+    response.status,
+    endpoint,
+    text.length > 512 ? `${text.slice(0, 512)}…` : text,
+    retryAfterHeader(response),
+  );
+}
+
 /** Read `{"error": code, "retry_after_secs": N}` leniently. */
 function parseLimitBody(body: string): { error: string | null; retryAfterSecs: number | null } {
   try {
@@ -484,22 +535,33 @@ export class AuthClient {
    * into the discovery identity-bundle upload alongside the ADR-0019
    * genesis self-signature.
    *
+   * The body carries the identity proof (F3, `identity-proof.ts`) by
+   * `identity` over `accountId`.
+   *
    * @param sessionToken the live bearer token proving the OPAQUE auth.
-   * @param pubkey       the client's 32-byte Ed25519 genesis identity key.
+   * @param identity     the account identity whose 32-byte Ed25519 key is
+   *                     recorded.
+   * @param accountId    the signed-in account's 16-byte id.
    */
   async genesisAttest(
     sessionToken: string,
-    pubkey: Uint8Array,
+    identity: WasmIdentity,
+    accountId: Uint8Array,
   ): Promise<Uint8Array> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
+    const pubkey = identity.signaturePublicKey;
     if (pubkey.length !== 32) {
       throw new AuthClientArgError("pubkey must be 32 bytes (Ed25519)");
     }
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    const wasm = await loadWasm();
     const resp = await this.post<GenesisAttestRequest, GenesisAttestResponse>(
       "/auth/genesis/attest",
-      { pubkey_b64: base64UrlEncodeNoPad(pubkey) },
+      { pubkey_b64: base64UrlEncodeNoPad(pubkey), identity_proof_b64: identityProofB64(wasm, identity, accountId) },
       sessionToken,
     );
     return base64UrlDecodeNoPad(resp.genesis_attest_b64);
@@ -1006,6 +1068,8 @@ export class AuthClient {
     freshGrant: string,
     seed: Uint8Array,
     newSignaturePubkey: Uint8Array,
+    /** The account's 16-byte id, which the identity proof (F3) names. */
+    accountId: Uint8Array,
   ): Promise<KeyResetResult> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
@@ -1019,7 +1083,13 @@ export class AuthClient {
     if (newSignaturePubkey.length !== 32) {
       throw new AuthClientArgError("newSignaturePubkey must be 32 bytes (Ed25519)");
     }
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
     const wasm = await loadWasm();
+    // The proof by the key being recorded (F3); refused before anything is
+    // sent when the seed's key is not `newSignaturePubkey`.
+    const identityProof = identityProofOfSeedB64(wasm, seed, accountId, newSignaturePubkey);
     const reg = wasm.OpaqueRegister.startRecovery(seed);
     const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
       "/account/keys/reset/start",
@@ -1033,6 +1103,7 @@ export class AuthClient {
         fresh_grant: freshGrant,
         recovery_upload: upload,
         new_signature_pubkey_b64: base64UrlEncodeNoPad(newSignaturePubkey),
+        identity_proof_b64: identityProof,
       },
       sessionToken,
     );
@@ -1077,6 +1148,8 @@ export class AuthClient {
     /** The 64-byte BIP39 seed of the NEW phrase. */
     readonly newSeed: Uint8Array;
     readonly newSignaturePubkey: Uint8Array;
+    /** The account's 16-byte id, which the identity proof (F3) names. */
+    readonly accountId: Uint8Array;
     readonly proof: Uint8Array;
     /** Devices whose removal raced the commit (at most 8). */
     readonly revokeDeviceIds: readonly Uint8Array[];
@@ -1093,7 +1166,11 @@ export class AuthClient {
     if (args.revokeDeviceIds.length > 8) {
       throw new AuthClientArgError("at most 8 device ids ride a rotation");
     }
+    if (args.accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
     const wasm = await loadWasm();
+    const identityProof = identityProofOfSeedB64(wasm, args.newSeed, args.accountId, args.newSignaturePubkey);
     const reg = wasm.OpaqueRegister.startRecovery(args.newSeed);
     const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
       "/account/keys/rotate/start",
@@ -1107,6 +1184,7 @@ export class AuthClient {
         fresh_grant: args.freshGrant,
         recovery_upload: upload,
         new_signature_pubkey_b64: base64UrlEncodeNoPad(args.newSignaturePubkey),
+        identity_proof_b64: identityProof,
         supersession_proof_b64: base64UrlEncodeNoPad(args.proof),
         revoke_device_ids_b64: args.revokeDeviceIds.map((id) => base64UrlEncodeNoPad(id)),
         ...(args.phraseSaved === true ? { phrase_saved: true } : {}),
@@ -1268,6 +1346,9 @@ export class AuthClient {
       throw new AuthClientArgError("newSignaturePubkey must be 32 bytes (Ed25519)");
     }
     const wasm = await loadWasm();
+    // The proof by the NEW key (F3), made before anything is sent; it rides
+    // the finish, so a resent finish carries the same bytes.
+    const identityProof = identityProofOfSeedB64(wasm, args.newSeed, args.accountId, args.newSignaturePubkey);
     const accountIdB64Url = base64UrlEncodeNoPad(args.accountId);
     // The secret the login is made from: the old password, or (the phrase
     // arm) the old phrase's seed.
@@ -1325,6 +1406,7 @@ export class AuthClient {
       password_upload: passwordUpload,
       recovery_upload: recoveryUpload,
       new_signature_pubkey_b64: base64UrlEncodeNoPad(args.newSignaturePubkey),
+      identity_proof_b64: identityProof,
     };
     const oldAccountSeed = args.oldAccountSeed.slice();
     const accountId = args.accountId.slice();
@@ -1797,8 +1879,7 @@ export class AuthClient {
       throw new AuthNetworkError(endpoint, err);
     }
     if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new AuthHttpError(response.status, endpoint, text, retryAfterHeader(response));
+      throw await authHttpErrorFrom(response, endpoint);
     }
     return (await response.json()) as Res;
   }
@@ -1815,8 +1896,7 @@ export class AuthClient {
       throw new AuthNetworkError(endpoint, err);
     }
     if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new AuthHttpError(response.status, endpoint, text, retryAfterHeader(response));
+      throw await authHttpErrorFrom(response, endpoint);
     }
     return (await response.json()) as Res;
   }
@@ -1849,8 +1929,7 @@ export class AuthClient {
     }
 
     if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new AuthHttpError(response.status, endpoint, text, retryAfterHeader(response));
+      throw await authHttpErrorFrom(response, endpoint);
     }
 
     // Some endpoints return small JSON, others return `{ ok: true }`.

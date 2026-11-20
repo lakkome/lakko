@@ -53,6 +53,12 @@ public final class ReachCenter: ObservableObject {
     /// The setting in effect on this device.
     @Published public private(set) var setting: FfiVisibilitySetting = defaultVisibilitySetting()
     @Published public private(set) var status: ReachApplyStatus = .applied
+    /// ADR-0089 step 5 — discovery refused publishing the Everyone record
+    /// (`403 hidden-from-search`): moderators removed this account from
+    /// search. Who can find me says so and does not offer Everyone; the
+    /// setting itself is not changed. Left when a later Everyone publish
+    /// succeeds. Memory only.
+    @Published public private(set) var hiddenFromSearch = false
     /// Bumped whenever the grants this device hands out may have changed (a
     /// rotation, a setting change): the profile republisher listens.
     @Published public private(set) var grantRevision: UInt64 = 0
@@ -283,6 +289,7 @@ public final class ReachCenter: ObservableObject {
     /// signer registers them. Idempotent for the bound account.
     public func activate(accountIdB64: String, accountIdentity: Identity) {
         if self.accountIdB64 == accountIdB64, accountSeed != nil { return }
+        if self.accountIdB64 != accountIdB64 { hiddenFromSearch = false }
         self.accountIdB64 = accountIdB64
         accountSeed = accountIdentity.ed25519Seed()
         ownAccountKey = accountIdentity.signaturePublicKey()
@@ -378,6 +385,7 @@ public final class ReachCenter: ObservableObject {
         accountIdB64 = nil
         accountSeed = nil
         ownAccountKey = nil
+        hiddenFromSearch = false
         mailboxSigner = nil
         mailboxPseudonym = nil
         ownMailbox = nil
@@ -1915,12 +1923,31 @@ public final class ReachCenter: ObservableObject {
             guard self.accountIdB64 == accountIdB64 else { return }
             record.publishedEveryone = wantPublic
             publishedEveryoneFor = wantPublic ? publishKey : nil
+            noteEveryonePublished(wantPublic: wantPublic)
             persist()
         } catch {
             guard self.accountIdB64 == accountIdB64 else { return }
+            if noteEveryoneRefusedAsHidden(error, wantPublic: wantPublic) { return }
             NSLog("ADR-0060: Everyone publish failed: \(error)")
             if status == .applied { status = Self.isOffline(error) ? .pendingOffline : .failed }
         }
+    }
+
+    /// ADR-0089 step 5 — an Everyone record was published: the account is in
+    /// search again.
+    func noteEveryonePublished(wantPublic: Bool) {
+        if wantPublic, hiddenFromSearch { hiddenFromSearch = false }
+    }
+
+    /// ADR-0089 step 5 — whether `error` is discovery's `403
+    /// hidden-from-search` on publishing Everyone; if so the account is held
+    /// hidden. Not a failure to retry by hand: the setting's screen says why
+    /// and the next sync asks again.
+    func noteEveryoneRefusedAsHidden(_ error: Error, wantPublic: Bool) -> Bool {
+        guard wantPublic, DiscoveryClientError.isHiddenFromSearch(error) else { return false }
+        NSLog("ADR-0060: Everyone publish refused: hidden from search")
+        if !hiddenFromSearch { hiddenFromSearch = true }
+        return true
     }
 
     /// The person chose Everyone and nothing was published: said on the

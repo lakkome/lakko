@@ -43,5 +43,5 @@ pub use supersession::{
     RotationEvidence, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,
 };
 pub use witness::{
-    sign_witness_cosig, verify_witness_cosig, verify_witness_quorum, WITNESS_COSIG_LEN,
+    sign_witness_cosig, verify_witness_cosig, verify_witness_quorum, LogId, WITNESS_COSIG_LEN,
 };

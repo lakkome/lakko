@@ -115,6 +115,11 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// ``offered(canReply:canForward:canEditOrDelete:hasText:pin:canSelect:save:translate:)``.
     case ban
 
+    /// ADR-0089 / UX `reporting-and-moderation.md` 2.1 — report this message's
+    /// author (a channel post: the channel). On someone else's message only;
+    /// destructive group.
+    case report
+
     public var id: String { rawValue }
 
     public var title: String {
@@ -132,6 +137,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .edit: return Localization.text("chat.message.edit")
         case .delete: return Localization.text("common.delete")
         case .ban: return Localization.text("channels.moderation.ban")
+        case .report: return Localization.text("report.action")
         }
     }
 
@@ -150,13 +156,14 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .edit: return "pencil"
         case .delete: return "trash"
         case .ban: return "nosign"
+        case .report: return "flag"
         }
     }
 
     /// Whether the platform's destructive colour applies, and whether the card
     /// separates this row from the ones above it (section 2, "the destructive
     /// one, separated").
-    public var isDestructive: Bool { self == .delete || self == .ban }
+    public var isDestructive: Bool { self == .delete || self == .ban || self == .report }
 
     /// The actions this message offers, in section 2's order.
     ///
@@ -175,7 +182,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         pin: PinMenuState = .unavailable,
         canSelect: Bool = false,
         save: SaveMenuState = .unavailable,
-        translate: MessageTranslateMenuState = .unavailable
+        translate: MessageTranslateMenuState = .unavailable,
+        canReport: Bool = false
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -214,7 +222,19 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
             actions.append(.edit)
             actions.append(.delete)
         }
+        // ADR-0089 — Report, in the destructive group, last; never on an own
+        // message (an own message is the one `canEditOrDelete` is about).
+        if canReport && !canEditOrDelete { actions.append(.report) }
         return actions
+    }
+
+    /// ADR-0089 step 3 — the rows a suspended account is offered: none that
+    /// sends (Reply, Forward, Edit, Delete, Ban). A control the server or the
+    /// device would refuse afterwards is not offered at all.
+    public static func whileSuspended(_ actions: [MessageMenuAction], suspended: Bool) -> [MessageMenuAction] {
+        guard suspended else { return actions }
+        let sending: Set<MessageMenuAction> = [.reply, .forward, .edit, .delete, .ban]
+        return actions.filter { !sending.contains($0) }
     }
 }
 
@@ -392,6 +412,19 @@ struct MessageMenuRequest: Identifiable {
     let onReact: (String) -> Void
     let onMoreReactions: () -> Void
     let perform: (MessageMenuAction) -> Void
+
+    /// The same request with what a suspended account may not do removed:
+    /// the sending rows and the reaction row.
+    func narrowed(suspended: Bool) -> MessageMenuRequest {
+        guard suspended else { return self }
+        var copy = MessageMenuRequest(
+            id: id, bubbleFrame: bubbleFrame, isOutgoing: isOutgoing,
+            actions: MessageMenuAction.whileSuspended(actions, suspended: true),
+            canReact: false, bubble: bubble,
+            onReact: onReact, onMoreReactions: onMoreReactions, perform: perform)
+        copy.reactionRow = reactionRow
+        return copy
+    }
 }
 
 /// Holds the open menu, if any.
@@ -405,6 +438,10 @@ final class MessageMenuPresenter: ObservableObject {
 
     @Published private(set) var request: MessageMenuRequest?
 
+    /// Whether the account is in suspended mode. The token provider's flag;
+    /// a test replaces it.
+    var isSuspended: () -> Bool = { SessionTokenProvider.shared.isSuspended }
+
     var isOpen: Bool { request != nil }
 
     /// Open the menu on a message.
@@ -414,6 +451,9 @@ final class MessageMenuPresenter: ObservableObject {
     /// second request can only come from a gesture that was already in flight.
     func open(_ request: MessageMenuRequest) {
         guard self.request == nil else { return }
+        // ADR-0089 step 3 — while suspended, no sending row and no reaction
+        // bar, whichever screen opened the menu.
+        let request = request.narrowed(suspended: isSuspended())
         // The feedback `.contextMenu` used to give at the moment it opened. A
         // long press with no answer until the screen changes reads as a
         // hesitation.

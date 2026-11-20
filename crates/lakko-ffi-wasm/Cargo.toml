@@ -91,6 +91,8 @@ lakko-transparency.workspace = true
 # ADR-0036 — genesis-attestation client verify (`verify_genesis_binding`)
 # for the first-observation anti-squatting gate (G-30 finding 2).
 lakko-attest.workspace = true
+# Reporting and moderation (ADR-0089).
+lakko-moderation.workspace = true
 # Phase 2a3d8 — `HistoryBundle` / `SealedBundle` generated types
 # + prost runtime for the inner-bytes re-encode in
 # `sealHistoryBundle` / `openHistoryBundle`.
@@ -134,6 +136,12 @@ openmls = { version = "0.8", features = ["js"], default-features = false }
 # `#[wasm_bindgen_test]`.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[dev-dependencies]
+# The host tests sign a moderator statement with the software authenticator
+# to prove a suspension end to end (ADR-0089 security fix F2). Test builds
+# only; no new crate.
+lakko-moderation = { workspace = true, features = ["software-authenticator"] }
 
 # Phase 1.16f1 — bundle-size pass. wasm-pack defaults to
 # `wasm-opt -O` (Binaryen's balanced level); we switch to `-Oz`

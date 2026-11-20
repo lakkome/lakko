@@ -59,7 +59,7 @@ pub(crate) async fn delete_account(
 
 /// Everything an account owns here besides its username binding and its
 /// identity bundle: the MLS KeyPackages, the ADR-0060 search terms and public
-/// record. Invite ledger rows are not among them (ADR-0078 section 10: no row
+/// record, a moderator's hide (ADR-0089). Invite ledger rows are not among them (ADR-0078 section 10: no row
 /// names its owner).
 async fn purge_owned_rows(
     pool: &sqlx::MySqlPool,
@@ -71,6 +71,8 @@ async fn purge_owned_rows(
         "DELETE FROM keypackage_tombstones WHERE account_id = ?",
         "DELETE FROM search_terms WHERE kind = 1 AND target = ?",
         "DELETE FROM public_records WHERE kind = 1 AND target = ?",
+        // ADR-0089 step 5 - a moderator's hide of this account.
+        "DELETE FROM moderation_hidden WHERE account_id = ?",
     ] {
         delete_keyed(pool, sql, account_id).await?;
     }

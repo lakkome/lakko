@@ -467,11 +467,19 @@ public class WebauthnClient(
 
     private suspend fun ensure2xx(response: HttpResponse, endpoint: String) {
         if (response.status.value in 200..299) return
-        val body = response.safeReadBody()
+        val full = try {
+            response.bodyAsText()
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            ""
+        }
+        val body = if (full.length > 512) full.take(509) + "…" else full
         throw WebauthnHttpError(
             status = response.status.value,
             endpoint = endpoint,
             body = body,
+            suspended = if (response.status.value == 403) me.lakko.app.auth.parseSuspendedBody(full) else null,
         )
     }
 
@@ -688,6 +696,10 @@ public class WebauthnHttpError(
     public val status: Int,
     public val endpoint: String,
     public val body: String,
+    /** ADR-0089 section 4 - the passkey sign-in answered `403
+     *  account-suspended` with the restricted session (read from the whole
+     *  body, before [body] is truncated). */
+    public val suspended: me.lakko.app.auth.SuspendedCredentials? = null,
 ) : WebauthnClientError("webauthn $endpoint → $status: $body")
 
 /** The user dismissed the platform sheet, or the authenticator
@@ -696,15 +708,6 @@ public class WebauthnHttpError(
  *  action" (fail-closed). */
 public class WebauthnUserCancelledError :
     WebauthnClientError("webauthn gesture cancelled")
-
-private suspend fun HttpResponse.safeReadBody(): String {
-    return try {
-        val text = bodyAsText()
-        if (text.length > 512) text.take(509) + "…" else text
-    } catch (_: Throwable) {
-        ""
-    }
-}
 
 // -----------------------------------------------------------------
 // action_hash derivation (G-13, ADR-0014)

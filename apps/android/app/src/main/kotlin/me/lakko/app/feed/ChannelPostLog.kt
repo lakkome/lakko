@@ -43,6 +43,9 @@ public data class PersistedChannelPost(
     /** Server receive time, unix ms. */
     val serverTsMs: Long,
     val text: String,
+    /** ADR-0089 section 2 — the post's wire as served (base64url), what a
+     *  report from the channel's info includes when this post is picked. */
+    val wireB64: String? = null,
 )
 
 /** One channel's slice of the log. */
@@ -157,7 +160,7 @@ public suspend fun syncChannelSlot(
                     blocked = true
                 }
                 is PostOutcome.Text -> {
-                    fresh += PersistedChannelPost(p.cursor, p.serverTsMs, outcome.text)
+                    fresh += PersistedChannelPost(p.cursor, p.serverTsMs, outcome.text, wireB64 = p.payloadB64)
                     cursor = p.cursor
                 }
                 PostOutcome.Skip -> cursor = p.cursor

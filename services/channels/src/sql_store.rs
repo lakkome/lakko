@@ -39,9 +39,10 @@ use crate::feedback::{
 };
 use crate::feedback_sql;
 use crate::storage::{
-    ChannelId, ChannelStore, DirectoryQuery, InviteKeyRow, ModerationAction, PublicSeedOutcome,
-    SealedTicket, StorageError, StoredListing, StoredPost, SubscriberEntry, SubscriberId,
-    INVITE_KEY_LEN, OWNER_NONCE_LEN, OWNER_PUBKEY_LEN, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
+    ChannelId, ChannelModeration, ChannelStore, DirectoryQuery, InviteKeyRow, ModerationOutcome,
+    ModerationRow, ModerationStatement, PublicSeedOutcome, SealedTicket, StorageError,
+    StoredListing, StoredPost, SubscriberEntry, SubscriberId, INVITE_KEY_LEN, OWNER_NONCE_LEN,
+    OWNER_PUBKEY_LEN, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
 
 /// MariaDB-backed `ChannelStore`. Construct with a pool
@@ -1200,14 +1201,19 @@ impl ChannelStore for SqlChannelStore {
             Some((true, _)) => return Err(StorageError::ChannelPrivate),
             Some((false, _)) => {},
         }
-        let blocked: Option<(i8,)> =
-            sqlx::query_as("SELECT blocked FROM channel_moderation WHERE channel_id = ?")
-                .bind(channel.as_bytes().as_slice())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        if blocked.is_some_and(|(b,)| b != 0) {
-            return Err(StorageError::ListingBlocked);
+        let moderation: Option<(i8, i8, i8)> = sqlx::query_as(
+            "SELECT blocked, delisted, removed FROM channel_moderation WHERE channel_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        match moderation {
+            Some((blocked, _, _)) if blocked != 0 => return Err(StorageError::ListingBlocked),
+            Some((_, delisted, removed)) if delisted != 0 || removed != 0 => {
+                return Err(StorageError::ListingDelisted);
+            },
+            _ => {},
         }
         let stored: Option<(u64,)> =
             sqlx::query_as("SELECT updated_at_ms FROM channel_listings WHERE channel_id = ?")
@@ -1320,51 +1326,141 @@ impl ChannelStore for SqlChannelStore {
             .collect()
     }
 
-    async fn moderate(
+    async fn apply_moderation(
         &self,
-        channel: ChannelId,
-        action: ModerationAction,
-        reason: &str,
-        now_ms: u64,
-    ) -> Result<(), StorageError> {
+        statement: &ModerationStatement,
+    ) -> Result<ModerationOutcome, StorageError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        let upsert = match action {
-            // A removal keeps whatever block is in force.
-            ModerationAction::Remove => {
-                "INSERT INTO channel_moderation (channel_id, blocked, reason, action_at_ms) \
-                 VALUES (?, 0, ?, ?) \
-                 ON DUPLICATE KEY UPDATE reason = VALUES(reason), \
-                     action_at_ms = VALUES(action_at_ms)"
-            },
-            ModerationAction::Block => {
-                "INSERT INTO channel_moderation (channel_id, blocked, reason, action_at_ms) \
-                 VALUES (?, 1, ?, ?) \
-                 ON DUPLICATE KEY UPDATE blocked = 1, reason = VALUES(reason), \
-                     action_at_ms = VALUES(action_at_ms)"
-            },
-            ModerationAction::Unblock => {
-                "INSERT INTO channel_moderation (channel_id, blocked, reason, action_at_ms) \
-                 VALUES (?, 0, ?, ?) \
-                 ON DUPLICATE KEY UPDATE blocked = 0, reason = VALUES(reason), \
-                     action_at_ms = VALUES(action_at_ms)"
-            },
-        };
-        sqlx::query(upsert)
-            .bind(channel.as_bytes().as_slice())
-            .bind(reason)
-            .bind(now_ms)
+        // The stored list version, under its row lock: one statement applies
+        // at a time.
+        let stored: Option<(u64,)> = sqlx::query_as(
+            "SELECT list_version FROM moderation_list_state WHERE id = 1 FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if stored.is_some_and(|(v,)| statement.list_version < v) {
+            return Ok(ModerationOutcome::StaleList);
+        }
+        let repeat: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM moderation_applied_statements WHERE statement_id = ? FOR UPDATE",
+        )
+        .bind(&statement.statement_id[..])
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if repeat.is_some() {
+            return Ok(ModerationOutcome::Repeat);
+        }
+        let channel = statement.channel.as_bytes();
+        let row: Option<(i8, i8, i8, Option<u64>, u64)> = sqlx::query_as(
+            "SELECT blocked, delisted, removed, log_index, issued_at_ms \
+             FROM channel_moderation WHERE channel_id = ? FOR UPDATE",
+        )
+        .bind(channel.as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let current = row.map_or_else(ModerationRow::default, |(b, d, r, log_index, at)| {
+            ModerationRow {
+                blocked: b != 0,
+                delisted: d != 0,
+                removed: r != 0,
+                log_index,
+                issued_at_ms: at,
+            }
+        });
+        let outcome = if statement.issued_at_ms < current.issued_at_ms {
+            ModerationOutcome::Superseded
+        } else {
+            let next = current.after(statement.action, statement.log_index);
+            sqlx::query(
+                "INSERT INTO channel_moderation \
+                    (channel_id, blocked, delisted, removed, reason, action_at_ms, log_index, \
+                     issued_at_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE blocked = VALUES(blocked), \
+                    delisted = VALUES(delisted), removed = VALUES(removed), \
+                    reason = VALUES(reason), action_at_ms = VALUES(action_at_ms), \
+                    log_index = VALUES(log_index), issued_at_ms = VALUES(issued_at_ms)",
+            )
+            .bind(channel.as_slice())
+            .bind(next.blocked)
+            .bind(next.delisted)
+            .bind(next.removed)
+            .bind(statement.reason)
+            .bind(statement.now_ms)
+            .bind(statement.log_index)
+            .bind(statement.issued_at_ms)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
-        if action != ModerationAction::Unblock {
-            sqlx::query("DELETE FROM channel_listings WHERE channel_id = ?")
-                .bind(channel.as_bytes().as_slice())
+            if statement.action != ChannelModeration::Restore {
+                sqlx::query("DELETE FROM channel_listings WHERE channel_id = ?")
+                    .bind(channel.as_slice())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            }
+            ModerationOutcome::Changed
+        };
+        sqlx::query(
+            "INSERT INTO moderation_applied_statements (statement_id, applied_at_ms) \
+             VALUES (?, ?)",
+        )
+        .bind(&statement.statement_id[..])
+        .bind(statement.now_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO moderation_list_state (id, list_version) VALUES (1, ?) \
+             ON DUPLICATE KEY UPDATE list_version = GREATEST(list_version, VALUES(list_version))",
+        )
+        .bind(statement.list_version)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(outcome)
+    }
+
+    async fn removed_channel(&self, channel: ChannelId) -> Result<Option<u64>, StorageError> {
+        let row: Option<(Option<u64>,)> = sqlx::query_as(
+            "SELECT log_index FROM channel_moderation WHERE channel_id = ? AND removed = 1",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.map(|(i,)| i.unwrap_or(0)))
+    }
+
+    async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let stored: Option<(u64,)> = sqlx::query_as(
+            "SELECT list_version FROM moderation_list_state WHERE id = 1 FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        match lakko_moderation::apply::list_floor(stored.map(|(v,)| v), list_version) {
+            Err(_) => return Ok(false),
+            Ok(lakko_moderation::apply::FloorStep::Keep) => {},
+            Ok(lakko_moderation::apply::FloorStep::Raise) => {
+                sqlx::query(
+                    "INSERT INTO moderation_list_state (id, list_version) VALUES (1, ?) \
+                     ON DUPLICATE KEY UPDATE \
+                        list_version = GREATEST(list_version, VALUES(list_version))",
+                )
+                .bind(list_version)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;
+            },
         }
         tx.commit().await.map_err(db_err)?;
-        Ok(())
+        Ok(true)
     }
 
     async fn put_member_card(

@@ -288,6 +288,28 @@ android {
             "${(project.findProperty("lakko.release.check.dev.override") as String?)?.toBoolean() ?: false}",
         )
 
+        // ADR-0089 — the pinned root key the moderator list is verified under.
+        //
+        // `LAKKO_MODERATION_ROOT_KEY` — base64url (no-pad) of the 32-byte
+        // Ed25519 offline moderation root key. Empty when unset → reporting
+        // is UNAVAILABLE: the report sheet says so and nothing is sent.
+        buildConfigField(
+            "String",
+            "LAKKO_MODERATION_ROOT_KEY",
+            "\"${project.findProperty("lakko.moderation.root.key") as String? ?: ""}\"",
+        )
+        // ADR-0089 step 4 — the moderation log's operator key.
+        //
+        // `LAKKO_MODERATION_LOG_KEY` — base64url (no-pad) of the 32-byte
+        // Ed25519 key the moderation log's roots are signed with. Empty when
+        // unset (or malformed) → no suspension marks anywhere and no snapshot
+        // request is made. The witness keys and threshold are the
+        // transparency pins above.
+        buildConfigField(
+            "String",
+            "LAKKO_MODERATION_LOG_KEY",
+            "\"${project.findProperty("lakko.moderation.log.key") as String? ?: ""}\"",
+        )
         // ADR-0061 (S6) — signed translation updates.
         //
         // `LAKKO_TRANSLATION_KEY` — base64url (no-pad) of the 32-byte Ed25519

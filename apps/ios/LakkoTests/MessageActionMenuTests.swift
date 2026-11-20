@@ -168,7 +168,9 @@ final class MessageActionMenuTests: XCTestCase {
     /// destructive action added in the middle would quietly produce a separator
     /// in the wrong place.
     func testDeleteIsTheOnlyDestructiveActionAndComesLast() {
-        XCTAssertEqual(MessageMenuAction.allCases.filter(\.isDestructive), [.delete, .ban])
+        // ADR-0089 — Report joins the destructive group; `offered` puts it
+        // last and only when Delete is not offered (never on an own message).
+        XCTAssertEqual(MessageMenuAction.allCases.filter(\.isDestructive), [.delete, .ban, .report])
         XCTAssertEqual(MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: true, hasText: true).last, .delete)
     }
 

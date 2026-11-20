@@ -662,12 +662,22 @@ public final class ContactsRepository: ObservableObject {
             // ADR-0060 section 1 (2026-11-06) — the contacts who wrote with a
             // retired `contact` key and get the current grant, invisibly.
             var regrant: [Data] = []
+            // ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // the senders of this batch's requests whose accounts the
+            // moderation log shows suspended, asked about all at once under
+            // one bound of a few seconds. Only a verified `suspended` counts;
+            // a late or failed answer shows the request as before.
+            let suspendedSenders = await suspendedRequestSenders(Self.requestSenders(pollResult.events))
             for event in pollResult.events {
                 // The session ended (or changed account) while this batch
                 // was in flight, or while a Welcome of it was being joined:
                 // the rest belongs to the old account. Its grants, profiles
                 // and Welcomes are not filed under whoever is bound now.
                 guard boundAccountIdB64 == pollAccountIdB64 else { break }
+                // ADR-0089 step 4 — dropped unseen before anything else
+                // decides about it: no grant, profile, regrant, link-answer
+                // acceptance or card.
+                if Self.droppedAsSuspended(event, suspendedSenders: suspendedSenders) { continue }
                 let decision = Self.rowContactDecision(
                     event, reachKeys: pollResult.reachKeyByMessageId,
                     isContact: { [weak self] in self?.isCurrentContact($0) ?? false },
@@ -681,6 +691,11 @@ public final class ContactsRepository: ObservableObject {
                 }
                 switch event {
                 case .contactRequest(let req, let replyGrant, let linkAnswer):
+                    // ADR-0089 section 6 — a request from a blocked account is
+                    // dropped unseen, whichever route it took (the inbox or an
+                    // invite link): nothing of it is kept, not its grant, not
+                    // its profile.
+                    if Self.requestBlocked(req.fromPubkey) { continue }
                     // ADR-0060 section 6 — the requester's `reply` grant, filed
                     // under the key the request signature authenticated; the
                     // accept (Welcome) and the ack are written with it.
@@ -821,7 +836,7 @@ public final class ContactsRepository: ObservableObject {
             let resolver = client.mailboxResolver()
             let merged = ContactsInboxMerge.merge(
                 fetched: newPending, pending: state.pending, accepted: state.accepted,
-                currentKey: resolver.current(of:))
+                currentKey: resolver.current(of:), isBlocked: Self.requestBlocked)
             #if DEBUG
             for (request, reason) in merged.dropped {
                 NSLog(
@@ -1227,6 +1242,12 @@ public final class ContactsRepository: ObservableObject {
     func fileGroupContactRequest(
         groupIdHex: String, envelope: Data, senderKey: Data, ownX25519Secret: Data, createdAt: String
     ) -> Bool {
+        // ADR-0089 step 4 — a sender the moderation log already showed
+        // suspended is dropped unseen before anything else decides. This
+        // route files synchronously inside the group's event fold, so it
+        // cannot wait for a standing; one not yet known is asked about below
+        // and the request is hidden from Requests once it verifies.
+        if groupRequestSenderSuspended(senderKey) { return false }
         let wire: Data
         do {
             guard let opened = try checkGroupContactRequest(
@@ -1258,6 +1279,7 @@ public final class ContactsRepository: ObservableObject {
             if isContact { knownContactRequestHandler(request) }
             return false
         }
+        askedAboutGroupRequestSender(senderKey)
         if let replyGrant = opened.replyGrant {
             ReachCenter.shared.keep(
                 replyGrant, carrier: .request,
@@ -1276,7 +1298,8 @@ public final class ContactsRepository: ObservableObject {
         let merged = ContactsInboxMerge.merge(
             fetched: [request], pending: state.pending,
             accepted: state.accepted.filter { !samePerson($0.request.fromPubkey, senderKey) },
-            currentKey: { ReachCenter.shared.currentAccountKey(of: $0) })
+            currentKey: { ReachCenter.shared.currentAccountKey(of: $0) },
+            isBlocked: Self.requestBlocked)
         guard !merged.kept.isEmpty else { return false }
         state = state.with(pending: merged.applied(to: state.pending))
         return true
@@ -1730,6 +1753,64 @@ public final class ContactsRepository: ObservableObject {
     ///
     /// The mutation flows through `state`'s `didSet`, so the persisted
     /// accepted list and the name directory's renames follow.
+    /// ADR-0089 section 6 — whether a contact request from `key` is dropped
+    /// unseen (`blockVerdict(.contactRequest)`).
+    static func requestBlocked(_ key: Data) -> Bool {
+        BlockList.shared.verdict(.contactRequest, accountKey: key) == .drop
+    }
+
+    /// ADR-0089 step 4 — of the given request senders, the ones verified
+    /// suspended, all asked about at once under one bound. Injectable for
+    /// tests; the default asks ``SuspensionMarks``.
+    var suspendedRequestSenders: @MainActor ([Data]) async -> Set<Data> = { keys in
+        await SuspensionMarks.shared.verifiedSuspended(keys)
+    }
+
+    /// ADR-0089 step 4 — whether a group-carried request's sender is known
+    /// suspended now, and the background ask for one not yet known.
+    /// Injectable for tests.
+    var groupRequestSenderSuspended: @MainActor (Data) -> Bool = { SuspensionMarks.shared.isSuspended($0) }
+    var askedAboutGroupRequestSender: @MainActor (Data) -> Void = { SuspensionMarks.shared.check([$0]) }
+
+    /// The senders of the contact requests in a batch.
+    static func requestSenders(_ events: [IncomingMailboxEvent]) -> [Data] {
+        events.compactMap { event in
+            if case .contactRequest(let req, _, _) = event { return req.fromPubkey }
+            return nil
+        }
+    }
+
+    /// Whether `event` is a contact request whose sender is verified
+    /// suspended (whichever route: the inbox, or an invite link's answer).
+    static func droppedAsSuspended(_ event: IncomingMailboxEvent, suspendedSenders: Set<Data>) -> Bool {
+        guard case .contactRequest(let req, _, _) = event else { return false }
+        return suspendedSenders.contains(req.fromPubkey)
+    }
+
+    /// ADR-0089 section 6 / UX 1.2 — block a person: the register is written
+    /// (this device at once, the account's other devices at their next sync),
+    /// their pending requests go unseen, and they are removed from the
+    /// contact list exactly as `Remove contact` does (the contact key
+    /// rotates, ADR-0060 section 1). Returns whether the block holds.
+    @discardableResult
+    public func block(accountKey: Data) -> Bool {
+        guard BlockList.shared.set(accountKey, blocked: true) else { return false }
+        let stale = state.pending.filter { Self.requestBlocked($0.fromPubkey) }.map(\.messageId)
+        if !stale.isEmpty {
+            state = state.with(pending: state.pending.filter { !stale.contains($0.messageId) })
+        }
+        for contact in state.accepted where contact.request.fromPubkey == accountKey {
+            removeContact(messageId: contact.request.messageId)
+        }
+        return true
+    }
+
+    /// UX 1.3 — unblock. It does not make the person a contact again.
+    @discardableResult
+    public func unblock(accountKey: Data) -> Bool {
+        BlockList.shared.unblock(accountKey)
+    }
+
     public func removeContact(messageId: Int64) {
         let removed = state.accepted.filter { $0.request.messageId == messageId }
         let remaining = state.accepted.filter { $0.request.messageId != messageId }
@@ -1883,7 +1964,7 @@ public final class ContactsRepository: ObservableObject {
             guard !listed.isEmpty, self.boundAccountIdB64 == accountIdB64 else { return }
             let merged = ContactsInboxMerge.merge(
                 fetched: listed, pending: self.state.pending, accepted: self.state.accepted,
-                currentKey: client.mailboxResolver().current(of:))
+                currentKey: client.mailboxResolver().current(of:), isBlocked: Self.requestBlocked)
             self.state = self.state.with(pending: merged.applied(to: self.state.pending))
         }
     }
@@ -2988,10 +3069,22 @@ public final class ContactsRepository: ObservableObject {
             return (try? linkClaimAnsweredElsewhere(
                 claims: Self.ffiClaims(seen), rosterKeys: roster.roster)) ?? false
         }
-        for row in inbox.rows() {
+        // ADR-0089 step 4 — before a held request is decided (it would be
+        // accepted with no card), its sender's standing is asked, all rows at
+        // once under one bound: a verified suspension drops it unseen; a late
+        // or failed answer decides it as before.
+        let rows = inbox.rows()
+        let suspendedRequesters = rows.isEmpty
+            ? [] : await suspendedRequestSenders(rows.map(\.request.fromPubkey))
+        for row in rows {
             guard bound.isCurrent else { return }
             let req = row.request
             let key = LinkClaims.requestKeyHex(linkId: row.linkId, requesterKey: req.fromPubkey)
+            if suspendedRequesters.contains(req.fromPubkey) {
+                claims.forgetOwn(key)
+                inbox.remove(messageId: req.messageId)
+                continue
+            }
             // ADR-0079 amendment of 2026-10-19 — the moment the request was
             // written decides the link's expiry: the time the DS stamped on
             // the row, kept with the request across a restart. A stamp that

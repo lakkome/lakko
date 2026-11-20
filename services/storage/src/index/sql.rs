@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The MariaDB blob index (`storage_blobs`, migrations `0001` and `0003`).
+//! The MariaDB blob index (`storage_blobs`, migrations `0001` and `0003`;
+//! the ADR-0089 tombstones and moderation bookkeeping, migration `0004`).
 
 use async_trait::async_trait;
 use sqlx::{MySqlPool, QueryBuilder, Row as _};
 
-use super::{BlobId, BlobIndex, BlobRow, IndexError, UploadOutcome};
+use super::{
+    BlobId, BlobIndex, BlobRow, IndexError, ModerationDelete, ModerationOutcome, UploadOutcome,
+};
 
 /// Rows per multi-row `INSERT IGNORE` of the import.
 const IMPORT_BATCH: usize = 500;
@@ -67,10 +70,13 @@ impl BlobIndex for SqlIndex {
 
     async fn record_upload(&self, row: BlobRow) -> Result<UploadOutcome, IndexError> {
         let key = row.delete_pk.map(|k| k.to_vec());
+        // No row for a tombstoned id: the condition is in the insert itself,
+        // so a delete applied between a check and the insert cannot leave one.
         let inserted = sqlx::query(
             "INSERT IGNORE INTO storage_blobs \
              (blob_id, size_bytes, node, created_day, last_access_day, delete_pk, idle_days) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             SELECT ?, ?, ?, ?, ?, ?, ? FROM DUAL WHERE NOT EXISTS \
+               (SELECT 1 FROM storage_blob_tombstones WHERE blob_id = ?)",
         )
         .bind(&row.id[..])
         .bind(row.size)
@@ -79,14 +85,118 @@ impl BlobIndex for SqlIndex {
         .bind(row.last_access_day)
         .bind(key)
         .bind(row.idle_days)
+        .bind(&row.id[..])
         .execute(&self.pool)
         .await?
         .rows_affected();
         if inserted == 1 {
             return Ok(UploadOutcome::Created);
         }
+        if self.is_tombstoned(&row.id).await? {
+            return Ok(UploadOutcome::Removed);
+        }
         self.touch(&[row.id], row.last_access_day).await?;
         Ok(UploadOutcome::Existed)
+    }
+
+    async fn is_tombstoned(&self, id: &BlobId) -> Result<bool, IndexError> {
+        let row = sqlx::query("SELECT 1 FROM storage_blob_tombstones WHERE blob_id = ?")
+            .bind(&id[..])
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    async fn apply_moderation_delete(
+        &self,
+        statement: &ModerationDelete,
+    ) -> Result<ModerationOutcome, IndexError> {
+        let mut tx = self.pool.begin().await?;
+        // The stored list version, under its row lock: one statement applies
+        // at a time.
+        let stored: Option<u64> = sqlx::query_scalar(
+            "SELECT list_version FROM moderation_list_state WHERE id = 1 FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if stored.is_some_and(|v| statement.list_version < v) {
+            return Ok(ModerationOutcome::StaleList);
+        }
+        let repeat = sqlx::query(
+            "SELECT 1 FROM moderation_applied_statements WHERE statement_id = ? FOR UPDATE",
+        )
+        .bind(&statement.statement_id[..])
+        .fetch_optional(&mut *tx)
+        .await?;
+        if repeat.is_some() {
+            return Ok(ModerationOutcome::Repeat);
+        }
+        let tombstoned =
+            sqlx::query("SELECT 1 FROM storage_blob_tombstones WHERE blob_id = ? FOR UPDATE")
+                .bind(&statement.id[..])
+                .fetch_optional(&mut *tx)
+                .await?;
+        let outcome = if tombstoned.is_some() {
+            ModerationOutcome::AlreadyRemoved
+        } else {
+            let node: Option<String> =
+                sqlx::query_scalar("SELECT node FROM storage_blobs WHERE blob_id = ? FOR UPDATE")
+                    .bind(&statement.id[..])
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            sqlx::query("INSERT INTO storage_blob_tombstones (blob_id, at_day) VALUES (?, ?)")
+                .bind(&statement.id[..])
+                .bind(statement.day)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM storage_blobs WHERE blob_id = ?")
+                .bind(&statement.id[..])
+                .execute(&mut *tx)
+                .await?;
+            ModerationOutcome::Removed { node }
+        };
+        sqlx::query(
+            "INSERT INTO moderation_applied_statements (statement_id, applied_at_ms) \
+             VALUES (?, ?)",
+        )
+        .bind(&statement.statement_id[..])
+        .bind(statement.now_ms)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO moderation_list_state (id, list_version) VALUES (1, ?) \
+             ON DUPLICATE KEY UPDATE list_version = GREATEST(list_version, VALUES(list_version))",
+        )
+        .bind(statement.list_version)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, IndexError> {
+        let mut tx = self.pool.begin().await?;
+        let stored: Option<u64> = sqlx::query_scalar(
+            "SELECT list_version FROM moderation_list_state WHERE id = 1 FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        match lakko_moderation::apply::list_floor(stored, list_version) {
+            Err(_) => return Ok(false),
+            Ok(lakko_moderation::apply::FloorStep::Keep) => {},
+            Ok(lakko_moderation::apply::FloorStep::Raise) => {
+                sqlx::query(
+                    "INSERT INTO moderation_list_state (id, list_version) VALUES (1, ?) \
+                     ON DUPLICATE KEY UPDATE \
+                        list_version = GREATEST(list_version, VALUES(list_version))",
+                )
+                .bind(list_version)
+                .execute(&mut *tx)
+                .await?;
+            },
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn touch(&self, ids: &[BlobId], day: u32) -> Result<(), IndexError> {
@@ -250,6 +360,22 @@ pub(crate) mod tests {
         };
         let index = SqlIndex::new(pool);
         super::super::contract::run(&index, random_base()).await;
+    }
+
+    #[tokio::test]
+    async fn the_sql_index_keeps_moderator_tombstones() {
+        let Some(pool) = test_pool("the_sql_index_keeps_moderator_tombstones").await else {
+            return;
+        };
+        let index = SqlIndex::new(pool);
+        let mut ids = [[0u8; 32]; 2];
+        lakko_crypto::random::fill(&mut ids[0]);
+        lakko_crypto::random::fill(&mut ids[1]);
+        let mut statement = [0u8; 16];
+        lakko_crypto::random::fill(&mut statement);
+        // The stored list version only grows and the database is shared:
+        // every run uses the highest version there is.
+        super::super::contract::run_moderation(&index, ids, statement, u64::MAX).await;
     }
 
     #[tokio::test]

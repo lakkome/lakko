@@ -226,6 +226,8 @@ describe("each context keeps about a day of use on hand", () => {
     // Chosen, not measured.
     ["channel-react", 4],
     ["channel-comment", 4],
+    // ADR-0089 section 2: reports to the moderators. Chosen, not measured.
+    ["report", 2],
   ];
 
   it("names a target for every context", () => {

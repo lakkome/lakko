@@ -116,7 +116,10 @@ public final class PasskeysViewModel: ObservableObject {
     /// state. Called on init + on any session-flip (login,
     /// logout, recover). Idempotent.
     public func rebindSession() {
-        client.setSessionToken(authRepository.identitySecrets?.sessionToken)
+        // ADR-0089 step 3 — a suspended account signed in without its keys
+        // deletes itself with the `s1`.
+        client.setSessionToken(
+            authRepository.identitySecrets?.sessionToken ?? authRepository.accountForDeletion()?.sessionToken)
     }
 
     // MARK: - List
@@ -346,7 +349,9 @@ public final class PasskeysViewModel: ObservableObject {
     @discardableResult
     func deleteAccount(proof: FreshAuthProofModel, hasPasskey: Bool) async -> Bool {
         rebindSession()
-        guard let secrets = authRepository.identitySecrets else {
+        // ADR-0089 step 3 — the signed-in account, or a suspended one signed
+        // in here without its keys (its `s1`).
+        guard let secrets = authRepository.accountForDeletion() else {
             message = .error(.key("common.error.session_not_ready"))
             return false
         }
@@ -377,7 +382,7 @@ public final class PasskeysViewModel: ObservableObject {
             await OwnLinks.revokeAll(
                 accountIdB64: base64Encode(secrets.accountId),
                 discovery: DiscoveryClient(
-                    sessionToken: authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken))
+                    sessionToken: authRepository.accountForDeletion()?.sessionToken ?? secrets.sessionToken))
             do {
                 try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
             } catch let error as WebauthnClientError {
@@ -393,10 +398,20 @@ public final class PasskeysViewModel: ObservableObject {
             }
             // Best-effort discovery purge — the auth tier is the critical
             // erasure; the session token is about to be invalidated anyway.
-            let token = authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken
+            let token = authRepository.accountForDeletion()?.sessionToken ?? secrets.sessionToken
             do {
                 let discovery = DiscoveryClient(sessionToken: token)
                 try await discovery.deleteAccount()
+            } catch {
+                // best-effort
+            }
+            // The backup blob, best-effort like the directory: storage
+            // verifies the session (the `s1` of a suspended account too)
+            // without asking auth.
+            do {
+                let storage = StorageClient()
+                storage.setSessionToken(token)
+                try await storage.deleteBackup()
             } catch {
                 // best-effort
             }

@@ -386,7 +386,8 @@ public final class AuthRepository: ObservableObject {
     /// in the app; injectable because the OPAQUE exchange cannot be
     /// answered by a scripted server.
     typealias KeyResetOperation = (
-        _ sessionToken: String, _ freshGrant: String, _ seed: Data, _ newSignaturePubkey: Data
+        _ sessionToken: String, _ freshGrant: String, _ seed: Data, _ newSignaturePubkey: Data,
+        _ accountId: Data
     ) async throws -> KeyResetResult
 
     private let keyResetOperation: KeyResetOperation
@@ -713,9 +714,10 @@ public final class AuthRepository: ObservableObject {
         self.identityKeyMarks = identityKeyMarks
         self.logoutOwed = logoutOwed
         self.tokenProvider = tokenProvider
-        self.keyResetOperation = keyResetOperation ?? { sessionToken, freshGrant, seed, newKey in
+        self.keyResetOperation = keyResetOperation ?? { sessionToken, freshGrant, seed, newKey, accountId in
             try await authClientFactory().resetAccountKeys(
-                sessionToken: sessionToken, freshGrant: freshGrant, seed: seed, newSignaturePubkey: newKey)
+                sessionToken: sessionToken, freshGrant: freshGrant, seed: seed, newSignaturePubkey: newKey,
+                accountId: accountId)
         }
         self.proofLoginOperation = proofLoginOperation ?? { handle, password in
             try await authClientFactory().login(handle: handle, password: password)
@@ -778,6 +780,13 @@ public final class AuthRepository: ObservableObject {
         }
         tokenProvider.onDeviceRevoked = { [weak self] accountIdB64 in
             Task { @MainActor in self?.handleDeviceRevoked(accountIdB64: accountIdB64) }
+        }
+        // ADR-0089 step 3 — suspended mode follows auth's answers.
+        tokenProvider.onSuspended = { [weak self] landing, accountIdB64 in
+            Task { @MainActor in self?.suspendedPairInstalled(landing, accountIdB64: accountIdB64) }
+        }
+        tokenProvider.onSuspensionEnded = { [weak self] accountIdB64 in
+            Task { @MainActor in self?.suspensionEnded(accountIdB64: accountIdB64) }
         }
     }
 
@@ -863,6 +872,10 @@ public final class AuthRepository: ObservableObject {
         case .anon(let cachedUsername):
             identitySecrets = nil
             state = .anon(cachedUsername: cachedUsername)
+            // ADR-0089 step 3 — a suspended account that landed on this
+            // device without its keys: the suspended screen alone, with the
+            // kept `s1` / `r2`, until auth says the suspension is over.
+            restoreSuspendedWithoutKeys(marker: marker, nowMs: nowMs)
         case .anonDiscardingToken(let cachedUsername):
             if let marker {
                 persistence.deleteSessionToken(accountIdB64: marker.accountIdB64)
@@ -871,7 +884,12 @@ public final class AuthRepository: ObservableObject {
             state = .anon(cachedUsername: cachedUsername)
         case .session(let account, let secrets):
             // The pair is installed before anything can make a bearer call.
-            tokenProvider.install(secrets.session, accountIdB64: account.accountIdB64)
+            // ADR-0089 step 3 — an account last seen suspended keeps its
+            // `s1` in the access slot and the provider's suspended gate until
+            // the launch refresh below says otherwise.
+            let suspended = suspension.isFlagged(accountIdB64: account.accountIdB64)
+            tokenProvider.install(secrets.session, accountIdB64: account.accountIdB64, suspended: suspended)
+            suspension.bind(accountIdB64: account.accountIdB64)
             // A fresh identity whose phrase was never confirmed: the phrase
             // screen comes before the session.
             if parkOwedFreshPhrase(
@@ -894,7 +912,7 @@ public final class AuthRepository: ObservableObject {
                 guard let self else { return }
                 switch await self.tokenProvider.refresh() {
                 case .superseded, .revoked: return
-                case .refreshed, .invalid, .noCredential, .failed: break
+                case .refreshed, .invalid, .noCredential, .failed, .suspended: break
                 }
                 await self.checkPublishedIdentity(
                     accountIdBytes: secrets.accountId,
@@ -997,12 +1015,15 @@ public final class AuthRepository: ObservableObject {
     /// keys of the session that is ALREADY live (a token refresh, the device
     /// bind, a proof, a password or key change): the account bound to this
     /// device did not change, so work started under the binding goes on.
-    private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String, rebinds: Bool = true) {
+    private func adoptIdentitySecrets(
+        _ secrets: IdentitySecrets, context: String, rebinds: Bool = true, suspended: Bool = false
+    ) {
         if rebinds { binding.advance() }
         // The account landed: its stores are written again.
         AccountStoreGate.open(base64Encode(secrets.accountId))
         identitySecrets = secrets
-        adoptSessionPair(secrets.session, accountIdB64: base64Encode(secrets.accountId), context: context)
+        adoptSessionPair(
+            secrets.session, accountIdB64: base64Encode(secrets.accountId), context: context, suspended: suspended)
     }
 
     /// Install a session pair in the token provider and persist it, so every
@@ -1010,16 +1031,163 @@ public final class AuthRepository: ObservableObject {
     /// the next launch can restore the session. Also for the states that
     /// hold a pair before ``identitySecrets`` exists (a sign-in parked
     /// without keys, the fresh phrase). Best-effort persist, as above.
-    private func adoptSessionPair(_ pair: SessionPair, accountIdB64: String, context: String) {
+    private func adoptSessionPair(
+        _ pair: SessionPair, accountIdB64: String, context: String, suspended: Bool = false
+    ) {
         // A session exists again on this device: a logout still owed from
         // before must not be sent now (its floor would end this session).
         logoutOwed.clear()
-        tokenProvider.install(pair, accountIdB64: accountIdB64)
+        tokenProvider.install(pair, accountIdB64: accountIdB64, suspended: suspended)
+        // ADR-0089 step 3 — the pair says whether the account is suspended:
+        // an `s1` pair enters suspended mode, any normal pair leaves it.
+        if suspended {
+            suspension.enter(accountIdB64: accountIdB64)
+        } else {
+            suspension.leave(accountIdB64: accountIdB64)
+        }
         do {
             try persistence.putSessionToken(PersistedSessionToken(pair: pair), accountIdB64: accountIdB64)
         } catch {
             NSLog("session-token persist (\(context)) failed: \(error)")
         }
+    }
+
+    // MARK: - Suspended mode (ADR-0089 step 3)
+
+    /// Suspended mode for the account signed in here
+    /// (``SuspensionCenter``). The process-wide one; a test replaces it.
+    var suspension: SuspensionCenter = .shared
+
+    /// The provider installed a suspended landing's pair (a refresh, or a
+    /// bearer route followed by one): keep it as this account's session, so
+    /// the `s1` and `r2` survive a restart, and enter suspended mode.
+    private func suspendedPairInstalled(_ landing: SuspendedLanding, accountIdB64: String) {
+        if let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 {
+            adoptIdentitySecrets(
+                IdentitySecrets(
+                    accountId: secrets.accountId,
+                    exportKey: secrets.exportKey,
+                    accountIdentitySeed: secrets.accountIdentitySeed,
+                    session: landing.pair
+                ),
+                context: "suspended",
+                rebinds: false,
+                suspended: true
+            )
+        } else if tokenProvider.account == accountIdB64 {
+            adoptSessionPair(landing.pair, accountIdB64: accountIdB64, context: "suspended", suspended: true)
+        }
+    }
+
+    /// A refresh answered a normal pair after suspended mode: the pair is
+    /// already adopted (``sessionPairRefreshed(_:accountIdB64:)``); suspended
+    /// mode ends silently. A device that landed without the account's keys
+    /// has no app to return to, so it signs out to the sign-in screen.
+    private func suspensionEnded(accountIdB64: String) {
+        suspension.leave(accountIdB64: accountIdB64)
+        // The token contexts left empty while suspended are topped up now,
+        // not at their next scheduled refill.
+        Task { await AnonTokenPool.shared.runScheduledRefills() }
+        if case .anon = state, tokenProvider.account == accountIdB64 {
+            NSLog("[suspension] the suspension ended on a device without the account's keys; signing out")
+            logout()
+        }
+    }
+
+    /// Land a sign-in that auth answered with `403 account-suspended` as the
+    /// sign-in would have landed, in suspended mode (UX section 4): a device
+    /// that holds the account's keys opens to the suspended screen in front
+    /// of its chats; any other shows the screen alone. Nothing is published,
+    /// bound or subscribed: a suspended device sends nothing but the
+    /// suspension's own routes.
+    private func landSuspended(
+        _ refused: AccountSuspendedError,
+        username: String,
+        context: String,
+        writes: SignInKeyWrites
+    ) throws {
+        guard let landing = refused.landing else { throw refused }
+        let accountIdBytes = landing.accountId
+        let accountIdB64 = landing.accountIdB64
+        freshAuth.put(landing.freshGrant, accountIdB64: accountIdB64)
+        sessionLanding = .other
+        restoreNotice = nil
+        // The password sign-in computed the export key before its finish was
+        // refused: the device key is written as on any password sign-in.
+        if let exportKey = refused.exportKey {
+            let rootKey = deriveDeviceRootKey(exportKey: exportKey, accountIdB64: accountIdB64)
+            try writes.required(accountIdB64) {
+                try DeviceKeyStore.putDeviceKey(accountIdB64: accountIdB64, rootKey: rootKey)
+            }
+            do {
+                try writes.ifNotWiped(accountIdB64) {
+                    try ExportKeyStore.putExportKey(accountIdB64: accountIdB64, exportKey: exportKey)
+                }
+            } catch {
+                NSLog("export-key persist (suspended \(context)) failed: \(error)")
+            }
+        }
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: username))
+        // The flag first, so the landing below already renders in suspended
+        // mode.
+        adoptSessionPair(landing.pair, accountIdB64: accountIdB64, context: "suspended \(context)", suspended: true)
+        if let seed = Self.readCachedAccountIdentitySeed(accountIdB64: accountIdB64, context: context) {
+            bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+                accountIdB64: accountIdB64,
+                accountIdentitySeed: seed,
+                context: context,
+                writes: writes
+            )
+            let exportKey = refused.exportKey
+                ?? ((try? ExportKeyStore.getExportKey(accountIdB64: accountIdB64)) ?? nil)
+                ?? Data()
+            finishCanonicalSession(
+                accountIdentitySeed: seed,
+                accountIdBytes: accountIdBytes,
+                exportKey: exportKey,
+                session: landing.pair,
+                username: username,
+                retryMarkedBackupRestore: false,
+                suspended: true
+            )
+            return
+        }
+        // No keys on this device: the suspended screen alone.
+        binding.advance()
+        pendingRecovery = nil
+        identitySecrets = nil
+        state = .anon(cachedUsername: username)
+    }
+
+    /// A launch that found no keys for the cached account, while that
+    /// account was in suspended mode with a usable refresh credential: the
+    /// pair goes back into the provider and the suspended screen shows
+    /// alone. The launch refresh then says whether it is still suspended.
+    private func restoreSuspendedWithoutKeys(marker: PersistedSession?, nowMs: Int64) {
+        guard let marker, suspension.isFlagged(accountIdB64: marker.accountIdB64),
+              let token = persistence.sessionToken(accountIdB64: marker.accountIdB64),
+              token.pair.refreshUsable(nowMs: nowMs) else { return }
+        tokenProvider.install(token.pair, accountIdB64: marker.accountIdB64, suspended: true)
+        suspension.bind(accountIdB64: marker.accountIdB64)
+        Task { [weak self] in
+            _ = await self?.tokenProvider.refresh()
+        }
+    }
+
+    /// A proof sign-in (password or passkey) for Delete account, answered
+    /// `account-suspended`: the renewed `s1` replaces the session and the
+    /// grant it carries is the proof.
+    private func installSuspendedProof(
+        _ refused: AccountSuspendedError, for account: ProofAccount, context: String
+    ) throws {
+        guard let landing = refused.landing, landing.accountId == account.accountIdBytes else {
+            throw FreshAuthWrongPassword()
+        }
+        guard let minted = landing.freshGrant, minted.expiresAtMs > grantNowMs() else {
+            throw FreshAuthRequired()
+        }
+        try installProofSession(landing.pair, for: account, context: context, suspended: true)
+        freshAuth.put(minted, accountIdB64: account.accountIdB64)
     }
 
     // MARK: - Flows
@@ -1816,10 +1984,20 @@ public final class AuthRepository: ObservableObject {
         let client = authClientFactory()
         let bound = binding.capture()
         let writes = SignInKeyWrites()
-        let result = try await client.login(
-            handle: name.handle,
-            password: password
-        )
+        let result: LoginResult
+        do {
+            result = try await client.login(
+                handle: name.handle,
+                password: password
+            )
+        } catch let refused as AccountSuspendedError {
+            // ADR-0089 step 3 — the password was right; the account is
+            // suspended.
+            try bound.require()
+            try landSuspended(refused, username: name.canonical, context: "login", writes: writes)
+            sessionLanding = .password
+            return
+        }
         // A sign-out, or another account's landing, while the round trip was
         // out: this sign-in was overtaken and lands nothing.
         try bound.require()
@@ -1993,7 +2171,20 @@ public final class AuthRepository: ObservableObject {
     ) async throws {
         let bound = binding.capture()
         let writes = SignInKeyWrites()
-        let assertion = try await passkeyCeremony(nil)
+        let assertion: PasskeyLoginResult
+        do {
+            assertion = try await passkeyCeremony(nil)
+        } catch let refused as AccountSuspendedError {
+            // ADR-0089 step 3 — the passkey verified; the account is
+            // suspended. The name: the one cached here, else the hint.
+            try bound.require()
+            let cached = sessionStore.load()
+            let name = cached.flatMap { $0.accountIdB64 == refused.landing?.accountIdB64 ? $0.username : nil }
+                ?? usernameHint ?? ""
+            try landSuspended(refused, username: name, context: "passkey login", writes: writes)
+            sessionLanding = .passkey
+            return
+        }
         // A sign-out, or another account's landing, while the ceremony was
         // out: this sign-in was overtaken and lands nothing.
         try bound.require()
@@ -2262,6 +2453,12 @@ public final class AuthRepository: ObservableObject {
             try bound.require()
         } catch let stale as StaleBindingError {
             throw stale
+        } catch let refused as AccountSuspendedError {
+            // ADR-0089 step 3 — the words were right; the account is
+            // suspended.
+            try bound.require()
+            try landSuspended(refused, username: name.canonical, context: "three words", writes: writes)
+            return true
         } catch {
             switch ThreeWords.stalePhraseVerdict(failure: ThreeWords.signInFailure(error)) {
             case .keep:
@@ -2852,11 +3049,20 @@ public final class AuthRepository: ObservableObject {
         let client = authClientFactory()
         let bound = binding.capture()
         let writes = SignInKeyWrites()
-        let result = try await client.recover(
-            handle: name.handle,
-            mnemonicSeed: seed,
-            newPassword: newPassword
-        )
+        let result: RecoverResult
+        do {
+            result = try await client.recover(
+                handle: name.handle,
+                mnemonicSeed: seed,
+                newPassword: newPassword
+            )
+        } catch let refused as AccountSuspendedError {
+            // ADR-0089 step 3 — the phrase was right and the account is
+            // suspended; the password was not changed.
+            try bound.require()
+            try landSuspended(refused, username: resolvedUsername, context: "recover", writes: writes)
+            return
+        }
         // A sign-out, or another account's landing, while the reset was out:
         // the password is changed on the server, and nothing lands here.
         try bound.require()
@@ -3096,6 +3302,13 @@ public final class AuthRepository: ObservableObject {
         rotationAdoptRetry = nil
         sessionExpiredNotice = false
         protectStepOwed = false
+        // ADR-0089 step 3 — no session, no suspended mode; the account's
+        // flag stays for its next sign-in on this device.
+        suspension.bind(accountIdB64: nil)
+        // ADR-0089 step 4 — the suspension marks of other accounts are
+        // memory only; the next account on this device starts empty.
+        SuspensionMarks.shared.reset()
+        ChannelRemovals.shared.reset()
         // A sign-in or restore still in flight must not land after this, and
         // a restore parked on the stale-backup question is over.
         binding.advance()
@@ -3135,7 +3348,11 @@ public final class AuthRepository: ObservableObject {
             // The persisted session token (relaunch restore input), through
             // the injected persistence so a test observes it.
             persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
+            // ADR-0089 step 3 — nothing of the account stays, its
+            // suspended-mode flag included.
+            suspension.forget(accountIdB64: cached.accountIdB64)
         }
+        suspension.bind(accountIdB64: nil)
         sessionStore.clear()
         // ADR-0054 S3 — the push unregister below spends a token; take it
         // before the session (and with it the pool) is cleared.
@@ -3303,7 +3520,8 @@ public final class AuthRepository: ObservableObject {
         exportKey: Data,
         session: SessionPair,
         username: String,
-        retryMarkedBackupRestore: Bool = true
+        retryMarkedBackupRestore: Bool = true,
+        suspended: Bool = false
     ) {
         let accountIdB64 = base64Encode(accountIdBytes)
         // The keys are on this device now; nothing is left to explain.
@@ -3327,7 +3545,8 @@ public final class AuthRepository: ObservableObject {
                 accountIdentitySeed: accountIdentitySeed,
                 session: session
             ),
-            context: "finishCanonicalSession"
+            context: "finishCanonicalSession",
+            suspended: suspended
         )
         state = .session(
             SessionAccount(accountIdB64: accountIdB64, username: username)
@@ -3457,7 +3676,7 @@ public final class AuthRepository: ObservableObject {
                 if publish == .firstPublish {
                     genesisAttest = await Self.mintGenesisAttestation(
                         accountId: accountIdBytes,
-                        identityPubkey: derivedPubkey,
+                        identity: identity,
                         sessionToken: token,
                         client: authClientFactory()
                     )
@@ -3615,6 +3834,10 @@ public final class AuthRepository: ObservableObject {
         }
         Task { [weak self] in
             guard let self else { return }
+            // ADR-0089 step 3 — a suspended account sends nothing but the
+            // suspension's own routes; the bind and the key record wait for
+            // the landing after it.
+            guard !self.tokenProvider.isSuspended else { return }
             await self.bindSessionDeviceIfNeeded(accountIdB64: accountIdB64, context: "landing")
             guard let secrets = self.identitySecrets, base64Encode(secrets.accountId) == accountIdB64 else {
                 return
@@ -3688,7 +3911,8 @@ public final class AuthRepository: ObservableObject {
     func recordIdentityKeyIfNeeded(accountIdBytes: Data, accountIdentitySeed: Data) async {
         let accountIdB64 = base64Encode(accountIdBytes)
         guard identityKeyRecordInFlight != accountIdB64,
-              let pubkey = try? Identity.fromSeed(seed: accountIdentitySeed).signaturePublicKey(),
+              let identity = try? Identity.fromSeed(seed: accountIdentitySeed),
+              case let pubkey = identity.signaturePublicKey(),
               IdentityKeyRecord.needsMint(
                 recordedPubkeyB64: identityKeyMarks.recorded(accountIdB64: accountIdB64), currentPubkey: pubkey),
               tokenProvider.account == accountIdB64,
@@ -3699,9 +3923,12 @@ public final class AuthRepository: ObservableObject {
         defer { identityKeyRecordInFlight = nil }
         do {
             _ = try await authClientFactory().mintGenesisAttestation(
-                sessionToken: token, identityPubkey: pubkey)
+                sessionToken: token, identity: identity, accountId: accountIdBytes)
             identityKeyMarks.markRecorded(pubkey: pubkey, accountIdB64: accountIdB64)
         } catch {
+            if let code = IdentityProof.refusalCode(of: error) {
+                NSLog("[auth] WARN the account key was not recorded at auth: %@", code)
+            }
             switch IdentityKeyRecord.refusal(of: error) {
             case .identityKeyMismatch:
                 NSLog("[auth] WARN auth holds another account key for this account; not recorded")
@@ -4805,10 +5032,17 @@ public final class AuthRepository: ObservableObject {
         let client = authClientFactory()
         let bound = binding.capture()
         let writes = SignInKeyWrites()
-        let result = try await client.totpRecover(
-            handle: name.handle,
-            code: code
-        )
+        let result: TotpRecoverResult
+        do {
+            result = try await client.totpRecover(
+                handle: name.handle,
+                code: code
+            )
+        } catch let refused as AccountSuspendedError {
+            try bound.require()
+            try landSuspended(refused, username: name.canonical, context: "totp recover", writes: writes)
+            return
+        }
         // As in ``login(username:password:)``: overtaken, lands nothing.
         try bound.require()
         let accountIdBytes = result.accountId
@@ -4852,8 +5086,15 @@ public final class AuthRepository: ObservableObject {
             username, emptyError: AuthClientError.argument("enter the username of the account to recover"))
         let bound = binding.capture()
         let writes = SignInKeyWrites()
-        let result = try await authClientFactory().recoveryEmailRecoverPassword(
-            ticket: ticket, newPassword: newPassword)
+        let result: RecoverResult
+        do {
+            result = try await authClientFactory().recoveryEmailRecoverPassword(
+                ticket: ticket, newPassword: newPassword)
+        } catch let refused as AccountSuspendedError {
+            try bound.require()
+            try landSuspended(refused, username: name.canonical, context: "email recover", writes: writes)
+            return
+        }
         // A sign-out, or another account's landing, while the round trip was
         // out: the password is changed on the server, and nothing lands here.
         try bound.require()
@@ -5142,13 +5383,17 @@ public final class AuthRepository: ObservableObject {
         let bound = binding.capture()
         let reset: KeyResetResult
         do {
-            let answered = try await keyResetOperation(bearer.sessionToken, grant, seed, newPubkey)
+            let answered = try await keyResetOperation(
+                bearer.sessionToken, grant, seed, newPubkey, pending.accountIdBytes)
             reset = KeyResetResult(
                 attestation: answered.attestation,
                 session: answered.session.naming(deviceIdB64: bearer.deviceIdB64))
         } catch {
             // Nothing was reset: the row goes back to what it held.
             kept.undo()
+            if let code = IdentityProof.refusalCode(of: error) {
+                NSLog("[auth] key reset refused: %@", code)
+            }
             if FreshAuthRefusal.isRequired(error) {
                 // The grant expired on the way (or was spent): ask again.
                 freshAuth.clear()
@@ -5364,6 +5609,38 @@ public final class AuthRepository: ObservableObject {
                 accountIdB64: account.accountIdB64,
                 username: account.username)
         }
+        // ADR-0089 step 3 — a suspended account signed in on a device without
+        // its keys: Delete account is on its suspended screen.
+        if let keyless = suspendedAccountWithoutKeys {
+            return ProofAccount(
+                accountIdBytes: keyless.accountIdBytes,
+                accountIdB64: keyless.accountIdB64,
+                username: keyless.username)
+        }
+        return nil
+    }
+
+    /// ADR-0089 step 3 — the suspended account this device signed in
+    /// without its keys (``landSuspended(_:username:context:writes:)``), or
+    /// `nil`: no keys are needed to delete it.
+    var suspendedAccountWithoutKeys: (accountIdBytes: Data, accountIdB64: String, username: String)? {
+        guard case .anon = state, identitySecrets == nil, pendingRecovery == nil,
+              tokenProvider.isSuspended, let account = tokenProvider.account,
+              let bytes = base64Decode(account), bytes.count == accountIdLength else { return nil }
+        let username = sessionStore.load().flatMap { $0.accountIdB64 == account ? $0.username : nil } ?? ""
+        return (bytes, account, username)
+    }
+
+    /// ADR-0089 step 3 — the account Delete account deletes and the bearer
+    /// it sends: the signed-in account, else a suspended account signed in
+    /// without its keys (the `s1`). `nil` when there is neither.
+    public func accountForDeletion() -> (accountId: Data, sessionToken: String)? {
+        if let secrets = identitySecrets {
+            return (secrets.accountId, secrets.sessionToken)
+        }
+        if let keyless = suspendedAccountWithoutKeys, let token = tokenProvider.current?.sessionToken {
+            return (keyless.accountIdBytes, token)
+        }
         return nil
     }
 
@@ -5406,6 +5683,7 @@ public final class AuthRepository: ObservableObject {
         _ = account
         let token = pendingRecovery?.currentSession(tokenProvider).sessionToken
             ?? identitySecrets?.sessionToken
+            ?? (suspendedAccountWithoutKeys != nil ? tokenProvider.current?.sessionToken : nil)
         guard let token else { return nil }
         return await passkeyPresence(token)
     }
@@ -5439,6 +5717,11 @@ public final class AuthRepository: ObservableObject {
         let result: LoginResult
         do {
             result = try await proofLoginOperation(handle, password)
+        } catch let refused as AccountSuspendedError {
+            // ADR-0089 step 3 — the password was right and the account is
+            // suspended: the grant it carries is what Delete account needs.
+            try installSuspendedProof(refused, for: account, context: "proof sign-in")
+            return
         } catch {
             if FreshAuthRefusal.isWrongPassword(error) { throw FreshAuthWrongPassword() }
             throw error
@@ -5463,7 +5746,13 @@ public final class AuthRepository: ObservableObject {
     /// (``AuthErrorCopy/isPasskeyCancelled(_:)``).
     public func proveWithPasskey() async throws {
         guard let account = proofAccount() else { throw FreshAuthNoAccount() }
-        let assertion = try await passkeyCeremony(base64UrlEncodeNoPad(account.accountIdBytes))
+        let assertion: PasskeyLoginResult
+        do {
+            assertion = try await passkeyCeremony(base64UrlEncodeNoPad(account.accountIdBytes))
+        } catch let refused as AccountSuspendedError {
+            try installSuspendedProof(refused, for: account, context: "proof passkey")
+            return
+        }
         guard base64UrlDecodeNoPad(assertion.accountIdB64) == account.accountIdBytes else {
             NSLog("[auth] WARN the passkey for a proof belongs to another account; refused")
             throw FreshAuthPasskeyOtherAccount()
@@ -5479,12 +5768,12 @@ public final class AuthRepository: ObservableObject {
     /// Install the pair a proof sign-in returned for the SAME account, in
     /// place of the current one. Not a landing: ``state`` is not touched.
     private func installProofSession(
-        _ session: SessionPair, for account: ProofAccount, context: String
+        _ session: SessionPair, for account: ProofAccount, context: String, suspended: Bool = false
     ) throws {
         if let pending = pendingRecovery {
             // The restore prompt may have changed meanwhile.
             guard pending.accountIdB64 == account.accountIdB64 else { throw FreshAuthNoAccount() }
-            adoptSessionPair(session, accountIdB64: account.accountIdB64, context: context)
+            adoptSessionPair(session, accountIdB64: account.accountIdB64, context: context, suspended: suspended)
             pendingRecovery = PendingRecovery(
                 accountIdBytes: pending.accountIdBytes,
                 accountIdB64: pending.accountIdB64,
@@ -5493,6 +5782,12 @@ public final class AuthRepository: ObservableObject {
                 username: pending.username
             )
             sessionLanded(accountIdB64: account.accountIdB64)
+            return
+        }
+        if identitySecrets == nil, suspended, tokenProvider.account == account.accountIdB64 {
+            // A suspended account signed in without its keys: the renewed
+            // `s1` replaces the one kept.
+            adoptSessionPair(session, accountIdB64: account.accountIdB64, context: context, suspended: true)
             return
         }
         guard let secrets = identitySecrets, secrets.accountId == account.accountIdBytes else {
@@ -5507,7 +5802,8 @@ public final class AuthRepository: ObservableObject {
                 session: session
             ),
             context: context,
-            rebinds: false
+            rebinds: false,
+            suspended: suspended
         )
         // ADR-0074 — the proof sign-in issued a pair that names no device;
         // name this one again.
@@ -5852,20 +6148,26 @@ public final class AuthRepository: ObservableObject {
     /// attestation is attached only when the mint succeeds.
     private static func mintGenesisAttestation(
         accountId: Data,
-        identityPubkey: Data,
+        identity: Identity,
         sessionToken: String,
         client: AuthClient = AuthClient()
     ) async -> Data? {
         do {
             return try await client.mintGenesisAttestation(
                 sessionToken: sessionToken,
-                identityPubkey: identityPubkey
+                identity: identity,
+                accountId: accountId
             )
         } catch {
-            NSLog(
-                "genesis-attest (ADR-0036): mint failed, publishing bundle " +
-                "without attestation: \(error)"
-            )
+            // ADR-0089 F3: an identity-proof refusal logs its code only.
+            if let code = IdentityProof.refusalCode(of: error) {
+                NSLog("genesis-attest (ADR-0036): mint refused (%@), publishing bundle without attestation", code)
+            } else {
+                NSLog(
+                    "genesis-attest (ADR-0036): mint failed, publishing bundle " +
+                    "without attestation: \(error)"
+                )
+            }
             return nil
         }
     }
@@ -5906,7 +6208,7 @@ public final class AuthRepository: ObservableObject {
         // — a mint failure attaches nothing, never blocks the reset publish).
         let genesisAttest = await Self.mintGenesisAttestation(
             accountId: accountId,
-            identityPubkey: identity.signaturePublicKey(),
+            identity: identity,
             sessionToken: sessionToken,
             client: authClientFactory()
         )
@@ -6058,7 +6360,7 @@ public final class AuthRepository: ObservableObject {
             // attestation is ignored.
             let genesisAttest = await mintGenesisAttestation(
                 accountId: accountId,
-                identityPubkey: identity.signaturePublicKey(),
+                identity: identity,
                 sessionToken: sessionToken
             )
             // Proof-less re-publish (account key unchanged). Clears any

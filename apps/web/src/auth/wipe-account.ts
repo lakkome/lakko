@@ -374,6 +374,11 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "device-ack-unsent",
       run: () => removeLocal(`lakko.device-ack.unsent.v1.${accountIdB64}`),
     },
+    // ADR-0089 section 6: the "block register is not confirmed sent" marker.
+    {
+      name: "blocked-unsent",
+      run: () => removeLocal(`lakko.blocked.unsent.v1.${accountIdB64}`),
+    },
     // ADR-0079: the "link-record register is not confirmed sent" marker,
     // the claims of link requests (seen from the account's other devices and
     // this device's own, reworked 2026-10-17), and the ledger-row deletions

@@ -60,6 +60,8 @@ import { createLiveText } from "../l10n/live-text";
 import { aggregateShared, type SharedChannelsRow } from "./shared-channels";
 import { screenAnchor } from "../ui/screen-anchor";
 import { LakkoPicker } from "../ui/LakkoPicker";
+import { openChannelReport } from "../moderation/channel-report";
+import { CONVERSATION_DISCOVER } from "../moderation/report-model";
 
 // ----- Copy (UX spec sections 6 and 7) ---------------------------------------
 
@@ -87,6 +89,25 @@ function base64UrlToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+/** ADR-0089 UX 2.1 - the Discover card's Report: the channel is the target,
+ *  its listing as served is included; posts are not picked from here. */
+function reportCard(card: DirectoryCard): void {
+  let wire: Uint8Array | null = null;
+  try {
+    wire = card.listingB64 === undefined ? null : base64UrlToBytes(card.listingB64);
+  } catch {
+    wire = null;
+  }
+  openChannelReport({
+    channelIdHex: card.channelIdHex,
+    name: card.name,
+    conversationKind: CONVERSATION_DISCOVER,
+    fixed: wire === null ? [] : [{ kind: "listing", wire }],
+    canPick: false,
+    leave: null,
+  });
 }
 
 /** Decode one listing with the shared codec; `null` when it refuses. */
@@ -566,6 +587,10 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
             {t("discover.card.hide_topic")}
           </button>
         </Show>
+        {/* ADR-0089 UX 2.1 - report the channel; its listing is included. */}
+        <button type="button" class="ghost" style={{ color: "var(--danger)" }} onClick={() => reportCard(c())}>
+          {t("report.action")}
+        </button>
       </div>
       </Show>
     </article>

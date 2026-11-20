@@ -59,6 +59,10 @@ public final class ChannelsClient {
     let transport: ChannelsTransport
     /// ADR-0059 section 9 — the publisher role per (account, channel).
     let roles: ChannelPublisherRoleCache
+    /// ADR-0089 step 5 — every channel request passes through it: a channel
+    /// moderators removed is not asked again until its standing's reuse
+    /// period ends.
+    let removalGate: ChannelRemovalGate
 
     public convenience init(
         baseURL: String = ChannelsClient.defaultBaseURL,
@@ -82,6 +86,7 @@ public final class ChannelsClient {
         session: URLSession = .shared,
         tokens: AnonTokenSource = AnonTokenPool.shared,
         roles: ChannelPublisherRoleCache,
+        removalGate: ChannelRemovalGate = .shared,
         transport: @escaping ChannelsTransport
     ) {
         self.baseURL = baseURL
@@ -91,7 +96,23 @@ public final class ChannelsClient {
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
         self.roles = roles
+        self.removalGate = removalGate
         self.transport = transport
+    }
+
+    /// One request on the wire through the anti-censorship transport, past
+    /// the removal gate.
+    func channelsPerform(
+        _ request: URLRequest, session: URLSession, config: AntiCensorshipConfig
+    ) async throws -> (Data, URLResponse) {
+        try await removalGate.perform(request) {
+            try await AntiCensorshipTransport.perform($0, session: session, config: config)
+        }
+    }
+
+    /// One request through the injected transport, past the removal gate.
+    func gatedTransport(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try await removalGate.perform(request, send: transport)
     }
 
     /// The owner signer of `channelIdHex` for the account identity
@@ -251,7 +272,7 @@ public final class ChannelsClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue(tokenHeader, forHTTPHeaderField: AnonTokenRoute.headerName)
             request.httpBody = body
-            let (data, response) = try await AntiCensorshipTransport.perform(
+            let (data, response) = try await channelsPerform(
                 request, session: anonymousSession, config: .current
             )
             guard let http = response as? HTTPURLResponse else {
@@ -310,7 +331,7 @@ public final class ChannelsClient {
         request.setValue(
             signer.sign(method: method, path: path, query: "", body: Data()),
             forHTTPHeaderField: channelOwnerProofHeaderName())
-        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        let (data, response) = try await channelsPerform(request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
         }
@@ -337,11 +358,13 @@ public final class ChannelsClient {
         request.setValue(
             signer.sign(method: "DELETE", path: path, query: "", body: Data()),
             forHTTPHeaderField: channelOwnerProofHeaderName())
-        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        let (data, response) = try await channelsPerform(request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
         }
-        guard (200..<300).contains(http.statusCode) || http.statusCode == 410 else {
+        // A removed channel (`410 channel-removed`) is not a deleted one.
+        guard (200..<300).contains(http.statusCode)
+            || (http.statusCode == 410 && !ChannelRemovalGate.isRemovedAnswer(data)) else {
             struct ErrEnvelope: Decodable { let code: String; let detail: String }
             if let body = try? decoder.decode(ErrEnvelope.self, from: data) {
                 throw ChannelsApiError(status: http.statusCode, code: body.code, detail: body.detail)
@@ -383,7 +406,7 @@ public final class ChannelsClient {
             signer.sign(method: "PUT", path: path, query: "", body: body),
             forHTTPHeaderField: channelOwnerProofHeaderName())
         request.httpBody = body
-        let (data, response) = try await transport(request)
+        let (data, response) = try await gatedTransport(request)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
         }
@@ -666,7 +689,7 @@ public final class ChannelsClient {
             request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
         }
-        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        let (data, response) = try await channelsPerform(request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
         }
@@ -689,7 +712,7 @@ public final class ChannelsClient {
     private func anonymousGet<R: Decodable>(endpoint: String) async throws -> R {
         var request = URLRequest(url: try buildURL(endpoint: endpoint))
         request.httpMethod = "GET"
-        let (data, response) = try await AntiCensorshipTransport.perform(
+        let (data, response) = try await channelsPerform(
             request, session: anonymousSession, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -730,7 +753,7 @@ public final class ChannelsClient {
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             request.setValue(header, forHTTPHeaderField: AnonTokenRoute.headerName)
-            let (data, response) = try await AntiCensorshipTransport.perform(
+            let (data, response) = try await channelsPerform(
                 request, session: anonymousSession, config: .current)
             guard let http = response as? HTTPURLResponse else {
                 throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -822,7 +845,7 @@ public final class ChannelsClient {
     }
 
     private func executeNoContent(request: URLRequest) async throws {
-        let (_, response) = try await AntiCensorshipTransport.perform(
+        let (_, response) = try await channelsPerform(
             request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
@@ -898,7 +921,7 @@ public final class ChannelsClient {
             let request = try Self.publisherRequest(
                 baseURL: baseURL, method: method, path: path, query: query,
                 body: body, contentType: contentType, proof: proof)
-            let (data, response) = try await transport(request)
+            let (data, response) = try await gatedTransport(request)
             guard let http = response as? HTTPURLResponse else {
                 throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
             }
@@ -928,7 +951,7 @@ public final class ChannelsClient {
     }
 
     func execute<R: Decodable>(request: URLRequest) async throws -> R {
-        let (data, response) = try await transport(request)
+        let (data, response) = try await gatedTransport(request)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(
                 status: -1,
@@ -1097,6 +1120,17 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
     /// Whether `error` says the channel was deleted.
     public static func isChannelDeleted(_ error: Error) -> Bool {
         (error as? ChannelsApiError)?.code == channelDeletedCode
+    }
+
+    /// ADR-0089 step 5 — moderators removed the channel: every route answers
+    /// `410 channel-removed` for it (and this device answers the same for a
+    /// channel it holds, ``ChannelRemovalGate``). Nothing ends: the channel
+    /// stays, its posts stay readable, writing is not offered.
+    public static let channelRemovedCode = "channel-removed"
+
+    /// Whether `error` says moderators removed the channel.
+    public static func isChannelRemoved(_ error: Error) -> Bool {
+        (error as? ChannelsApiError)?.code == channelRemovedCode
     }
 
     /// The one code the server answers every refused publisher proof with

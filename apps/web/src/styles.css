@@ -60,6 +60,21 @@
   --radius-md: 12px;
   --radius-lg: 18px;
   --radius-pill: 999px;
+  /* Space and type scale (design system "Shape, space, type"). */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 15px;
+  --text-lg: 17px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
   --shadow-1: 0 1px 2px light-dark(rgba(16, 20, 40, 0.04), rgba(0, 0, 0, 0.4)),
     0 1px 3px light-dark(rgba(16, 20, 40, 0.06), rgba(0, 0, 0, 0.35));
   --shadow-2: 0 8px 24px light-dark(rgba(16, 20, 40, 0.12), rgba(0, 0, 0, 0.5));
@@ -560,7 +575,7 @@ a.lk-row:hover {
   background: var(--surface-hover);
 }
 .lk-pane-lookup:disabled {
-  color: var(--text-muted);
+  color: var(--surface-muted);
   cursor: default;
 }
 
@@ -4629,6 +4644,10 @@ button.lk-reactors-row:focus-visible {
   flex: 0 0 auto;
   margin: 12px 24px 0;
 }
+/* ADR-0089 step 5: the line of a channel moderators removed, in its info. */
+.lk-info-header .lk-channel-removed {
+  margin: 8px 0 0;
+}
 @media (max-width: 720px) {
   .lk-channel-notice {
     margin: 12px 16px 0;
@@ -7588,6 +7607,15 @@ button.lk-folder-new {
   cursor: pointer;
   align-items: flex-start;
 }
+/* ADR-0089 step 5: Everyone while moderators hid the account from search. */
+.lk-privacy-choice.disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.lk-privacy-hidden {
+  display: block;
+  padding: 0 16px 12px;
+}
 .lk-privacy-choice > input,
 .lk-privacy-choice-label > input {
   margin: 3px 0 0;
@@ -8643,4 +8671,144 @@ button.lk-card-row-button {
 .lk-bubble.outgoing .lk-bubble-channel-invite .lk-meta {
   color: inherit;
   opacity: 0.85;
+}
+
+/* ADR-0089 (docs/ux/reporting-and-moderation.md). The report sheet: the
+   layer's card on wide web, a bottom sheet on a phone width. */
+.lk-report-form {
+  gap: var(--space-3);
+}
+.lk-report-reasons {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-report-legend {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  margin-bottom: var(--space-1);
+}
+.lk-report-included {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.lk-report-comment {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.lk-report-comment textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+.lk-report-actions {
+  justify-content: flex-end;
+}
+@media (max-width: 600px) {
+  .lk-layer.lk-report-sheet:modal {
+    inset: auto 0 0 0;
+    margin: 0;
+    width: 100%;
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+}
+/* ADR-0089 step 3: the suspended screen's actions and the appeal sheet's
+   counter (docs/ux/reporting-and-moderation.md section 4). */
+.lk-suspended-actions {
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.lk-appeal-count {
+  align-self: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+/* The read-only line in place of a composer, and the row at the top of the
+   chat list that brings the suspended screen back. */
+.lk-suspended-line {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--surface-border);
+  color: var(--surface-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+.lk-suspended-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: auto;
+  margin: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: start;
+  cursor: pointer;
+}
+.lk-suspended-banner > span {
+  flex: 1;
+}
+/* A blocked person's group message, collapsed (UX 1.2). */
+.lk-blocked-row button {
+  color: var(--surface-muted);
+}
+/* A blocked person's tile in a call (UX 1.2). */
+.lk-call-tile-blocked {
+  font-size: var(--text-xs);
+  color: var(--surface-faint);
+}
+/* The one-to-one banner in place of the composer (UX 1.2). */
+.lk-blocked-banner {
+  margin: var(--space-2) var(--space-3);
+  width: auto;
+}
+/* The one-to-one banner under the header when the other person's account is
+   suspended (ADR-0089 step 4, reporting UX 3): nothing it replaces, no
+   action. */
+.lk-suspended-banner {
+  margin: 8px 12px 0;
+  width: auto;
+  color: var(--surface-muted);
+  font-size: 0.85rem;
+}
+/* "Suspended" after a member's name in a group's member list (ADR-0089
+   step 4, reporting UX 3). */
+.lk-member-suspended {
+  font-weight: normal;
+  color: var(--surface-muted);
+}
+/* The sheet's "Choose messages" list (UX 2.2). */
+.lk-report-choose-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-report-choose-list .lk-card-row-title {
+  overflow-wrap: anywhere;
+}
+/* A contact request row's Block and Report (UX 1.1): inline on a wide
+   screen, behind the row's overflow menu on a phone width. */
+.lk-request-inline {
+  display: contents;
+}
+.lk-request-more {
+  display: none;
+}
+@media (max-width: 600px) {
+  .lk-request-inline {
+    display: none;
+  }
+  .lk-request-more {
+    display: inline-flex;
+  }
 }

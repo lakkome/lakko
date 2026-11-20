@@ -43,6 +43,8 @@ struct ContactDetailScreen: View {
     var onChatDeleted: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
+    /// ADR-0089 step 3 — a suspended account calls and adds nobody.
+    @Environment(\.accountSuspended) private var accountSuspended
     @State private var renaming = false
     @State private var draftName = ""
     @State private var confirmingRemove = false
@@ -53,6 +55,12 @@ struct ContactDetailScreen: View {
     @ObservedObject private var l10n = Localization.shared
     /// ADR-0060 — whether `Their contacts can find me` stands follows the setting.
     @ObservedObject private var reach = ReachCenter.shared
+    /// ADR-0089 — Block / Unblock and the "Blocked" line follow the register.
+    @ObservedObject private var blocks = BlockList.shared
+    /// ADR-0089 step 4 — the "Account suspended" line follows the marks.
+    @ObservedObject private var suspensions = SuspensionMarks.shared
+    @State private var confirmingBlock = false
+    @State private var reportRequest: ReportRequest?
 
     var body: some View {
         // One presentation: pushed on the tab's stack, from the Contacts list
@@ -119,11 +127,13 @@ struct ContactDetailScreen: View {
         // test suite can run it, never by a flag read down in the layout. A
         // person the viewer removed is not a contact: their card offers `Add
         // to contacts` in place of Rename and Remove (amended 2026-10-24).
-        let sections = personInfoSections(
+        let isBlocked = blocks.isBlocked(contact.request.fromPubkey)
+        let sections = SuspendedInfo.withoutSending(personInfoSections(
             caps: PersonInfoCapabilities(
                 membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
                 isContact: isContact,
-                contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts))
+                contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts,
+                isBlocked: isBlocked)), suspended: accountSuspended)
         List {
             Section {
                 VStack(spacing: 8) {
@@ -143,6 +153,22 @@ struct ContactDetailScreen: View {
                         Text(line)
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    // ADR-0089 / UX 1.4 — a muted line under a blocked
+                    // person's name; step 4 / UX 3 — or under a suspended
+                    // one's (blocked wins when both apply).
+                    switch SuspensionMarkRules.cardLine(
+                        blocked: isBlocked, suspended: suspensions.isSuspended(contact.request.fromPubkey)) {
+                    case .blocked:
+                        Text(l10n.t("block.card_line"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    case .suspended:
+                        Text(l10n.t("suspended.card_line"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    case .none:
+                        EmptyView()
                     }
                     if let theirName = resolved.theirName {
                         Text(l10n.t("contacts.detail.their_name", texts: ["name": theirName]))
@@ -284,6 +310,35 @@ struct ContactDetailScreen: View {
             // different things — one forgets the PERSON, the other forgets the
             // CONVERSATION — and the rule can return both at once, so neither
             // is worded as if it did the other's job.
+            // ADR-0089 / UX 1.1, 2.1 — Report, then Block (or Unblock), in
+            // the danger block above Remove contact.
+            if sections.contains(.report) || sections.contains(.block) || sections.contains(.unblock) {
+                Section {
+                    if sections.contains(.report) {
+                        Button(role: .destructive) {
+                            reportRequest = viewModel.reportRequest(for: contact, name: resolved.name)
+                        } label: {
+                            Label(l10n.t("report.action"), systemImage: "flag")
+                                .foregroundStyle(Color.lakkoDanger)
+                        }
+                    }
+                    if sections.contains(.block) {
+                        Button(role: .destructive) { confirmingBlock = true } label: {
+                            Label(l10n.t("block.action"), systemImage: "hand.raised")
+                                .foregroundStyle(Color.lakkoDanger)
+                        }
+                    }
+                    if sections.contains(.unblock) {
+                        Button {
+                            viewModel.unblock(accountKey: contact.request.fromPubkey)
+                        } label: {
+                            Label(l10n.t("block.unblock"), systemImage: "hand.raised.slash")
+                                .foregroundStyle(Color.lakkoText)
+                        }
+                    }
+                }
+            }
+
             if sections.contains(.removeContact) || sections.contains(.deleteChat) {
                 Section {
                     if sections.contains(.removeContact) {
@@ -306,6 +361,27 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
+        // ADR-0089 step 4 — ask about the person when their card opens.
+        .task(id: contact.request.fromPubkey) {
+            _ = await suspensions.standing(contact.request.fromPubkey)
+        }
+        // ADR-0089 / UX 1.2 — Block asks first; blocking also removes the
+        // contact, so the card stays and reads `Unblock`.
+        .lakkoDialog(
+            isPresented: $confirmingBlock,
+            title: l10n.t("block.confirm.title", texts: ["name": resolved.name]),
+            message: l10n.t("block.confirm.body")
+        ) {
+            [
+                .danger(l10n.t("block.action")) {
+                    viewModel.block(accountKey: contact.request.fromPubkey)
+                },
+                .cancel(),
+            ]
+        }
+        .reportSheet($reportRequest) { follow in
+            if follow == .block { viewModel.block(accountKey: contact.request.fromPubkey) }
+        }
         .lakkoDialog(
             isPresented: $renaming,
             title: l10n.t("contacts.rename.action"),

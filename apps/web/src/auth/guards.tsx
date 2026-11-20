@@ -36,6 +36,7 @@ import NewPasswordPrompt from "./NewPasswordPrompt";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { GuestAccountScreen } from "./GuestAccountOffer";
 import { KeyStoreUnavailableScreen } from "./KeyStoreUnavailableScreen";
+import { SuspendedScreen } from "./SuspendedScreen";
 import { readReturnUrl } from "./return-url";
 import {
   anonymousGuardView,
@@ -89,8 +90,27 @@ function SignedOutGate(props: { children: JSX.Element }): JSX.Element {
 function KeyStoreGate(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   return (
-    <Show when={auth.keyStoreUnavailable()} fallback={props.children}>
+    <Show when={auth.keyStoreUnavailable()} fallback={<SuspensionGate>{props.children}</SuspensionGate>}>
       <KeyStoreUnavailableScreen />
+    </Show>
+  );
+}
+
+/**
+ * ADR-0089 (UX `reporting-and-moderation.md` section 4): while this device is
+ * in suspended mode the suspended screen replaces every route, public ones
+ * included, until the person chooses "Read my chats" (the app then opens
+ * read-only) or signs out.
+ */
+function SuspensionGate(props: { children: JSX.Element }): JSX.Element {
+  const auth = useAuth();
+  const screen = (): boolean => {
+    const mode = auth.suspension();
+    return mode !== null && !mode.reading;
+  };
+  return (
+    <Show when={screen()} fallback={props.children}>
+      <SuspendedScreen />
     </Show>
   );
 }

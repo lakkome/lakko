@@ -9,7 +9,7 @@ use axum::Json;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_crypto::signing::Signature;
-use lakko_transparency::{SignedRoot, TreeHash};
+use lakko_transparency::{LogId, SignedRoot, TreeHash};
 use serde::{Deserialize, Serialize};
 
 use crate::store::CosignError;
@@ -28,6 +28,10 @@ pub(crate) struct SignedRootWire {
 /// a consistency proof from the witness's last-co-signed size to the new size.
 #[derive(Deserialize)]
 pub(crate) struct CosignReq {
+    /// Which log the root belongs to: `"kt"` or `"moderation"` (witness v2,
+    /// ADR-0089 section 5). Required; missing or unknown is a 400.
+    #[serde(default)]
+    pub(crate) log: Option<String>,
     pub(crate) new_root: SignedRootWire,
     /// Base64 32-byte audit-path hashes of the RFC 6962 §2.1.2 consistency
     /// proof. Empty for the first co-sign (the witness is at the empty tree).
@@ -43,11 +47,20 @@ pub(crate) struct CosignRes {
 
 /// `POST /witness/cosign` — verify + co-sign a new operator root (service-secret
 /// gated). The witness co-signs only when the root is operator-signed AND
-/// append-only-extends its last-co-signed root; a fork is refused (409).
+/// append-only-extends its last-co-signed root of that log; a fork is refused
+/// (409). A log this witness has no operator key for answers 404
+/// `unknown-log`.
 pub(crate) async fn cosign(
     State(state): State<AppState>,
     Json(req): Json<CosignReq>,
 ) -> Result<Json<CosignRes>, (StatusCode, &'static str)> {
+    let log = req.log.as_deref().and_then(LogId::from_wire_name).ok_or((
+        StatusCode::BAD_REQUEST,
+        "log must be \"kt\" or \"moderation\"",
+    ))?;
+    let operator = state
+        .operator_for(log)
+        .ok_or((StatusCode::NOT_FOUND, "unknown-log"))?;
     let tree_root: TreeHash = B64
         .decode(req.new_root.tree_root_b64.as_bytes())
         .map_err(|_| (StatusCode::BAD_REQUEST, "tree_root_b64 not valid base64"))?
@@ -89,7 +102,7 @@ pub(crate) async fn cosign(
 
     let cosig = state
         .store
-        .cosign(&state.db, &state.operator_pubkey, &new_root, &proof)
+        .cosign(&state.db, log, &operator, &new_root, &proof)
         .await
         .map_err(|e| match e {
             CosignError::BadOperatorSignature => {

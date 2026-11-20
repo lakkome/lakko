@@ -22,6 +22,8 @@
  * (read with the post's reaction counts), not a count of rows read; a post
  * whose count is 0 reads no page.
  */
+import { accountSuspended } from "../auth/suspension-state";
+import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import { base64Encode } from "../auth/account-id";
@@ -596,9 +598,11 @@ export function PostComments(props: {
               </div>
             )}
           </Show>
+          {/* ADR-0089 step 3: a suspended account comments on nothing. */}
+          <SuspendedComposerLine />
           <form
             class="lk-comment-field"
-            style={{ display: "flex", gap: "var(--space-2)" }}
+            style={{ display: accountSuspended() ? "none" : "flex", gap: "var(--space-2)" }}
             onSubmit={(e) => {
               e.preventDefault();
               void onSend();

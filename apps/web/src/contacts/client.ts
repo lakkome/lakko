@@ -40,7 +40,7 @@
  * to surface a "please re-enter your password" prompt in that
  * case.
  */
-import { loadWasm } from "../wasm";
+import { loadWasm, wasmIfLoaded } from "../wasm";
 import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
 import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
 import type { ConversationKind } from "../chat/conversation-kind";
@@ -143,6 +143,7 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
 import {
+  blockDropsEvent,
   consumeGroupContactRequest,
   consumeKnockSeed,
   consumeRegistrarSeed,
@@ -342,6 +343,9 @@ export interface IncomingContactRequest {
    *  arrived inside (standard base64 of its id), shown as "Via {group}";
    *  absent for a request from the inbox. */
   viaGroupIdB64?: string;
+  /** ADR-0089 section 2 - the signed request wire as received, which a
+   *  report on the request carries. Kept in memory with the request. */
+  wire?: Uint8Array;
 }
 
 /** ADR-0079 section 2 — the `/i/` link a contact request answers. SECRET. */
@@ -964,6 +968,7 @@ function sweepPortsFor(
             processed,
             (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
             (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
+            group,
           );
           // ADR-0057 — consumed at receipt, like the poll does, never shown.
           if (event.kind === "registrarSeed") {
@@ -974,6 +979,9 @@ function sweepPortsFor(
             await consumeKnockSeed(group, event.setting.plaintext, event.senderKey);
           } else if (event.kind === "serviceEnvelope") {
             // An unrecognised `lakko/…` service envelope: dropped, never shown.
+          } else if (blockDropsEvent(wasmIfLoaded(), group, event)) {
+            // ADR-0089 section 6 - a blocked person's row in the one-to-one
+            // with them: consumed, never shown.
           } else {
             onSweptEvent(event);
           }
@@ -5410,6 +5418,9 @@ export function decodeContactRequestBody(
     linkAnswer,
     createdAt,
     ...(viaGroupIdB64 !== undefined ? { viaGroupIdB64 } : {}),
+    // ADR-0089 section 2 - the signed request as received, a report's
+    // evidence.
+    wire: body,
   };
 }
 

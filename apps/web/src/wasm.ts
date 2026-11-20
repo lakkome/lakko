@@ -46,11 +46,24 @@ export function wasmSync(): typeof wasm {
 export function loadWasm(): Promise<typeof wasm> {
   if (cached === null) {
     cached = init().then(() => {
+      loaded = true;
       setLoadedVersion((v) => v + 1);
       return wasm;
     });
   }
   return cached;
+}
+
+let loaded = false;
+
+/**
+ * The exports namespace when {@link loadWasm} has finished, else `null`.
+ * Not reactive, and it never starts a load: for a hot path that must not wait
+ * for, or trigger, the module's fetch (every wasm object such a path holds
+ * was made by the loaded module).
+ */
+export function wasmIfLoaded(): typeof wasm | null {
+  return loaded ? wasm : null;
 }
 
 /**

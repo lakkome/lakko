@@ -196,7 +196,7 @@ pub fn anon_token_header_name() -> String {
 /// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`,
 /// `channel-subscribe`, `directory-search`, `vault-claim`, `blob-upload`,
 /// `blob-read`, `mailbox-write`, `call-join`, `circle-claim`, `channel-react`,
-/// `channel-comment`.
+/// `channel-comment`, `report`.
 #[wasm_bindgen(js_name = anonTokenContexts)]
 #[must_use]
 pub fn anon_token_contexts() -> Vec<String> {
@@ -347,6 +347,7 @@ mod tests {
                 "circle-claim",
                 "channel-react",
                 "channel-comment",
+                "report",
             ]
         );
         // Every listed name is one a request can be built for.

@@ -37,6 +37,10 @@
 export const CODE_KEY_GENERATION_SUPERSEDED = "key-generation-superseded";
 export const CODE_REFRESH_INVALID = "refresh-invalid";
 export const CODE_DEVICE_REVOKED = "device-revoked";
+/** ADR-0089 section 4: auth's bearer routes refuse a suspended account's
+ *  access token with `403` and this code (no credentials); the refresh route
+ *  answers it with the restricted session. */
+export const CODE_ACCOUNT_SUSPENDED = "account-suspended";
 
 /** The `error` code of a `{"error": "<code>", ...}` body, or `null`. */
 export function errorCodeOf(body: string | null | undefined): string | null {
@@ -61,7 +65,11 @@ export type BearerRefusal =
   /** Refresh once, then send the request once more with the new token. */
   | "refresh-and-retry"
   /** Report the `401` to the caller as it is. */
-  | "report";
+  | "report"
+  /** ADR-0089: `403 account-suspended` from a bearer route of auth. The
+   *  provider refreshes once (the refresh answers with the restricted
+   *  session) and the caller gets the refusal as it is. */
+  | "suspended";
 
 /**
  * The rule for a bearer route's response.
@@ -79,6 +87,7 @@ export function bearerRefusal(input: {
   readonly retried: boolean;
   readonly refreshAvailable: boolean;
 }): BearerRefusal {
+  if (input.status === 403 && input.errorCode === CODE_ACCOUNT_SUSPENDED) return "suspended";
   if (input.status !== 401) return "pass";
   // The two codes never arrive together and neither outranks the other
   // here: the server reads the generation before the device floor (ADR-0074

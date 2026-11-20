@@ -30,6 +30,7 @@
  * Unlike the post sync it does not stop in a hidden tab: someone may be
  * waiting to be let in. A pass is skipped while the previous one runs.
  */
+import { accountSuspended } from "../auth/suspension-state";
 import { createEffect, onCleanup, onMount, type Component } from "solid-js";
 
 import { useChats } from "../chat/ChatContext";
@@ -155,6 +156,9 @@ export async function rotateChannel(
   force: boolean,
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
+  // ADR-0089 step 3: a suspended account rotates nothing (every step of a
+  // rotation writes to the channels service and the DS).
+  if (accountSuspended()) return;
   const wasm = await loadWasm();
   let rotated = false;
   await withPublisherGroup(identity, idHex, async (group) => {
@@ -686,6 +690,9 @@ export const ChannelPublisherLoops: Component = () => {
   }
 
   async function pass(): Promise<void> {
+    // ADR-0089 step 3: no publisher work (rotation, approvals, seeds) while
+    // the account is suspended; the next pass after it ends picks it up.
+    if (accountSuspended()) return;
     const lineage = chats.conversationAccountIdentity();
     const current = chats.accountIdentity();
     if (lineage === null || current === null || !channelsState.hydrated()) return;

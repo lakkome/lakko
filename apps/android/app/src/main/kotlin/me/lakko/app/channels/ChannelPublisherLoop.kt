@@ -89,6 +89,9 @@ public class ChannelPublisherLoop private constructor(
         if (state.boundAccount == null) return
         mutex.withLock {
             for (id in state.keysByChannel.value.keys.toList()) {
+                // ADR-0089 step 5 — a removed channel's heartbeat stops; one
+                // pass per period asks whether it was restored.
+                if (!RemovedChannels.mayAsk(id)) continue
                 try {
                     pass(id)
                 } catch (e: kotlinx.coroutines.CancellationException) {
@@ -97,6 +100,11 @@ public class ChannelPublisherLoop private constructor(
                     if (ChannelRemovalWatch.isDeleted(e)) {
                         // Section 15 — the owner deleted the channel.
                         endHere(id)
+                        continue
+                    }
+                    if (RemovedChannels.isRemovedError(e)) {
+                        // ADR-0089 step 5 — removed by moderators: kept.
+                        Log.i(TAG, "channel pass: channel removed")
                         continue
                     }
                     Log.w(TAG, "channel pass failed", e)

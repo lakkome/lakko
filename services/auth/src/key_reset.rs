@@ -167,6 +167,11 @@ pub(crate) struct ResetFinishReq {
     /// pubkey: the key the reset installs, bound into the attestation and
     /// recorded as the account's identity key (ADR-0074 section 0.1).
     pub(crate) new_signature_pubkey_b64: String,
+    /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
+    /// over the account id and that key (`signIdentityProof`, ADR-0089 F3).
+    /// Absent or invalid: `400 identity-proof-invalid`.
+    #[serde(default)]
+    pub(crate) identity_proof_b64: Option<String>,
     /// URL-safe base64 of the 32-byte device id the new pair names
     /// (ADR-0074 section 0.4). Absent: the pair names the device the
     /// caller's bearer names. A reset that gives the device a new
@@ -301,6 +306,11 @@ pub(crate) async fn finish(
             .await?;
     let upload = decode_registration_upload(&payload.recovery_upload)?;
     let new_signature_pubkey = decode_pubkey(&payload.new_signature_pubkey_b64)?;
+    crate::identity_target::require_identity_proof(
+        payload.identity_proof_b64.as_deref(),
+        &account_id,
+        &new_signature_pubkey,
+    )?;
     let registration_bytes = ServerRegistration::<LakkoCipherSuite>::finish(upload)
         .serialize()
         .to_vec();
@@ -353,14 +363,25 @@ pub(crate) async fn finish(
     .await
     .map_err(ApiError::Db)?;
 
+    //    The new key's target, claimed for this account (ADR-0089 F3): a key
+    //    another account holds is refused and the reset rolls back.
+    crate::identity_target::claim(
+        &mut tx,
+        &account_id,
+        &new_signature_pubkey,
+        crate::session::now_ms(),
+    )
+    .await?;
+
     //    Bump the key generation and read the new value in one statement.
     //    The same statement records the new identity key (ADR-0074 section
-    //    0.1): the reset is the one writer that moves it.
+    //    0.1).
     let bumped = sqlx::query(
         "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
-         identity_pubkey = ? WHERE id = ?",
+         identity_pubkey = ?, identity_target = ? WHERE id = ?",
     )
     .bind(&new_signature_pubkey[..])
+    .bind(&crate::identity_target::target_of(&new_signature_pubkey)[..])
     .bind(account_id.as_slice())
     .execute(&mut *tx)
     .await

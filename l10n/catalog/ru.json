@@ -285,6 +285,46 @@
       "text": "Восстановить эту старую резервную копию?",
       "status": "machine"
     },
+    "block.action": {
+      "text": "Заблокировать",
+      "status": "machine"
+    },
+    "block.banner": {
+      "text": "Вы заблокировали {name}.",
+      "status": "machine"
+    },
+    "block.call_label": {
+      "text": "Заблокирован",
+      "status": "machine"
+    },
+    "block.card_line": {
+      "text": "Заблокирован",
+      "status": "machine"
+    },
+    "block.confirm.body": {
+      "text": "Этот человек не сможет писать и звонить вам или отправить запрос в контакты. Ему об этом не сообщат.",
+      "status": "machine"
+    },
+    "block.confirm.title": {
+      "text": "Заблокировать {name}?",
+      "status": "machine"
+    },
+    "block.group_row": {
+      "text": "Сообщение от заблокированного вами человека",
+      "status": "machine"
+    },
+    "block.list.empty": {
+      "text": "Вы никого не заблокировали.",
+      "status": "machine"
+    },
+    "block.list.title": {
+      "text": "Заблокированные",
+      "status": "machine"
+    },
+    "block.unblock": {
+      "text": "Разблокировать",
+      "status": "machine"
+    },
     "call.alert.title": {
       "text": "Звонок",
       "status": "machine"
@@ -2219,6 +2259,10 @@
     },
     "channels.subscribers.title_count": {
       "text": "Подписчики ({count})",
+      "status": "machine"
+    },
+    "channels.unavailable": {
+      "text": "Этот канал недоступен.",
       "status": "machine"
     },
     "channels.unsubscribe.action": {
@@ -8293,6 +8337,146 @@
       "text": "слово {position}",
       "status": "machine"
     },
+    "report.action": {
+      "text": "Пожаловаться",
+      "status": "machine"
+    },
+    "report.add_messages": {
+      "text": "Добавить сообщения",
+      "status": "machine"
+    },
+    "report.also_block": {
+      "text": "Также заблокировать {name}",
+      "status": "machine"
+    },
+    "report.also_leave": {
+      "text": "Выйти из группы",
+      "status": "machine"
+    },
+    "report.also_unsubscribe": {
+      "text": "Отписаться",
+      "status": "machine"
+    },
+    "report.comment": {
+      "text": "Что-то ещё (необязательно)",
+      "status": "machine"
+    },
+    "report.empty_hint": {
+      "text": "Жалобы с приложенными сообщениями рассматриваются в первую очередь.",
+      "status": "machine"
+    },
+    "report.failed": {
+      "text": "Не удалось отправить жалобу. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "report.included": {
+      "text": "{n, plural, one {Приложено: # сообщение} few {Приложено: # сообщения} many {Приложено: # сообщений} other {Приложено: # сообщения}}",
+      "status": "machine"
+    },
+    "report.included_none": {
+      "text": "Ничего не приложено",
+      "status": "machine"
+    },
+    "report.included_partial": {
+      "text": "Приложено: {n} из {total} сообщений",
+      "status": "machine"
+    },
+    "report.limited": {
+      "text": "Сегодня вы отправили много жалоб. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "report.list.empty": {
+      "text": "Вы не отправляли жалоб.",
+      "status": "machine"
+    },
+    "report.list.title": {
+      "text": "Ваши жалобы",
+      "status": "machine"
+    },
+    "report.not_told": {
+      "text": "{name} не узнает, кто пожаловался.",
+      "status": "machine"
+    },
+    "report.reason.child_safety": {
+      "text": "Безопасность ребёнка",
+      "status": "machine"
+    },
+    "report.reason.harassment": {
+      "text": "Травля или угрозы",
+      "status": "machine"
+    },
+    "report.reason.hate": {
+      "text": "Ненависть",
+      "status": "machine"
+    },
+    "report.reason.impersonation": {
+      "text": "Выдаёт себя за другого",
+      "status": "machine"
+    },
+    "report.reason.other": {
+      "text": "Другое",
+      "status": "machine"
+    },
+    "report.reason.sexual": {
+      "text": "Сексуальный контент",
+      "status": "machine"
+    },
+    "report.reason.spam": {
+      "text": "Спам или мошенничество",
+      "status": "machine"
+    },
+    "report.reason.violence": {
+      "text": "Насилие или жестокий контент",
+      "status": "machine"
+    },
+    "report.select.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "report.select.limit": {
+      "text": "Можно приложить не больше {n} сообщений.",
+      "status": "machine"
+    },
+    "report.select.title": {
+      "text": "Выберите сообщения",
+      "status": "machine"
+    },
+    "report.send": {
+      "text": "Отправить жалобу",
+      "status": "machine"
+    },
+    "report.sent": {
+      "text": "Жалоба отправлена. Модераторы её рассмотрят.",
+      "status": "machine"
+    },
+    "report.status.action": {
+      "text": "Приняты меры",
+      "status": "machine"
+    },
+    "report.status.none": {
+      "text": "Без мер",
+      "status": "machine"
+    },
+    "report.status.received": {
+      "text": "Получена",
+      "status": "machine"
+    },
+    "report.title": {
+      "text": "Жалоба на {name}",
+      "status": "machine"
+    },
+    "report.unavailable": {
+      "text": "На этом сервере жалобы не принимаются.",
+      "status": "machine"
+    },
+    "report.who_sees": {
+      "text": "Модераторы Lakko увидят приложенное.",
+      "status": "machine"
+    },
+    "report.why": {
+      "text": "Почему вы жалуетесь?",
+      "status": "machine"
+    },
     "requests_sent.ask_again": {
       "text": "Спросить снова",
       "status": "machine"
@@ -9557,6 +9741,106 @@
       "text": "Перевод недоступен в этом браузере",
       "status": "machine"
     },
+    "suspended.appeal": {
+      "text": "Обжаловать",
+      "status": "machine"
+    },
+    "suspended.appeal.declined": {
+      "text": "Ваша апелляция отклонена.",
+      "status": "machine"
+    },
+    "suspended.appeal.failed": {
+      "text": "Не удалось отправить апелляцию. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "suspended.appeal.field": {
+      "text": "Расскажите модераторам, что произошло",
+      "status": "machine"
+    },
+    "suspended.appeal.once": {
+      "text": "По этой приостановке можно отправить одну апелляцию.",
+      "status": "machine"
+    },
+    "suspended.appeal.send": {
+      "text": "Отправить апелляцию",
+      "status": "machine"
+    },
+    "suspended.appeal.sent": {
+      "text": "Апелляция отправлена. Решение появится здесь.",
+      "status": "machine"
+    },
+    "suspended.appeal.title": {
+      "text": "Обжаловать приостановку",
+      "status": "machine"
+    },
+    "suspended.appeal.unavailable": {
+      "text": "На этом сервере нельзя подать апелляцию.",
+      "status": "machine"
+    },
+    "suspended.banner": {
+      "text": "Аккаунт {name} приостановлен за нарушение правил Lakko.",
+      "status": "machine"
+    },
+    "suspended.cannot_add": {
+      "text": "Этот аккаунт приостановлен. Добавить его нельзя.",
+      "status": "machine"
+    },
+    "suspended.card_line": {
+      "text": "Аккаунт приостановлен",
+      "status": "machine"
+    },
+    "suspended.channel_removed": {
+      "text": "Этот канал удалён за нарушение правил Lakko.",
+      "status": "machine"
+    },
+    "suspended.member": {
+      "text": "Приостановлен",
+      "status": "machine"
+    },
+    "suspended.self.body": {
+      "text": "Вы можете читать свои чаты, но не можете отправлять сообщения, добавлять контакты и звонить.",
+      "status": "machine"
+    },
+    "suspended.self.composer": {
+      "text": "Ваш аккаунт приостановлен",
+      "status": "machine"
+    },
+    "suspended.self.delete": {
+      "text": "Удалить аккаунт",
+      "status": "machine"
+    },
+    "suspended.self.load_failed": {
+      "text": "Не удалось загрузить подробности. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "suspended.self.loading": {
+      "text": "Проверяем аккаунт…",
+      "status": "machine"
+    },
+    "suspended.self.no_end": {
+      "text": "У этой приостановки нет даты окончания.",
+      "status": "machine"
+    },
+    "suspended.self.read": {
+      "text": "Читать мои чаты",
+      "status": "machine"
+    },
+    "suspended.self.reason": {
+      "text": "Причина: {reason}.",
+      "status": "machine"
+    },
+    "suspended.self.sign_out": {
+      "text": "Выйти",
+      "status": "machine"
+    },
+    "suspended.self.title": {
+      "text": "Ваш аккаунт приостановлен",
+      "status": "machine"
+    },
+    "suspended.self.until": {
+      "text": "До {date}.",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "Вы исчерпали дневной лимит на это действие. Попробуйте завтра.",
       "status": "machine"
@@ -9875,6 +10159,10 @@
     },
     "who_can_find_me.groups_chosen_helper": {
       "text": "Только выбранные вами ({chosen} из {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.hidden_by_moderation": {
+      "text": "Модераторы Lakko убрали вас из поиска. Вас по-прежнему могут найти через контакты, группы и каналы.",
       "status": "machine"
     },
     "who_can_find_me.lede": {

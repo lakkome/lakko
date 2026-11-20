@@ -107,8 +107,27 @@ fn grant(state: &AppState, account: &[u8; 16]) -> String {
 }
 
 /// A deterministic account identity key per test account.
-fn account_key(seed: u8) -> SigningKey {
-    SigningKey::from_seed(&[seed; 32])
+/// A fresh random identity key on every call: a key belongs to one account
+/// forever (ADR-0089 F3) in a database the tests share across runs. The tag
+/// names the key in the test; two calls never agree.
+fn account_key(_tag: u8) -> SigningKey {
+    let mut seed = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut OsRng, &mut seed);
+    SigningKey::from_seed(&seed)
+}
+
+/// The account a v3 bearer names.
+fn account_of(bearer: &str) -> [u8; 16] {
+    URL_SAFE_NO_PAD
+        .decode(bearer.split('.').nth(1).expect("account part"))
+        .expect("base64")
+        .try_into()
+        .expect("16 bytes")
+}
+
+/// `key`'s identity proof for `account` (ADR-0089 F3).
+fn identity_proof(account: &[u8; 16], key: &SigningKey) -> String {
+    b64(&lakko_attest::sign_identity_proof(&key.to_seed(), account))
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -203,7 +222,10 @@ async fn record_key(state: &AppState, bearer: &str, key: &SigningKey) -> StatusC
         state,
         "/auth/genesis/attest",
         Some(bearer),
-        &json!({ "pubkey_b64": b64(&key.verifying_key().to_bytes()) }),
+        &json!({
+            "pubkey_b64": b64(&key.verifying_key().to_bytes()),
+            "identity_proof_b64": identity_proof(&account_of(bearer), key),
+        }),
     )
     .await
     .0
@@ -638,13 +660,41 @@ async fn the_genesis_mint_signs_only_the_recorded_key() {
         None
     );
 
+    // ADR-0089 F3: no proof, a proof by another key, a proof for another
+    // account: 400, nothing recorded.
+    for proof in [
+        None,
+        Some(identity_proof(&account, &second)),
+        Some(identity_proof(&[0; 16], &first)),
+        Some("@@".to_string()),
+    ] {
+        let (st, bytes) = post(
+            &state,
+            "/auth/genesis/attest",
+            Some(&a.session_token),
+            &json!({ "pubkey_b64": b64(&first_pub), "identity_proof_b64": proof }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(code(&bytes), "identity-proof-invalid");
+    }
+    assert_eq!(
+        crate::devices::identity_pubkey_of(&pool, &account)
+            .await
+            .unwrap(),
+        None
+    );
+
     // The first mint records the key and returns an attestation that binds
     // the account, the derived username hash and that key.
     let (st, bytes) = post(
         &state,
         "/auth/genesis/attest",
         Some(&a.session_token),
-        &json!({ "pubkey_b64": b64(&first_pub) }),
+        &json!({
+            "pubkey_b64": b64(&first_pub),
+            "identity_proof_b64": identity_proof(&account, &first),
+        }),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -693,7 +743,10 @@ async fn the_genesis_mint_signs_only_the_recorded_key() {
             &state,
             "/auth/genesis/attest",
             Some(bearer),
-            &json!({ "pubkey_b64": b64(&second.verifying_key().to_bytes()) }),
+            &json!({
+                "pubkey_b64": b64(&second.verifying_key().to_bytes()),
+                "identity_proof_b64": identity_proof(&account, &second),
+            }),
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT);
@@ -728,13 +781,44 @@ async fn the_genesis_mint_signs_only_the_recorded_key() {
         None
     );
 
+    // ADR-0089 F3: a key another account recorded is refused, with its own
+    // proof, and the second account records nothing.
+    let (st, bytes) = post(
+        &state,
+        "/auth/genesis/attest",
+        Some(&f.session_token),
+        &json!({
+            "pubkey_b64": b64(&first_pub),
+            "identity_proof_b64": identity_proof(&fresh_account, &first),
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(code(&bytes), "identity-key-taken");
+    assert_eq!(
+        crate::devices::identity_pubkey_of(&pool, &fresh_account)
+            .await
+            .unwrap(),
+        None
+    );
+    // The history row names the first account, and outlives it.
+    let owner = crate::identity_target::owner_of(
+        &pool,
+        &crate::identity_target::target_of(&first_pub),
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(owner, Some(account));
+
     // Two first mints racing for one account record exactly one key: one
     // answers 200 and the other 409.
     let racer = new_account(&pool).await;
     let r = pair(&state, &racer, &DEVICE_A);
+    let (third, fourth) = (account_key(0x53), account_key(0x54));
     let (x, y) = tokio::join!(
-        record_key(&state, &r.session_token, &first),
-        record_key(&state, &r.session_token, &second)
+        record_key(&state, &r.session_token, &third),
+        record_key(&state, &r.session_token, &fourth)
     );
     let mut outcomes = [x, y];
     outcomes.sort();
@@ -744,9 +828,25 @@ async fn the_genesis_mint_signs_only_the_recorded_key() {
         .unwrap()
         .expect("one key recorded");
     assert!(
-        recorded == first_pub || recorded == second.verifying_key().to_bytes(),
+        recorded == third.verifying_key().to_bytes()
+            || recorded == fourth.verifying_key().to_bytes(),
         "the recorded key is one of the two"
     );
+    // Only the winner's target was claimed.
+    let mut claimed = 0;
+    for k in [&third, &fourth] {
+        let owner = crate::identity_target::owner_of(
+            &pool,
+            &crate::identity_target::target_of(&k.verifying_key().to_bytes()),
+            now_ms(),
+        )
+        .await
+        .unwrap();
+        if owner == Some(racer) {
+            claimed += 1;
+        }
+    }
+    assert_eq!(claimed, 1);
 }
 
 /// `bind-device` replaces an unbound pair with one naming the device, once.

@@ -117,6 +117,14 @@ public class InviteLandingViewModel(
         if (current.adding) return
         mutableState.value = current.copy(adding = true, failed = false)
         viewModelScope.launch {
+            // ADR-0089 step 4 / UX 3 — a link from an account the moderation
+            // log confirms suspended adds nothing: Add waits a few seconds for
+            // the inviter's standing (nothing is spent yet) and stops on a
+            // verified suspension; a slow or failed check proceeds as before.
+            if (!me.lakko.app.moderation.inviteAddMayProceed(current.invite.ownerSignaturePubkey)) {
+                mutableState.value = current.copy(adding = false, failed = false, inviterSuspended = true)
+                return@launch
+            }
             val result = withContext(NonCancellable) {
                 try {
                     repo.addThroughInviteLink(current.invite)
@@ -227,7 +235,13 @@ public sealed interface InviteLandingState {
 
     /** The default page; `adding` while Add runs, `failed` after a network
      *  failure (the line under the button). */
-    public data class Ready(val invite: OpenedInvite, val adding: Boolean, val failed: Boolean) : InviteLandingState
+    public data class Ready(
+        val invite: OpenedInvite,
+        val adding: Boolean,
+        val failed: Boolean,
+        /** ADR-0089 step 4 — Add found the inviter's account suspended. */
+        val inviterSuspended: Boolean = false,
+    ) : InviteLandingState
 
     /** The inviter is already a contact. [invite] is the opened link whose
      *  answer Open chat delivers; `answering` while it runs, [failure] after

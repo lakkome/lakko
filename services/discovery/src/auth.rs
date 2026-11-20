@@ -80,8 +80,31 @@ pub(crate) struct SessionDevice(pub(crate) [u8; 32]);
 /// diagnostics; clients see only the opaque 401.
 pub(crate) async fn require_session(
     State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    admit(&state, request, next, false).await
+}
+
+/// [`require_session`], also accepting the `s1` restricted session of a
+/// suspended account ([ADR-0089] step 3). Used on `DELETE /discovery/account`
+/// alone, so a suspended person who deletes the account at auth also removes
+/// its username, identity bundle and KeyPackages here.
+///
+/// [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+pub(crate) async fn require_session_or_restricted(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    admit(&state, request, next, true).await
+}
+
+async fn admit(
+    state: &AppState,
     mut request: Request,
     next: Next,
+    restricted_too: bool,
 ) -> Result<Response, StatusCode> {
     let header_value = request
         .headers()
@@ -105,13 +128,20 @@ pub(crate) async fn require_session(
     // here: discovery's stateless verify accepts any generation within the
     // expiry. It is handed on, and the two identity writes apply the floor
     // of their own row (`key_reset::floor_refuses`).
-    let verified = state
-        .session_token_secret
-        .verify(token, now_ms)
-        .map_err(|e| {
+    let verified = match state.session_token_secret.verify(token, now_ms) {
+        Ok(v) => v,
+        Err(_) if restricted_too => state
+            .session_token_secret
+            .verify_restricted(token, now_ms)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "session-token verify failed");
+                StatusCode::UNAUTHORIZED
+            })?,
+        Err(e) => {
             tracing::warn!(error = %e, "session-token verify failed");
-            StatusCode::UNAUTHORIZED
-        })?;
+            return Err(StatusCode::UNAUTHORIZED);
+        },
+    };
 
     request
         .extensions_mut()

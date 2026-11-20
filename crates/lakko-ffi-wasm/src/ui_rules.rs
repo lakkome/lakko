@@ -434,10 +434,12 @@ impl From<RustInfoTarget> for InfoTarget {
 /// inferred from its position.
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PersonInfoCapabilities {
     membership_ended: bool,
     is_contact: bool,
     contacts_of_contacts_on: bool,
+    is_blocked: bool,
 }
 
 #[wasm_bindgen]
@@ -448,19 +450,29 @@ impl PersonInfoCapabilities {
     /// one-to-one remains, and whose card then offers `add-contact`.
     /// `contactsOfContactsOn`: Contacts of my contacts is on in "Who can find
     /// me", under either form; left out it reads `false`, and the card has
-    /// no `their-contacts-can-find-me` row.
+    /// no `their-contacts-can-find-me` row. `isBlocked`: the viewer blocked
+    /// this person (ADR-0089 section 6); left out it reads `false`.
     #[wasm_bindgen(constructor)]
     #[must_use]
     pub fn new(
         membership_ended: bool,
         is_contact: bool,
         contacts_of_contacts_on: Option<bool>,
+        is_blocked: Option<bool>,
     ) -> Self {
         Self {
             membership_ended,
             is_contact,
             contacts_of_contacts_on: contacts_of_contacts_on.unwrap_or(false),
+            is_blocked: is_blocked.unwrap_or(false),
         }
+    }
+
+    /// The viewer blocked this person.
+    #[wasm_bindgen(getter, js_name = isBlocked)]
+    #[must_use]
+    pub fn is_blocked(&self) -> bool {
+        self.is_blocked
     }
 
     /// The person is on this device's contact list.
@@ -497,6 +509,7 @@ pub struct GroupInfoCapabilities {
     is_owner: bool,
     can_leave: bool,
     membership_ended: bool,
+    has_handle: bool,
 }
 
 #[wasm_bindgen]
@@ -517,6 +530,7 @@ impl GroupInfoCapabilities {
         is_owner: bool,
         can_leave: bool,
         membership_ended: bool,
+        has_handle: Option<bool>,
     ) -> Self {
         Self {
             can_manage_members,
@@ -525,7 +539,17 @@ impl GroupInfoCapabilities {
             is_owner,
             can_leave,
             membership_ended,
+            has_handle: has_handle.unwrap_or(false),
         }
+    }
+
+    /// The group holds an `@name` (ADR-0087); a group is reported only by
+    /// its name (ADR-0089). The constructor's last argument; left out it
+    /// reads `false`.
+    #[wasm_bindgen(getter, js_name = hasHandle)]
+    #[must_use]
+    pub fn has_handle(&self) -> bool {
+        self.has_handle
     }
 
     /// Owner or admin, and still a member.
@@ -666,6 +690,21 @@ pub fn info_target(kind: ConversationKind) -> InfoTarget {
     rust_info_target(kind.into()).into()
 }
 
+/// What a block does on a path (ADR-0089 section 6): `path` is one of
+/// `"one-to-one-message"`, `"group-message"`, `"contact-request"`,
+/// `"incoming-call"`, `"call-tile"`, `"notification"`, `"outgoing-signal"`,
+/// `"incoming-signal"`; the answer is `"show"`, `"drop"`, `"collapse"`,
+/// `"decline-silently"`, `"label"` or `"withhold"`. Throws on an unknown
+/// path.
+#[wasm_bindgen(js_name = blockVerdict)]
+pub fn block_verdict(path: &str, blocked: bool) -> Result<String, JsError> {
+    let p = lakko_ui_rules::block::BlockPath::from_name(path)
+        .ok_or_else(|| JsError::new("unknown block path"))?;
+    Ok(lakko_ui_rules::block::block_verdict(p, blocked)
+        .name()
+        .to_owned())
+}
+
 /// What a person's info holds — section 2.1.
 ///
 /// The blocks come back as their kebab-case names, which is the vocabulary
@@ -681,6 +720,7 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
         membership_ended: caps.membership_ended,
         is_contact: caps.is_contact,
         contacts_of_contacts_on: caps.contacts_of_contacts_on,
+        is_blocked: caps.is_blocked,
     })
     .into_iter()
     .map(|s| s.name().to_string())
@@ -769,6 +809,7 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<String> {
         is_owner: caps.is_owner,
         can_leave: caps.can_leave,
         membership_ended: caps.membership_ended,
+        has_handle: caps.has_handle,
     })
     .into_iter()
     .map(|s| s.name().to_string())
@@ -2347,18 +2388,31 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
-        let ended = person_info_sections(PersonInfoCapabilities::new(true, true, None));
+        let ended = person_info_sections(PersonInfoCapabilities::new(true, true, None, None));
         assert!(ended.contains(&"delete-chat".to_string()));
         assert!(!ended.contains(&"call".to_string()));
-        let removed = person_info_sections(PersonInfoCapabilities::new(false, false, Some(true)));
+        let removed =
+            person_info_sections(PersonInfoCapabilities::new(false, false, Some(true), None));
         assert!(!removed.iter().any(|s| s == "their-contacts-can-find-me"));
         assert!(
-            person_info_sections(PersonInfoCapabilities::new(false, true, Some(true)))
+            person_info_sections(PersonInfoCapabilities::new(false, true, Some(true), None))
                 .iter()
                 .any(|s| s == "their-contacts-can-find-me")
         );
         assert!(removed.contains(&"add-contact".to_string()));
         assert!(!removed.contains(&"remove-contact".to_string()));
+        let blocked =
+            person_info_sections(PersonInfoCapabilities::new(false, false, None, Some(true)));
+        assert!(blocked.contains(&"unblock".to_string()));
+        assert!(blocked.contains(&"report".to_string()));
+        assert_eq!(
+            block_verdict("group-message", true).ok().as_deref(),
+            Some("collapse")
+        );
+        assert_eq!(
+            block_verdict("group-message", false).ok().as_deref(),
+            Some("show")
+        );
         assert_eq!(
             channel_info_sections(ChannelInfoCapabilities::new(
                 ChannelRole::Subscriber,
@@ -2371,6 +2425,7 @@ mod tests {
                 "channel-description",
                 "subscribers",
                 "members-can-find-me",
+                "report",
                 "unsubscribe"
             ]
         );

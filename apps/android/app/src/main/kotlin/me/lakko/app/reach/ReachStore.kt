@@ -192,6 +192,10 @@ internal data class ReachDoc(
      *  device's first registration pass. Device-local, not part of the
      *  shared ReachState. */
     val fofRotatedAtMs: Long? = null,
+    /** ADR-0089 step 5 — discovery refused the Everyone record with
+     *  `403 hidden-from-search`: moderators removed this account from
+     *  search. Cleared when a later Everyone publication lands. */
+    val hiddenFromSearch: Boolean = false,
 )
 
 /**

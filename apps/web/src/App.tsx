@@ -73,6 +73,7 @@ import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { ReportSheetHost } from "./moderation/ReportSheet";
 
 /**
  * Router-level layout (G-36). Renders the active route unchanged and
@@ -108,6 +109,12 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
     </Show>
     {props.children}
     <CallHostView />
+    {/*
+     * ADR-0089 section 2 - the one report sheet. In the router (Add messages
+     * opens a conversation) and outside every route, so a report started on
+     * one screen survives the trip to another.
+     */}
+    <ReportSheetHost />
   </>
 );
 

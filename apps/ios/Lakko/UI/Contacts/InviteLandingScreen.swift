@@ -32,6 +32,9 @@ public struct InviteLandingScreen: View {
     public var onOpenContacts: () -> Void
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 4 — an inviter whose account is suspended cannot be
+    /// added.
+    @ObservedObject private var suspensions = SuspensionMarks.shared
 
     public init(
         viewModel: InviteLandingViewModel,
@@ -56,6 +59,10 @@ public struct InviteLandingScreen: View {
         .navigationTitle(l10n.t("invite.contact.page_title"))
         .navigationBarTitleDisplayMode(.inline)
         .task { await viewModel.open() }
+        // ADR-0089 step 4 — ask about the link's issuer once it is read.
+        .task(id: inviterKey) {
+            if let inviterKey { _ = await suspensions.standing(inviterKey) }
+        }
         .onChange(of: viewModel.chatToOpen) { _, target in
             guard let target else { return }
             viewModel.dismiss()
@@ -66,6 +73,12 @@ public struct InviteLandingScreen: View {
             viewModel.dismiss()
             onOpenContacts()
         }
+    }
+
+    /// The inviter of a link that opened, `nil` while there is none.
+    private var inviterKey: Data? {
+        if case .ready(let invite, _, _) = viewModel.state { return invite.ownerSignaturePubkey }
+        return nil
     }
 
     private func name(_ stated: String?) -> String {
@@ -99,31 +112,50 @@ public struct InviteLandingScreen: View {
                     .foregroundStyle(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
             }
-            Button {
-                Task { await viewModel.add() }
-            } label: {
-                Group {
-                    if adding { ProgressView() } else { Text(l10n.t("invite.contact.page.add")) }
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(adding)
-            Button {
-                viewModel.dismiss()
-                onDone()
-            } label: {
-                Text(l10n.t("invite.contact.page.not_now")).frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .disabled(adding)
-            if failed {
-                Text(l10n.t("invite.contact.page.add_failed", texts: ["name": name(invite.statedName)]))
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoDanger)
+            // ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // the inviter's account is suspended: one line and Done, no Add.
+            if !SuspensionMarkRules.inviteOffersAdd(
+                inviterSuspended: viewModel.inviterSuspended
+                    || suspensions.isSuspended(invite.ownerSignaturePubkey)) {
+                Text(l10n.t("suspended.cannot_add"))
+                    .font(.body)
+                    .foregroundStyle(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
+                Button {
+                    viewModel.dismiss()
+                    onDone()
+                } label: {
+                    Text(l10n.t("invite.contact.page.done")).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            } else {
+                Button {
+                    Task { await viewModel.add() }
+                } label: {
+                    Group {
+                        if adding { ProgressView() } else { Text(l10n.t("invite.contact.page.add")) }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(adding)
+                Button {
+                    viewModel.dismiss()
+                    onDone()
+                } label: {
+                    Text(l10n.t("invite.contact.page.not_now")).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(adding)
+                if failed {
+                    Text(l10n.t("invite.contact.page.add_failed", texts: ["name": name(invite.statedName)]))
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .multilineTextAlignment(.center)
+                }
             }
 
         case .alreadyContacts(_, let statedName, _, let answering, let failure):
@@ -457,6 +489,14 @@ public final class InviteLandingViewModel: ObservableObject {
     /// Set once Add has recorded the pending contact: the screen closes into
     /// that chat.
     @Published public private(set) var chatToOpen: ChatTarget?
+    /// ADR-0089 step 4 — Add found the inviter's account suspended: the page
+    /// says so and sends nothing.
+    @Published public private(set) var inviterSuspended = false
+    /// ADR-0089 step 4 — the inviter's verified standing, waited for at most
+    /// its bound. Injectable for tests.
+    var inviterSuspendedCheck: @MainActor (Data) async -> Bool = {
+        await SuspensionMarks.shared.verifiedSuspended($0)
+    }
 
     private let slug: String
     private let repository: ContactsRepository
@@ -554,8 +594,18 @@ public final class InviteLandingViewModel: ObservableObject {
         guard case .ready(let invite, false, _) = state else { return }
         state = .ready(invite, adding: true, failed: false)
         let repository = self.repository
-        let result = await Cancellation.shielded {
-            await repository.addThroughInviteLink(invite)
+        // ADR-0089 step 4 — a tap before the inviter's standing answered
+        // waits for it (bounded): a verified suspension sends nothing.
+        let check = inviterSuspendedCheck
+        let gated = await Cancellation.shielded {
+            await SuspensionMarkRules.addThroughInvite(
+                inviter: invite.ownerSignaturePubkey, inviterSuspended: check,
+                send: { await repository.addThroughInviteLink(invite) })
+        }
+        guard let result = gated else {
+            inviterSuspended = true
+            state = .ready(invite, adding: false, failed: false)
+            return
         }
         switch result {
         case .added(let contact):

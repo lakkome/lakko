@@ -15,6 +15,7 @@
  *     conversation this device holds, the saved messages' files, and the own
  *     profile photo.
  */
+import { writeGuardedFetch } from "../auth/suspension-state";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
@@ -56,7 +57,8 @@ async function buyPass(kind: BlobPassKind): Promise<{ pass: string; expiresAtMs:
   let response: Response;
   try {
     response = await anonTokens.spend(context, (name, value) =>
-      fetch(`${DEFAULT_BASE_URL}/blob/pass/${kind}`, anonymousFetchInit({ method: "POST", headers: { [name]: value } })),
+      // ADR-0089 step 3: while suspended only the read pass is bought.
+      writeGuardedFetch(`${DEFAULT_BASE_URL}/blob/pass/${kind}`, anonymousFetchInit({ method: "POST", headers: { [name]: value } })),
     );
   } catch (err) {
     // No token left for the period, or none until the next refill: the limit

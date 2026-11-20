@@ -301,6 +301,46 @@
       "comment": "Confirmation dialog title when the backup found is older than the newest one this account has made (a possible rollback).",
       "security_critical": true
     },
+    "block.action": {
+      "text": "Block",
+      "comment": "Danger row on a person's card and on a contact request, and the confirm button of the block dialog."
+    },
+    "block.banner": {
+      "text": "You blocked {name}.",
+      "comment": "Banner that replaces the composer in a one-to-one with a blocked person; {name} is the person's name."
+    },
+    "block.call_label": {
+      "text": "Blocked",
+      "comment": "Muted label on a blocked person's tile in a call."
+    },
+    "block.card_line": {
+      "text": "Blocked",
+      "comment": "Muted line under the name on a blocked person's card."
+    },
+    "block.confirm.body": {
+      "text": "They won't be able to message or call you, or send you a contact request. They aren't told.",
+      "comment": "Body of the block confirmation dialog. Must say the person is not told."
+    },
+    "block.confirm.title": {
+      "text": "Block {name}?",
+      "comment": "Title of the block confirmation dialog; {name} is the person's name."
+    },
+    "block.group_row": {
+      "text": "Message from someone you blocked",
+      "comment": "A muted row in a group in place of a blocked person's message; tapping it shows the message."
+    },
+    "block.list.empty": {
+      "text": "You haven't blocked anyone.",
+      "comment": "Empty state of Settings > Privacy > Blocked people."
+    },
+    "block.list.title": {
+      "text": "Blocked people",
+      "comment": "Title of the list in Settings > Privacy, and of its row."
+    },
+    "block.unblock": {
+      "text": "Unblock",
+      "comment": "Row on a blocked person's card, in the banner of a blocked one-to-one and on each row of Blocked people."
+    },
     "call.alert.title": {
       "text": "Call",
       "comment": "Title of the alert that explains why a call did not start or ended (the message under it says why)."
@@ -2288,6 +2328,10 @@
     "channels.subscribers.title_count": {
       "text": "Subscribers ({count})",
       "comment": "Title of a channel's subscriber list, with the count."
+    },
+    "channels.unavailable": {
+      "text": "This channel isn't available.",
+      "comment": "Shown in a channel's conversation when the server says the channel was removed but the removal could not be checked."
     },
     "channels.unsubscribe.action": {
       "text": "Unsubscribe",
@@ -8630,6 +8674,146 @@
       "comment": "Placeholder of one word slot; {position} is its number in the phrase, in Latin digits.",
       "security_critical": true
     },
+    "report.action": {
+      "text": "Report",
+      "comment": "Row on a person's card, a group's or channel's info, a contact request, a message or post menu, and a Discover card."
+    },
+    "report.add_messages": {
+      "text": "Add messages",
+      "comment": "Link in the report sheet that opens the conversation to pick messages."
+    },
+    "report.also_block": {
+      "text": "Also block {name}",
+      "comment": "Checkbox in the report sheet, on by default, when a person is reported."
+    },
+    "report.also_leave": {
+      "text": "Leave the group",
+      "comment": "Checkbox in the report sheet, off by default, when a group is reported."
+    },
+    "report.also_unsubscribe": {
+      "text": "Unsubscribe",
+      "comment": "Checkbox in the report sheet, off by default, when a channel is reported."
+    },
+    "report.comment": {
+      "text": "Anything to add (optional)",
+      "comment": "Placeholder of the optional text field of the report sheet."
+    },
+    "report.empty_hint": {
+      "text": "Reports with messages included are reviewed first.",
+      "comment": "Hint in the report sheet when nothing is included."
+    },
+    "report.failed": {
+      "text": "Couldn't send the report. Try again.",
+      "comment": "Error in the report sheet when the network failed; the sheet stays filled in."
+    },
+    "report.included": {
+      "text": "{n, plural, one {Included: # message} other {Included: # messages}}",
+      "comment": "Line in the report sheet saying how many messages go with the report; {n} is the count."
+    },
+    "report.included_none": {
+      "text": "Nothing included",
+      "comment": "Line in the report sheet when no message is picked."
+    },
+    "report.included_partial": {
+      "text": "Included: {n} of {total} messages",
+      "comment": "Some picked messages are no longer on this device and are left out; {n} go, out of {total} picked."
+    },
+    "report.limited": {
+      "text": "You've sent many reports today. Try again tomorrow.",
+      "comment": "Error in the report sheet when today's report limit is used up."
+    },
+    "report.list.empty": {
+      "text": "You haven't sent any reports.",
+      "comment": "Empty state of Settings > Privacy > Your reports."
+    },
+    "report.list.title": {
+      "text": "Your reports",
+      "comment": "Title of the list in Settings > Privacy, and of its row."
+    },
+    "report.not_told": {
+      "text": "{name} isn't told who reported them.",
+      "comment": "Second sentence above the send button when a person is reported."
+    },
+    "report.reason.child_safety": {
+      "text": "A child's safety",
+      "comment": "A report reason: content that puts a child at risk."
+    },
+    "report.reason.harassment": {
+      "text": "Harassment or threats",
+      "comment": "A report reason."
+    },
+    "report.reason.hate": {
+      "text": "Hate",
+      "comment": "A report reason."
+    },
+    "report.reason.impersonation": {
+      "text": "Pretending to be someone else",
+      "comment": "A report reason."
+    },
+    "report.reason.other": {
+      "text": "Something else",
+      "comment": "A report reason."
+    },
+    "report.reason.sexual": {
+      "text": "Sexual content",
+      "comment": "A report reason."
+    },
+    "report.reason.spam": {
+      "text": "Spam or scam",
+      "comment": "A report reason."
+    },
+    "report.reason.violence": {
+      "text": "Violence or graphic content",
+      "comment": "A report reason."
+    },
+    "report.select.done": {
+      "text": "Done",
+      "comment": "Button that ends picking messages for a report."
+    },
+    "report.select.limit": {
+      "text": "You can include up to {n} messages.",
+      "comment": "Shown when the person tries to pick more than the limit; {n} is the limit."
+    },
+    "report.select.title": {
+      "text": "Choose messages",
+      "comment": "Title of the conversation while picking messages for a report."
+    },
+    "report.send": {
+      "text": "Send report",
+      "comment": "Primary button of the report sheet."
+    },
+    "report.sent": {
+      "text": "Report sent. Moderators will review it.",
+      "comment": "Short notice after a report was sent."
+    },
+    "report.status.action": {
+      "text": "Action taken",
+      "comment": "Status of a sent report: moderators acted on it. Never says what or against whom."
+    },
+    "report.status.none": {
+      "text": "No action",
+      "comment": "Status of a sent report: moderators decided not to act."
+    },
+    "report.status.received": {
+      "text": "Received",
+      "comment": "Status of a sent report: not decided yet."
+    },
+    "report.title": {
+      "text": "Report {name}",
+      "comment": "Title of the report sheet; {name} is the person, group or channel reported."
+    },
+    "report.unavailable": {
+      "text": "Reporting isn't available on this server.",
+      "comment": "Error in the report sheet when the server takes no reports."
+    },
+    "report.who_sees": {
+      "text": "Lakko's moderators will see what's included.",
+      "comment": "Line above the send button of the report sheet."
+    },
+    "report.why": {
+      "text": "Why are you reporting this?",
+      "comment": "Heading above the list of report reasons."
+    },
     "requests_sent.ask_again": {
       "text": "Ask again",
       "comment": "Button on a request to join with no answer after 7 days."
@@ -10029,6 +10213,106 @@
       "text": "Translation isn't available in this browser",
       "comment": "Web variant of the line above."
     },
+    "suspended.appeal": {
+      "text": "Appeal",
+      "comment": "Button on the suspended screen that opens the appeal sheet."
+    },
+    "suspended.appeal.declined": {
+      "text": "Your appeal was declined.",
+      "comment": "Shown on the suspended screen after moderators declined the appeal."
+    },
+    "suspended.appeal.failed": {
+      "text": "Couldn't send the appeal. Try again.",
+      "comment": "Shown in the appeal sheet when sending failed."
+    },
+    "suspended.appeal.field": {
+      "text": "Tell the moderators what happened",
+      "comment": "Placeholder of the appeal text field (up to 1,000 characters)."
+    },
+    "suspended.appeal.once": {
+      "text": "You can send one appeal for this suspension.",
+      "comment": "Hint under the appeal text field."
+    },
+    "suspended.appeal.send": {
+      "text": "Send appeal",
+      "comment": "Button in the appeal sheet."
+    },
+    "suspended.appeal.sent": {
+      "text": "Appeal sent. You'll see the decision here.",
+      "comment": "Shown on the suspended screen after the appeal was sent."
+    },
+    "suspended.appeal.title": {
+      "text": "Appeal the suspension",
+      "comment": "Title of the appeal sheet."
+    },
+    "suspended.appeal.unavailable": {
+      "text": "Appeals aren't available on this server.",
+      "comment": "Shown in the appeal sheet when the server has no moderators configured."
+    },
+    "suspended.banner": {
+      "text": "{name}'s account is suspended for breaking Lakko's rules.",
+      "comment": "Banner at the top of a one-to-one when the other person's account is suspended. {name} is their display name. No action on the banner."
+    },
+    "suspended.cannot_add": {
+      "text": "This account is suspended. You can't add it.",
+      "comment": "Shown on an invite link page or in search when the account the link or result names is suspended."
+    },
+    "suspended.card_line": {
+      "text": "Account suspended",
+      "comment": "Muted line under the name on a person's card when their account is suspended."
+    },
+    "suspended.channel_removed": {
+      "text": "This channel was removed for breaking Lakko's rules.",
+      "comment": "Shown in a channel's info and conversation when the moderation log confirms the channel was removed. Posts already on the device stay readable."
+    },
+    "suspended.member": {
+      "text": "Suspended",
+      "comment": "Muted marker after a member's name in a group's member list when their account is suspended."
+    },
+    "suspended.self.body": {
+      "text": "You can read your chats but you can't send messages, add contacts or make calls.",
+      "comment": "Body of the suspended screen."
+    },
+    "suspended.self.composer": {
+      "text": "Your account is suspended",
+      "comment": "Shown in place of the message composer while the account is suspended."
+    },
+    "suspended.self.delete": {
+      "text": "Delete account",
+      "comment": "Button on the suspended screen of a device that holds no chats (signed in afresh), where Settings cannot be reached; opens the usual delete-account confirmation."
+    },
+    "suspended.self.load_failed": {
+      "text": "Couldn't load the details. Try again.",
+      "comment": "Shown on the suspended screen when its details could not be loaded."
+    },
+    "suspended.self.loading": {
+      "text": "Checking your account…",
+      "comment": "Shown on the suspended screen while the suspension details load."
+    },
+    "suspended.self.no_end": {
+      "text": "This suspension has no end date.",
+      "comment": "Line on the suspended screen for a suspension with no end."
+    },
+    "suspended.self.read": {
+      "text": "Read my chats",
+      "comment": "Button on the suspended screen: open the app read-only."
+    },
+    "suspended.self.reason": {
+      "text": "Reason: {reason}.",
+      "comment": "Line on the suspended screen; {reason} is a report reason name such as 'Spam or scam'."
+    },
+    "suspended.self.sign_out": {
+      "text": "Sign out",
+      "comment": "Button on the suspended screen."
+    },
+    "suspended.self.title": {
+      "text": "Your account is suspended",
+      "comment": "Title of the screen a suspended person sees at sign-in or refresh."
+    },
+    "suspended.self.until": {
+      "text": "Until {date}.",
+      "comment": "Line on the suspended screen; {date} is the end of a timed suspension."
+    },
     "tokens.action_allowance_used": {
       "text": "You have used today's allowance for this. Try again tomorrow.",
       "comment": "An invite link, group link or channel name refused because the account's daily allowance for it is used up."
@@ -10368,6 +10652,10 @@
       "text": "Only the ones you choose ({chosen} of {total}).",
       "comment": "Line under Members of my groups and channels when only chosen ones count. {chosen} is how many are on, {total} how many groups and channels the person is in.",
       "security_critical": true
+    },
+    "who_can_find_me.hidden_by_moderation": {
+      "text": "Lakko's moderators removed you from search. People can still find you through your contacts, groups and channels.",
+      "comment": "Shown in Who can find me when the server refuses publishing to everyone because moderators hid the account from search; Everyone cannot be chosen."
     },
     "who_can_find_me.lede": {
       "text": "Whoever can find you by username or name can ask to be your contact.",

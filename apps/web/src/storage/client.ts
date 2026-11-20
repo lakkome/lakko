@@ -38,6 +38,7 @@
  *     status code + endpoint so the UI can branch on 404 / 400.
  *   * [`StorageNetworkError`] — DNS / TLS / transport failure.
  */
+import { writeGuardedFetch } from "../auth/suspension-state";
 import { sessionFetch } from "../auth/session-fetch";
 import {
   BLOB_DELETE_KEY_HEADER,
@@ -219,7 +220,7 @@ export class StorageClient {
         try {
           // `.slice()` reifies the backing buffer as a fresh `ArrayBuffer`
           // so it satisfies TS's `BodyInit` type.
-          response = await fetch(url, { method: "PUT", headers, body: ciphertext.slice() });
+          response = await writeGuardedFetch(url, { method: "PUT", headers, body: ciphertext.slice() });
         } catch (err) {
           throw new StorageNetworkError(endpoint, err);
         }
@@ -272,7 +273,7 @@ export class StorageClient {
     const found = await this.withPass("read", endpoint, async (pass) => {
       let response: Response;
       try {
-        response = await fetch(url, { method: "GET", headers: pass === null ? {} : { [BLOB_PASS_HEADER]: pass } });
+        response = await writeGuardedFetch(url, { method: "GET", headers: pass === null ? {} : { [BLOB_PASS_HEADER]: pass } });
       } catch (err) {
         throw new StorageNetworkError(endpoint, err);
       }
@@ -295,7 +296,7 @@ export class StorageClient {
     const found = await this.withPass("read", endpoint, async (pass) => {
       let response: Response;
       try {
-        response = await fetch(url, { method: "HEAD", headers: pass === null ? {} : { [BLOB_PASS_HEADER]: pass } });
+        response = await writeGuardedFetch(url, { method: "HEAD", headers: pass === null ? {} : { [BLOB_PASS_HEADER]: pass } });
       } catch (err) {
         throw new StorageNetworkError(endpoint, err);
       }
@@ -324,7 +325,7 @@ export class StorageClient {
     await this.withPass("read", endpoint, async (pass) => {
       let response: Response;
       try {
-        response = await fetch(url, {
+        response = await writeGuardedFetch(url, {
           method: "POST",
           headers: { "content-type": "application/json", ...(pass === null ? {} : { [BLOB_PASS_HEADER]: pass }) },
           body,
@@ -356,7 +357,7 @@ export class StorageClient {
     const [name, value] = await access.signDelete(blobId, endpoint);
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}${endpoint}`, { method: "DELETE", headers: { [name]: value } });
+      response = await writeGuardedFetch(`${this.baseUrl}${endpoint}`, { method: "DELETE", headers: { [name]: value } });
     } catch (err) {
       throw new StorageNetworkError(`${endpoint} (DELETE)`, err);
     }

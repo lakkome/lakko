@@ -13,7 +13,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:?usage: render-units.sh <output-dir>}"
 mkdir -p "$OUT"
 
-SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu obfs-proxy)
+SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu obfs-proxy moderation)
 
 # The `Environment=LAKKO_*_KEY_PATH` lines dropped below point into
 # /etc/lakko/secrets, which the test stack does not have. The test server

@@ -75,6 +75,14 @@ public final class ContactsViewModel: ObservableObject {
     private weak var chatRepository: ChatRepository?
     private var cancellables: Set<AnyCancellable> = []
 
+    /// ADR-0089 step 4 — the repository's state with the requests of
+    /// senders known suspended left out of `pending`.
+    static func hidingSuspended(_ state: ContactsState, isSuspended: (Data) -> Bool) -> ContactsState {
+        let visible = SuspensionMarkRules.visibleRequests(state.pending, isSuspended: isSuspended)
+        guard visible.count != state.pending.count else { return state }
+        return state.with(pending: visible, lastError: state.lastError)
+    }
+
     public init(
         repository: ContactsRepository,
         chatRepository: ChatRepository? = nil
@@ -104,12 +112,23 @@ public final class ContactsViewModel: ObservableObject {
             chatRepository?.oneToOneConversation(
                 contactKey: contact.request.fromPubkey, linkedGroupIdHex: contact.groupIdHex)
         }
-        self.repositoryState = repository.state
+        // ADR-0089 step 4 — a held request whose sender the moderation log
+        // shows suspended is not shown (it is kept, and comes back when the
+        // suspension ends); the senders are asked about as requests arrive.
+        let marks = SuspensionMarks.shared
+        self.repositoryState = Self.hidingSuspended(repository.state, isSuspended: marks.isSuspended)
         repository.$state
+            .combineLatest(marks.$marks)
             .receive(on: RunLoop.main)
-            .sink { [weak self] newState in
-                self?.repositoryState = newState
+            .sink { [weak self] newState, _ in
+                self?.repositoryState = Self.hidingSuspended(newState, isSuspended: marks.isSuspended)
             }
+            .store(in: &cancellables)
+        repository.$state
+            .map { $0.pending.map(\.fromPubkey) }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { marks.check($0) }
             .store(in: &cancellables)
         self.invited = repository.invited
         repository.$invited
@@ -396,6 +415,37 @@ public final class ContactsViewModel: ObservableObject {
     public func chatGroupIdHex(for contact: AcceptedContact) -> String? {
         conversation(contact)
     }
+
+    /// ADR-0089 / UX 2.1 — Report from a person's card: the person, nothing
+    /// included at first, their own messages in the one-to-one offered, and
+    /// `Also block` checked.
+    public func reportRequest(for contact: AcceptedContact, name: String) -> ReportRequest {
+        let key = contact.request.fromPubkey
+        let chat = conversation(contact)
+        let messages = chat.flatMap { chatRepository?.heldMessages(groupIdHex: $0) } ?? []
+        return ReportRequest(
+            target: .person(accountKey: key), targetName: name, conversationKind: .card,
+            groupIdHex: chat,
+            candidates: ReportCandidates.from(messages, onlyAuthor: base64Encode(key), name: { _ in nil }),
+            followUp: .block, personName: name)
+    }
+
+    /// ADR-0089 — Report a contact request: the requester, with the request
+    /// itself included (its wire as it was received; a row stored before
+    /// the wire was kept carries none).
+    public func reportRequest(forRequest request: IncomingContactRequest, name: String) -> ReportRequest {
+        ReportRequest(
+            target: .person(accountKey: request.fromPubkey), targetName: name,
+            conversationKind: .contactRequest,
+            fixedEvidence: request.wire.map { [FfiEvidenceItem.contactRequest(wire: $0)] } ?? [],
+            followUp: .block, personName: name)
+    }
+
+    /// ADR-0089 / UX 1.2 — block a person from a card or a request row.
+    public func block(accountKey: Data) { BlockList.shared.block(accountKey) }
+
+    /// UX 1.3.
+    public func unblock(accountKey: Data) { BlockList.shared.unblock(accountKey) }
 
     /// The accepted contact on the other side of a conversation between two
     /// people, or `nil` when this device holds none for them.

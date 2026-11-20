@@ -1787,6 +1787,77 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
+    /// Block (`blocked`) or unblock the account whose 32-byte account
+    /// signature key is `accountKey` (ADR-0089 section 6), stamped `hlc`,
+    /// at wall-clock `nowMs`. Returns the envelope to send in a DeviceGroup
+    /// service envelope, or `undefined` when nothing changed. Throws
+    /// `"bounds: ..."` when the key is not 32 bytes.
+    #[wasm_bindgen(js_name = setBlocked)]
+    pub fn set_blocked(
+        &self,
+        hlc: u64,
+        account_key: &[u8],
+        blocked: bool,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let Ok(key) = <[u8; core::BLOCKED_KEY_LEN]>::try_from(account_key) else {
+            return Err(JsError::new("bounds: account key must be 32 bytes"));
+        };
+        self.with(|s| s.set_blocked(hlc, key, blocked, now_ms))
+    }
+
+    /// Whether the account `accountKey` is blocked. A key of another length
+    /// is never blocked.
+    #[wasm_bindgen(js_name = isBlocked)]
+    pub fn is_blocked(&self, account_key: &[u8]) -> Result<bool, JsError> {
+        let Ok(key) = <[u8; core::BLOCKED_KEY_LEN]>::try_from(account_key) else {
+            return Ok(false);
+        };
+        self.with(|s| s.is_blocked(&key))
+    }
+
+    /// Every blocked account key, most recently blocked first,
+    /// flat-concatenated (32 bytes each). `blockedAccountTimes` gives the
+    /// times in the same order.
+    #[wasm_bindgen(js_name = blockedAccounts)]
+    pub fn blocked_accounts(&self) -> Result<Vec<u8>, JsError> {
+        self.with(|s| {
+            s.blocked_accounts()
+                .iter()
+                .flat_map(|(k, _)| k.to_vec())
+                .collect()
+        })
+    }
+
+    /// When each account of `blockedAccounts` was blocked, wall-clock
+    /// millis, in the same order.
+    #[wasm_bindgen(js_name = blockedAccountTimes)]
+    pub fn blocked_account_times(&self) -> Result<Vec<u64>, JsError> {
+        self.with(|s| s.blocked_accounts().iter().map(|(_, t)| *t).collect())
+    }
+
+    /// Every held block register, unblocks included, as envelopes: the
+    /// re-send a device owes on DeviceGroup growth or when a live send did
+    /// not go out.
+    #[wasm_bindgen(js_name = blockedEnvelopes)]
+    pub fn blocked_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        Ok(self
+            .with(|s| s.blocked_envelopes())?
+            .iter()
+            .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+            .collect())
+    }
+
+    /// Decode a block envelope received in a DeviceGroup service envelope
+    /// (route on `isBlockedEnvelope`) and fold every register in. Fail
+    /// closed. Returns whether anything changed. Throws an `Error` whose
+    /// message is `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyBlockedEnvelope)]
+    pub fn apply_blocked_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_blocked_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4) at
     /// `hlc`. `true` when written; then send `linkRecordEnvelopeFor(linkId)`
     /// in a DeviceGroup service envelope.
@@ -2116,6 +2187,22 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
+/// `true` when `bytes` open with the block envelope domain (ADR-0089
+/// section 6). Says nothing about validity; `SyncedState.applyBlockedEnvelope`
+/// decides that.
+#[wasm_bindgen(js_name = isBlockedEnvelope)]
+#[must_use]
+pub fn is_blocked_envelope(bytes: &[u8]) -> bool {
+    core::is_blocked_envelope(bytes)
+}
+
+/// Longest block envelope; below `deviceGroupServiceEnvelopeMaxLen()`.
+#[wasm_bindgen(js_name = blockedEnvelopeMaxLen)]
+#[must_use]
+pub fn blocked_envelope_max_len() -> u32 {
+    u32::try_from(core::BLOCKED_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
 /// `true` when `bytes` open with the device-acknowledgement envelope domain
 /// (`lakko/sync/device-ack/v1`): the routing question for a DeviceGroup
 /// service envelope. Says nothing about validity;
@@ -2386,6 +2473,25 @@ mod tests {
             recovery_email_envelope_max_len()
                 <= crate::mls::device_group_service_envelope_max_len()
         );
+    }
+
+    /// A block is written, carried and listed (the envelope arrays are not
+    /// built off wasm32, so `blockedEnvelopes` is not called here).
+    #[test]
+    fn a_block_is_set_folded_and_listed() {
+        let a = SyncedState::new();
+        let sent = a.set_blocked(2, &[9u8; 32], true, 7).ok().flatten();
+        let Some(sent) = sent else {
+            panic!("a block writes");
+        };
+        assert!(is_blocked_envelope(&sent));
+        assert!(blocked_envelope_max_len() <= crate::mls::device_group_service_envelope_max_len());
+        let b = SyncedState::new();
+        assert_eq!(b.apply_blocked_envelope(&sent).ok(), Some(true));
+        assert_eq!(b.is_blocked(&[9u8; 32]).ok(), Some(true));
+        assert_eq!(b.is_blocked(&[9u8; 3]).ok(), Some(false));
+        assert_eq!(b.blocked_accounts().ok(), Some(vec![9u8; 32]));
+        assert_eq!(b.blocked_account_times().ok(), Some(vec![7]));
     }
 
     /// Envelopes arrays cannot be built off wasm32, so the envelope comes

@@ -25,6 +25,7 @@
  * action.
  */
 
+import { accountSuspended } from "../auth/suspension-state";
 import { createMemo, For, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
@@ -171,7 +172,8 @@ export default function Calls(): JSX.Element {
     <aside class="lk-pane" aria-label={t("nav.calls")}>
       <div class="lk-pane-head">
         <h1>{t("nav.calls")}</h1>
-        <div class="lk-actions">
+        {/* ADR-0089 step 3: a suspended account places no call. */}
+        <div class="lk-actions" style={accountSuspended() ? { display: "none" } : undefined}>
           <button type="button" class="primary" onClick={() => void newCall()}>
             <Icon name="video" size={16} />
             {t("call.history.new_call")}
@@ -231,6 +233,7 @@ export default function Calls(): JSX.Element {
                         <button
                           type="button"
                           class="lk-icon-button"
+                          style={accountSuspended() ? { display: "none" } : undefined}
                           title={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
                           aria-label={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
                           onClick={() => callBack(row)}

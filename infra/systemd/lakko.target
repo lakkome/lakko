@@ -24,6 +24,7 @@ Wants=lakko-svc-auth.service \
       lakko-svc-discovery.service \
       lakko-svc-push-gw.service \
       lakko-svc-channels.service \
+      lakko-svc-moderation.service \
       lakko-sfu.service
 After=network-online.target
 

@@ -17,6 +17,8 @@ import { createMemo, createResource, createSignal, For, Show, type JSX } from "s
 import { A, useNavigate } from "@solidjs/router";
 
 import { t } from "../l10n";
+import { useAuth } from "../auth/AuthContext";
+import { isHiddenFromSearch } from "../moderation/hidden-from-search";
 import { tRich } from "../l10n/rich";
 import { reachApplyStatus, reachSession } from "../reach/reach-service";
 import { visibilitySetting } from "../reach/visibility-store";
@@ -40,6 +42,7 @@ import {
   showsMembersSwitch,
   showsListSearch,
   statusLine,
+  everyoneOffered,
   viewOf,
   visibleRows,
   type ContactEntry,
@@ -130,13 +133,16 @@ function ModeRow(props: {
   readonly label: string;
   readonly helper?: string;
   readonly current: ModeName;
+  /** ADR-0089 step 5: Everyone while moderators hid the account. */
+  readonly disabled?: boolean;
 }): JSX.Element {
   return (
-    <label class="lk-card-row lk-privacy-choice">
+    <label class="lk-card-row lk-privacy-choice" classList={{ disabled: props.disabled === true }}>
       <input
         type="radio"
         name="lk-visibility-mode"
         checked={props.current === props.mode}
+        disabled={props.disabled === true}
         onChange={() => run(() => actions.chooseMode(props.mode))}
       />
       <span class="lk-card-row-body">
@@ -149,6 +155,12 @@ function ModeRow(props: {
 
 export function WhoCanFindMeSection(): JSX.Element {
   const navigate = useNavigate();
+  const auth = useAuth();
+  /** ADR-0089 step 5: moderators hid this account from search. */
+  const hidden = (): boolean => {
+    const s = auth.state();
+    return isHiddenFromSearch(s.kind === "session" ? s.account.accountId : null);
+  };
   const view = useView();
   const chosenKeys = useChosenKeys();
   const scopes = useFindableScopes();
@@ -324,7 +336,13 @@ export function WhoCanFindMeSection(): JSX.Element {
                   label={COPY.everyone()}
                   helper={COPY.everyoneHelper()}
                   current={v().mode}
+                  disabled={everyoneOffered(hidden()) === false}
                 />
+                <Show when={hidden()}>
+                  <p class="lk-card-row-sub lk-privacy-hidden" role="status">
+                    {t("who_can_find_me.hidden_by_moderation")}
+                  </p>
+                </Show>
               </div>
             </section>
           );

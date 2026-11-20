@@ -19,7 +19,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lakko_anon_token_server::{AnonTokenServerConfig, TokenVerifier};
 use lakko_svc_channels::api::INVITE_KEY_GRACE_MS;
-use lakko_svc_channels::internal::{internal_router, load_internal_secret};
+use lakko_svc_channels::internal::{internal_router, load_internal};
 use lakko_svc_channels::owner_auth::OWNER_NONCE_RETENTION_MS;
 use lakko_svc_channels::{
     router, AppState, ChannelStore, Config, InMemoryChannelStore, SqlChannelStore, MIGRATIONS,
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     info!(bind = %cfg.bind, "lakko-svc-channels starting (v{})", VERSION);
     let anon_config = AnonTokenServerConfig::from_env()?;
-    let internal_secret = load_internal_secret().map_err(anyhow::Error::msg)?;
+    let internal = load_internal().map_err(anyhow::Error::msg)?;
 
     let (store, anon_tokens): (Arc<dyn ChannelStore + Send + Sync>, TokenVerifier) =
         if let Some(url) = &cfg.database_url {
@@ -101,8 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(cfg.clone(), store, anon_tokens);
     let app = router(Arc::clone(&state));
 
-    if let Some(secret) = internal_secret {
-        let internal = internal_router(state, secret);
+    if let Some(internal_config) = internal {
+        let internal = internal_router(state, internal_config);
         let internal_listener = TcpListener::bind(cfg.internal_bind).await?;
         info!(bind = %cfg.internal_bind, "internal moderation listener started");
         tokio::spawn(async move {
@@ -112,8 +112,8 @@ async fn main() -> anyhow::Result<()> {
         });
     } else {
         warn!(
-            "internal moderation listener NOT started: LAKKO_CHANNELS_INTERNAL_SECRET is unset; \
-             listings cannot be removed or blocked by the operator"
+            "internal moderation listener NOT started: LAKKO_CHANNELS_INTERNAL_SECRET or \
+             LAKKO_CHANNELS_MODERATION_ROOT_KEY is unset; no moderator action reaches channels"
         );
     }
 

@@ -16,6 +16,8 @@
  * are gone. The machinery that kept a channel alive while the Manage page was
  * mounted runs app-wide (`channels/ChannelPublisherLoops.tsx`).
  */
+import { accountSuspended } from "../auth/suspension-state";
+import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 
@@ -65,6 +67,19 @@ import { ChannelComposer } from "../channels/ChannelComposer";
 import { ChannelInfo, ChannelInfoScreenHost, type ChannelInfoScreen } from "../channels/ChannelInfo";
 import { ChannelPostItem } from "../channels/ChannelPostItem";
 import { fetchPosts, type ChannelPostView } from "../channels/api";
+import { openChannelReport } from "../moderation/channel-report";
+import { registerLivePosts } from "../moderation/report-runtime";
+import { attachmentsPreviewLabel } from "../chat/list-preview";
+import { CONVERSATION_CHANNEL } from "../moderation/report-model";
+
+/** A post's base64url payload as bytes (padding optional). */
+function base64UrlToBytesForReport(b64url: string): Uint8Array {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
 import { foldBanListFromPlaintext } from "../channels/ban-list";
 import { foldChannelMeta } from "../channels/channel-meta";
 import { decodeAndDecryptPost } from "../channels/composer";
@@ -79,6 +94,10 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { PushedScreen } from "../ui/PushedScreen";
 import { loadWasm } from "../wasm";
+import { getDeviceKey } from "../auth/key-store";
+import { loadChannelPostLog } from "../feed/channel-post-log-store";
+import { channelWriteControls, heldPostsOf } from "../channels/removed-channel";
+import { channelRemovalLine, channelRemovalLineKey } from "../moderation/channel-removal";
 import { paths } from "./paths";
 
 /** What a search card or a link page may hand the route: how to subscribe
@@ -116,6 +135,12 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   const canPublish = (): boolean => role() === "owner" || role() === "publisher";
   const reading = (): boolean => canPublish() || channelReadStateOf(id) === "reading";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(id);
+  // ADR-0089 step 5: moderators removed the channel. It stays, the posts on
+  // this device stay readable, nothing that writes is offered.
+  const removalLine = (): ReturnType<typeof channelRemovalLine> => channelRemovalLine(id);
+  const removed = (): boolean => removalLine() !== null;
+  const controls = (): ReturnType<typeof channelWriteControls> =>
+    channelWriteControls({ canPublish: canPublish(), reading: reading(), accountSuspended: accountSuspended(), removed: removed() });
 
   const [infoOpen, setInfoOpen] = createSignal(false);
   const [infoScreen, setInfoScreen] = createSignal<ChannelInfoScreen | null>(null);
@@ -219,9 +244,34 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
         await decodeAll(merged);
       }
     } catch {
-      setLoadFailed(untrack(posts).length === 0);
+      if (removed()) {
+        // The service refuses a removed channel: what this device holds is
+        // shown instead, and no load failure is claimed.
+        setLoadFailed(false);
+        if (untrack(posts).length === 0) await showHeldPosts();
+      } else {
+        setLoadFailed(untrack(posts).length === 0);
+      }
     } finally {
       setLoaded(true);
+    }
+  }
+
+  /** A removed channel opened with nothing fetched in this view: the posts
+   *  the channel-post log holds for it. */
+  async function showHeldPosts(): Promise<void> {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    try {
+      const key = await getDeviceKey(s.account.accountId);
+      if (key === null) return;
+      const log = await loadChannelPostLog(s.account.accountId, key);
+      const held = heldPostsOf(log?.channels[id]);
+      if (held.posts.length === 0 || untrack(posts).length > 0 || !removed()) return;
+      setPosts(held.posts);
+      setDecoded(held.decoded);
+    } catch {
+      // Nothing held: the empty line says so.
     }
   }
 
@@ -259,6 +309,22 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   // the read state's VALUE, so the catch-up's own epoch write does not start
   // another read.
   const readState = createMemo(() => channelReadStateOf(id));
+  // A restore: the channel answers again, and is read from the start as if
+  // it had never been removed (the held posts carry no attachments).
+  createEffect(
+    on(
+      removed,
+      (now, before) => {
+        if (before !== true || now) return;
+        caughtUp = false;
+        setPosts([]);
+        setDecoded(new Map());
+        setEpochs(new Map());
+        void load();
+      },
+      { defer: true },
+    ),
+  );
   createEffect(on(readState, () => void load({ redecode: true }), { defer: true }));
   const timeline = createMemo(() => channelTimeline(posts(), decoded()));
 
@@ -268,7 +334,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
       .posts.filter((p) => p.state === "ok")
       .map((p) => p.cursor)
       .slice(-50);
-    if (cursors.length > 0 && reading()) requestReactionCounts(id, cursors);
+    if (cursors.length > 0 && reading() && !removed()) requestReactionCounts(id, cursors);
   });
 
   // ----- the list scrolls to its end and the newest post shown is read -----
@@ -374,6 +440,43 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
       navigate(conversationKindOf(entry.group) === "chat" ? paths.chat(slug) : paths.groupChat(slug));
     }
   }
+
+  // ----- ADR-0089 section 2: reporting the channel's posts -----
+  /** A post's menu: the channel is the target, the post is included. */
+  function reportPost(cursor: number): void {
+    openChannelReport({
+      channelIdHex: id,
+      name: facts().name,
+      conversationKind: CONVERSATION_CHANNEL,
+      picked: [cursor],
+      fixed: [],
+      leave: null,
+    });
+  }
+  // The posts as fetched, for a report's evidence and its "Choose messages"
+  // list while this view is open.
+  onCleanup(
+    registerLivePosts(id, {
+      post: (cursor) => {
+        const view = posts().find((p) => p.cursor === cursor);
+        if (view === undefined) return undefined;
+        try {
+          return base64UrlToBytesForReport(view.payloadB64);
+        } catch {
+          return undefined;
+        }
+      },
+      candidates: () =>
+        timeline().posts.map((p) => ({
+          id: p.cursor,
+          authorKeyB64: undefined,
+          text: p.text,
+          filesLabel: attachmentsPreviewLabel(p.attachments.map((a) => ({ mime: a.mime ?? null, kind: a.kind ?? null }))),
+          createdAt: new Date(p.serverTsMs).toISOString(),
+          deleted: p.state !== "ok",
+        })),
+    }),
+  );
 
   // ----- publishing -----
   async function publish(plaintext: Uint8Array): Promise<void> {
@@ -483,7 +586,14 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
           }
         >
           <div class="lk-chat-scroll lk-channel-scroll" ref={scroller}>
-            <Show when={!canPublish() && channelReadStateOf(id) === "waiting"}>
+            <Show when={removalLine()}>
+              {(line) => (
+                <div class="lk-alert info lk-channel-notice lk-channel-removed" role="status">
+                  {t(channelRemovalLineKey(line()))}
+                </div>
+              )}
+            </Show>
+            <Show when={!removed() && !canPublish() && channelReadStateOf(id) === "waiting"}>
               <div class="lk-alert info lk-channel-notice" role="status">
                 {t("channels.link_page.waiting")}
               </div>
@@ -491,7 +601,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             <Show when={timeline().earlierUnavailable}>
               <p class="lk-channel-earlier">{t("channels.posts.earlier_unavailable")}</p>
             </Show>
-            <Show when={loadFailed()}>
+            <Show when={loadFailed() && !removed()}>
               <div class="lk-alert danger lk-channel-notice" role="alert">
                 {t("channels.posts.error.load")}
                 <button type="button" class="ghost small" onClick={() => void load()}>
@@ -529,8 +639,8 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
                       post={post}
                       epoch={epochs().get(post.cursor)}
                       hub={hub}
-                      canPublish={canPublish()}
-                      canReact={reading()}
+                      canPublish={controls().editDelete}
+                      canReact={controls().reactAndComment}
                       now={clock()}
                       sessionToken={() => auth.identitySecrets()?.sessionToken ?? null}
                       onEdit={(cursor, text) => setEditing({ cursor, text })}
@@ -538,6 +648,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
                       onForward={() => setForwarding(post)}
                       saved={isSaved(post.cursor)}
                       onToggleSaved={() => void toggleSaved(post)}
+                      onReport={controls().reportPost ? () => reportPost(post.cursor) : undefined}
                     />
                     </>
                   )}
@@ -552,8 +663,12 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
               </div>
             )}
           </Show>
-          <Show when={canPublish()}>
-            <ChannelComposer publish={publish} editing={editing()} onCancelEdit={() => setEditing(null)} hub={hub} />
+          {/* ADR-0089 step 3: a suspended publisher posts nothing. */}
+          <Show when={canPublish() && !removed()}>
+            <SuspendedComposerLine />
+            <Show when={controls().composer}>
+              <ChannelComposer publish={publish} editing={editing()} onCancelEdit={() => setEditing(null)} hub={hub} />
+            </Show>
           </Show>
         </Show>
       </div>

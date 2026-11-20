@@ -42,6 +42,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -87,6 +88,8 @@ public fun WhoCanFindMeScreen(
 ) {
     val settingOrNull by reach.visibility.collectAsStateWithLifecycle()
     val status by reach.applyStatus.collectAsStateWithLifecycle()
+    // ADR-0089 step 5 — moderators removed this account from search.
+    val hiddenFromSearch by reach.hiddenFromSearch.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     var showList by rememberSaveable { mutableStateOf(false) }
     var showContactList by rememberSaveable { mutableStateOf(false) }
@@ -183,6 +186,14 @@ public fun WhoCanFindMeScreen(
                             }
                         }
                     }
+                }
+                if (hiddenFromSearch) {
+                    Text(
+                        t("who_can_find_me.hidden_by_moderation"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
                 }
                 Text(
                     FIND_ME_EXPLANATION.text(),
@@ -282,6 +293,7 @@ public fun WhoCanFindMeScreen(
                     title = t("who_can_find_me.mode.everyone"),
                     helper = FIND_ME_EVERYONE_HELPER.text(),
                     selected = model.mode == FindMeMode.EVERYONE,
+                    enabled = me.lakko.app.reach.everyoneSelectable(hiddenFromSearch),
                     onSelect = { apply { uniffi.lakko_ffi_uniffi.chooseVisibilityMode(it, FfiVisibilityMode.EVERYONE) } },
                 )
             }
@@ -494,11 +506,12 @@ private fun RadioRow(
     onSelect: () -> Unit,
     indent: Int = 0,
     trailingDisclosure: Boolean = false,
+    enabled: Boolean = true,
 ) {
     ListItem(
         headlineContent = { Text(title) },
         supportingContent = helper?.let { { Text(it) } },
-        leadingContent = { RadioButton(selected = selected, onClick = null) },
+        leadingContent = { RadioButton(selected = selected, onClick = null, enabled = enabled) },
         trailingContent = if (trailingDisclosure) {
             { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null) }
         } else {
@@ -507,7 +520,8 @@ private fun RadioRow(
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
         modifier = Modifier
             .padding(start = (indent * INDENT_DP).dp)
-            .selectable(selected = selected, role = Role.RadioButton, onClick = onSelect),
+            .alpha(if (enabled) 1f else DISABLED_ROW_ALPHA)
+            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onSelect),
     )
 }
 
@@ -681,3 +695,6 @@ public val MEMBERS_CAN_FIND_ME_NOTICE: UiText = UiText(
     "who_can_find_me.members_excluded_notice",
     parts = mapOf("privacy" to UiText("settings.section.privacy")),
 )
+
+/** A radio row that cannot be chosen, drawn muted. */
+private const val DISABLED_ROW_ALPHA: Float = 0.38f

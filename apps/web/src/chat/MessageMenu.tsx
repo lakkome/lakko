@@ -82,6 +82,7 @@
  * backdrop on the two platforms whose menu replaces the screen.
  */
 
+import { accountSuspended } from "../auth/suspension-state";
 import { t } from "../l10n";
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
@@ -272,7 +273,8 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
   /** The reaction row is drawn: not on an older segment's row, and not when
    *  the conversation takes no reactions. Without it the card takes the
    *  row's single-surface slot. */
-  const hasRow = (): boolean => props.pinOnly !== true && props.reactionRow.length > 0;
+  const hasRow = (): boolean =>
+    props.pinOnly !== true && props.reactionRow.length > 0 && !accountSuspended();
 
   const copyable = (): string | null =>
     props.copyText !== null && props.copyText.length > 0 ? props.copyText : null;
@@ -375,7 +377,9 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
           class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
           style={offset((l) => (!hasRow() ? l.row : l.card))}
         >
-            <Show when={props.pinOnly !== true && props.canReply !== false}>
+            {/* ADR-0089 step 3: React, Reply, Forward, Edit and Delete each
+                send; a suspended account's menu does not offer them. */}
+            <Show when={props.pinOnly !== true && props.canReply !== false && !accountSuspended()}>
             <button
               ref={(el) => {
                 if (!hasRow()) firstItem = el;
@@ -388,7 +392,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               <span>{t("chat.message.reply")}</span>
             </button>
             </Show>
-            <Show when={props.pinOnly !== true && props.canForward}>
+            <Show when={props.pinOnly !== true && props.canForward && !accountSuspended()}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onForward())}>
                 <Icon name="forward" size={16} />
                 <span>{t("chat.message.forward")}</span>
@@ -455,7 +459,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               )}
             </Show>
-            <Show when={props.pinOnly !== true && props.canEditDelete}>
+            <Show when={props.pinOnly !== true && props.canEditDelete && !accountSuspended()}>
               <Show when={props.canEdit !== false}>
                 <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
                   <Icon name="pencil" size={16} />

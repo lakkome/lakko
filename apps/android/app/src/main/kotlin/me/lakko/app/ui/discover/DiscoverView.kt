@@ -9,6 +9,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -252,8 +259,46 @@ public fun DiscoverCardView(
                     OutlinedButton(onClick = { model.notInterested(card.channelIdHex) }) { Text(t("discover.card.not_interested")) }
                 }
                 val topic = card.topic
-                if (topic != null) {
-                    TextButton(onClick = { model.hideTopic(topic) }) { Text(t("discover.card.hide_topic")) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (topic != null) {
+                        TextButton(onClick = { model.hideTopic(topic) }) { Text(t("discover.card.hide_topic")) }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    // ADR-0089 — Report, behind the card's overflow: the channel,
+                    // with its listing included.
+                    var overflow by remember(card.channelIdHex) { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { overflow = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = t("common.more_options"))
+                        }
+                        DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
+                            DropdownMenuItem(
+                                text = { Text(t("report.action"), color = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    overflow = false
+                                    me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                                        me.lakko.app.ui.moderation.ReportRequest(
+                                            me.lakko.app.moderation.channelReportSubject(
+                                                channelIdHex = card.channelIdHex,
+                                                name = card.name,
+                                                conversationKind = me.lakko.app.moderation.ReportConversationKind.DISCOVER,
+                                                other = listOfNotNull(
+                                                    card.listingB64?.let { b64 ->
+                                                        runCatching {
+                                                            java.util.Base64.getDecoder().decode(b64)
+                                                        }.recoverCatching {
+                                                            java.util.Base64.getUrlDecoder().decode(b64)
+                                                        }.getOrNull()
+                                                    }?.let { me.lakko.app.moderation.ReportOtherEvidence.Listing(it) },
+                                                ),
+                                                subscribed = false,
+                                            ),
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }

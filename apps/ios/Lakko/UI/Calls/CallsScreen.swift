@@ -43,6 +43,8 @@ struct CallsScreen: View {
     @ObservedObject var conversations: ChatListViewModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 3 — a suspended account makes no calls.
+    @Environment(\.accountSuspended) private var accountSuspended
     /// Start a group video call and land in it. Returns the one sentence to
     /// show when it could not start (another call holds the slot, or there is
     /// no session), `nil` when it did.
@@ -66,6 +68,7 @@ struct CallsScreen: View {
             .navigationTitle(l10n.t("nav.calls"))
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
+                if !accountSuspended {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button(action: startCall) {
                         if starting {
@@ -77,6 +80,7 @@ struct CallsScreen: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(starting)
                     .accessibilityLabel(l10n.t("call.history.new_call"))
+                }
                 }
             }
             .lakkoDialog(item: $startError) { message in
@@ -163,6 +167,7 @@ struct CallsScreen: View {
                 CallHistory.rowAccessibilityLabel(
                     entry, title: title, calendar: calendar, locale: locale))
 
+            if !accountSuspended {
             Button {
                 onCallBack(entry.conversationId, entry.kind, entry.video)
             } label: {
@@ -174,6 +179,7 @@ struct CallsScreen: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(CallHistory.callBackAccessibilityLabel(entry))
+            }
         }
         .padding(.vertical, 4)
     }
@@ -186,9 +192,11 @@ struct CallsScreen: View {
         } description: {
             Text(l10n.t("call.history.empty_body"))
         } actions: {
-            Button(l10n.t("call.history.new_call"), action: startCall)
-                .buttonStyle(.borderedProminent)
-                .disabled(starting)
+            if !accountSuspended {
+                Button(l10n.t("call.history.new_call"), action: startCall)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(starting)
+            }
         }
     }
 

@@ -1,0 +1,26 @@
+{
+  "name": "@lakko/moderation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "description": "Lakko moderators' panel (ADR-0089 section 7). Uses the web client's stylesheet and wasm core; build apps/web's wasm first.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@solidjs/router": "0.16.1",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vite": "6.4.2",
+    "vite-plugin-solid": "2.11.12",
+    "vite-plugin-wasm": "3.6.0",
+    "vitest": "4.1.8"
+  }
+}

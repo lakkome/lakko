@@ -1098,7 +1098,8 @@ final class RecoveryEmailTests: XCTestCase {
         func json(_ phraseSaved: Bool?) throws -> [String: Any] {
             try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(KeyRotateFinishRequest(
                 freshGrant: "g", recoveryUpload: "u", newSignaturePubkeyB64: "k",
-                supersessionProofB64: "p", revokeDeviceIdsB64: [], phraseSaved: phraseSaved))) as? [String: Any])
+                supersessionProofB64: "p", revokeDeviceIdsB64: [], phraseSaved: phraseSaved,
+                identityProofB64: "ip"))) as? [String: Any])
         }
         XCTAssertEqual(try json(true)["phrase_saved"] as? Bool, true)
         XCTAssertNil(try json(nil)["phrase_saved"], "a device rotation sends no field")

@@ -164,6 +164,15 @@ lakko-mnemonic.workspace = true
 # roots), never native-tls.
 lettre.workspace = true
 
+# ADR-0089 section 4 (account suspension): the moderator list, the signed
+# statement and its WebAuthn check, the account target hash and the appeal
+# seal's shape, checked on the internal listener and the appeal route.
+# Already in the lock file (services/moderation, both FFI crates).
+lakko-moderation.workspace = true
+# Constant-time compare of the internal listener's shared secret. Already in
+# the lock file (services/channels).
+subtle = "2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # ADR-0078 section 2: the `/call/jwt` tests mint spendable `call-join`

@@ -101,9 +101,12 @@ final class FreshAuthTests: XCTestCase {
         XCTAssertEqual(start, ["fresh_grant": "g1", "recovery_request": "req"])
         let finish = try JSONSerialization.jsonObject(
             with: JSONEncoder().encode(
-                KeyResetFinishRequest(freshGrant: "g1", recoveryUpload: "up", newSignaturePubkeyB64: "pk"))
+                KeyResetFinishRequest(
+                    freshGrant: "g1", recoveryUpload: "up", newSignaturePubkeyB64: "pk", identityProofB64: "ip"))
         ) as? [String: String]
-        XCTAssertEqual(finish, ["fresh_grant": "g1", "recovery_upload": "up", "new_signature_pubkey_b64": "pk"])
+        XCTAssertEqual(finish, [
+            "fresh_grant": "g1", "recovery_upload": "up", "new_signature_pubkey_b64": "pk",
+            "identity_proof_b64": "ip"])
     }
 
     // MARK: - The refusals

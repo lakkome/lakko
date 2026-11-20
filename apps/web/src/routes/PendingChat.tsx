@@ -25,6 +25,8 @@
  * copies in the same waiting state. They are never sent from here; the
  * device where they were typed sends them (`contacts/carried-copies.ts`).
  */
+import { accountSuspended } from "../auth/suspension-state";
+import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 
@@ -199,7 +201,13 @@ export default function PendingChat(): JSX.Element {
             </For>
           </ol>
             </div>
-          <form class="lk-composer" onSubmit={(e) => void onSend(e)}>
+          {/* ADR-0089 step 3: nothing is queued for a contact while suspended. */}
+          <SuspendedComposerLine />
+          <form
+            class="lk-composer"
+            style={accountSuspended() ? { display: "none" } : undefined}
+            onSubmit={(e) => void onSend(e)}
+          >
             <textarea
               class="lk-composer-input"
               rows={1}

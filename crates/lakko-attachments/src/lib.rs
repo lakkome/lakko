@@ -117,6 +117,9 @@ use zeroize::Zeroize;
 
 use lakko_crypto::aead::{open, seal, AeadKey, Algorithm, KEY_LEN, NONCE_LEN};
 
+pub mod attested;
+pub use attested::{parse_attested_body, AttestError, Attestation};
+
 /// Length of a content-addressed blob id (= SHA-256 output).
 pub const BLOB_ID_LEN: usize = 32;
 
@@ -1858,6 +1861,17 @@ pub enum AttachmentError {
 /// supported public API.
 #[doc(hidden)]
 pub mod fuzz_api {
+    /// The attested-message receive path on arbitrary bytes: never panics,
+    /// and nothing the fuzzer did not sign under the fixed key verifies.
+    pub fn attested_open(bytes: &[u8]) {
+        let key = lakko_crypto::signing::SigningKey::from_seed(&[0x33; 32])
+            .verifying_key()
+            .to_bytes();
+        let (_, att) = crate::attested::parse_attested_body(bytes, b"fuzz-group", &key);
+        assert_ne!(att, crate::attested::Attestation::Verified);
+        let _ = crate::attested::split(bytes);
+    }
+
     use super::{
         compose, compose_channel_invite, compose_chat, compose_forward, compose_reaction,
         compose_reply, is_reaction_emoji, parse, parse_body, AttachmentRef, MediaKind, MessageBody,

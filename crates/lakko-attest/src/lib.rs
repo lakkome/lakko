@@ -122,6 +122,14 @@
 //! separator.
 //!
 //! [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+//!
+//! # Identity proof
+//!
+//! The crate also hosts the identity proof (see the [`identity_proof`]
+//! module, ADR-0089 security fixes): an account identity key's signature
+//! over the account id and its own public key, which auth requires before it
+//! records the key for the account. Client-signed, auth-verified, like the
+//! account statement.
 
 #![forbid(unsafe_code)]
 
@@ -129,6 +137,7 @@ pub mod account_statement;
 pub mod backup_head;
 pub mod genesis;
 pub mod handle_cert;
+pub mod identity_proof;
 pub mod key_reset;
 pub mod release_manifest;
 pub mod username_cert;
@@ -149,6 +158,10 @@ pub use genesis::{
 pub use handle_cert::{
     verify_handle_binding, HandleCertError, HandleCertificate, HANDLE_CERT_LEN,
     HANDLE_WRITE_KEY_LEN,
+};
+pub use identity_proof::{
+    identity_proof_message, sign_identity_proof, verify_identity_proof, IdentityProofError,
+    IDENTITY_PROOF_LEN,
 };
 pub use key_reset::{
     key_reset_account_ref, verify_key_reset_binding, verify_key_reset_fresh, KeyResetAttestError,

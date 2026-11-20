@@ -191,9 +191,25 @@ struct LakkoApp: App {
         // A group call never rings a closed device, so a call wake for a
         // GROUP conversation, or for one whose group call this device is in or
         // just left, rings nothing either (older senders woke for group ends).
+        // ADR-0089 section 6 — no notification of a blocked person's over a
+        // running app.
+        PushAppDelegate.conversationSuppressed = { [weak chat] groupIdHex in
+            guard let peer = chat?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return false }
+            return BlockList.shared.verdict(.notification, accountKey: peer) == .drop
+        }
         VoipPushRegistrar.shared.callWakeSuppressed = {
             [weak host, weak groupHost, weak chat] groupIdHex in
-            CallWakeSuppression.anySource(
+            // ADR-0089 section 6 — a call from a person this account blocked
+            // is declined without a ring (`blockVerdict(.incomingCall)`); the
+            // row itself is dropped by the receive filter, so no missed-call
+            // row is written either.
+            if let peer = chat?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex),
+               BlockList.shared.verdict(.incomingCall, accountKey: peer) == .declineSilently {
+                return true
+            }
+            // ADR-0089 step 3 — a suspended account takes no calls.
+            if SessionTokenProvider.shared.isSuspended { return true }
+            return CallWakeSuppression.anySource(
                 oneToOne: host?.suppressesCallWake(groupIdHex: groupIdHex) ?? false,
                 groupCall: groupHost?.suppressesCallWake(groupIdHex: groupIdHex) ?? false,
                 kind: chat?.groupKind(groupIdHex: groupIdHex))
@@ -433,6 +449,14 @@ struct LakkoApp: App {
         // account's, written through its synced state.
         QuickReactionSetting.shared.onChoose = { [weak sync] emoji in
             Task { _ = await sync?.setQuickReaction(emoji) }
+        }
+        // ADR-0089 section 6 — a block is the account's, written through its
+        // synced state.
+        BlockList.shared.setter = { [weak sync] key, blocked in
+            sync?.setBlocked(accountKey: key, blocked: blocked) ?? false
+        }
+        BlockList.shared.blockAction = { [weak contacts] key in
+            contacts?.block(accountKey: key) ?? BlockList.shared.set(key, blocked: true)
         }
         auth.heldRecoveryAddress = { [weak sync] in sync?.recoveryEmail }
         accountProtection.usernameWatch = sync.$ownUsername
@@ -747,6 +771,9 @@ struct LakkoApp: App {
                     // ADR-0060 section 4 — a `fof` rotation that came due
                     // while the app was closed.
                     ReachCenter.shared.noteForeground()
+                    // ADR-0089 step 3 — a suspended account asks auth again
+                    // on every return to the foreground.
+                    Task { await SuspensionCenter.shared.noteForeground() }
                 }
             }
             // ADR-0061 — the mirrored names carry words of the interface
@@ -812,6 +839,9 @@ struct AppRoot: View, Equatable {
     let services: AppServices
     @ObservedObject private var authRepository: AuthRepository
     @ObservedObject private var inviteIntake: InviteIntake
+    /// ADR-0089 step 3 — suspended mode: the suspended screen in place of
+    /// the app, or the read-only app. Publishes rarely.
+    @ObservedObject private var suspension = SuspensionCenter.shared
     /// ADR-0061 — the two backup alarms below read the catalog, so they
     /// follow a language switch (a rare event; nothing else here re-renders).
     @ObservedObject private var l10n = Localization.shared
@@ -881,6 +911,11 @@ struct AppRoot: View, Equatable {
             // AppRoot appear (view identity is stable across auth-state flips).
             .task {
                 await releaseChecker.checkOnLaunch()
+            }
+            // ADR-0089 step 3 — while suspended, ask auth again every 10
+            // minutes; a normal pair ends suspended mode silently.
+            .task(id: suspension.account) {
+                await suspension.runChecks()
             }
             .onReceive(services.deviceGroupSync.$deviceRemoved.removeDuplicates()) { removed in
                 if deviceRemoved != removed { deviceRemoved = removed }
@@ -956,9 +991,32 @@ struct AppRoot: View, Equatable {
                     services.groupCallHost.reset()
                     services.linkCallHost.reset()
                 }
+        } else if suspension.active, !(suspension.reading && sessionWithKeys) {
+            // ADR-0089 step 3 / UX `reporting-and-moderation.md` section 4 —
+            // the one screen that says why. A device without the account's
+            // keys has no chats to read and shows it alone.
+            SuspendedScreen(
+                center: suspension,
+                keysHere: sessionWithKeys,
+                onSignOut: { authRepository.logout() },
+                authRepository: authRepository,
+                onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) }
+            )
+            .onAppear {
+                services.callHost.reset()
+                services.groupCallHost.reset()
+                services.linkCallHost.reset()
+            }
         } else {
             authContent
+                .environment(\.accountSuspended, suspension.active)
         }
+    }
+
+    /// The account is signed in with its keys on this device.
+    private var sessionWithKeys: Bool {
+        if case .session = authRepository.state { return true }
+        return false
     }
 
     @ViewBuilder private var authContent: some View {
@@ -1235,6 +1293,10 @@ enum TabRoute: Hashable {
     case chatFolders(reorder: Bool)
     /// Settings > Privacy > Who can find me (ADR-0060).
     case whoCanFindMe
+    /// Settings > Privacy > Blocked people (ADR-0089, UX 1.1).
+    case blockedPeople
+    /// Settings > Privacy > Your reports (ADR-0089, UX 2.3).
+    case yourReports
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -1749,6 +1811,11 @@ private struct SessionRoot: View, Equatable {
         .overlay(alignment: .bottom) {
             MembershipEndToast(center: chatRepository.membershipEndNotices)
                 .animation(.easeOut(duration: 0.2), value: chatRepository.membershipEndNotices.shown)
+        }
+        // ADR-0089 / UX 2.3 — "Report sent. Moderators will review it."
+        .overlay(alignment: .bottom) {
+            ReportSentToast()
+                .animation(.easeOut(duration: 0.2), value: ReportNoticeCenter.shared.shown)
         }
         // Deep links: park on the current tab's stack when a slug arrives
         // (a tap while signed in), and pick up one already parked (a tap
@@ -2490,6 +2557,10 @@ private struct SessionRoot: View, Equatable {
             ChatFoldersSettingsScreen(
                 startInReorder: reorder, viewModel: chatListVM, channels: channelsState,
                 feedReading: models.feedReading)
+        case .blockedPeople:
+            BlockedPeopleScreen()
+        case .yourReports:
+            YourReportsScreen(accountIdB64: chatRepository.currentAccountIdB64)
         case .whoCanFindMe:
             WhoCanFindMeScreen(
                 reach: ReachCenter.shared,

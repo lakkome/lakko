@@ -591,3 +591,61 @@ async fn a_young_account_draws_the_young_call_join_quota() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json(&body)["remaining"], 97);
 }
+
+/// ADR-0089 step 3: a suspended account reads its chats, files included, so
+/// its restricted session (and a leftover access token) may draw `blob-read`
+/// passes and nothing else.
+#[tokio::test]
+async fn a_suspended_account_draws_blob_read_tokens_only() {
+    let Some(pool) = test_pool("a_suspended_account_draws_blob_read_tokens_only").await else {
+        return;
+    };
+    let issuer = issuer_with(DEFAULT_QUOTAS);
+    let window = issuer.server.window_secs;
+    let account: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    insert_account(&pool, account).await;
+    sqlx::query(
+        "INSERT INTO account_suspensions \
+            (account_id, until_ms, reason, reason_salt, statement_id, log_index, suspended_at_ms) \
+         VALUES (?, NULL, 1, ?, ?, 0, 0)",
+    )
+    .bind(&account[..])
+    .bind(&[0u8; 16][..])
+    .bind(&uuid::Uuid::now_v7().into_bytes()[..])
+    .execute(&pool)
+    .await
+    .expect("suspend");
+    let (state, secret) = build_state(pool, Some(issuer));
+    let s1 = secret
+        .issue_restricted(&account, 1, &[0u8; 32], 0, now_ms() + 3_600_000)
+        .expect("restricted session");
+    let epoch = lakko_anon_token_server::current_epoch(window);
+
+    for (auth, label) in [
+        (format!("Bearer {s1}"), "s1"),
+        (bearer(&secret, account), "v3"),
+    ] {
+        let read = TokenRequest::new(TokenContext::BlobRead, epoch, 1).unwrap();
+        let (status, _, body) = send(
+            &state,
+            issue_req(
+                &auth,
+                &serde_json::json!({"context": "blob-read", "blinded_elements": blinded_json(&read)}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{label}: {}", json(&body));
+
+        let lookup = TokenRequest::new(TokenContext::DiscoveryLookup, epoch, 1).unwrap();
+        let (status, _, body) = send(
+            &state,
+            issue_req(
+                &auth,
+                &serde_json::json!({"context": "discovery-lookup", "blinded_elements": blinded_json(&lookup)}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{label}");
+        assert_eq!(json(&body)["error"], "account-suspended", "{label}");
+    }
+}

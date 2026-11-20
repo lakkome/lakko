@@ -101,6 +101,7 @@ import {
 } from "./own-profile-sync";
 import { durableSnapshotHook } from "../chat/persist-hooks";
 import { ownPersonKeyB64, personKeysOf as groupPeopleOf } from "../chat/person-key";
+import { signalsWithheldFrom } from "../moderation/block-conversation";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -435,6 +436,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     if (entry === undefined) return;
     // A group this device is no longer in can never carry another message.
     if (readIsActive(entry.group) === false) return;
+    // ADR-0089 section 6 - no profile update goes to a blocked person.
+    if (signalsWithheldFrom(entry.group, chats.identity())) return;
     // ADR-0060 / ADR-0074 section 3.5a rule 3 - what the grants composed
     // below carry, read BEFORE composing: recorded only once the publish
     // landed, so a conversation whose profile did not get out stays owed.
@@ -494,6 +497,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const entry = chats.get(groupIdB64);
     if (entry === undefined) return;
     if (readIsActive(entry.group) === false) return;
+    if (signalsWithheldFrom(entry.group, chats.identity())) return;
     recordProfileRequest(account, groupIdB64, Date.now());
     try {
       const w = await loadWasm();

@@ -39,7 +39,7 @@ use lakko_crypto::signing::SigningKey;
 use lakko_mls::Identity;
 use lakko_transparency::{
     sign_leaf_genesis, verify_inclusion, verify_leaf_genesis, verify_supersession_chain,
-    verify_witness_cosig, verify_witness_quorum, InclusionProof, LogEntry, PinnedIdentity,
+    verify_witness_cosig, verify_witness_quorum, InclusionProof, LogEntry, LogId, PinnedIdentity,
     RotationEvidence, SignedRoot, SupersessionProof, TreeHash,
 };
 use serde::Deserialize;
@@ -567,7 +567,14 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
     // Every served cosig verifies against exactly one of the pinned witness keys.
     for cosig in &cosigs {
         let matches = witness_keys.iter().any(|k| {
-            verify_witness_cosig(cosig, k, &served_root.tree_root, served_root.log_size).is_ok()
+            verify_witness_cosig(
+                cosig,
+                k,
+                LogId::Kt,
+                &served_root.tree_root,
+                served_root.log_size,
+            )
+            .is_ok()
         });
         assert!(
             matches,
@@ -581,6 +588,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         &cosig_refs,
         &key_refs,
         2,
+        LogId::Kt,
         &served_root.tree_root,
         served_root.log_size,
     )
@@ -596,6 +604,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
             &cosig_refs,
             &one_key,
             2,
+            LogId::Kt,
             &served_root.tree_root,
             served_root.log_size,
         )
@@ -639,6 +648,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         .post(format!("{}/witness/cosign", witness_url()))
         .bearer_auth(witness_cosign_secret())
         .json(&json!({
+            "log": "kt",
             "new_root": {
                 "tree_root_b64": B64.encode(forged_tree_root),
                 "log_size": served_root.log_size,
@@ -666,6 +676,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         .post(format!("{}/witness/cosign", witness_url()))
         .bearer_auth(witness_cosign_secret())
         .json(&json!({
+            "log": "kt",
             "new_root": {
                 "tree_root_b64": B64.encode(forged_tree_root),
                 "log_size": served_root.log_size + 1,

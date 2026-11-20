@@ -762,6 +762,9 @@ public final class ChatRepository: ObservableObject {
             },
             canSend: { [weak self] groupIdHex in
                 guard let self, self.groups[groupIdHex] != nil else { return false }
+                // ADR-0089 section 6 — profile updates stop going to a
+                // blocked person in the one-to-one with them.
+                if self.withholdsSignal(groupIdHex: groupIdHex) { return false }
                 return !membershipEnded(self.membershipStateNow(groupIdHex: groupIdHex))
             },
             nowMs: { Self.nowMs() },
@@ -2500,7 +2503,8 @@ public final class ChatRepository: ObservableObject {
         return PinGate.maySetShared(
             oneToOne: isOneToOne(groupIdHex: groupIdHex),
             ownRole: ownRole(groupIdHex: groupIdHex),
-            membershipEnded: membershipEnded(membershipStateNow(groupIdHex: groupIdHex)))
+            membershipEnded: membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+            suspended: SessionTokenProvider.shared.isSuspended)
     }
 
     /// "Pin for me" / "Unpin for me": a flag on this device. Nothing is sent.
@@ -3187,6 +3191,7 @@ public final class ChatRepository: ObservableObject {
         // makes the chat reachable is gone.
         groups[groupIdHex]?.forgetHistory()
         _ = messageLogStore.deleteGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        MessageEvidenceStore.shared.deleteConversation(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         _ = waitingLogSlots.take(groupIdHex)
         if let groupIdB64 {
             // ADR-0073 R.6 — the claim state of a group that is gone from here.
@@ -4435,7 +4440,8 @@ public final class ChatRepository: ObservableObject {
         do {
             result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
                 try await sealAndPublishLocked(
-                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message)
+                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message,
+                    attest: true)
             }
         } catch {
             record.markFailed(localId: localId)
@@ -4596,7 +4602,8 @@ public final class ChatRepository: ObservableObject {
                 // ADR-0054 decision 1 — a chat message asks for a message
                 // wake, carried on the publish itself.
                 try await sealAndPublishLocked(
-                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message)
+                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message,
+                    attest: true)
             }
         } catch {
             record.markFailed(localId: localId)
@@ -4785,7 +4792,8 @@ public final class ChatRepository: ObservableObject {
                 opMessageId = try await sealAndPublishLocked(
                     groupIdHex: groupIdHex,
                     plaintextBytes: envelopeBytes,
-                    wake: wake
+                    wake: wake,
+                    attest: true
                 ).messageId
             }
             guard let record = groups[groupIdHex] else { return }
@@ -4885,7 +4893,8 @@ public final class ChatRepository: ObservableObject {
     func sealAndPublishLocked(
         groupIdHex: String,
         plaintextBytes: Data,
-        wake: DsWake.Kind? = nil
+        wake: DsWake.Kind? = nil,
+        attest: Bool = false
     ) async throws -> SendMessageResult {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped")
@@ -4893,6 +4902,13 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // ADR-0089 section 1 — a chat, edit, delete or reaction envelope is
+        // signed by this device's conversation leaf over the group id before
+        // the MLS encrypt, so a recipient can hand it to a moderator as
+        // evidence. Typing, read receipts and service envelopes are not.
+        let sealedInput: Data = try attest
+            ? Self.attested(identity: identity, group: record.group, envelope: plaintextBytes)
+            : plaintextBytes
         let bound = binding.capture()
         var pushWake: DsWake?
         if let wake { pushWake = await self.pushWake(groupIdHex: groupIdHex, kind: wake) }
@@ -4902,7 +4918,7 @@ public final class ChatRepository: ObservableObject {
             try await client.sendMessage(
                 identity: identity,
                 group: group,
-                plaintext: plaintextBytes,
+                plaintext: sealedInput,
                 wake: pushWake
             )
         }
@@ -4911,6 +4927,62 @@ public final class ChatRepository: ObservableObject {
         // the record that is there now.
         try requireCommitRegion(bound)
         return result
+    }
+
+    /// ADR-0089 — the messages this device holds for `groupIdHex` (a report
+    /// from outside the conversation offers them in `Add messages`).
+    public func heldMessages(groupIdHex: String) -> [ChatMessage] {
+        groups[groupIdHex]?.messages ?? []
+    }
+
+    /// ADR-0089 section 6 — the other person of the one-to-one
+    /// `groupIdHex` is blocked: typing, read receipts and profile updates are
+    /// not sent to them (`blockVerdict(.outgoingSignal)`). `false` for a
+    /// group.
+    func withholdsSignal(groupIdHex: String) -> Bool {
+        // ADR-0089 step 3 — a suspended account sends nothing at all.
+        if SessionTokenProvider.shared.isSuspended { return true }
+        guard let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return false }
+        return BlockList.shared.verdict(.outgoingSignal, accountKey: peer) == .withhold
+    }
+
+    /// ADR-0089 section 6 — the person blocked in the one-to-one
+    /// `groupIdHex`, for the banner that replaces the composer; `nil` in a
+    /// group or when the other person is not blocked.
+    public func blockedOneToOnePeer(groupIdHex: String) -> Data? {
+        guard let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex),
+              BlockList.shared.verdict(.oneToOneMessage, accountKey: peer) == .drop else { return nil }
+        return peer
+    }
+
+    /// ADR-0089 section 1 — keep the evidence of the chat messages of a
+    /// batch that came from someone else, so a report can carry them later.
+    /// Own messages (this account's other devices included) need none.
+    func keepEvidence(
+        _ events: [IncomingChatEvent], evidence: [Int64: MessageEvidence],
+        groupIdHex: String, ownAuthorKey: MemberIdentity?
+    ) {
+        guard !evidence.isEmpty, let accountIdB64 = currentAccountIdB64 else { return }
+        var kept: [Int64: MessageEvidence] = [:]
+        for event in events {
+            guard case .application(let messageId, _, _, let senderKey, _, _, _) = event,
+                  let senderKey, senderKey != ownAuthorKey,
+                  let held = evidence[messageId] else { continue }
+            kept[messageId] = held
+        }
+        MessageEvidenceStore.shared.put(accountIdB64: accountIdB64, groupIdHex: groupIdHex, kept)
+    }
+
+    /// ADR-0089 section 1 — `envelope` wrapped with this device's leaf
+    /// signature over `group`'s id. Throws when the core refuses it (only a
+    /// service envelope or a bad group id can be refused), so a chat message
+    /// is never sent unattested by accident.
+    static func attested(identity: Identity, group: Group, envelope: Data) throws -> Data {
+        do {
+            return try attestMessage(identity: identity, groupId: try group.groupId(), envelope: envelope)
+        } catch {
+            throw ChatError.wrapped("message attestation failed", underlying: error)
+        }
     }
 
     /// ADR-0024 — publish an ephemeral typing signal for `groupIdHex`.
@@ -4926,6 +4998,8 @@ public final class ChatRepository: ObservableObject {
     ) async throws {
         // ADR-0073 R.7 case 1 — typing is not sent into a dead one-to-one.
         if isDeadSession(groupIdHex: groupIdHex) { return }
+        // ADR-0089 section 6 — nor to a person this account blocked.
+        if withholdsSignal(groupIdHex: groupIdHex) { return }
         let envelopeBytes: Data
         do {
             envelopeBytes = try composeTypingEnvelope(isTyping: isTyping)
@@ -4951,6 +5025,8 @@ public final class ChatRepository: ObservableObject {
     ) async throws {
         // ADR-0073 R.7 case 1 — nor is a read receipt.
         if isDeadSession(groupIdHex: groupIdHex) { return }
+        // ADR-0089 section 6 — nor to a person this account blocked.
+        if withholdsSignal(groupIdHex: groupIdHex) { return }
         let envelopeBytes: Data
         do {
             envelopeBytes = try composeReadReceiptEnvelope(upTo: upTo)
@@ -5579,6 +5655,9 @@ public final class ChatRepository: ObservableObject {
             eventSenders: result.eventSenders, groupIdHex: groupIdHex)
         noteAppliedForUnread(events, groupIdHex: groupIdHex)
         matchDisplayCopies(events, groupIdHex: groupIdHex, ownAuthorKey: AuthorIdentity.own(group: record.group))
+        keepEvidence(
+            events, evidence: result.evidence, groupIdHex: groupIdHex,
+            ownAuthorKey: AuthorIdentity.own(group: record.group))
         record.consumeEvents(
             events,
             ownAuthorKey: AuthorIdentity.own(group: record.group),
@@ -7290,6 +7369,12 @@ public final class ChatRepository: ObservableObject {
                     self.noteAppliedForUnread(events, groupIdHex: groupIdHex)
                     self.matchDisplayCopies(
                         events, groupIdHex: groupIdHex, ownAuthorKey: AuthorIdentity.own(group: record.group))
+                    self.keepEvidence(
+                        events,
+                        evidence: ChatClient.messageEvidence(of: processed, group: record.group)
+                            .map { [row.id: $0] } ?? [:],
+                        groupIdHex: groupIdHex,
+                        ownAuthorKey: AuthorIdentity.own(group: record.group))
                     record.consumeEvents(
                         events,
                         ownAuthorKey: AuthorIdentity.own(group: record.group),

@@ -267,9 +267,13 @@ public enum PinGate {
     /// The LOCAL half of the same rule, for the sheet: may this device set or
     /// clear a shared pin here? Either participant of a one-to-one; the owner
     /// or an admin of a role-table group; anyone in a group with no table
-    /// (`ownRole == nil`); nobody once their membership ended.
-    public static func maySetShared(oneToOne: Bool, ownRole: Role?, membershipEnded: Bool) -> Bool {
-        guard !membershipEnded else { return false }
+    /// (`ownRole == nil`); nobody once their membership ended, and nobody
+    /// while the account is suspended (ADR-0089 step 3: a shared pin or
+    /// unpin sends an envelope; `Pin for me` stays).
+    public static func maySetShared(
+        oneToOne: Bool, ownRole: Role?, membershipEnded: Bool, suspended: Bool = false
+    ) -> Bool {
+        guard !membershipEnded, !suspended else { return false }
         if oneToOne { return true }
         return ownRole != .member
     }

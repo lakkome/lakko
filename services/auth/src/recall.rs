@@ -731,6 +731,8 @@ pub(crate) async fn status(
             ApiError::RecallRefused
         });
     };
+    // ADR-0089 section 4: told only to a holder of an anchor's key.
+    crate::suspension::refuse_recall_if_suspended(&state.db, &account_id).await?;
     Ok(Json(StatusRes {
         anchor_seq: anchor.seq,
         expires_at_ms: anchor.expires_at_ms,
@@ -854,6 +856,9 @@ pub(crate) async fn start(
         return Err(refusal_of(verdict, now).into());
     }
     let anchor = anchor.ok_or(ApiError::RecallRefused)?;
+    // ADR-0089 section 4: after the statement check, before anything is
+    // counted.
+    crate::suspension::refuse_recall_if_suspended(&state.db, &account_id).await?;
 
     // From here on the caller holds the anchor's key.
     // The envelope this attempt is against. The phrase arm does not exist
@@ -982,6 +987,12 @@ pub(crate) struct FinishReq {
     /// URL-safe base64 of the NEW identity's 32-byte Ed25519 signature
     /// public key. Not the anchor's key: the old identity does not return.
     pub(crate) new_signature_pubkey_b64: String,
+    /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
+    /// over the account id and that key (`signIdentityProof`, ADR-0089 F3).
+    /// Absent or invalid: `400 identity-proof-invalid`, before anything else
+    /// is looked at.
+    #[serde(default)]
+    pub(crate) identity_proof_b64: Option<String>,
     /// URL-safe base64 of the 32-byte device id the new pair names. Absent:
     /// the pair names no device and the client binds one afterwards.
     #[serde(default)]
@@ -1148,6 +1159,9 @@ async fn replay_outcome(
     if current != Some(outcome.key_generation) {
         return Err(ApiError::RecallRefused);
     }
+    // ADR-0089 section 4: a recall that succeeded before a suspension is not
+    // answered with a session after it.
+    crate::suspension::refuse_recall_if_suspended(&state.db, &input.account_id).await?;
     let session = crate::session::issue_pair_at(
         state,
         &input.account_id,
@@ -1231,6 +1245,11 @@ fn decode_finish(req: &FinishReq) -> Result<FinishInput, OpaqueError> {
             "new_signature_pubkey_b64 must be 32 bytes of URL-safe base64",
         ))?;
     crate::genesis_attest::require_usable_identity_key(&new_signature_pubkey)?;
+    crate::identity_target::require_identity_proof(
+        req.identity_proof_b64.as_deref(),
+        &account_id,
+        &new_signature_pubkey,
+    )?;
     Ok(FinishInput {
         session_id,
         account_id,
@@ -1250,7 +1269,8 @@ fn decode_finish(req: &FinishReq) -> Result<FinishInput, OpaqueError> {
 ///
 /// Order:
 ///
-/// 1. the body's shape (`400`); then, if this attempt's finish ALREADY
+/// 1. the body's shape (`400`; a missing or invalid identity proof of the
+///    new key is `400 identity-proof-invalid`); then, if this attempt's finish ALREADY
 ///    succeeded, the retry rule of the module doc: the identical request is
 ///    answered again, any other is `401 recall-refused`;
 /// 2. the attempt's state exists, is unexpired and is for this account and
@@ -1258,6 +1278,8 @@ fn decode_finish(req: &FinishReq) -> Result<FinishInput, OpaqueError> {
 ///    under the anchor's key over the state's server nonce, the new key and
 ///    both uploads. Any failure: `401 recall-refused`, nothing consumed
 ///    (`401 statement-stale` when the statement is right but for its time);
+///    a suspended account is the plain `403`; a new key another account
+///    holds is `409 identity-key-taken` (ADR-0089 F3);
 /// 3. the state is consumed (a second finish for it is `recall-refused`);
 /// 4. the OPAQUE login finish against the anchored password: `401
 ///    wrong-password` (the attempt was counted when it was opened);
@@ -1341,6 +1363,13 @@ pub(crate) async fn finish(
         // (ADR-0074 D10, invariant #6).
         return Err(ApiError::BadInput("new_signature_pubkey must be a new key").into());
     }
+    // ADR-0089 section 4: after the statement check, before the attempt is
+    // consumed; a suspended account is not recalled.
+    crate::suspension::refuse_recall_if_suspended(&state.db, &account_id).await?;
+    // ADR-0089 F3: a key another account holds, refused before the attempt
+    // is consumed (claimed again under the transaction below).
+    crate::identity_target::require_free(&state.db, &account_id, &input.new_signature_pubkey)
+        .await?;
 
     // 3. Consume the attempt. Of two finishes for one state, one deletes it.
     let consumed = sqlx::query("DELETE FROM recall_states WHERE session_id = ?")
@@ -1400,13 +1429,16 @@ pub(crate) async fn finish(
         .await
         .map_err(ApiError::Db)?;
 
-    //    The generation and the identity key. No anchor is captured for the
+    //    The new key's target, claimed for this account (ADR-0089 F3); then
+    //    the generation and the identity key. No anchor is captured for the
     //    key this displaces.
+    crate::identity_target::claim(&mut tx, &account_id, &input.new_signature_pubkey, now).await?;
     sqlx::query(
         "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
-         identity_pubkey = ? WHERE id = ?",
+         identity_pubkey = ?, identity_target = ? WHERE id = ?",
     )
     .bind(&input.new_signature_pubkey[..])
+    .bind(&crate::identity_target::target_of(&input.new_signature_pubkey)[..])
     .bind(&account_id[..])
     .execute(&mut *tx)
     .await

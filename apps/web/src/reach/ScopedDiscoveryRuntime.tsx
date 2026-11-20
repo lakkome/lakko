@@ -18,6 +18,7 @@
  * for what this device never received, and answers such an ask by sending
  * its own again (ADR-0060 section 4, "A device that holds nothing asks").
  */
+import { isHiddenFromSearchError, noteEveryonePublished, noteHiddenFromSearch } from "../moderation/hidden-from-search";
 import { runPublicationSteps } from "./publication-steps";
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
@@ -249,7 +250,19 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
               } finally {
                 payload.free();
               }
-              await scoped.putVisibility({ public: true, nameTermLookupKeys: nameLookupKeys, publicRecord });
+              try {
+                await scoped.putVisibility({ public: true, nameTermLookupKeys: nameLookupKeys, publicRecord });
+              } catch (err) {
+                // ADR-0089 step 5: moderators hid this account from search.
+                // Who can find me says so; nothing else is wrong, so the step
+                // does not fail (no retry line under the setting).
+                if (isHiddenFromSearchError(err)) {
+                  noteHiddenFromSearch(account);
+                  return;
+                }
+                throw err;
+              }
+              noteEveryonePublished(account);
               await save({ ...state, everyone: { public: true, key: pubKey } });
             }
           } else if (action.kind === "withdraw") {

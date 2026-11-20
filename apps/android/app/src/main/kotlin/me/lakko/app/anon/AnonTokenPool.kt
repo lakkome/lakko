@@ -76,6 +76,8 @@ public enum class AnonTokenContext(public val wire: String) {
     CHANNEL_REACT("channel-react"),
     /** ADR-0087 section 13a: one per comment under a channel post. */
     CHANNEL_COMMENT("channel-comment"),
+    /** ADR-0089 section 2: one per report sent to Lakko's moderators. */
+    REPORT("report"),
 }
 
 /**
@@ -103,6 +105,9 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
     // ADR-0087 section 13a. Chosen, not measured.
     AnonTokenContext.CHANNEL_REACT -> 16
     AnonTokenContext.CHANNEL_COMMENT -> 8
+    // ADR-0089 section 2: pre-fetched so the issuance time says nothing
+    // about when a report is sent. Chosen, not measured.
+    AnonTokenContext.REPORT -> 2
 }
 
 /** The first scheduled refill of a newly bound session runs at a random
@@ -185,6 +190,10 @@ public sealed interface AnonIssueOutcome {
 
     /** 503 `anon-tokens-disabled`. */
     public data object Disabled : AnonIssueOutcome
+
+    /** ADR-0089 section 4 - `403 account-suspended`: the account is
+     *  suspended and this context is not issued to it. Not now, not a fault. */
+    public data object Suspended : AnonIssueOutcome
 
     /** Anything else (network, 5xx, a malformed answer). */
     public data class Failed(val cause: Throwable?) : AnonIssueOutcome
@@ -319,6 +328,13 @@ public class AnonTokenPool(
      *  issuance and waits for it, as it waits for a scheduled refill. Off, the
      *  release rule (ADR-0078 section 8): a take never starts an issuance. */
     private val refillOnEmptyTake: Boolean = false,
+    /**
+     * ADR-0089 section 4 - which contexts may be issued now. While the
+     * account is suspended the issuer answers only `blob-read` (files in
+     * chats still open); every other context is neither refilled nor asked
+     * for, so the schedule sends nothing the issuer would refuse.
+     */
+    private val issuable: (AnonTokenContext) -> Boolean = { true },
 ) : AnonTokenSource {
 
     override val headerName: String get() = core.headerName
@@ -368,6 +384,8 @@ public class AnonTokenPool(
         data class Filled(val tokens: List<PooledAnonToken>) : RefillResult
         data class Quota(val retryAfterSecs: Long) : RefillResult
         data object Disabled : RefillResult
+        /** Not issued to a suspended account (ADR-0089): not now. */
+        data object Suspended : RefillResult
         data class Failed(val reason: String, val cause: Throwable?) : RefillResult
     }
 
@@ -473,6 +491,7 @@ public class AnonTokenPool(
         timedOut -> AnonTokenUnavailable(context, "the refill did not finish in $waitMs ms")
         result is RefillResult.Quota -> AnonTokenQuotaExhausted(context, result.retryAfterSecs)
         result == RefillResult.Disabled -> AnonTokenDisabled(context)
+        result == RefillResult.Suspended -> AnonTokenUnavailable(context, "not issued while the account is suspended")
         result is RefillResult.Failed -> AnonTokenUnavailable(context, result.reason, result.cause)
         result is RefillResult.Filled -> AnonTokenUnavailable(context, "the refill brought no live token")
         empty -> AnonTokenUnavailable(context, "pool empty until the next scheduled refill")
@@ -519,6 +538,9 @@ public class AnonTokenPool(
         val s = session() ?: return
         val pending = synchronized(lock) {
             if (generation != gen || owner != s.accountKey || s.accountKey in forgotten) return
+            // Not issued now (a suspended account): the next scheduled pass
+            // asks again; nothing is sent meanwhile.
+            if (!issuable(context)) return
             val queue = queues[context]
             if (queue != null) {
                 val current = currentEpochLocked()
@@ -620,6 +642,7 @@ public class AnonTokenPool(
 
     private fun ensureRefillLocked(context: AnonTokenContext, s: AnonSession): Deferred<RefillResult>? {
         refills[context]?.let { return it.result }
+        if (!issuable(context)) return CompletableDeferred(RefillResult.Suspended)
         val until = exhaustedUntil[context]
         if (until != null) {
             val now = nowSecs()
@@ -721,6 +744,7 @@ public class AnonTokenPool(
                 is AnonIssueOutcome.QuotaExhausted ->
                     EpochStep.Done(RefillResult.Quota(outcome.retryAfterSecs))
                 AnonIssueOutcome.Disabled -> EpochStep.Done(RefillResult.Disabled)
+                AnonIssueOutcome.Suspended -> EpochStep.Done(RefillResult.Suspended)
                 is AnonIssueOutcome.Failed ->
                     EpochStep.Done(RefillResult.Failed("issuance failed", outcome.cause))
             }

@@ -746,6 +746,8 @@ struct RecallFinishRequest: Codable, Equatable {
     /// Absent, never null, when the session is to name no device yet.
     let deviceIdB64: String?
     let statementB64: String
+    /// ADR-0089 F3 — `signIdentityProof` by the NEW key over the account id.
+    let identityProofB64: String
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -757,6 +759,7 @@ struct RecallFinishRequest: Codable, Equatable {
         case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
         case deviceIdB64 = "device_id_b64"
         case statementB64 = "statement_b64"
+        case identityProofB64 = "identity_proof_b64"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -770,6 +773,7 @@ struct RecallFinishRequest: Codable, Equatable {
         try container.encode(newSignaturePubkeyB64, forKey: .newSignaturePubkeyB64)
         try container.encodeIfPresent(deviceIdB64, forKey: .deviceIdB64)
         try container.encode(statementB64, forKey: .statementB64)
+        try container.encode(identityProofB64, forKey: .identityProofB64)
     }
 }
 

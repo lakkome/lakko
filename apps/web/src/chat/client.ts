@@ -82,7 +82,7 @@ import { withGroupMlsLock } from "../mls/group-lock";
 import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
 import { boundContactsAccount } from "../contacts/local-store";
 import { DS_WAKE_HEADER_LEN, type DsWake } from "../ds/wake";
-import { loadWasm } from "../wasm";
+import { loadWasm, wasmIfLoaded } from "../wasm";
 import {
   isKnockRowLen as wasmIsKnockRowLen,
   knockRowVersion as wasmKnockRowVersion,
@@ -102,6 +102,14 @@ import {
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
 import { looksLikeCallSignaling as looksLikeCallSignalingBytes } from "../calls/call-signaling-wake";
 import { DurableCursorGate } from "./durable-cursor";
+import { conversationKindOf } from "./conversation-kind";
+import { dropsAtReceipt } from "../moderation/block-rules";
+import {
+  attestOutgoing,
+  evidenceAtReceipt,
+  unwrapReceived,
+  type MessageEvidence,
+} from "../moderation/attestation";
 import {
   consumeOwnPublished,
   isOwnPublished,
@@ -210,6 +218,12 @@ export type IncomingChatEvent =
        *  version. `text` is empty and there are no attachments; every screen
        *  draws `chat.message.unsupported` in its place. */
       unsupportedVersion?: number;
+      /** ADR-0089 section 1 - what a report needs of this message, captured
+       *  at receipt: the attestation verdict, the raw attested bytes, the
+       *  sender leaf key and its device binding. Absent on an own message,
+       *  on a frame with no resolvable sender leaf, and on a row restored
+       *  from a log written before the field existed. */
+      evidence?: MessageEvidence;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -766,6 +780,13 @@ export interface BroadcastControlOptions {
    * devices read there. Everything else is refused ({@link HeldForSuccessor}).
    */
   readonly intoSupersededSession?: boolean;
+  /**
+   * ADR-0089 section 1 - the frame is an edit, a delete or a reaction (a
+   * chat envelope sent without a wake), so it is attested like a message.
+   * Never set for a typing signal, a read receipt or a service envelope; a
+   * service envelope is not wrapped even when it is.
+   */
+  readonly attest?: boolean;
 }
 
 export class ChatClient {
@@ -933,8 +954,11 @@ export class ChatClient {
     // the profile is published under the same lock.
     await runBeforeSend(base64Encode(groupId));
 
+    // ADR-0089 section 1 - every envelope sent through here is a chat
+    // envelope (a message, a reply, a forward, a reaction that notifies), so
+    // it is attested; a service envelope is never wrapped whatever the flag.
     return withGroupMlsLock(base64Encode(groupId), async () =>
-      this.sealAndPublish(myIdentity, group, groupId, plaintext, "message"),
+      this.sealAndPublish(myIdentity, group, groupId, plaintext, "message", true),
     );
   }
 
@@ -956,7 +980,22 @@ export class ChatClient {
     groupId: Uint8Array,
     plaintext: Uint8Array,
     wake: OutboundWake,
+    attest: boolean,
   ): Promise<SendMessageResult> {
+    // ADR-0089 section 1 - the attested wrapper, BEFORE the MLS encrypt and
+    // before anything else in this region: a refusal of the core aborts the
+    // send with nothing sealed.
+    let sealedPlaintext: Uint8Array = plaintext;
+    // The core that seals the message signs it; a page without one (only a
+    // unit test with no wasm) has nothing to sign with.
+    const core = attest ? wasmIfLoaded() : null;
+    if (core !== null) {
+      try {
+        sealedPlaintext = attestOutgoing(core, myIdentity, groupId, plaintext, attest);
+      } catch (err) {
+        throw new ChatError("attestMessage failed", err);
+      }
+    }
     // ADR-0054 — the wake rides the signed publish as a header, so the
     // `push_gid` is resolved BEFORE anything is sealed: nothing awaits between
     // the ratchet advance and the persist below except the persist itself.
@@ -970,7 +1009,7 @@ export class ChatClient {
     // until it is persisted.
     let wireBytes: Uint8Array;
     try {
-      wireBytes = group.createApplicationMessage(myIdentity, plaintext);
+      wireBytes = group.createApplicationMessage(myIdentity, sealedPlaintext);
     } catch (err) {
       throw new ChatError("createApplicationMessage failed", err);
     }
@@ -1153,7 +1192,14 @@ export class ChatClient {
     }
 
     const result = await withGroupMlsLock(base64Encode(groupId), async () =>
-      this.sealAndPublish(myIdentity, group, groupId, controlBytes, options.wake ?? null),
+      this.sealAndPublish(
+        myIdentity,
+        group,
+        groupId,
+        controlBytes,
+        options.wake ?? null,
+        options.attest === true,
+      ),
     );
     return { messageId: result.messageId };
   }
@@ -1341,6 +1387,7 @@ export class ChatClient {
         processed,
         (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
         (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
+        group,
       );
       if (event.kind === "externalJoinRequest") events.push(event);
     }
@@ -1573,6 +1620,7 @@ export class ChatClient {
         processed,
         (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
         (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
+        group,
       );
       // ADR-0057 — consumed here, at receipt, and never handed on.
       if (event.kind === "registrarSeed") {
@@ -1591,6 +1639,10 @@ export class ChatClient {
       }
       // Never shown, never persisted, never previewed.
       if (event.kind === "serviceEnvelope") continue;
+      // ADR-0089 section 6 - a blocked person's message, typing, receipt or
+      // profile in the one-to-one with them: consumed, never stored, never
+      // shown, never notified (the shared block rule decides).
+      if (blockDropsEvent(wasmIfLoaded(), group, event)) continue;
       events.push(event);
     }
 
@@ -1795,12 +1847,22 @@ export async function toEvent(
   processed: ReturnType<WasmGroup["processIncoming"]>,
   resolveSender: (leafIndex: number) => MemberIdentity | undefined,
   resolveSenderDevice?: (leafIndex: number) => string | undefined,
+  /** ADR-0089 section 1 - the group the frame decrypted in, read for the
+   *  report evidence at receipt (its id and the sender leaf's device
+   *  binding). Absent: no evidence is kept. */
+  evidenceGroup?: EvidenceGroup,
 ): Promise<IncomingChatEvent> {
   // The WASM `ProcessedMessage.kind` is a PascalCase string
   // discriminator: "Application" | "Commit" | "Proposal" |
   // "ExternalJoinProposal" (see lakko-ffi-wasm/src/mls.rs).
   if (processed.kind === "Application" && processed.applicationData !== undefined) {
-    const bytes = processed.applicationData;
+    // ADR-0089 section 1 - the raw plaintext may be an attested chat
+    // envelope; every classifier below reads the envelope inside it, exactly
+    // as before the wrapper existed. A malformed wrapper stays whole and
+    // classifies as a service envelope, which is dropped.
+    const raw = processed.applicationData;
+    const core = wasmIfLoaded();
+    const bytes = unwrapReceived(core, raw);
     // ADR-0023 — the original author's MLS leaf for this
     // Application message. `undefined` for a control frame /
     // external sender (which can never be a valid edit/delete
@@ -2045,9 +2107,11 @@ export async function toEvent(
       };
     }
     if (body.kind === "chat") {
+      const evidence = receiptEvidence(core, raw, senderLeaf, resolveSenderDevice, evidenceGroup);
       return {
         kind: "application",
         messageId,
+        ...(evidence === undefined ? {} : { evidence }),
         text: body.text,
         attachments: body.attachments,
         // Alias kept for transitional call-site compatibility;
@@ -2117,6 +2181,58 @@ export async function toEvent(
   const sk: "commit" | "external-join-proposal" =
     processed.kind === "Commit" ? "commit" : "external-join-proposal";
   return { kind: "system", messageId, systemKind: sk, createdAt };
+}
+
+/** ADR-0089 section 6 - whether `event` from a blocked sender is dropped at
+ *  receipt in `group` (the one-to-one with them). Never throws. */
+export function blockDropsEvent(
+  wasm: Awaited<ReturnType<typeof loadWasm>> | null,
+  group: { groupKind(): number | undefined },
+  event: IncomingChatEvent,
+): boolean {
+  const senderKey = "senderKey" in event ? event.senderKey : undefined;
+  if (senderKey === undefined) return false;
+  const conversation = conversationKindOf(group) === "chat" ? "one-to-one" : "group";
+  return dropsAtReceipt(wasm, conversation, {
+    kind: event.kind,
+    ...(event.kind === "op" ? { op: event.op } : {}),
+    senderKey,
+  });
+}
+
+/** ADR-0089 section 1 - what {@link toEvent} reads of the group for the
+ *  report evidence. Structural, so a test can hand in a plain object. */
+export interface EvidenceGroup {
+  readonly groupId: Uint8Array;
+  deviceBindingAt(leaf: number): Uint8Array | undefined;
+}
+
+/**
+ * The report evidence of one received chat message, read NOW (C-68: the
+ * leaf the binding is read at may hold somebody else after the next
+ * commit). `undefined` when the sender leaf or its key is unknown, or when no
+ * group was handed in. Never throws.
+ */
+function receiptEvidence(
+  wasm: Awaited<ReturnType<typeof loadWasm>> | null,
+  raw: Uint8Array,
+  senderLeaf: number | undefined,
+  resolveSenderDevice: ((leafIndex: number) => string | undefined) | undefined,
+  group: EvidenceGroup | undefined,
+): MessageEvidence | undefined {
+  if (group === undefined || senderLeaf === undefined || resolveSenderDevice === undefined) return undefined;
+  let leafKey: Uint8Array | undefined;
+  let binding: Uint8Array | undefined;
+  let groupId: Uint8Array;
+  try {
+    const keyB64 = resolveSenderDevice(senderLeaf);
+    leafKey = keyB64 === undefined ? undefined : base64Decode(keyB64);
+    groupId = group.groupId;
+    binding = group.deviceBindingAt(senderLeaf) ?? undefined;
+  } catch {
+    return undefined;
+  }
+  return evidenceAtReceipt(wasm, raw, groupId, leafKey, binding);
 }
 
 /**

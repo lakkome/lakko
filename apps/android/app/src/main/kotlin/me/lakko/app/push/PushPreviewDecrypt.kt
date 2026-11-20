@@ -339,6 +339,12 @@ public interface PushDecryptDeps {
      * read from; this path never writes it.
      */
     public fun heldRow(accountIdB64: String, groupHex: String, messageId: Long): me.lakko.app.chat.HeldRow? = null
+
+    /**
+     * ADR-0089 section 6 — whether [senderAccountB64] is blocked by the
+     * account, read from the persisted synced state (a READ, C-59).
+     */
+    public fun isBlocked(accountIdB64: String, senderAccountB64: String?): Boolean = false
 }
 
 /**
@@ -400,6 +406,19 @@ internal fun wakeRowSuppressed(
         senderKeyB64 = row.senderAccountB64,
     ) == me.lakko.app.chat.ResendVerdict.SKIP
 }
+
+/**
+ * ADR-0089 section 6 — whether a row of a blocked sender posts nothing: a
+ * call offer is declined without a ring ([me.lakko.app.moderation.declinesCallSilently]),
+ * anything else notifies for nothing ([me.lakko.app.moderation.suppressesNotification]).
+ * Called only for a sender the register holds.
+ */
+internal fun blockedRowSilenced(row: ProcessedRow): Boolean =
+    if (row.kind == ProcessedKind.CALL_SIGNALING) {
+        me.lakko.app.moderation.declinesCallSilently(row.senderAccountB64) { true }
+    } else {
+        me.lakko.app.moderation.suppressesNotification(row.senderAccountB64) { true }
+    }
 
 /**
  * Produce a real decrypted notification preview for a GroupMessage
@@ -665,6 +684,14 @@ public suspend fun decryptPushWake(
                 // the preview, and a wake that carried nothing else posts
                 // nothing at all.
                 if (suppressed) {
+                    suppressedRows += 1
+                    continue
+                }
+                // ADR-0089 section 6 — nothing of a blocked person notifies,
+                // and their calls do not ring (declined without a ring).
+                val blocked = runCatching { deps.isBlocked(account.accountIdB64, processed.senderAccountB64) }
+                    .getOrDefault(false)
+                if (blocked && blockedRowSilenced(processed)) {
                     suppressedRows += 1
                     continue
                 }

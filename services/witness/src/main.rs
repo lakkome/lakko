@@ -14,8 +14,11 @@
 //! - `LAKKO_BIND` — `host:port` (default `0.0.0.0:8088`).
 //! - `LAKKO_WITNESS_DATABASE_URL` / `DATABASE_URL` — MariaDB.
 //! - `LAKKO_WITNESS_OPERATOR_PUBKEY` — base64 of the transparency operator's
-//!   Ed25519 verifying key (the PIN; required — the witness refuses to boot
-//!   without it, since it could otherwise co-sign any root).
+//!   Ed25519 verifying key (the PIN for the KT log; required — the witness
+//!   refuses to boot without it, since it could otherwise co-sign any root).
+//! - `LAKKO_WITNESS_MODERATION_OPERATOR_PUBKEY` — base64 of the moderation
+//!   log's operator key (ADR-0089 section 5; optional — unset, a moderation
+//!   cosign answers 404 `unknown-log`).
 //! - `LAKKO_WITNESS_COSIGN_SECRET` — shared secret gating `POST /witness/cosign`.
 
 #![forbid(unsafe_code)]
@@ -64,8 +67,22 @@ pub(crate) struct AppState {
     /// The cosign shared secret, or `None` (the endpoint then serves 503).
     pub(crate) cosign_secret: Option<Arc<Vec<u8>>>,
     /// The PINNED transparency operator verifying key — the witness only
-    /// co-signs roots signed by it.
+    /// co-signs KT roots signed by it.
     pub(crate) operator_pubkey: VerifyingKey,
+    /// The PINNED moderation-log operator key, or `None` (the witness then
+    /// co-signs no moderation root).
+    pub(crate) moderation_operator_pubkey: Option<VerifyingKey>,
+}
+
+impl AppState {
+    /// The pinned operator key for `log`, or `None` when this witness does not
+    /// witness that log.
+    pub(crate) fn operator_for(&self, log: lakko_transparency::LogId) -> Option<VerifyingKey> {
+        match log {
+            lakko_transparency::LogId::Kt => Some(self.operator_pubkey),
+            lakko_transparency::LogId::Moderation => self.moderation_operator_pubkey,
+        }
+    }
 }
 
 #[tokio::main]
@@ -85,7 +102,16 @@ async fn main() -> anyhow::Result<()> {
 
     // The PINNED operator key — required; the witness refuses to boot without
     // it (a witness that co-signs unauthenticated roots is worse than none).
-    let operator_pubkey = load_operator_pin().context("load LAKKO_WITNESS_OPERATOR_PUBKEY")?;
+    let operator_pubkey = load_operator_pin("LAKKO_WITNESS_OPERATOR_PUBKEY")?
+        .context("LAKKO_WITNESS_OPERATOR_PUBKEY must be set (the operator key the witness pins)")?;
+    let moderation_operator_pubkey = load_operator_pin("LAKKO_WITNESS_MODERATION_OPERATOR_PUBKEY")?;
+    if moderation_operator_pubkey.is_some() {
+        tracing::info!("moderation operator key pinned — the moderation log is witnessed");
+    } else {
+        tracing::warn!(
+            "LAKKO_WITNESS_MODERATION_OPERATOR_PUBKEY unset — moderation cosigns answer 404"
+        );
+    }
 
     let pool = MySqlPoolOptions::new()
         .max_connections(8)
@@ -119,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         store: Arc::new(store),
         cosign_secret,
         operator_pubkey,
+        moderation_operator_pubkey,
     };
 
     let app = build_app(state);
@@ -137,16 +164,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse the pinned operator verifying key from `LAKKO_WITNESS_OPERATOR_PUBKEY`
-/// (base64 of a 32-byte Ed25519 key).
-fn load_operator_pin() -> anyhow::Result<VerifyingKey> {
-    let raw = std::env::var("LAKKO_WITNESS_OPERATOR_PUBKEY")
-        .context("LAKKO_WITNESS_OPERATOR_PUBKEY must be set (the operator key the witness pins)")?;
+/// Parse a pinned operator verifying key (base64 of a 32-byte Ed25519 key)
+/// from `var`; `Ok(None)` when the variable is unset or empty.
+fn load_operator_pin(var: &str) -> anyhow::Result<Option<VerifyingKey>> {
+    let Ok(raw) = std::env::var(var) else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
     let bytes = B64
-        .decode(raw.trim().as_bytes())
-        .context("LAKKO_WITNESS_OPERATOR_PUBKEY is not valid base64")?;
+        .decode(raw.as_bytes())
+        .with_context(|| format!("{var} is not valid base64"))?;
     VerifyingKey::from_bytes(&bytes)
-        .map_err(|_| anyhow::anyhow!("LAKKO_WITNESS_OPERATOR_PUBKEY is not a valid Ed25519 key"))
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("{var} is not a valid Ed25519 key"))
 }
 
 /// Build the router. `POST /witness/cosign` sits behind the cosign-secret
@@ -227,5 +260,99 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => tracing::info!("received SIGINT, shutting down"),
         () = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    //! Request-shape tests for `POST /witness/cosign` that never reach the
+    //! database: the `log` field is checked before any storage access.
+
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use lakko_crypto::signing::SigningKey;
+    use tower::ServiceExt as _;
+
+    const SECRET: &[u8] = b"0123456789abcdef0123";
+
+    fn app(moderation_operator: bool) -> Router {
+        // A lazy pool never connects; these requests are refused before any
+        // storage access.
+        let db = sqlx::mysql::MySqlPoolOptions::new()
+            .connect_lazy("mysql://nobody@127.0.0.1:1/none")
+            .expect("lazy pool");
+        let operator = SigningKey::from_seed(&[0x77; 32]).verifying_key();
+        build_app(AppState {
+            db,
+            store: Arc::new(WitnessStore::empty_for_tests(SigningKey::from_seed(
+                &[0x88; 32],
+            ))),
+            cosign_secret: Some(Arc::new(SECRET.to_vec())),
+            operator_pubkey: operator,
+            moderation_operator_pubkey: moderation_operator.then_some(operator),
+        })
+    }
+
+    async fn post_with_body(app: Router, body: serde_json::Value) -> (StatusCode, String) {
+        use http_body_util::BodyExt as _;
+        let req = Request::post("/witness/cosign")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", B64.encode(SECRET)))
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        let res = app.oneshot(req).await.expect("response");
+        let status = res.status();
+        let bytes = res.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn post(app: Router, body: serde_json::Value) -> StatusCode {
+        post_with_body(app, body).await.0
+    }
+
+    fn root() -> serde_json::Value {
+        json!({
+            "tree_root_b64": B64.encode([0u8; 32]),
+            "log_size": 0,
+            "timestamp_unix": 0,
+            "signature_b64": B64.encode([0u8; 64]),
+        })
+    }
+
+    #[tokio::test]
+    async fn missing_log_is_400() {
+        let status = post(app(true), json!({ "new_root": root() })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unknown_log_is_400() {
+        for log in ["", "KT", "tree", "moderation-log"] {
+            let status = post(app(true), json!({ "log": log, "new_root": root() })).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "log {log:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn moderation_without_an_operator_key_is_404() {
+        let status = post(
+            app(false),
+            json!({ "log": "moderation", "new_root": root() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_known_log_reaches_the_operator_check() {
+        // An all-zero signature fails the operator check (400 with a different
+        // body) before any storage access, showing the log was accepted.
+        for log in ["kt", "moderation"] {
+            let (status, body) =
+                post_with_body(app(true), json!({ "log": log, "new_root": root() })).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "log {log:?}");
+            assert_eq!(body, "operator signature is invalid", "log {log:?}");
+        }
     }
 }

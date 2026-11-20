@@ -224,6 +224,15 @@ targets:
         LakkoAppStoreUrl: ""
         LakkoCurrentRelease: "1"
         LakkoReleaseCheckDevOverride: "false"
+        # ADR-0089 section 2 — base64url of the 32-byte Ed25519 offline root key
+        # that signs the moderator list. EMPTY → reporting is unavailable (the
+        # report sheet says so); there is no serving-tier fallback.
+        LakkoModerationRootKey: ""
+        # ADR-0089 step 4 — base64url of the 32-byte Ed25519 operator key of
+        # the moderation log (the snapshot of active suspensions is checked
+        # under it, with the transparency witness pins above). EMPTY or
+        # malformed → no suspension marks anywhere and no snapshot request.
+        LakkoModerationLogKey: ""
         # ADR-0061 section 5 — signed translation updates. LakkoTranslationKey is
         # base64url of the 32-byte Ed25519 key of the dedicated translation
         # publisher (`just gen-translation-key`, not the release key). EMPTY →
@@ -624,6 +633,12 @@ targets:
       # and READ here; and the re-send rule itself, the same function the
       # app's receive paths call. Foundation only; read-only here.
       - path: Lakko/Chat/ContinuityMirror.swift
+        type: file
+        buildPhase: sources
+      # ADR-0089 section 6 — the account's blocked people, mirrored by the
+      # app and READ here, so nothing of a blocked person's is notified. The
+      # register itself lives in the synced state (C-59). Foundation only.
+      - path: Lakko/Moderation/BlockedSenderMirror.swift
         type: file
         buildPhase: sources
       - path: Lakko/Chat/ResendMarker.swift

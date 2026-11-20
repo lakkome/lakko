@@ -408,11 +408,23 @@ public data class PersistedMessage(
      */
     val membershipJoined: List<String> = emptyList(),
     val membershipLeft: List<String> = emptyList(),
+    /** ADR-0089 section 1 — the report evidence of a received row; absent on
+     *  own rows, deleted rows and rows written before reporting existed. */
+    val evidence: PersistedEvidence? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
     public companion object
 }
+
+/** ADR-0089 section 1 — a stored [me.lakko.app.moderation.MessageEvidence]. */
+@Serializable
+public data class PersistedEvidence(
+    val verdict: String,
+    val plaintextB64: String,
+    val leafKeyB64: String,
+    val bindingB64: String? = null,
+)
 
 /** ADR-0052 — a stored [ReplyRef]. */
 @Serializable
@@ -590,6 +602,20 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         lastOpId = msg.lastOpId,
         membershipJoined = msg.membershipJoined,
         membershipLeft = msg.membershipLeft,
+        // ADR-0089 — the evidence holds the message's words, so it goes the
+        // way the words go.
+        evidence = if (msg.deleted) {
+            null
+        } else {
+            msg.evidence?.let {
+                PersistedEvidence(
+                    verdict = it.verdict.wire,
+                    plaintextB64 = it.plaintextB64,
+                    leafKeyB64 = it.leafKeyB64,
+                    bindingB64 = it.bindingB64,
+                )
+            }
+        },
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -645,6 +671,16 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         lastOpId = lastOpId,
         membershipJoined = membershipJoined,
         membershipLeft = membershipLeft,
+        evidence = evidence?.let { e ->
+            me.lakko.app.moderation.AttestationVerdict.fromWire(e.verdict)?.let { verdict ->
+                me.lakko.app.moderation.MessageEvidence(
+                    verdict = verdict,
+                    plaintextB64 = e.plaintextB64,
+                    leafKeyB64 = e.leafKeyB64,
+                    bindingB64 = e.bindingB64,
+                )
+            }
+        },
     )
 }
 

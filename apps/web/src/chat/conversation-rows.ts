@@ -48,6 +48,8 @@ import { useGroupNames } from "./GroupNameContext";
 import { useLineage } from "./use-lineage";
 import { decodeReadPosition, encodeReadPosition, readUpToInSegment } from "./lineage";
 import { base64Encode } from "../auth/account-id";
+import { blockVerdictForSender } from "../moderation/block-rules";
+import { wasmSync } from "../wasm";
 
 // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 export function createConversationRows() {
@@ -189,7 +191,9 @@ export function createConversationRows() {
     );
     const syncedReadUpTo =
       upTo === null ? null : upTo === "all" ? BigInt(Number.MAX_SAFE_INTEGER) : BigInt(upTo);
-    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
+    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo, (k) =>
+      blockVerdictForSender(wasmSync(), "notification", k) === "drop",
+    );
     if (summary.preview !== null || summary.lastAt !== null) return summary;
     // A successor nothing was said in yet: the row keeps the last line and
     // the place of the conversation's earlier part, so it neither goes blank

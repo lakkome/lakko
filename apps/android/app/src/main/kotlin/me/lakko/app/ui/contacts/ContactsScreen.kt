@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -137,6 +138,8 @@ public fun ContactsScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // ADR-0089 section 4 - a suspended account adds no contacts.
+    val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // ADR-0048 — every name on this screen comes from the one resolver; the
     // version flow recomposes a row in place when a profile arrives or a
     // username verifies.
@@ -247,7 +250,17 @@ public fun ContactsScreen(
     val listedKeys = remember(sections, byKey) {
         listedPersonKeys(sections) { rowKey -> byKey[rowKey]?.let { base64Encode(it.request.fromPubkey) } }
     }
-    val pending = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
+    val pendingAll = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
+    // ADR-0089 step 4 / UX 3 — a request held from before its sender's
+    // suspension leaves the list once the moderation log confirms it; the
+    // list shows at once and an unknown standing keeps the request.
+    val pendingKeys = remember(pendingAll) {
+        pendingAll.mapTo(HashSet()) { java.util.Base64.getEncoder().encodeToString(it.fromPubkey) }
+    }
+    val suspendedRequesters by me.lakko.app.ui.suspension.rememberSuspendedAmong(pendingKeys)
+    val pending = remember(pendingAll, suspendedRequesters) {
+        me.lakko.app.contacts.shownPendingRequests(pendingAll, suspendedRequesters)
+    }
 
     Scaffold(
         modifier = modifier,
@@ -255,7 +268,7 @@ public fun ContactsScreen(
             TopAppBar(
                 title = { Text(t("nav.contacts")) },
                 actions = {
-                    Box {
+                    if (!suspendedReadOnly) Box {
                         IconButton(onClick = { menuOpen = true }) {
                             Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.add"))
                         }
@@ -326,6 +339,27 @@ public fun ContactsScreen(
                             via = viaGroupLine(req.viaGroupIdHex, req.viaGroupIdHex?.let(viewModel::groupNameOf)),
                             onAccept = { viewModel.onAcceptClicked(req.messageId) },
                             onDecline = { viewModel.onDeclineClicked(req.messageId) },
+                            // ADR-0089 — Block and Report, behind the row's overflow.
+                            onBlock = {
+                                val key = java.util.Base64.getEncoder().encodeToString(req.fromPubkey)
+                                val shown = nameVersion.let { directory.resolve(req.fromPubkey) }
+                                me.lakko.app.ui.moderation.ModerationRequests.askBlock(
+                                    me.lakko.app.ui.moderation.BlockRequest(key, shown.primary),
+                                )
+                            },
+                            onReport = {
+                                val key = java.util.Base64.getEncoder().encodeToString(req.fromPubkey)
+                                val shown = nameVersion.let { directory.resolve(req.fromPubkey) }
+                                me.lakko.app.ui.moderation.ModerationRequests.openReport(
+                                    me.lakko.app.ui.moderation.ReportRequest(
+                                        me.lakko.app.moderation.contactRequestReportSubject(
+                                            requesterKeyB64 = key,
+                                            name = shown.primary,
+                                            requestWire = req.wire,
+                                        ),
+                                    ),
+                                )
+                            },
                         )
                     }
                 }
@@ -347,7 +381,7 @@ public fun ContactsScreen(
 
                 if (nothingAtAll && query.isBlank()) {
                     item(key = "empty") {
-                        EmptyState(onAdd = { inviteSheetOpen = true })
+                        EmptyState(onAdd = if (suspendedReadOnly) null else ({ inviteSheetOpen = true }))
                     }
                 } else if (sections.isEmpty() && query.isNotBlank()) {
                     item(key = "no-match") {
@@ -534,7 +568,10 @@ private fun RequestRow(
     via: ViaLine?,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
+    onBlock: () -> Unit = {},
+    onReport: () -> Unit = {},
 ) {
+    var overflow by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     // The resolver's "Someone" placeholder is a data value; the screen says it in the interface language.
     val title = if (name.isPlaceholder) t("contacts.request.someone") else requestSenderLabel(name)
     Column(
@@ -580,8 +617,34 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            Button(onClick = onAccept, enabled = !accepting) { Text(t(acceptButtonKey(acceptFailed))) }
+            // ADR-0089 section 4 - accepting adds a contact: not while suspended.
+            val acceptReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
+            if (!acceptReadOnly) Button(onClick = onAccept, enabled = !accepting) { Text(t(acceptButtonKey(acceptFailed))) }
             OutlinedButton(onClick = onDecline, enabled = !accepting) { Text(t("contacts.request.decline")) }
+            androidx.compose.foundation.layout.Box {
+                androidx.compose.material3.IconButton(onClick = { overflow = true }) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.Filled.MoreVert,
+                        contentDescription = t("common.more_options"),
+                    )
+                }
+                androidx.compose.material3.DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text(t("report.action"), color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            overflow = false
+                            onReport()
+                        },
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text(t("block.action"), color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            overflow = false
+                            onBlock()
+                        },
+                    )
+                }
+            }
         }
         if (acceptFailed) {
             Spacer(Modifier.height(6.dp))
@@ -658,7 +721,7 @@ private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun EmptyState(onAdd: () -> Unit) {
+private fun EmptyState(onAdd: (() -> Unit)?) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -673,8 +736,10 @@ private fun EmptyState(onAdd: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
-        Spacer(Modifier.height(12.dp))
-        Button(onClick = onAdd) { Text(t("contacts.add.share_invite")) }
+        if (onAdd != null) {
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onAdd) { Text(t("contacts.add.share_invite")) }
+        }
     }
 }
 

@@ -36,6 +36,11 @@
 //!   whose added-device warning was seen, sent the same way. Domain,
 //!   version, a bounded count, fixed-size entries, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys.
+//! * `decode_blocked_envelope` (ADR-0089 section 6): the people the account
+//!   blocked or unblocked, sent the same way. Domain, version, a bounded
+//!   count, fixed-size entries with a state byte, strictly ascending keys,
+//!   no trailing bytes; an accepted envelope folds to exactly its keys and
+//!   states.
 //! * `decode_channel_reaction_envelope` (ADR-0087 section 13a): the
 //!   account's own reactions under channel posts and, since phase B
 //!   (version `0x02`), on their comments, sent the same way. Domain,

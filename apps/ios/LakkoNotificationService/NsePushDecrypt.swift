@@ -542,6 +542,13 @@ public protocol NsePushDecryptDeps {
     /// `false`: a missing mirror drops nothing.
     func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool
 
+    /// ADR-0089 section 6 — is `senderKeyB64` an account this account
+    /// blocked? READ-ONLY, from the App Group mirror the APP writes
+    /// (``BlockedSenderMirror``; the register lives in the synced state this
+    /// process does not open). Defaulted `false`: a missing mirror drops
+    /// nothing.
+    func isBlockedSender(accountIdB64: String, senderKeyB64: String?) -> Bool
+
     /// ADR-0073 R.7 case 1 — is this chat row a re-send whose original the
     /// app already holds: the named row exists in an OLDER segment of the
     /// SAME conversation and is by the SAME account as the sender? READ-ONLY:
@@ -589,6 +596,7 @@ public protocol NsePushDecryptDeps {
 
 public extension NsePushDecryptDeps {
     func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool { false }
+    func isBlockedSender(accountIdB64: String, senderKeyB64: String?) -> Bool { false }
     func holdsResendOriginal(
         accountIdB64: String, receivedGroupIdHex: String,
         origin: NseResendOrigin, senderKeyB64: String?
@@ -980,6 +988,7 @@ func nseLogMissingSenderName() {
 /// | the row                                                              | dropped |
 /// |----------------------------------------------------------------------|---------|
 /// | any kind, from a key an accepted reset retired                       | yes     |
+/// | any kind, from an account this account blocked (ADR-0089)            | yes     |
 /// | a chat row carrying a re-send marker whose original the app holds    | yes     |
 /// | a chat row carrying a marker that matches nothing the app holds      | no      |
 /// | anything else                                                        | no      |
@@ -990,6 +999,11 @@ public func nseDropsSilently(
     deps: NsePushDecryptDeps
 ) -> Bool {
     if deps.isSupersededSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
+        return true
+    }
+    // ADR-0089 section 6 — nothing of a blocked person's is notified: no
+    // preview, no call alert, whatever the kind.
+    if deps.isBlockedSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
         return true
     }
     if row.kind == .chat, let origin = row.resendOrigin {

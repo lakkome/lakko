@@ -84,6 +84,10 @@
 	<string></string>
 	<key>LakkoReleaseCheckDevOverride</key>
 	<string>false</string>
+	<key>LakkoModerationLogKey</key>
+	<string></string>
+	<key>LakkoModerationRootKey</key>
+	<string></string>
 	<key>LakkoReleaseKey</key>
 	<string></string>
 	<key>LakkoReleaseManifestUrl</key>

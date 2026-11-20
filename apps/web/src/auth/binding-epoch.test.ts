@@ -149,9 +149,11 @@ describe("AuthContext wiring", () => {
     );
     // Every state change goes through that wrapper.
     expect(src.match(/setStateSignal\(/g)?.length).toBe(1);
-    // `logout`, `forgetDevice`, and the sign-out that follows a key reset or
-    // a device removal elsewhere (`wipeAfterSignOut`).
-    expect(src.match(/binding\.signedOut\(\);/g)?.length).toBe(3);
+    // `logout`, `forgetDevice`, the sign-out that follows a key reset or a
+    // device removal elsewhere (`wipeAfterSignOut`), and the end of a
+    // suspended account that deleted itself (ADR-0089,
+    // `finishSuspendedDeletion`).
+    expect(src.match(/binding\.signedOut\(\);/g)?.length).toBe(4);
   });
 
   it.each([
@@ -237,8 +239,10 @@ describe("AuthContext wiring", () => {
       expect(method(name)).toContain("wipes: flow.wipes,");
     }
     // The only plain openings left: the landing itself, a landing without a
-    // route (page-load restore, the sign-ups), and the two post-reset paths.
-    expect(src.match(/openStoresFor\(/g)?.length).toBe(7);
+    // route (page-load restore, the sign-ups), the two post-reset paths,
+    // and the suspended landing called without a route (ADR-0089: the
+    // routes that have one pass it and open through `flow.openStores`).
+    expect(src.match(/openStoresFor\(/g)?.length).toBe(8);
   });
 
   it("a key reset's landing writes the keys only if the account was not wiped since the route began", () => {

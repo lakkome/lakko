@@ -107,6 +107,8 @@ public object AccountLocalWipe {
 
         // ---- session + identity material ------------------------------------
         Step("session-token") { ctx, acct -> me.lakko.app.auth.SessionTokenStore.deleteSessionToken(ctx, acct) },
+        // ADR-0089 section 4: the restricted session of a suspended account.
+        Step("suspension") { ctx, acct -> me.lakko.app.auth.SuspensionStore.delete(ctx, acct) },
         Step("session-record") { ctx, acct ->
             val store = me.lakko.app.auth.SessionStore(ctx)
             if (store.load()?.accountIdB64 == acct) store.clear()
@@ -274,6 +276,8 @@ public object AccountLocalWipe {
             }
         },
         Step("folder-tab") { ctx, acct -> me.lakko.app.ui.chat.FolderTabPrefs.deleteAccount(ctx, acct) },
+        // ADR-0089 section 2 — "Your reports" lives on this device only.
+        Step("sent-reports") { ctx, acct -> me.lakko.app.moderation.SharedPrefsSentReportStore(ctx).clearForAccount(acct) },
         Step("played-media-marks") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetAccountOnDevice(ctx, acct) },
         Step("recent-emoji") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetEmojiOnDevice(ctx, acct) },
 

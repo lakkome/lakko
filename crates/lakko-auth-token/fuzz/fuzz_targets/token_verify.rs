@@ -2,14 +2,16 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `TokenSecret::verify` + `TokenSecret::verify_refresh` +
-//! `TokenSecret::verify_fresh_grant` (the v3 access-token, r2
-//! refresh-credential and k1 fresh-auth-grant parsers + verifiers,
-//! `fuzz_api::verify_token`, ADR-0073 and ADR-0074). The fuzz input is an
+//! `TokenSecret::verify_fresh_grant` + `TokenSecret::verify_restricted` (the
+//! v3 access-token, r2 refresh-credential, k1 fresh-auth-grant and s1
+//! restricted-session parsers + verifiers, `fuzz_api::verify_token`, ADR-0073,
+//! ADR-0074 and ADR-0089). The fuzz input is an
 //! attacker-controlled credential string: a client or peer presents an
 //! access token on every bearer request and a refresh credential on auth's
 //! refresh route, and a fresh-auth grant in a body field or the
-//! `x-lakko-fresh-grant` header of auth's fresh-auth-gated routes, so the
-//! bytes are untrusted and reach the parser before admission. The harness verifies the same input as all three kinds against a
+//! `x-lakko-fresh-grant` header of auth's fresh-auth-gated routes, and a
+//! suspended account presents a restricted session, so the
+//! bytes are untrusted and reach the parser before admission. The harness verifies the same input as all four kinds against a
 //! FIXED 32-byte secret (the fuzzer cannot forge a valid HMAC, so it
 //! exercises the dot-split → version gate → base64url account_id decode +
 //! 16-byte length check → `u64` generation parse → base64url device_id

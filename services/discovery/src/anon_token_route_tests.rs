@@ -424,3 +424,40 @@ async fn a_batch_evaluates_like_single_evaluations_for_one_register_token() {
         oprf::MAX_OPRF_BATCH
     );
 }
+
+/// ADR-0089 step 3: a suspended account's restricted session (`s1`) erases the
+/// account's discovery rows and opens nothing else.
+#[tokio::test]
+async fn the_restricted_session_only_deletes_the_account() {
+    let Some(pool) = test_pool("the_restricted_session_only_deletes_the_account").await else {
+        return;
+    };
+    let st = state(pool, true);
+    let account = [0x5Au8; 16];
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let s1 = st
+        .session_token_secret
+        .issue_restricted(&account, 1, &[0u8; 32], 0, now_ms + 3_600_000)
+        .unwrap();
+    let app = crate::build_app(st);
+    let with_bearer = |method: &str, uri: &str, body: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-real-ip", "192.0.2.11")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {s1}"))
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let (status, _) = send(&app, with_bearer("POST", "/discovery/register", "{}")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, with_bearer("DELETE", "/discovery/account", "")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}

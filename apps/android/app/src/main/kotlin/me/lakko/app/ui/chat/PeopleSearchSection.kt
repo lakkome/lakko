@@ -113,9 +113,17 @@ internal fun PeopleSearchSection(
         contactsState.accepted.mapTo(HashSet()) { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
     }
     LaunchedEffect(contactKeys) { session.onContacts(contactKeys) }
-    val people = remember(local, shown, ownKeyHex, excludeKeysB64, chatPeersB64, contactKeys) {
+    val foundPeople = remember(local, shown, ownKeyHex, excludeKeysB64, chatPeersB64, contactKeys) {
         val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
         peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
+    }
+    // ADR-0089 step 4 / UX 3 — search does not list a suspended account. The
+    // rows show at once; a row leaves as soon as the moderation log confirms
+    // its account suspended.
+    val foundKeys = remember(foundPeople) { foundPeople.mapTo(HashSet()) { it.keyB64 } }
+    val suspendedFound by me.lakko.app.ui.suspension.rememberSuspendedAmong(foundKeys)
+    val people = remember(foundPeople, suspendedFound) {
+        me.lakko.app.moderation.withoutSuspendedRows(foundPeople, suspendedFound) { it.keyB64 }
     }
     val channel = shown?.channel
     // ADR-0087 section 5 — the public groups and channels, asked here so the
@@ -252,14 +260,17 @@ private fun PersonRow(
                     )
                 }
             }
+            // ADR-0089 section 4 - a suspended account adds no contacts.
+            val addReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
             when (row.action) {
                 RowAction.OPEN ->
                     TextButton(onClick = { onOpenContact(person.keyB64) }) { Text(t("common.open")) }
-                RowAction.ADD ->
+                RowAction.ADD -> if (!addReadOnly) {
                     TextButton(onClick = onAdd) { Text(t("search.people.add_contact")) }
+                }
                 RowAction.ADDING ->
                     TextButton(onClick = {}, enabled = false) { Text(t("search.people.add_contact")) }
-                RowAction.ASK_AGAIN ->
+                RowAction.ASK_AGAIN -> if (!addReadOnly)
                     TextButton(onClick = onAskAgain) { Text(t("contacts.search.ask_again")) }
                 RowAction.NONE -> Unit
             }

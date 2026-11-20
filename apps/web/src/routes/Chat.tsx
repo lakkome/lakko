@@ -31,6 +31,8 @@
  * surface) is also a follow-up — current composer is a plain
  * `<input>`, no edit history.
  */
+import { accountSuspended } from "../auth/suspension-state";
+import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import {
   createEffect,
   createMemo,
@@ -137,7 +139,7 @@ import {
   type GroupCallRecord,
   type GroupCallRecords,
 } from "../calls/group-call-record";
-import { loadWasm as loadWasmForCalls } from "../wasm";
+import { loadWasm as loadWasmForCalls, wasmSync } from "../wasm";
 // ADR-0045 UX §6 — the core's own answer to *will the identical call work
 // later*. Imported as a named export rather than through `loadWasm` because
 // `formatError` is synchronous; `src/wasm.ts` imports the same module, so
@@ -232,6 +234,7 @@ import {
   infoOpening,
   infoTargetForKind,
   type InfoSection as InfoSectionName,
+  sectionsWhileSuspended,
 } from "../chat/conversation-info";
 import { uiRules } from "../chat/ui-rules";
 import type { IncomingChatEvent } from "../chat/client";
@@ -576,6 +579,17 @@ import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { isDesktop, publicOrigin } from "../platform";
 import { lastEditableOwnMessage, upEditsLastMessage } from "../chat/edit-last";
 import { displayLocale } from "../l10n/display-locale";
+import { evidenceFromPersisted, type MessageEvidence } from "../moderation/attestation";
+import { oneToOnePeer, signalsWithheldFrom } from "../moderation/block-conversation";
+import { isBlockedKeyB64 } from "../moderation/block-registry";
+import { isSuspendedKeyB64 } from "../moderation/suspension-marks";
+import { personMark } from "../moderation/suspension-rules";
+import { blockVerdictForSender } from "../moderation/block-rules";
+import { registerLiveConversation } from "../moderation/report-runtime";
+import { attachmentsPreviewLabel } from "../chat/list-preview";
+import { openReport } from "../moderation/report-session";
+import { CONVERSATION_GROUP, CONVERSATION_ONE_TO_ONE, type PickCandidate } from "../moderation/report-model";
+import { unblockPerson } from "../moderation/block-actions";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -1609,8 +1623,11 @@ function ChatView(props: {
 
   /** What this chat's call buttons (and the in-chat "call in progress"
    *  banner) offer — `calls/group-call-host.ts`. */
+  // ADR-0089 step 3: a suspended account places and joins no call.
   const callAffordance = (): ChatCallAffordance =>
-    chatCallAffordance({
+    accountSuspended()
+      ? "hidden"
+      : chatCallAffordance({
       membershipEnded: membershipEnded(),
       callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
@@ -2016,6 +2033,113 @@ function ChatView(props: {
   // one-to-one never becomes one. The member count above is display only.
   const conversationKind = createMemo<ConversationKind>(() => conversationKindOf(props.entry.group));
   const isGroupChat = (): boolean => conversationKind() === "group";
+  /** ADR-0089 section 6 - the other person of this one-to-one when this
+   *  account blocked them, else `null` (a group, or nobody blocked). */
+  const blockedPeerKey = (): string | null => {
+    if (isGroupChat()) return null;
+    const peer = oneToOnePeer(props.entry.group, chats.identity());
+    return peer !== null && isBlockedKeyB64(peer) ? peer : null;
+  };
+  /** ADR-0089 step 4, UX 3 - this one-to-one's other person when the
+   *  moderation log confirms their account is suspended and they are not
+   *  blocked (a block's banner wins). The chat still works. */
+  const suspendedPeer = (): boolean => {
+    if (isGroupChat()) return false;
+    const peer = oneToOnePeer(props.entry.group, chats.identity());
+    if (peer === null) return false;
+    return personMark(isBlockedKeyB64(peer), isSuspendedKeyB64(peer)) === "suspended";
+  };
+  const [unblocking, setUnblocking] = createSignal(false);
+  // ----- ADR-0089 section 2: reporting from this conversation -----------
+  /** The person this conversation is about, for a report's target. */
+  function reportPersonTarget(keyB64: string): { kind: "person"; accountKeyB64: string; name: string } {
+    return { kind: "person", accountKeyB64: keyB64, name: memberNameOf(profiles.resolve(keyB64), "a report") };
+  }
+  /** Report on someone else's message (UX 2.1): the target is its author,
+   *  the message is included, more of that author's can be added. */
+  function openMessageReport(messageId: number): void {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined || row.kind !== "incoming" || row.event.kind !== "application") return;
+    const author = row.event.senderKey;
+    if (author === undefined || author === ownPersonKeyB64(chats.identity())) return;
+    openReport({
+      target: reportPersonTarget(author),
+      conversationKind: isGroupChat() ? CONVERSATION_GROUP : CONVERSATION_ONE_TO_ONE,
+      pickFrom: { kind: "chat", groupIdB64: props.entry.groupIdB64, authorKeyB64: author },
+      picked: [messageId],
+    });
+  }
+  /** Report the group from its info (only by its `@name`, the shared rule
+   *  offers the block only then). */
+  function openGroupReport(): void {
+    const handle = groupNames.handleOf(props.entry.groupIdB64)?.handle;
+    if (handle === undefined) return;
+    closeInfo();
+    openReport({
+      target: { kind: "group", groupIdB64: props.entry.groupIdB64, handle, name: resolvePeerName() },
+      conversationKind: CONVERSATION_GROUP,
+      pickFrom: { kind: "chat", groupIdB64: props.entry.groupIdB64, authorKeyB64: null },
+      canLeave: groupSections().includes("leave-group"),
+      leave: () => onLeaveGroup(),
+    });
+  }
+  // The open view's rows are newer than the message log behind it: the
+  // report sheet reads the evidence and the "Choose messages" list here.
+  onCleanup(
+    registerLiveConversation(props.entry.groupIdB64, {
+      evidence: (id) => {
+        const row = rows().find((r) => rowMessageId(r) === id);
+        if (row === undefined || row.kind !== "incoming" || row.event.kind !== "application") return undefined;
+        if (msgOps().get(id)?.deleted === true) return undefined;
+        return row.event.evidence;
+      },
+      candidates: () => {
+        const out: PickCandidate[] = [];
+        for (const row of rows()) {
+          if (row.kind !== "incoming" || row.event.kind !== "application") continue;
+          const id = row.event.messageId;
+          const ops = msgOps().get(id);
+          out.push({
+            id,
+            authorKeyB64: row.event.senderKey,
+            text: ops?.editedText ?? row.event.text,
+            filesLabel: attachmentsPreviewLabel(
+              row.event.attachments.map((a) => ({ mime: a.mime ?? null, kind: a.kind ?? null })),
+            ),
+            createdAt: row.event.createdAt,
+            deleted: ops?.deleted === true || row.event.unsupportedVersion !== undefined,
+          });
+        }
+        return out;
+      },
+    }),
+  );
+  /** Collapsed rows the person tapped open, by DS id. Session-scoped: the
+   *  view is keyed on the conversation. */
+  const [revealedBlocked, setRevealedBlocked] = createSignal<ReadonlySet<number>>(new Set());
+  function revealBlocked(id: number | undefined): void {
+    if (id === undefined) return;
+    setRevealedBlocked((held) => new Set(held).add(id));
+  }
+  /** Whether a timeline row is drawn as the collapsed row: a group message
+   *  whose author this account blocked (the shared rule's `collapse`), not
+   *  tapped open yet. */
+  const collapsedBlocked = (row: TimelineRow): boolean => {
+    if (!isGroupChat() || row.kind !== "incoming" || row.event.kind !== "application") return false;
+    const id = row.event.messageId;
+    if (revealedBlocked().has(id)) return false;
+    return blockVerdictForSender(wasmSync(), "group-message", row.event.senderKey) === "collapse";
+  };
+  async function onUnblockPeer(peerKeyB64: string): Promise<void> {
+    setUnblocking(true);
+    try {
+      await unblockPerson(peerKeyB64);
+    } catch (err) {
+      setError(errorText(err, "common.error.unavailable"));
+    } finally {
+      setUnblocking(false);
+    }
+  }
   // 1.18h — members panel state. `membersVersion` is a
   // monotonic counter bumped on every epoch advance (refresh
   // success, addMember success, removeMember success); the
@@ -2110,7 +2234,8 @@ function ChatView(props: {
     // A membership that ended offers nothing here: the exit block says what
     // is left (ADR-0045 UX 6.2), and the end itself wipes the group.
     if (membershipEnded()) return [];
-    return conversationInfoSectionsFor(uiRules(), {
+    // ADR-0089 step 3: a suspended account adds nobody and invites nobody.
+    return sectionsWhileSuspended(conversationInfoSectionsFor(uiRules(), {
       kind: "group",
       role: ownRole() ?? "member",
       alone: memberCount() <= 1,
@@ -2120,7 +2245,7 @@ function ChatView(props: {
       canTransfer: usesProposalPath() && ownLeaf() !== undefined,
       canLeave: usesProposalPath() && ownLeaf() !== undefined,
       hasHandle: groupNames.handleOf(props.entry.groupIdB64) !== undefined,
-    });
+    }), accountSuspended());
   };
   /** The version of the accepted-contacts list the person info was built
    *  from; bumped by a rename or a remove made inside the layer. */
@@ -4996,7 +5121,7 @@ function ChatView(props: {
       let opId: number | undefined;
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeEditEnvelope(messageId, newText);
-        opId = (await publishQuiet(envelopeBytes)).messageId;
+        opId = (await publishQuiet(envelopeBytes, true)).messageId;
       }
       // Apply locally (no echo). Author == us, so the gate the
       // receive loop runs would accept it; we mirror that here.
@@ -5019,7 +5144,7 @@ function ChatView(props: {
     let opId: number | undefined;
     if (published) {
       const envelopeBytes = await composeDeleteEnvelope(messageId);
-      opId = (await publishQuiet(envelopeBytes)).messageId;
+      opId = (await publishQuiet(envelopeBytes, true)).messageId;
     }
     setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId, opId }));
     // Section 4.1 — a deleted message leaves the bar and its pin records
@@ -5245,7 +5370,11 @@ function ChatView(props: {
           const sent = await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
           at = sent.messageId;
         } else {
-          at = (await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes)).messageId;
+          at = (
+            await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, {
+              attest: true,
+            })
+          ).messageId;
         }
       }
       setMsgOps(
@@ -5308,16 +5437,23 @@ function ChatView(props: {
    * before this, every keystroke's typing signal woke the other person with
    * "New message". The same rule as the iOS and Android clients.
    */
-  async function publishQuiet(envelopeBytes: Uint8Array): Promise<{ messageId: number }> {
-    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
+  async function publishQuiet(
+    envelopeBytes: Uint8Array,
+    /** ADR-0089 section 1 - an edit or a delete is attested; a typing
+     *  signal and a read receipt are not. */
+    attest: boolean,
+  ): Promise<{ messageId: number }> {
+    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, { attest });
   }
 
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
     // ADR-0073 R.7 case 1 — a typing signal or a read receipt is not sent
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
+    // ADR-0089 section 6 - nor to a blocked person.
+    if (signalsWithheldFrom(props.entry.group, chats.identity())) return;
     try {
-      await publishQuiet(envelopeBytes);
+      await publishQuiet(envelopeBytes, false);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("publishEphemeral failed", err);
@@ -7481,7 +7617,9 @@ function ChatView(props: {
    *  the boundary, so a stale answer here costs a refused envelope, never a
    *  pin nobody agreed to. */
   const maySetSharedPin = (): boolean =>
-    !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
+    // ADR-0089 step 3: a shared pin or unpin sends; a suspended account has
+    // the personal pin alone.
+    !accountSuspended() && !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
   /** The stored pin an on-screen row id stands for: the row itself in this
    *  group, or `(older group, original id)` for a row of an older segment
    *  (ADR-0073 R.5, `pin-bar.ts` `pinTargetOfRow`). */
@@ -7780,6 +7918,15 @@ function ChatView(props: {
       </header>
       </Show>
 
+      {/* ADR-0089 step 4, reporting UX section 3 - the other person's account
+          is suspended: a banner under the header, with no action. It replaces
+          nothing (the composer stays), and a block's banner wins over it. */}
+      <Show when={suspendedPeer()}>
+        <div class="lk-banner lk-suspended-banner" role="status">
+          <span>{t("suspended.banner", { name: resolvePeerName() })}</span>
+        </div>
+      </Show>
+
       {/* ADR-0052 decision 3 / message-actions.md section 4 — the pinned bar,
           under the header, one pin at a time. No pins, no bar: the header
           does not move. */}
@@ -8030,6 +8177,22 @@ function ChatView(props: {
               </Show>
               <Show when={entry.kind === "message" ? entry.row : undefined}>
                 {(row) => (
+              <Show
+                when={!collapsedBlocked(row())}
+                fallback={
+                  // ADR-0089 section 6, UX 1.2 - a blocked person's message in
+                  // a group: one muted row that shows the message when tapped.
+                  <li class="lk-system-row lk-blocked-row">
+                    <button
+                      type="button"
+                      class="ghost small"
+                      onClick={() => revealBlocked(rowMessageId(row()))}
+                    >
+                      {t("block.group_row")}
+                    </button>
+                  </li>
+                }
+              >
               <TimelineBubble
                 conversationId={props.entry.groupIdB64}
                 row={row()}
@@ -8114,7 +8277,9 @@ function ChatView(props: {
                 isSelected={(id) => selection().has(id)}
                 onToggleSelect={toggleSelectedRow}
                 onSelect={enterSelectionMode}
+                onReport={membershipEnded() ? undefined : openMessageReport}
               />
+              </Show>
                 )}
               </Show>
               </>
@@ -8469,9 +8634,12 @@ function ChatView(props: {
       <Show when={selecting()}>
         <div class="lk-select-actions" role="toolbar" aria-label={t("chat.select.toolbar")}>
           <div class="lk-select-actions-row">
+            {/* ADR-0089 step 3: Forward and Delete send; a suspended account
+                is offered Save alone. */}
             <button
               type="button"
               class="lk-select-action"
+              style={accountSuspended() ? { display: "none" } : undefined}
               disabled={!forwardEnabled(selection())}
               onClick={() => setBulkForwardOpen(true)}
             >
@@ -8490,6 +8658,7 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-select-action danger"
+              style={accountSuspended() ? { display: "none" } : undefined}
               disabled={!deleteState().enabled}
               onClick={() => void deleteSelection()}
             >
@@ -8497,7 +8666,7 @@ function ChatView(props: {
               <span>{t("common.delete")}</span>
             </button>
           </div>
-          <Show when={deleteState().helper}>
+          <Show when={accountSuspended() ? null : deleteState().helper}>
             {(helper) => <div class="lk-select-helper">{helper()}</div>}
           </Show>
         </div>
@@ -8555,7 +8724,31 @@ function ChatView(props: {
           </For>
         </div>
       </Show>
-      <form onSubmit={onSend} class="lk-composer">
+      {/* ADR-0089 section 6, UX 1.2 - in the one-to-one with a blocked
+          person a banner replaces the composer. */}
+      <Show when={blockedPeerKey()}>
+        {(peer) => (
+          <div class="lk-banner lk-blocked-banner" role="status">
+            <span>{t("block.banner", { name: resolvePeerName() })}</span>
+            <button
+              type="button"
+              class="ghost small"
+              disabled={unblocking()}
+              onClick={() => void onUnblockPeer(peer())}
+            >
+              {t("block.unblock")}
+            </button>
+          </div>
+        )}
+      </Show>
+      {/* ADR-0089 step 3: a suspended account's composer is the muted line,
+          with no send control. */}
+      <SuspendedComposerLine />
+      <form
+        onSubmit={onSend}
+        class="lk-composer"
+        style={blockedPeerKey() !== null || accountSuspended() ? { display: "none" } : undefined}
+      >
         <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
           <EmojiPicker
             mode="compose"
@@ -9410,7 +9603,14 @@ function ChatView(props: {
                           "min-width": 0,
                         }}
                       >
-                        <span class="lk-row-title">{label()}</span>
+                        <span class="lk-row-title">
+                          {label()}
+                          {/* ADR-0089 step 4, UX 3 - a member whose account
+                              is suspended: a muted word after the name. */}
+                          <Show when={!isSelf && isSuspendedKeyB64(memberKeyB64)}>
+                            <span class="lk-member-suspended">{" "}{t("suspended.member")}</span>
+                          </Show>
+                        </span>
                         <Show when={m.deviceCount > 1}>
                           <span class="lk-row-sub">{t("chat.members.devices", { count: m.deviceCount })}</span>
                         </Show>
@@ -9538,6 +9738,19 @@ function ChatView(props: {
 
                 Only on the proposal path: a legacy group's core has no
                 self-remove route and no owner to transfer from. */}
+            {/* ADR-0089 section 2 - Report, first in the exit block, for
+                anyone but the owner and only for a group with an `@name` (the
+                shared rule). */}
+            <Show when={groupSections().includes("report")}>
+              <button
+                type="button"
+                class="ghost small"
+                style={{ color: "var(--danger)", "align-self": "flex-start", "margin-top": "0.6rem" }}
+                onClick={openGroupReport}
+              >
+                {t("report.action")}
+              </button>
+            </Show>
             <Show when={exitBlockState().kind !== "hidden"}>
               <div
                 style={{
@@ -10417,6 +10630,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
     };
   }
   if (m.direction === "incoming") {
+    const evidence: MessageEvidence | undefined = evidenceFromPersisted(m.evidence);
     return {
       kind: "incoming",
       event: {
@@ -10442,6 +10656,8 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         ...(forward === undefined ? {} : { forward }),
         // ADR-0061 section 6 — a message from a newer Lakko stays one.
         ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
+        // ADR-0089 section 1 - the report evidence captured at receipt.
+        ...(evidence === undefined ? {} : { evidence }),
       },
     };
   }

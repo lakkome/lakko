@@ -14,7 +14,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use lakko_transparency::{verify_witness_cosig, TreeHash};
+use lakko_transparency::{verify_witness_cosig, LogId, TreeHash};
 
 /// witness_key(32) + expected_tree_root(32) + expected_log_size(8) = 72; the
 /// remainder is the attacker-controlled co-sig blob.
@@ -39,5 +39,14 @@ fuzz_target!(|data: &[u8]| {
     o += 8;
     let cosig = &data[o..];
 
-    let _ = verify_witness_cosig(cosig, witness_key, &expected_tree_root, expected_log_size);
+    // Both logs: the log name enters the signature check (witness v2).
+    for log in LogId::ALL {
+        let _ = verify_witness_cosig(
+            cosig,
+            witness_key,
+            log,
+            &expected_tree_root,
+            expected_log_size,
+        );
+    }
 });

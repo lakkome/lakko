@@ -73,7 +73,7 @@ public class PasskeysViewModel(
      *  every operation so a token rotation between two calls
      *  doesn't strand the next request. */
     private fun rebindSession() {
-        client.setSessionToken(repo.identitySecrets.value?.sessionToken)
+        client.setSessionToken(repo.accountForDeletion()?.bearer)
     }
 
     public fun onNicknameChange(value: String) {
@@ -343,7 +343,9 @@ public class PasskeysViewModel(
      */
     public fun deleteAccount(context: Context, hasPasskey: Boolean, onProofRequired: () -> Unit) {
         rebindSession()
-        val secrets = repo.identitySecrets.value ?: run {
+        // The live session's account, or (ADR-0089) a suspended account's on
+        // a device without its chats, with the restricted session.
+        val secrets = repo.accountForDeletion() ?: run {
             mutableState.update { it.copy(deleteError = SESSION_NOT_READY) }
             return
         }
@@ -375,7 +377,7 @@ public class PasskeysViewModel(
                 // until it expires.
                 try {
                     DiscoveryClient().use { discovery ->
-                        discovery.setSessionToken(secrets.sessionToken)
+                        discovery.setSessionToken(secrets.bearer)
                         me.lakko.app.contacts.OwnLinks.revokeAll(
                             me.lakko.app.auth.base64Encode(secrets.accountId), discovery,
                         )
@@ -399,11 +401,25 @@ public class PasskeysViewModel(
                 }
                 // Best-effort discovery purge — the auth tier is the critical
                 // erasure; the session token is about to be invalidated anyway.
+                // ADR-0089 section 4 - a suspended account sends the `s1`,
+                // which discovery's and storage's account deletions accept.
                 try {
                     val discovery = DiscoveryClient()
-                    discovery.setSessionToken(secrets.sessionToken)
+                    discovery.setSessionToken(secrets.bearer)
                     discovery.deleteAccount()
-                } catch (_: Throwable) {
+                } catch (e: Throwable) {
+                    me.lakko.app.rethrowIfCancelled(e) {}
+                    // best-effort
+                }
+                // The encrypted backup goes with the account (best effort,
+                // like the directory: the auth erasure above is the critical one).
+                try {
+                    me.lakko.app.storage.StorageClient().use { storage ->
+                        storage.setSessionToken(secrets.bearer)
+                        storage.deleteBackup()
+                    }
+                } catch (e: Throwable) {
+                    me.lakko.app.rethrowIfCancelled(e) {}
                     // best-effort
                 }
                 // Local wipe + full sign-out on this device: the same path

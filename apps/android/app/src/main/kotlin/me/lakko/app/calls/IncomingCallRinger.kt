@@ -230,6 +230,10 @@ public object IncomingCallRinger : IncomingCallRingPort {
      */
     override fun startRinging(ring: IncomingCallRing) {
         val context = appContext ?: return
+        // ADR-0089 section 4 — a suspended account makes no calls, so nothing
+        // rings: in the app (the gate) and from a push wake in a process the
+        // app has not opened (the record on disk).
+        if (me.lakko.app.auth.SuspensionGate.readOnly.value || me.lakko.app.auth.SuspensionStore.isSuspendedHere(context)) return
         if (mutableRinging.value?.callIdHex == ring.callIdHex) return
         val remaining = remainingMs(ring)
         if (remaining <= 0L) {

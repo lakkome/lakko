@@ -171,13 +171,40 @@ import {
   linkRequestKeyHex,
   linkRequestStep,
 } from "./link-claims";
-import { loadWasm } from "../wasm";
+import { loadWasm, wasmSync, type Wasm } from "../wasm";
+import { blockVerdictForSender } from "../moderation/block-rules";
+import { isSuspendedKeyB64, standingWithin, standingsWithin, suspendedAmong } from "../moderation/suspension-marks";
+import { REQUEST_STANDING_BOUND_MS, dropsRequestFrom } from "../moderation/suspension-rules";
 
 /** How often held Welcomes are tried again (chosen). */
 const HELD_WELCOME_RETRY_MS = 30_000;
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
+
+/** ADR-0089 section 6 - whether the shared block rule drops this request:
+ *  its sender's account key is in the block register. */
+function requestBlocked(request: IncomingContactRequest): boolean {
+  return (
+    blockVerdictForSender(wasmSyncOrNull(), "contact-request", base64Encode(request.fromPubkey)) === "drop"
+  );
+}
+
+/** ADR-0089 step 4, UX 3 - whether a request is dropped unseen because the
+ *  moderation log confirms its sender's account is suspended. Waits a few
+ *  seconds at most; a timeout or an unchecked standing keeps the request. */
+async function requestFromSuspended(request: IncomingContactRequest): Promise<boolean> {
+  return dropsRequestFrom(await standingWithin(base64Encode(request.fromPubkey), REQUEST_STANDING_BOUND_MS));
+}
+
+/** The loaded wasm namespace, or `null` before it is. */
+function wasmSyncOrNull(): Wasm | null {
+  try {
+    return wasmSync();
+  } catch {
+    return null;
+  }
+}
 
 export interface MailboxApi {
   /** Contact requests awaiting Accept / Decline, oldest first. Kept across
@@ -315,6 +342,13 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (opened === null) return true;
     if (scope !== polled) return false;
     const { request, row } = opened;
+    // ADR-0089 section 6 - a request through a group from a blocked account:
+    // dropped unseen, and the row is handled.
+    if (requestBlocked(request)) return true;
+    // ADR-0089 step 4 - a request from an account the log confirms is
+    // suspended: dropped unseen too.
+    if (await requestFromSuspended(request)) return true;
+    if (scope !== polled) return false;
     if (request.profile !== null) profiles.ingest(base64Encode(request.fromPubkey), request.profile);
     // A contact this device already talks to in a one-to-one: answered
     // silently, as from the inbox (ADR-0073 R.7 case 1). A contact with NO
@@ -877,7 +911,16 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         }
         return null;
       };
-      for (const req of target.undecidedLinkRequests()) {
+      const undecided = target.undecidedLinkRequests();
+      // ADR-0089 step 4 - a held request is decided only after its sender's
+      // standing is asked again (the account may have been suspended since
+      // it arrived, or the check timed out then): every sender at once,
+      // under one bound. Only a verified suspension drops one.
+      const suspended = await suspendedAmong(
+        undecided.flatMap((r) => (r.linkAnswer === null ? [] : [base64Encode(r.fromPubkey)])),
+        REQUEST_STANDING_BOUND_MS,
+      );
+      for (const req of undecided) {
         if (!current()) return;
         const answer = req.linkAnswer;
         if (answer === null) {
@@ -886,6 +929,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         }
         const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
         const requesterKeyB64 = base64Encode(req.fromPubkey);
+        if (suspended.has(requesterKeyB64)) {
+          // Dropped unseen, as at arrival: no card, no one-to-one, no answer.
+          claims.forgetOwn(key);
+          target.remove(req.messageId);
+          continue;
+        }
         const liveGroupIdB64 = liveOneToOneWith(requesterKeyB64);
         // ADR-0079 amendment of 2026-10-19 - the moment the request was
         // written decides the link's expiry: the time the DS stamped on the
@@ -1213,10 +1262,25 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     let joined = false;
     const joinedEntries: ActiveGroup[] = [];
     let failed = false;
+    // ADR-0089 step 4 - the senders' standings for the whole batch, asked
+    // at once under one bound (a slow moderation server holds the poll a few
+    // seconds at most, not a few seconds per request).
+    const standings = await standingsWithin(
+      events.flatMap((ev) =>
+        ev.kind === "contact-request" && !requestBlocked(ev.request) ? [base64Encode(ev.request.fromPubkey)] : [],
+      ),
+      REQUEST_STANDING_BOUND_MS,
+    );
     try {
       for (const ev of events) {
         if (ev.kind === "contact-request") {
           const senderB64 = base64Encode(ev.request.fromPubkey);
+          // ADR-0089 section 6 - a request from a blocked account is dropped
+          // unseen, whichever way it came (the inbox, an invite link).
+          if (requestBlocked(ev.request)) continue;
+          // ADR-0089 step 4 - and one from an account the moderation log
+          // confirms is suspended (verified only; never on a timeout).
+          if (dropsRequestFrom(standings.get(senderB64) ?? "unknown")) continue;
           const action = rowAction(ev.reachPk, () => [senderB64]);
           if (action === "drop") {
             dropped();
@@ -1582,7 +1646,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   });
 
   const api: MailboxApi = {
-    pending,
+    // ADR-0089 section 6 - a request from a blocked account is never listed,
+    // also one that was held before the block was written.
+    pending: () =>
+      pending().filter((r) => !requestBlocked(r) && !isSuspendedKeyB64(base64Encode(r.fromPubkey))),
     busy,
     error,
     acceptedVersion,

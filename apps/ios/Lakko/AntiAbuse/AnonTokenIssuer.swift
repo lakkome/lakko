@@ -128,6 +128,10 @@ public final class AuthAnonTokenIssuer: AnonTokenIssuing, @unchecked Sendable {
             throw AnonTokenUnavailable.quotaExhausted(retryAfterSecs: retry)
         case 503 where AnonTokenRoute.errorCode(in: data) == "anon-tokens-disabled":
             throw AnonTokenUnavailable.disabled
+        case 403 where AnonTokenRoute.errorCode(in: data) == accountSuspendedCode:
+            // ADR-0089 step 3 — a suspended account draws `blob-read` only:
+            // "not now" for this context, until the suspension ends.
+            throw AnonTokenUnavailable.refused(code: accountSuspendedCode)
         default:
             throw AnonTokenUnavailable.issuanceFailed(
                 "POST /auth/tokens -> \(response.statusCode) \(AnonTokenRoute.errorCode(in: data) ?? "")")

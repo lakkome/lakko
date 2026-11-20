@@ -823,6 +823,19 @@ function buildDecryptDeps(wasm, core) {
     // the plaintext mirror the app writes (`src/push/superseded-mirror.ts`;
     // the pin store itself is `localStorage`, which a worker cannot read).
     // READ-ONLY (C-59). Every miss is "none retired": the wake is shown.
+    // ADR-0089 section 6 - the people this account blocked, from the same
+    // encrypted sync row as the mute flag. READ-ONLY; every miss is "none".
+    lookupBlockedKeys: async (accountId, deviceKey) => {
+      const row = await idbGet("lakko-device-sync", "rows", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        return core.blockedKeysFromSyncStateRow(payload, wasm);
+      } catch {
+        return null;
+      }
+    },
     lookupSupersededKeys: async (accountId) => {
       try {
         const row = await idbGet("lakko-superseded-keys", "rows", accountId);

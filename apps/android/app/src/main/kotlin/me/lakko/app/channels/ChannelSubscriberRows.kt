@@ -159,6 +159,7 @@ public object ChannelRemovalWatch {
     ) {
         ChannelUnsubscribe.leave(state, channelId, ChannelsClient.DEFAULT_BASE_URL, tellDevices = true)
         ChannelMemberCards.forgetUploads(channelId)
+        RemovedChannels.noteAnswered(channelId)
         _removed.update { it + (channelId to name) }
         (onNotice ?: notice)?.invoke(channelId, name)
     }
@@ -168,6 +169,7 @@ public object ChannelRemovalWatch {
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
         ChannelMemberCards.forgetUploads(channelId)
+        RemovedChannels.noteAnswered(channelId)
         me.lakko.app.feed.requestChannelPostSync()
         _removed.update { it + (channelId to name) }
         onNotice(channelId, name)
@@ -183,6 +185,8 @@ public object ChannelRemovalWatch {
         for ((channelId, keys) in state.subscriberKeysByChannel.value) {
             if (channelId in publishing) continue
             val channel = state.channels.value.firstOrNull { it.id == channelId } ?: continue
+            // ADR-0089 step 5 — a removed channel is asked once per period.
+            if (!RemovedChannels.mayAsk(channelId)) continue
             try {
                 client.fetchEnvelope(channelId, ChannelsComposer.bytesToHex(keys.publicKey))
             } catch (e: kotlinx.coroutines.CancellationException) {

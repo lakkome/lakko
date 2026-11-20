@@ -21,6 +21,28 @@ public object ChannelUnsubscribe {
      *  the request must not be cancelled with it. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** How the account's other devices learn of a leave ([tellDevices]
+     *  `false`: only this device's registers are cleared). Tests replace it. */
+    @Volatile
+    internal var tellOtherDevices: suspend (uniffi.lakko_ffi_uniffi.FolderConversationRef, Boolean) -> Unit =
+        { ref, tellDevices ->
+            val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+            if (tellDevices) sync?.publishConversationEnded(ref, 0u)
+            sync?.clearConversationRegisters(ref)
+        }
+
+    /** The client the background unsubscribe goes through (tests replace it). */
+    @Volatile
+    internal var serverClient: (String) -> ChannelsClient = { ChannelsClient(it) }
+
+    /** The unsubscribe signature (tests replace the core's). */
+    @Volatile
+    internal var serverSign: (ByteArray, ByteArray, ULong) -> String = ::coreSignature
+
+    /** The unsubscribe signature header's name (tests replace the core's). */
+    @Volatile
+    internal var serverHeaderName: () -> String = { uniffi.lakko_ffi_uniffi.unsubscribeSigHeaderName() }
+
     /**
      * Tell the server: sign with [keys] (the subscriber key registered for
      * [channelIdHex]) and send the DELETE through [client]. Throws on a
@@ -54,6 +76,17 @@ public object ChannelUnsubscribe {
     }
 
     /**
+     * ADR-0089 step 5 — the owner or a publisher takes a channel moderators
+     * removed out of the list: it ends here and the account's conversation
+     * end is written, so the account's other devices drop it too, as a
+     * subscriber's Unsubscribe does. Only the channels-service call is
+     * skipped (every route answers `410 channel-removed`).
+     */
+    public fun leaveRemoved(state: ChannelsUiState, channelId: String) {
+        leave(state, channelId, baseUrl = "", tellDevices = true, callService = false)
+    }
+
+    /**
      * Leave [channelId]: drop this device's local state for it at once, then
      * tell the server in the background with a client on [baseUrl]. A failure
      * to reach the server is logged; the local state is gone either way (the
@@ -63,12 +96,21 @@ public object ChannelUnsubscribe {
      * person. [tellDevices] says so over the DeviceGroup; a device acting on
      * that register passes `false`.
      */
-    public fun leave(state: ChannelsUiState, channelId: String, baseUrl: String, tellDevices: Boolean = true) {
+    public fun leave(
+        state: ChannelsUiState,
+        channelId: String,
+        baseUrl: String,
+        tellDevices: Boolean = true,
+        /** `false`: no channels-service call ([leaveRemoved]). */
+        callService: Boolean = true,
+    ) {
         val keys = state.subscriberKeysByChannel.value[channelId]?.let {
             ChannelSubscriberKeys(secret = it.secret.copyOf(), publicKey = it.publicKey.copyOf())
         }
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
+        // ADR-0089 step 5 — a removed channel's mark goes with it.
+        RemovedChannels.noteAnswered(channelId)
         // ADR-0060 §3 — the server drops the member card with the
         // subscription, so a later subscription uploads afresh.
         ChannelMemberCards.forgetUploads(channelId)
@@ -77,25 +119,29 @@ public object ChannelUnsubscribe {
         channelRef(channelId)?.let { ref ->
             scope.launch {
                 try {
-                    val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
-                    if (tellDevices) sync?.publishConversationEnded(ref, 0u)
-                    sync?.clearConversationRegisters(ref)
+                    tellOtherDevices(ref, tellDevices)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (cause: Throwable) {
-                    Log.w(LOG_TAG, "unsubscribe not told to the other devices: ${cause.javaClass.simpleName}")
+                    runCatching { Log.w(LOG_TAG, "unsubscribe not told to the other devices: ${cause.javaClass.simpleName}") }
                 }
             }
         }
         if (keys == null) return
+        if (!callService) {
+            keys.secret.fill(0)
+            return
+        }
         scope.launch {
             try {
-                ChannelsClient(baseUrl).use { client -> tellServer(client, channelId, keys) }
-                Log.i(LOG_TAG, "unsubscribed on the server")
+                serverClient(baseUrl).use { client ->
+                    tellServer(client, channelId, keys, headerName = serverHeaderName(), sign = serverSign)
+                }
+                runCatching { Log.i(LOG_TAG, "unsubscribed on the server") }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (cause: Throwable) {
-                Log.w(LOG_TAG, "unsubscribe not sent to the server: ${cause.javaClass.simpleName}")
+                runCatching { Log.w(LOG_TAG, "unsubscribe not sent to the server: ${cause.javaClass.simpleName}") }
             } finally {
                 keys.secret.fill(0)
             }

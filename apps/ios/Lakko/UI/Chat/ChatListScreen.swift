@@ -51,6 +51,8 @@ public struct ChatListScreen: View {
     @ObservedObject var feedReading: FeedReadingModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0089 step 3 — the read-only app of a suspended account.
+    @Environment(\.accountSuspended) private var accountSuspended
     /// Open the conversation this row names, whichever kind it is.
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
@@ -173,6 +175,11 @@ public struct ChatListScreen: View {
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
               VStack(spacing: 0) {
+                // ADR-0089 step 3 — reading a suspended account's chats: the
+                // suspended screen is one tap away.
+                if accountSuspended {
+                    SuspendedBanner { SuspensionCenter.shared.showScreen() }
+                }
                 if showsFolderBar {
                     FolderBar(
                         folders: deviceGroupSync.folders,
@@ -237,7 +244,10 @@ public struct ChatListScreen: View {
                 if let keysUpdatingLabel, !viewModel.synchronizing {
                     ToolbarItem(placement: .navigationBarLeading) { keysUpdatingLabel }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) { createMenu }
+                // ADR-0089 step 3 — a suspended account starts nothing.
+                if !accountSuspended {
+                    ToolbarItem(placement: .navigationBarTrailing) { createMenu }
+                }
             }
     }
 
@@ -1043,16 +1053,18 @@ public struct ChatListScreen: View {
                 .foregroundStyle(Color.lakkoTextMuted)
             Text(l10n.t("chats.empty.title"))
                 .font(.headline)
-            Button {
-                createMenuWithSaved = false
-                createMenuOpen = true
-            } label: {
-                Text(l10n.t("chats.empty.action"))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.lakkoAccent)
-                    .foregroundStyle(Color.lakkoAccentForeground)
-                    .clipShape(Capsule())
+            if !accountSuspended {
+                Button {
+                    createMenuWithSaved = false
+                    createMenuOpen = true
+                } label: {
+                    Text(l10n.t("chats.empty.action"))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.lakkoAccent)
+                        .foregroundStyle(Color.lakkoAccentForeground)
+                        .clipShape(Capsule())
+                }
             }
         }
         .padding(24)

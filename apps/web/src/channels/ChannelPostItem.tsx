@@ -56,6 +56,9 @@ export interface ChannelPostItemProps {
   /** ADR-0065 — whether this account saved the post. */
   readonly saved: boolean;
   readonly onToggleSaved: () => void;
+  /** ADR-0089 section 2 - `Report` in the menu, for a subscriber. Absent:
+   *  no Report row. */
+  readonly onReport?: (() => void) | undefined;
 }
 
 export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
@@ -234,6 +237,11 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
             onSelect={() => undefined}
             onEdit={() => props.onEdit(props.post.cursor, props.post.text)}
             onDelete={() => props.onDelete(props.post.cursor)}
+            extraDestructive={
+              props.onReport !== undefined
+                ? [{ label: t("report.action"), icon: "flag", onClick: () => props.onReport?.() }]
+                : []
+            }
             onClose={() => setMenu(null)}
           />
         )}
