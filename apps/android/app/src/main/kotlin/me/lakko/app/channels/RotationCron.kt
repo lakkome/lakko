@@ -172,13 +172,26 @@ public class RotationCron(
         //    and the new seed is resealed to every subscriber (ADR-0030
         //    chunked fanout, C-42); `409`, the stage is abandoned and this
         //    device does nothing more (the journal read applies the winner).
-        val outcome = me.lakko.app.ds.DsClient().use { ds ->
-            runPublisherCommit(
-                entry,
-                CoPublisher.commitPorts(
-                    ds, channelsClient, ids, publisherGroup, channelIdHex, accountIdB64, store,
-                ),
-            )
+        val outcome = try {
+            me.lakko.app.ds.DsClient().use { ds ->
+                runPublisherCommit(
+                    entry,
+                    CoPublisher.commitPorts(
+                        ds, channelsClient, ids, publisherGroup, channelIdHex, accountIdB64, store,
+                    ),
+                )
+            }.also { PublisherCommitRetry.shared.noteSuccess(accountIdB64, channelIdHex) }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // 2026-11-20 — the entry stays. A failure after the journal step
+            // holds the channel (a refusal: until the next start); an
+            // unanswered journal step is sent again next pass.
+            val after = store.entries(accountIdB64).firstOrNull { it.id == entry.id } ?: entry
+            if (!PublisherCommitRetry.owesJournal(after)) {
+                PublisherCommitRetry.shared.noteFailure(accountIdB64, channelIdHex, e)
+            }
+            throw e
         }
         if (outcome == PublisherCommitOutcome.LOST) {
             return OnceResult(rotated = false, newState = state, lost = true)

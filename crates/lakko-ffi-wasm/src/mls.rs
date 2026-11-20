@@ -4647,9 +4647,12 @@ fn bounded_history_extras(
 /// bytes) / `forwardOriginMessage` a forward (the origin kept only when both
 /// halves are given). A field out of the envelope's bounds is dropped alone.
 ///
-/// `content` (ADR-0092), the last argument, is the `ContentMessage` of a
-/// poll / checklist / location / contact card / article message, or
-/// `undefined`.
+/// `content` (ADR-0092) is the `ContentMessage` of a poll / checklist /
+/// location / contact card / article message, or `undefined`.
+///
+/// `authorKey` (version 6, ADR-0091 live walk 3), the last argument, is the
+/// author's 32-byte key as this device stored it, or `undefined`; a key of
+/// any other length is dropped.
 #[wasm_bindgen(js_name = encodeHistoryPlaceholder)]
 #[allow(clippy::too_many_arguments)]
 pub fn encode_history_placeholder(
@@ -4666,6 +4669,7 @@ pub fn encode_history_placeholder(
     forward_origin_group: Option<Vec<u8>>,
     forward_origin_message: Option<i64>,
     content: Option<crate::content::JsContentMessage>,
+    author_key: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsValue> {
     use lakko_mls::history_placeholder::{
         HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
@@ -4734,6 +4738,7 @@ pub fn encode_history_placeholder(
         reply,
         forward,
         content,
+        author_key: author_key.and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok()),
     };
     msg.encode().map_err(mls_err)
 }
@@ -4891,6 +4896,7 @@ pub struct OpenedHistoryPlaceholder {
     reply_val: Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
     forward_val: Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
     content_val: JsValue,
+    author_key_val: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -4964,6 +4970,13 @@ impl OpenedHistoryPlaceholder {
     pub fn content(&self) -> JsValue {
         self.content_val.clone()
     }
+
+    /// Version 6 (ADR-0091 live walk 3) — the author's 32-byte key as the
+    /// sending device stored it, or `undefined`.
+    #[wasm_bindgen(getter, js_name = authorKey)]
+    pub fn author_key(&self) -> Option<Vec<u8>> {
+        self.author_key_val.clone()
+    }
 }
 
 /// Decode canonical `payload_bytes` (produced by
@@ -4989,6 +5002,7 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
         crate::content::content_message_to_js(c.kind, &c.payload, &c.state, &mimes)
     });
     Ok(OpenedHistoryPlaceholder {
+        author_key_val: msg.author_key.map(|k| k.to_vec()),
         channel_invite_val,
         reply_val,
         forward_val,
@@ -6364,6 +6378,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("encodes");
         let back = super::decode_history_placeholder(&bytes).expect("decodes");
@@ -6373,6 +6388,36 @@ mod tests {
             .map(super::OpenedHistoryAttachment::inline_thumb)
             .collect();
         assert_eq!(thumbs, vec![None, Some(jpeg), None, None]);
+    }
+
+    /// ADR-0091 live walk 3 — a bundled message keeps its author.
+    #[test]
+    fn the_author_key_survives_the_history_bundle() {
+        let encode = |key: Option<Vec<u8>>| {
+            super::encode_history_placeholder(
+                9,
+                1,
+                "2026-11-20T01:07:00Z",
+                "hi",
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                key,
+            )
+            .expect("encodes")
+        };
+        let back =
+            super::decode_history_placeholder(&encode(Some(vec![0x44; 32]))).expect("decodes");
+        assert_eq!(back.author_key(), Some(vec![0x44; 32]));
+        let none =
+            super::decode_history_placeholder(&encode(Some(vec![0x44; 5]))).expect("decodes");
+        assert_eq!(none.author_key(), None);
     }
 
     #[test]

@@ -1003,6 +1003,19 @@ export const channelsActions = {
     });
     schedulePersist();
   },
+  /** 2026-11-20 — drop every kept seed of `channelId` above `epoch`: seeds
+   *  filed under an epoch mapping that no longer holds (`anchorChannelEpoch`).
+   *  The service never served an epoch above its next one. */
+  dropSubscribedSeedsAbove(channelId: string, epoch: number): void {
+    const inner = subscribedSeedsByChannel().get(channelId);
+    if (inner === undefined || ![...inner.keys()].some((e) => e > epoch)) return;
+    setSubscribedSeedsByChannel((map) => {
+      const next = new Map(map);
+      next.set(channelId, new Map([...(next.get(channelId) ?? [])].filter(([e]) => e <= epoch)));
+      return next;
+    });
+    schedulePersist();
+  },
   /** Record the recovered content-key seed for a specific
    *  epoch after the subscriber opened that epoch's seed
    *  envelope (ADR-0031 multi-epoch retention). Idempotent

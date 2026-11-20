@@ -605,3 +605,197 @@ public object ChannelReseal {
         return resealThrough(ChannelAdmissionMark.get(context, accountIdB64, channelIdHex))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Retry of recorded commits (2026-11-20)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a failed step of a recorded PublisherGroup commit means for its next
+ * try (seen live 2026-11-20 on iOS: a reseal refused `401
+ * owner-proof-required` was "retried later" once per entry, back to back,
+ * every pass, while every pass recorded one more rotation).
+ */
+public enum class PublisherCommitFailure {
+    /** The channels service answered `401 owner-proof-required` (this
+     *  device's publisher proof is not accepted for the channel) or `410
+     *  channel-deleted`: the same request gets the same answer. */
+    REFUSED,
+
+    /** Anything else (network, a 5xx, an unanswered journal step). */
+    TRANSIENT,
+    ;
+
+    public companion object {
+        /** The kind of [cause]; looks through `cause` chains. */
+        public fun of(cause: Throwable): PublisherCommitFailure {
+            var current: Throwable? = cause
+            var depth = 0
+            while (current != null && depth < 8) {
+                if (current is ChannelsApiException &&
+                    (current.code == PUBLISHER_REFUSED || (current.status == 410 && current.code == "channel-deleted"))
+                ) {
+                    return REFUSED
+                }
+                current = current.cause
+                depth += 1
+            }
+            return TRANSIENT
+        }
+
+        /** A label for a log line: the service's status and code, or the
+         *  error's class. Never the message (a URL in it names the channel). */
+        public fun logLabel(cause: Throwable): String =
+            if (cause is ChannelsApiException) "${cause.status} ${cause.code}" else cause.javaClass.simpleName
+    }
+}
+
+/**
+ * One channel's hold after a failure. A refusal holds the channel until the
+ * holds are reset (the next start, a new account binding); a transient
+ * failure waits [backoffMs]: 30 s doubling to 10 minutes, the schedule of the
+ * owed DS registrations ([me.lakko.app.chat.SweepRegistrationBackoff]).
+ */
+public data class PublisherCommitHold(
+    val refused: Boolean,
+    /** Consecutive failures, at least 1. */
+    val failures: Int,
+    /** When the last failure happened (ms). */
+    val failedAtMs: Long,
+) {
+    /** Whether the channel may be tried at [nowMs]. A clock that went back
+     *  past the failure allows it. */
+    public fun allows(nowMs: Long): Boolean =
+        !refused && (nowMs >= failedAtMs + backoffMs(failures) || nowMs < failedAtMs)
+
+    public companion object {
+        /** The wait after [failures] consecutive transient failures. */
+        public fun backoffMs(failures: Int): Long {
+            if (failures <= 0) return 0L
+            var delay = me.lakko.app.chat.SweepRegistrationBackoff.INITIAL_DELAY_MS
+            repeat(failures - 1) {
+                delay = minOf(delay * 2, me.lakko.app.chat.SweepRegistrationBackoff.MAX_DELAY_MS)
+            }
+            return delay
+        }
+    }
+}
+
+/**
+ * The per-channel holds of the recorded PublisherGroup commits, in memory.
+ * After a failed step the entry is KEPT: its commit merged and is on the
+ * journal, so the reseal (and an approve's Welcome) are still owed for the
+ * channel to be consistent, and a refusal that clears (an owner handover
+ * that landed, a fixed clock) lets the next start finish it. While a channel
+ * holds an owed entry no new rotation of it is staged ([hasOwedCommit]).
+ */
+public class PublisherCommitRetry(
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val warn: (String) -> Unit = { android.util.Log.w("PublisherCommit", it) },
+) {
+    private val holds = java.util.concurrent.ConcurrentHashMap<String, PublisherCommitHold>()
+
+    private fun key(accountIdB64: String, channelIdHex: String) = accountIdB64 + "|" + channelIdHex.lowercase()
+
+    public fun hold(accountIdB64: String, channelIdHex: String): PublisherCommitHold? =
+        holds[key(accountIdB64, channelIdHex)]
+
+    public fun mayAttempt(accountIdB64: String, channelIdHex: String): Boolean =
+        hold(accountIdB64, channelIdHex)?.allows(clock()) ?: true
+
+    public fun noteFailure(accountIdB64: String, channelIdHex: String, cause: Throwable): PublisherCommitHold {
+        val k = key(accountIdB64, channelIdHex)
+        val next = PublisherCommitHold(
+            refused = PublisherCommitFailure.of(cause) == PublisherCommitFailure.REFUSED,
+            failures = (holds[k]?.failures ?: 0) + 1,
+            failedAtMs = clock(),
+        )
+        holds[k] = next
+        return next
+    }
+
+    public fun noteSuccess(accountIdB64: String, channelIdHex: String) {
+        holds.remove(key(accountIdB64, channelIdHex))
+    }
+
+    /** Every hold goes (a new start does the same). */
+    public fun reset() {
+        holds.clear()
+    }
+
+    /**
+     * Run [entries] in their recorded order through [run]. An entry that
+     * owes its journal step ([owesJournal]) always runs; any other is skipped
+     * while its channel's hold does not allow a try. A channel stops at its
+     * first failure in this call, so a pile of entries of one channel costs
+     * one request, not one per entry. A failure holds the channel only when
+     * it came from a step after the journal ([reread] gives the entry as
+     * recorded after the run). Logs once per failure, with no identifier. A
+     * cancellation is rethrown and holds nothing.
+     */
+    public suspend fun replay(
+        entries: List<PublisherCommitEntry>,
+        accountIdB64: String,
+        reread: (String) -> PublisherCommitEntry? = { null },
+        run: suspend (PublisherCommitEntry) -> Unit,
+    ) {
+        val stopped = HashSet<String>()
+        for (entry in entries) {
+            val channel = entry.channelIdHex.lowercase()
+            if (channel in stopped) continue
+            val journal = owesJournal(entry)
+            if (!journal && !mayAttempt(accountIdB64, channel)) {
+                stopped += channel
+                continue
+            }
+            try {
+                run(entry)
+                if (!journal) noteSuccess(accountIdB64, channel)
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                stopped += channel
+                if (owesJournal(reread(entry.id) ?: entry)) {
+                    warn("G-50: a recorded commit is still unanswered by the journal (${PublisherCommitFailure.logLabel(e)}); sent again next pass")
+                    continue
+                }
+                val hold = noteFailure(accountIdB64, channel, e)
+                warn(
+                    if (hold.refused) {
+                        "G-50: a recorded commit was refused by the channels service (${PublisherCommitFailure.logLabel(e)}); kept, not tried again until the next start"
+                    } else {
+                        "G-50: a recorded commit did not finish (${PublisherCommitFailure.logLabel(e)}); tried again in ${PublisherCommitHold.backoffMs(hold.failures) / 1000} s"
+                    },
+                )
+            }
+        }
+    }
+
+    public companion object {
+        /** The process's holds. */
+        public val shared: PublisherCommitRetry = PublisherCommitRetry()
+
+        /** Whether [entry] still owes its DS journal step (a staged commit
+         *  whose verdict the DS has not given). That step is never held: a
+         *  staged commit freezes the group's membership operations, so it is
+         *  sent again every pass (ADR-0090 / ADR-0081); the pass cadence
+         *  bounds it. */
+        public fun owesJournal(entry: PublisherCommitEntry): Boolean =
+            !entry.journalLost && entry.remainingSteps.firstOrNull() == PublisherCommitEntry.Step.JOURNAL
+
+        /** Whether [entries] hold one of [channelIdHex] that still owes its
+         *  journal step or its reseal: no new rotation of the channel is
+         *  staged then (its reseal, when it lands, seals a seed no subscriber
+         *  holds yet to the subscribers listed at that moment, which is what a
+         *  rotation is for). An entry owing only a Welcome, an appointment or
+         *  a hand-over does not hold it. */
+        public fun hasOwedCommit(channelIdHex: String, entries: List<PublisherCommitEntry>): Boolean {
+            val channel = channelIdHex.lowercase()
+            return entries.any { e ->
+                e.channelIdHex.lowercase() == channel &&
+                    !e.journalLost &&
+                    e.remainingSteps.any { it == PublisherCommitEntry.Step.JOURNAL || it == PublisherCommitEntry.Step.RESEAL }
+            }
+        }
+    }
+}

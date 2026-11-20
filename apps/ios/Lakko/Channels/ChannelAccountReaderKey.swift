@@ -24,21 +24,22 @@ import LakkoCore
 @MainActor
 enum ChannelAccountReaderKey {
 
-    /// One attempt per channel per this long after a failure (chosen, not
-    /// measured; web uses the same).
-    static let retryAfterMs: UInt64 = 10 * 60 * 1000
+    /// The longest wait after a transient failure (2026-11-20: the
+    /// ``PublisherCommitHold`` schedule, 30 s doubling to this; a refusal
+    /// waits for the next start).
+    static let retryAfterMs: UInt64 = UInt64(SweepRegistrationBackoff.maxDelayMs)
 
-    private static var lastFailure: [String: UInt64] = [:]
+    private static var holds: [String: PublisherCommitHold] = [:]
 
     enum Step: Equatable { case register, nothing }
 
     /// What has to happen for the account's reader key on this device. Pure.
     nonisolated static func step(
-        publishing: Bool, keyHex: String?, registeredHex: String?, lastFailureMs: UInt64?, nowMs: UInt64
+        publishing: Bool, keyHex: String?, registeredHex: String?, hold: PublisherCommitHold?, nowMs: UInt64
     ) -> Step {
         guard publishing, let keyHex else { return .nothing }
         if registeredHex?.lowercased() == keyHex.lowercased() { return .nothing }
-        if let lastFailureMs, nowMs >= lastFailureMs, nowMs - lastFailureMs < retryAfterMs { return .nothing }
+        if let hold, !hold.allows(nowMs: Int64(clamping: nowMs)) { return .nothing }
         return .register
     }
 
@@ -50,11 +51,17 @@ enum ChannelAccountReaderKey {
     }
 
     /// Forget the failure times; on sign-out and at a new session.
-    static func reset() { lastFailure = [:] }
+    static func reset() { holds = [:] }
+
+    /// Whether the registration of `channelId` was refused (2026-11-20).
+    static func isRefused(channelId: String) -> Bool { holds[channelId]?.refused == true }
+
+    /// Drop the hold of `channelId` (the owner key was repaired).
+    static func clearHold(channelId: String) { holds[channelId] = nil }
 
     /// Register the account's reader key for a channel this device publishes
     /// in, once, and hand it the current seed. Best effort: a failure is
-    /// retried by a later publisher pass (after ``retryAfterMs``). Never
+    /// retried by a later publisher pass (after the hold). Never
     /// throws.
     static func ensure(
         channelId: String, state: ChannelsUiState, keyHex: String?, ports: Ports,
@@ -63,7 +70,7 @@ enum ChannelAccountReaderKey {
         let decision = step(
             publishing: state.keysByChannel[channelId] != nil, keyHex: keyHex,
             registeredHex: state.extras(channelId).readerKeyRegisteredHex,
-            lastFailureMs: lastFailure[channelId], nowMs: nowMs)
+            hold: holds[channelId], nowMs: nowMs)
         guard decision == .register, let keyHex = keyHex?.lowercased() else { return }
         // The flag is not known yet (the creating screen writes the first
         // record just after the keys): a public subscribe of a private
@@ -75,10 +82,16 @@ enum ChannelAccountReaderKey {
             } else {
                 try await ports.subscribePublic(channelId, keyHex)
             }
-            lastFailure[channelId] = nil
+            holds[channelId] = nil
         } catch {
-            lastFailure[channelId] = nowMs
-            NSLog("[channels] the account's reader key was not registered; tried again later")
+            // 2026-11-20 — a refusal (`401 owner-proof-required`) waits for
+            // the next start; anything else 30 s, doubling to 10 minutes.
+            let hold = PublisherCommitHold.after(
+                holds[channelId], failure: .of(error), nowMs: Int64(clamping: nowMs))
+            holds[channelId] = hold
+            NSLog("[channels] the account's reader key was not registered (%@); %@",
+                  PublisherCommitFailure.logLabel(error),
+                  hold.refused ? "not tried again until the next start" : "tried again after a wait")
             return
         }
         // Lost before it is written (a crash), the next pass registers again:

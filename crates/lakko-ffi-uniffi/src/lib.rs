@@ -4897,6 +4897,11 @@ pub struct HistoryPlaceholder {
     /// ADR-0052 decision 2 — the forward attribution, as stored.
     #[uniffi(default = None)]
     pub forward: Option<HistoryForward>,
+    /// ADR-0091 live walk 3 — the author's key as the sending device stored
+    /// it (32 bytes, the key a live message's author is resolved to at
+    /// receipt). A key of any other length is dropped on encode.
+    #[uniffi(default = None)]
+    pub author_key: Option<Vec<u8>>,
 }
 
 /// The reply a [`HistoryPlaceholder`] carries (ADR-0052). An author or
@@ -5060,6 +5065,9 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
         channel_invite,
         reply,
         forward,
+        author_key: placeholder
+            .author_key
+            .and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok()),
     };
     Ok(msg.encode()?)
 }
@@ -5092,6 +5100,7 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
         }),
     );
     Ok(HistoryPlaceholder {
+        author_key: msg.author_key.map(|k| k.to_vec()),
         channel_invite,
         reply: reply.map(|r| HistoryReply {
             target: r.target,
@@ -5212,6 +5221,7 @@ mod history_placeholder_media_tests {
             channel_invite: None,
             reply: None,
             forward: None,
+            author_key: None,
         })
         .expect("encodes");
         decode_history_placeholder(bytes)
@@ -5219,6 +5229,34 @@ mod history_placeholder_media_tests {
             .attachments
             .pop()
             .expect("one attachment")
+    }
+
+    /// ADR-0091 live walk 3 — a bundled message keeps its author; a key
+    /// of the wrong length is dropped, not an error.
+    #[test]
+    fn the_author_key_survives_the_history_bundle() {
+        let make = |author_key: Option<Vec<u8>>| HistoryPlaceholder {
+            message_id: 9,
+            direction: HistoryMessageDirection::Incoming,
+            created_at: "2026-11-20T01:07:00Z".into(),
+            text: "hi".into(),
+            attachments: vec![],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+            author_key,
+        };
+        let back = decode_history_placeholder(
+            encode_history_placeholder(make(Some(vec![0x33; 32]))).expect("encodes"),
+        )
+        .expect("decodes");
+        assert_eq!(back.author_key, Some(vec![0x33; 32]));
+        let short = decode_history_placeholder(
+            encode_history_placeholder(make(Some(vec![0x33; 31]))).expect("encodes"),
+        )
+        .expect("decodes");
+        assert_eq!(short.author_key, None);
     }
 
     #[test]
@@ -5261,6 +5299,7 @@ mod history_placeholder_media_tests {
             channel_invite: None,
             reply: None,
             forward: None,
+            author_key: None,
         })
         .expect("encodes");
         let back = decode_history_placeholder(bytes).expect("decodes");
@@ -5326,6 +5365,7 @@ mod history_placeholder_media_tests {
                 origin_group_id: Some(vec![7; 32]),
                 origin_message_id: Some(11),
             }),
+            author_key: None,
         })
         .expect("encodes");
         let back = decode_history_placeholder(bytes).expect("decodes");
@@ -5358,6 +5398,7 @@ mod history_placeholder_media_tests {
                 origin_group_id: Some(vec![7; 32]),
                 origin_message_id: None,
             }),
+            author_key: None,
         })
         .expect("encodes");
         let back = decode_history_placeholder(bytes).expect("decodes");

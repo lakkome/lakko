@@ -55,7 +55,7 @@ public final class BackupClient {
 
     /// The account's own profile and "who can find me" envelopes, read at the
     /// same one place, for the same reason.
-    private let ownEnvelopes: @MainActor (_ accountIdB64: String) -> OwnBackupEnvelopes
+    private let ownEnvelopes: @MainActor (_ accountIdB64: String) async -> OwnBackupEnvelopes
 
     init(
         storage: StorageClient = StorageClient(),
@@ -63,8 +63,8 @@ public final class BackupClient {
         authBaseURL: String = AuthClient.defaultBaseURL,
         authSession: URLSession = .shared,
         ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
-        ownEnvelopes: @escaping @MainActor (_ accountIdB64: String) -> OwnBackupEnvelopes = {
-            OwnBackupEnvelopes.current(accountIdB64: $0)
+        ownEnvelopes: @escaping @MainActor (_ accountIdB64: String) async -> OwnBackupEnvelopes = {
+            await OwnBackupEnvelopes.current(accountIdB64: $0)
         }
     ) {
         self.storage = storage
@@ -420,17 +420,49 @@ struct OwnBackupEnvelopes: Equatable {
 
     /// What this device holds for `accountIdB64` now, whether or not its
     /// session is up: a baseline can go out before the shell mounts.
+    ///
+    /// Walk-3 rule W3-R4: the reads that need the main actor happen on it
+    /// (``gather(accountIdB64:)``); composing the received-profile envelopes,
+    /// one core call per person, runs off it (``assemble(_:)``). What is
+    /// backed up is unchanged.
     @MainActor
-    static func current(accountIdB64: String) -> OwnBackupEnvelopes {
-        OwnBackupEnvelopes(
+    static func current(accountIdB64: String) async -> OwnBackupEnvelopes {
+        let gathered = gather(accountIdB64: accountIdB64)
+        return await Task.detached(priority: .utility) { assemble(gathered) }.value
+    }
+
+    /// The inputs of ``current(accountIdB64:)``, read on the main actor.
+    struct Gathered: Sendable {
+        let ownProfile: Data?
+        let visibility: Data?
+        let profiles: [String: ProfileClaim]
+        let contactKeysB64: [String]
+        let recentPeopleB64: [String]
+        let ownKeysB64: Set<String>
+    }
+
+    @MainActor
+    static func gather(accountIdB64: String) -> Gathered {
+        Gathered(
             ownProfile: ProfileDirectory.shared.backupProfileEnvelope(accountIdB64: accountIdB64),
             visibility: ReachCenter.shared.backupSettingEnvelope(accountIdB64: accountIdB64),
+            profiles: ProfileDirectory.shared.receivedProfiles(accountIdB64: accountIdB64),
+            contactKeysB64: AcceptedContactsStore.load(accountIdB64: accountIdB64)
+                .map { base64Encode($0.request.fromPubkey) },
+            recentPeopleB64: BackupPeopleOrder.recent(),
+            ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64))
+    }
+
+    /// The envelopes from `gathered`. No actor: called off the main thread.
+    static func assemble(_ gathered: Gathered) -> OwnBackupEnvelopes {
+        OwnBackupEnvelopes(
+            ownProfile: gathered.ownProfile,
+            visibility: gathered.visibility,
             receivedProfiles: receivedProfileRecords(
-                profiles: ProfileDirectory.shared.receivedProfiles(accountIdB64: accountIdB64),
-                contactKeysB64: AcceptedContactsStore.load(accountIdB64: accountIdB64)
-                    .map { base64Encode($0.request.fromPubkey) },
-                recentPeopleB64: BackupPeopleOrder.recent(),
-                ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64)))
+                profiles: gathered.profiles,
+                contactKeysB64: gathered.contactKeysB64,
+                recentPeopleB64: gathered.recentPeopleB64,
+                ownKeysB64: gathered.ownKeysB64))
     }
 
     /// The received profiles a backup carries, in the order the core keeps

@@ -536,7 +536,19 @@ public class ChannelsUiState(
                 )
             }
             when {
-                landedEpoch != null -> notePublisherCommitLanded(channelId, landedEpoch, keys.seed)
+                landedEpoch != null -> {
+                    // 2026-11-20 — the service now serves the group's current
+                    // seed at [landedEpoch]: the epoch mapping is anchored
+                    // there, whatever commits before had no reseal of their
+                    // own, and the seed overwrites one kept for that epoch
+                    // under the old mapping.
+                    keys.seedEpoch?.let { derived ->
+                        val mls = derived.toLong() - ChannelEpochOffsets.get(channelId)
+                        ChannelEpochOffsets.set(channelId, landedEpoch.toLong() - mls)
+                    }
+                    notePublisherCommitLanded(channelId, landedEpoch, keys.seed)
+                    anchorSeed(channelId, landedEpoch, keys.seed)
+                }
                 keys.seedEpoch != null -> notePublisherSeedAt(channelId, keys.seedEpoch, keys.seed)
                 else -> setKeys(channelId, keys)
             }
@@ -560,6 +572,14 @@ public class ChannelsUiState(
         move.kept?.let { (e, s) -> setSubscribedSeed(channelId, e, s) }
         move.keys?.let { setKeys(channelId, it) }
         move.filed?.let { (e, s) -> setSubscribedSeed(channelId, e, s) }
+    }
+
+    /** 2026-11-20 — the service serves (or is next to serve) [seed] at
+     *  [epoch]: it overwrites a seed kept for that epoch, and every seed kept
+     *  above it (filed under a mapping that no longer holds) goes. */
+    public fun anchorSeed(channelId: String, epoch: UInt, seed: ByteArray) {
+        if (subscribedSeeds(channelId)[epoch]?.contentEquals(seed) != true) setSubscribedSeed(channelId, epoch, seed)
+        dropSubscribedSeedsAbove(channelId, epoch)
     }
 
     /** A PublisherGroup commit of this (the owner's) device finished and its
@@ -652,6 +672,10 @@ public class ChannelsUiState(
      *  identity; everything persisted stays for the next sign-in. Logout. */
     public fun unbind() {
         publisher?.unbind()
+        // A held channel is tried again at the next binding (2026-11-20).
+        PublisherCommitRetry.shared.reset()
+        ChannelSubscriptionSync.readerKeyRetry.reset()
+        ChannelOwnerRepair.reset()
         ChannelEpochOffsets.boundAccount = null
         boundAccountIdB64 = null
         _publisherKeysReady.value = false
@@ -892,6 +916,20 @@ public class ChannelsUiState(
         _subscribedSeedsByChannel.update { outer ->
             val inner = outer[channelId] ?: emptyMap()
             outer + (channelId to (inner + (epoch to seed)))
+        }
+        persistSubscribedSeeds()
+    }
+
+    /** 2026-11-20 — drop every kept seed of [channelId] above [epoch]: seeds
+     *  filed under an epoch mapping that no longer holds
+     *  ([ChannelEpochOffsets.anchor]). The service never served an epoch above
+     *  its next one. */
+    public fun dropSubscribedSeedsAbove(channelId: String, epoch: UInt) {
+        val inner = _subscribedSeedsByChannel.value[channelId] ?: return
+        if (inner.keys.none { it > epoch }) return
+        _subscribedSeedsByChannel.update { outer ->
+            val held = outer[channelId] ?: return@update outer
+            outer + (channelId to held.filterKeys { it <= epoch })
         }
         persistSubscribedSeeds()
     }

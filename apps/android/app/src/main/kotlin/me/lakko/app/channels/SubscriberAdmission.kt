@@ -33,6 +33,10 @@ import kotlinx.coroutines.sync.Mutex
  */
 public class SubscriberAdmission(
     private val port: Port,
+    /** 2026-11-20 — the per-channel holds after a failed list read: a
+     *  refusal (`401 owner-proof-required`) waits for [clear] (sign-out, a
+     *  new session), anything else 30 s, doubling to 10 minutes. */
+    private val retry: PublisherCommitRetry = PublisherCommitRetry(warn = {}),
     private val warn: (String, Throwable) -> Unit = { _, _ -> },
 ) {
     /** What the admission needs from the channel state and the server. */
@@ -120,6 +124,7 @@ public class SubscriberAdmission(
      */
     public suspend fun admitNewSubscribers(channelIdHex: String) {
         if (!port.canPost(channelIdHex)) return
+        if (!retry.mayAttempt(HOLD_ACCOUNT, channelIdHex)) return
         val lock = lockFor(channelIdHex)
         if (!lock.tryLock()) return
         try {
@@ -128,9 +133,15 @@ public class SubscriberAdmission(
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (e: Throwable) {
-                warn("list subscribers failed", e)
+                val hold = retry.noteFailure(HOLD_ACCOUNT, channelIdHex, e)
+                warn(
+                    "list subscribers failed (${PublisherCommitFailure.logLabel(e)}); " +
+                        if (hold.refused) "not tried again until the next start" else "tried again after a wait",
+                    e,
+                )
                 return
             }
+            retry.noteSuccess(HOLD_ACCOUNT, channelIdHex)
             update(channelIdHex) { it.copy(subscribers = list) }
             val epoch = try {
                 port.currentEpoch(channelIdHex)
@@ -156,12 +167,24 @@ public class SubscriberAdmission(
     }
 
     /** Forget everything delivered (sign-out; another account may follow). */
+    /** Whether the list read of [channelIdHex] was refused (2026-11-20). */
+    public fun isRefused(channelIdHex: String): Boolean = retry.hold(HOLD_ACCOUNT, channelIdHex)?.refused == true
+
+    /** Drop the hold of [channelIdHex] (its owner key was repaired). */
+    public fun clearHold(channelIdHex: String) {
+        retry.noteSuccess(HOLD_ACCOUNT, channelIdHex)
+    }
+
     public fun clear() {
+        retry.reset()
         _state.value = emptyMap()
     }
 
     public companion object {
         private const val TAG = "SubscriberAdmission"
+
+        /** The holds of one instance serve one bound account. */
+        private const val HOLD_ACCOUNT: String = ""
 
         /** Between passes of the app-wide loop over the owned channels (chosen). */
         public const val APP_INTERVAL_MS: Long = 60_000L

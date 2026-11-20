@@ -600,7 +600,7 @@ import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { isDesktop, publicOrigin } from "../platform";
 import { lastEditableOwnMessage, upEditsLastMessage } from "../chat/edit-last";
 import { displayLocale } from "../l10n/display-locale";
-import { conversationBehind } from "../chat/conversation-behind";
+import { chatErrorsHidden, conversationBehind } from "../chat/conversation-behind";
 import { gapLines, gapLinesVersion, reentryRecordFor, type GapLine } from "../chat/reentry-store";
 import { gapLineTimes, insertByMessageId, placeGapLines } from "../chat/gap-line";
 import { onGapHistoryFiled, requestGapHistoryLook } from "../chat/reentry-history";
@@ -2415,6 +2415,15 @@ function ChatView(props: {
   const behindState = () => conversationBehind.state(props.entry.groupIdB64);
   const behindStopsActing = (): boolean => behindState().stopsActing;
   const reentryWaiting = (): boolean => behindState().kind === "confirmed";
+  // Live walk 2 — a chat that starts waiting drops an error shown before.
+  createEffect(
+    on(
+      () => chatErrorsHidden(behindState()),
+      (hidden, was) => {
+        if (hidden && was === false) setError(null);
+      },
+    ),
+  );
   // UX 2.2 — the note's second line names who can bring the device back, and
   // only after 30 seconds (most of the time the device is back before then).
   const [reentrySecondDue, setReentrySecondDue] = createSignal(false);
@@ -4574,7 +4583,9 @@ function ChatView(props: {
     try {
       await pollOnce(0, undefined, false);
     } catch (err) {
-      setError(errorText(err, "chat.error.refresh"));
+      // Live walk 2 — a waiting chat's reads are refused by design: no
+      // banner above the waiting note (UX 2.2).
+      if (!chatErrorsHidden(behindState())) setError(errorText(err, "chat.error.refresh"));
     } finally {
       setBusy(false);
     }
@@ -5403,7 +5414,9 @@ function ChatView(props: {
           const sent = await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
           at = sent.messageId;
         } else {
-          at = (await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes)).messageId;
+          at = (
+            await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, { personAction: true })
+          ).messageId;
         }
       }
       setMsgOps(
@@ -5467,7 +5480,8 @@ function ChatView(props: {
    * "New message". The same rule as the iOS and Android clients.
    */
   async function publishQuiet(envelopeBytes: Uint8Array): Promise<{ messageId: number }> {
-    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
+    // The person's own action (edit, delete, content op): ADR-0091 live walk 3.
+    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, { personAction: true });
   }
 
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
@@ -5475,7 +5489,8 @@ function ChatView(props: {
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
     try {
-      await publishQuiet(envelopeBytes);
+      // Automatic: held also after a refused read (ADR-0091 live walk 3).
+      await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
     } catch (err) {
       // ADR-0091: no typing signal or read receipt while behind.
       if (isConversationBehind(err)) return;

@@ -38,6 +38,7 @@ import {
   loadOwedGapSends,
   saveGapLook,
   saveOwedGapSends,
+  type ReentryRouteName,
   type StoredGapLook,
   type StoredOwedGapSend,
 } from "./reentry-store";
@@ -298,8 +299,9 @@ export interface GapLookPorts {
   /** One short read of the rendezvous: every row's payload, or `null` when
    *  the read failed. */
   read(rendezvous: Uint8Array): Promise<readonly Uint8Array[] | null>;
-  /** Open and file one row; `null` when it is not the bundle or does not open. */
-  apply(secret: Uint8Array, sealed: Uint8Array): Promise<FiledGapHistory | null>;
+  /** Open and file one row; `null` when it is not the bundle or does not open.
+   *  `route` is the request's (absent on a look stored before it was kept). */
+  apply(secret: Uint8Array, sealed: Uint8Array, groupIdB64: string, route: ReentryRouteName | undefined): Promise<FiledGapHistory | null>;
   /** The bundle was filed: narrow the gap line ending at `gapToMs`, show the rows. */
   received(groupIdB64: string, gapToMs: number, filed: FiledGapHistory): void;
 }
@@ -318,6 +320,7 @@ export async function recordGapLook(
     readonly secret: Uint8Array;
     readonly gapFromMs: number;
     readonly gapToMs: number;
+    readonly route?: ReentryRouteName;
   },
   deviceKey: DeviceCipher,
 ): Promise<boolean> {
@@ -330,6 +333,7 @@ export async function recordGapLook(
       gapFromMs: input.gapFromMs,
       gapToMs: input.gapToMs,
       lastLookMs: 0,
+      ...(input.route === undefined ? {} : { route: input.route }),
     };
     return saveGapLook(input.groupIdB64, look);
   } catch {
@@ -376,7 +380,7 @@ export async function lookForGapHistory(
     const rows = await ports.read(await gapRendezvousOf(secret)).catch(() => null);
     if (rows === null || rows.length === 0) return "none";
     for (const row of [...rows].reverse()) {
-      const filed = await ports.apply(secret, row).catch(() => null);
+      const filed = await ports.apply(secret, row, groupIdB64, look.route).catch(() => null);
       if (filed === null) continue;
       deleteGapLook(groupIdB64);
       ports.received(groupIdB64, look.gapToMs, filed);

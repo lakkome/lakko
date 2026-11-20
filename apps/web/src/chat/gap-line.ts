@@ -5,9 +5,11 @@
  * ADR-0091 / UX `conversation-rejoin.md` 2.4 - where the "can't be shown"
  * line sits in a chat, and the two times it names. Pure.
  *
- * A line sits before the first entry of the timeline that happened at or
- * after its end (the moment the device came back), or at the bottom when
- * nothing did. The first time is the first message the device could not
+ * A line sits where the gap was, by time: after the last entry of the
+ * timeline at or before its start, that is before the first entry that
+ * happened after its start, or at the bottom when nothing did (live walk 2,
+ * 2026-11-19: placed by its end, the local join, a message sent after the
+ * replacement but before the join stood above the line). The first time is the first message the device could not
  * read, with its date; the second is when it came back, with the date only
  * when it is another day.
  */
@@ -33,8 +35,8 @@ export function placeGapLines(entryTimesMs: readonly number[], lines: readonly G
     if (Number.isFinite(t)) last = t;
     times.push(last);
   }
-  for (const line of [...lines].sort((a, b) => a.toMs - b.toMs)) {
-    const index = times.findIndex((t) => t >= line.toMs);
+  for (const line of [...lines].sort((a, b) => a.fromMs - b.fromMs || a.toMs - b.toMs)) {
+    const index = times.findIndex((t) => t > line.fromMs);
     if (index < 0) trailing.push(line);
     else before.set(index, [...(before.get(index) ?? []), line]);
   }

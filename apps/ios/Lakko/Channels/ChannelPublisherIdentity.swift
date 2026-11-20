@@ -89,11 +89,15 @@ public final class ChannelPublisherIdentity {
     /// and lineage seed.
     public func account(currentSeed: Data) throws -> Identity {
         guard let accountId = boundAccount() else { throw NotBound() }
+        let bindingKey = deviceIdentityProvider()?.accountPublicKey()
+            ?? Self.storedDeviceBindingKey(accountIdB64: accountId)
         let lineage = Self.ownerSeed(
             lineage: DeviceGroupLifecycle.lineageSeed(accountIdB64: accountId, currentSeed: currentSeed)
                 ?? currentSeed,
             currentSeed: currentSeed,
-            boundAccountKey: deviceIdentityProvider()?.accountPublicKey())
+            boundAccountKey: bindingKey)
+        Self.noteSessionSeeds(
+            accountIdB64: accountId, current: currentSeed, owner: lineage, fromBinding: bindingKey != nil)
         if let account, boundAccountIdB64 == accountId, boundSeed == lineage {
             Self.noteOwnerSeed(lineage)
             return account
@@ -144,6 +148,7 @@ public final class ChannelPublisherIdentity {
         boundAccountIdB64 = nil
         boundSeed = nil
         Self.noteOwnerSeed(nil)
+        Self.noteCurrentSeed(nil)
     }
 
     /// Forget device: delete `accountIdB64`'s pre-ADR-0090 channel provider
@@ -157,6 +162,161 @@ public final class ChannelPublisherIdentity {
 
     private nonisolated static let seedLock = NSLock()
     private nonisolated(unsafe) static var currentOwnerSeed: Data?
+
+    private nonisolated(unsafe) static var currentAccountSeed: Data?
+    /// The account the noted seeds belong to.
+    private nonisolated(unsafe) static var notedAccountIdB64: String?
+
+    nonisolated static func noteCurrentSeed(_ seed: Data?) {
+        seedLock.lock()
+        currentAccountSeed = seed
+        if seed == nil {
+            notedAccountIdB64 = nil
+            notedLineageSeed = nil
+        }
+        seedLock.unlock()
+    }
+
+    /// Note both seeds of `accountIdB64` at once (the session landing, the
+    /// channel identity's binding, or the first proof of a session).
+    nonisolated static func noteSessionSeeds(
+        accountIdB64: String, current: Data, owner: Data, fromBinding: Bool = true
+    ) {
+        seedLock.lock()
+        if notedAccountIdB64 != accountIdB64 || currentAccountSeed != current { notedLineageSeed = nil }
+        notedAccountIdB64 = accountIdB64
+        currentAccountSeed = current
+        currentOwnerSeed = owner
+        ownerFromBinding = fromBinding
+        seedLock.unlock()
+    }
+
+    /// 2026-11-20 — the session landing notes the account's seeds before any
+    /// channel request, so the proof mapping holds from the first request
+    /// (``proofIdentity(role:passed:)``); the device binding, when the chat
+    /// provider holds it already, decides the owner seed exactly as
+    /// ``account(currentSeed:)`` does.
+    static func installSession(accountIdB64: String, currentSeed: Data) {
+        let lineage = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64, currentSeed: currentSeed)
+            ?? currentSeed
+        let bindingKey = shared.deviceIdentityProvider()?.accountPublicKey()
+            ?? storedDeviceBindingKey(accountIdB64: accountIdB64)
+        let owner = ownerSeed(lineage: lineage, currentSeed: currentSeed, boundAccountKey: bindingKey)
+        noteSessionSeeds(accountIdB64: accountIdB64, current: currentSeed, owner: owner, fromBinding: bindingKey != nil)
+    }
+
+    /// Whether the noted owner seed was decided with the device binding
+    /// known (landing with the chat provider up, the channel identity's
+    /// binding, or a stored binding read by the fallback). When not, the
+    /// fallback reads the stored binding again on the next proof.
+    private nonisolated(unsafe) static var ownerFromBinding = false
+    /// The oldest own predecessor seed of the noted account (or its current
+    /// seed when it never rotated); cleared with the other notes.
+    private nonisolated(unsafe) static var notedLineageSeed: Data?
+
+    private nonisolated static func noteLineage(_ seed: Data) {
+        seedLock.lock()
+        notedLineageSeed = seed
+        seedLock.unlock()
+    }
+
+    /// The account seeds a proof is decided with: the current one, the owner
+    /// (binding-aware lineage) one, and the oldest own predecessor.
+    struct ProofSeeds: Equatable {
+        let current: Data
+        let owner: Data
+        let lineage: Data
+    }
+
+    /// The seeds of the bound account; derived from storage when nothing was
+    /// noted for it yet, or when its owner seed was noted without the device
+    /// binding: the account seed, its own predecessors
+    /// (``DeviceGroupLifecycle/lineageSeed(accountIdB64:currentSeed:predecessors:conversationKeys:)``)
+    /// and the stored device binding (`DeviceIdentityStore`, read as the chat
+    /// repository reads it at landing), so no launch order leaves a proof
+    /// decided by a guess.
+    nonisolated static func sessionSeeds(
+        boundAccountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
+        storedCurrentSeed: (String) -> Data? = { (try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: $0)) ?? nil },
+        lineageSeed: (String, Data) -> Data? = { DeviceGroupLifecycle.lineageSeed(accountIdB64: $0, currentSeed: $1) },
+        storedBindingKey: (String) -> Data? = { storedDeviceBindingKey(accountIdB64: $0) }
+    ) -> ProofSeeds? {
+        seedLock.lock()
+        let noted = (notedAccountIdB64, currentAccountSeed, currentOwnerSeed, ownerFromBinding)
+        let notedLineage = notedLineageSeed
+        seedLock.unlock()
+        let account: String
+        if let notedAccount = noted.0, boundAccountIdB64 == nil || boundAccountIdB64 == notedAccount {
+            account = notedAccount
+        } else if let bound = boundAccountIdB64 {
+            account = bound
+        } else {
+            return nil
+        }
+        let sameAccount = noted.0 == account
+        guard let current = (sameAccount ? noted.1 : nil) ?? storedCurrentSeed(account) else { return nil }
+        let lineage = (sameAccount ? notedLineage : nil) ?? lineageSeed(account, current) ?? current
+        if sameAccount, let owner = noted.2, noted.3 {
+            noteLineage(lineage)
+            return ProofSeeds(current: current, owner: owner, lineage: lineage)
+        }
+        let bindingKey = storedBindingKey(account)
+        let owner = ownerSeed(lineage: lineage, currentSeed: current, boundAccountKey: bindingKey)
+        // A binding not readable now: the owner seed is the plain lineage
+        // until it is; owner proofs take the current key either way.
+        noteSessionSeeds(accountIdB64: account, current: current, owner: owner, fromBinding: bindingKey != nil)
+        noteLineage(lineage)
+        return ProofSeeds(current: current, owner: owner, lineage: lineage)
+    }
+
+    /// The account key the stored device binding names, or `nil` when none is
+    /// stored or it does not open (read as the chat repository reads it).
+    nonisolated static func storedDeviceBindingKey(accountIdB64: String) -> Data? {
+        guard let seed = (try? DeviceIdentityStore.getDeviceIdentitySeed(accountIdB64: accountIdB64)) ?? nil,
+              let binding = DeviceIdentityStore.getDeviceBinding(accountIdB64: accountIdB64),
+              let device = try? Identity.fromSeedWithBinding(seed: seed, binding: binding) else { return nil }
+        return device.accountPublicKey()
+    }
+
+    /// 2026-11-20 (ADR-0074) — the identity a channel publisher proof of
+    /// `role` is signed with, whatever account identity the caller passed:
+    ///
+    ///   * owner: the CURRENT seed's, the key the owner key moves to on a
+    ///     rotation (``ChannelOwnerHandover``, ``ChannelOwnerRepair``), for
+    ///     the current identity and any own earlier one (the lineage, the
+    ///     owner seed), whatever the device binding says or whether it could
+    ///     be read;
+    ///   * co-publisher: the owner-account seed's, the identity the binding
+    ///     the channel's owner appointed was composed with (the lineage,
+    ///     unless the device binding names the current key). A co-publisher
+    ///     cannot move its own appointment.
+    ///
+    /// Web and Android sign by the same rule. An identity that is none of the
+    /// bound account's (a test, another account) is used as passed.
+    nonisolated static func proofIdentity(role: ChannelPublisherRole, passed: Identity) -> Identity {
+        proofIdentity(role: role, passed: passed, seeds: sessionSeeds())
+    }
+
+    nonisolated static func proofIdentity(
+        role: ChannelPublisherRole, passed: Identity, seeds: ProofSeeds?
+    ) -> Identity {
+        guard let seeds else { return passed }
+        // No rotation: one identity, nothing to choose (and no derivation).
+        if seeds.current == seeds.owner, seeds.current == seeds.lineage { return passed }
+        guard let currentId = try? Identity.fromSeed(seed: seeds.current) else { return passed }
+        var accountKeys: Set<Data> = [currentId.signaturePublicKey()]
+        var ownerId: Identity?
+        for seed in Set([seeds.owner, seeds.lineage]) {
+            guard let id = try? Identity.fromSeed(seed: seed) else { continue }
+            accountKeys.insert(id.signaturePublicKey())
+            if seed == seeds.owner { ownerId = id }
+        }
+        guard accountKeys.contains(passed.signaturePublicKey()) else { return passed }
+        switch role {
+        case .owner: return currentId
+        case .copublisher: return ownerId ?? passed
+        }
+    }
 
     nonisolated static func noteOwnerSeed(_ seed: Data?) {
         seedLock.lock()

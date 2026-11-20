@@ -1101,11 +1101,20 @@ public enum DsClientError: Error {
 }
 
 extension DsClientError: LocalizedError {
+    /// The endpoint as it may appear in an error message: the route without its
+    /// query and with every run of 16 or more hex digits (a journal, mailbox or
+    /// rendezvous id) replaced by `:id`. Error messages reach logs, which carry
+    /// no identifier (ADR-0078 section 11); the case keeps the full value.
+    static func redacted(_ endpoint: String) -> String {
+        let path = endpoint.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? endpoint
+        return path.replacingOccurrences(of: "[0-9a-fA-F]{16,}", with: ":id", options: .regularExpression)
+    }
+
     public var errorDescription: String? {
         switch self {
         case .argument(let m): return m
-        case .http(let s, let e, let b): return "ds \(e) → \(s): \(b)"
-        case .network(let e, let u): return "ds \(e) network error: \(u)"
+        case .http(let s, let e, let b): return "ds \(DsClientError.redacted(e)) → \(s): \(b)"
+        case .network(let e, let u): return "ds \(DsClientError.redacted(e)) network error: \(u)"
         case .clockSkew: return DsClockSkew.copy
         }
     }

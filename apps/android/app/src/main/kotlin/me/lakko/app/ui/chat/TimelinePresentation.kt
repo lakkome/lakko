@@ -407,9 +407,12 @@ public fun buildTimeline(
 
 /**
  * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.4 — [items] with one
- * line per gap, styled as a date separator: after the row of the gap's
- * anchor message (the last message held before the device came back), else
- * before the first row from the gap's end on, else at the end. Local to this
+ * line per gap, styled as a date separator. Walk 2, R2: a line sits after the
+ * last message whose time is at or before the gap's START ([ReentryGap.fromMs],
+ * the value the request carried), that is before the first message after it;
+ * at the start when every message is later, at the end when none is. Placed
+ * by its start, not its end, so a message sent after the replacement but
+ * before this device joined does not land above the line. Local to this
  * device: never a message, never unread.
  */
 internal fun withReentryGapLines(
@@ -419,20 +422,31 @@ internal fun withReentryGapLines(
 ): List<TimelineItem> {
     if (gaps.isEmpty()) return items
     val out = items.toMutableList()
-    for (gap in gaps.sortedBy { it.toMs }) {
+    for (gap in gaps.sortedBy { it.fromMs }) {
         val line = TimelineItem.DateSeparator(key = "gap-${gap.fromMs}-${gap.toMs}", label = label(gap))
-        val anchorAt = if (gap.anchorMessageId > 0) {
-            out.indexOfFirst { it is TimelineItem.Row && it.message.messageId == gap.anchorMessageId }
+        val lastAtOrBefore = out.indexOfLast {
+            it is TimelineItem.Row && (parseMessageTimeMs(it.message.createdAt)?.let { t -> t <= gap.fromMs } ?: false)
+        }
+        val at = if (lastAtOrBefore >= 0) {
+            lastAtOrBefore + 1
         } else {
-            -1
+            // Every message is later than the gap's start (or none has a time):
+            // before the first message, else at the end.
+            out.indexOfFirst { it is TimelineItem.Row }.takeIf { it >= 0 }?.let { firstRowAt ->
+                // Keep the first message's date separator below the line.
+                if (firstRowAt > 0 && out[firstRowAt - 1] is TimelineItem.DateSeparator &&
+                    !(out[firstRowAt - 1] as TimelineItem.DateSeparator).key.startsWith("gap-")
+                ) {
+                    firstRowAt - 1
+                } else {
+                    firstRowAt
+                }
+            } ?: out.size
         }
-        val at = when {
-            anchorAt >= 0 -> anchorAt + 1
-            else -> out.indexOfFirst {
-                it is TimelineItem.Row && (parseMessageTimeMs(it.message.createdAt) ?: Long.MIN_VALUE) >= gap.toMs
-            }.takeIf { it >= 0 } ?: out.size
-        }
-        out.add(at, line)
+        // An earlier gap's line at the same place stays above this one.
+        var place = at
+        while (place < out.size && (out[place] as? TimelineItem.DateSeparator)?.key?.startsWith("gap-") == true) place++
+        out.add(place, line)
     }
     return out
 }

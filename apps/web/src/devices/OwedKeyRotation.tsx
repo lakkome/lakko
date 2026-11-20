@@ -9,16 +9,15 @@
  * connection returns, with nothing shown; the new words are withheld until
  * the record is gone.
  *
- * Also installs, for the session, which channels' owner requests are signed
- * by the account's new identity (`channels/owner-moved.ts`).
+ * Also installs, for the session, the identity owner requests are signed
+ * by: the account's current one once it rotated.
  *
  * Renders nothing. Whole-session, beside `OwedDeviceRemovals`.
  */
 import { createEffect, onCleanup, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { installMovedOwnerIdentity } from "../channels/api";
-import { loadOwnerMoved } from "../channels/owner-moved";
+import { installAccountIdentities, proofIdentitiesOf } from "../channels/api";
 import { useChats } from "../chat/ChatContext";
 import { useKeyRotation } from "./key-rotation-runtime";
 
@@ -34,15 +33,17 @@ export function OwedKeyRotation(): JSX.Element {
   const rotation = useKeyRotation();
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  installMovedOwnerIdentity((channelIdHexLower) => {
-    const s = auth.state();
-    if (s.kind !== "session") return null;
-    // Only an account that rotated has a predecessor; without one the
-    // identity passed to the request is the owner's.
-    if (chats.predecessorAccountIdentity() === null) return null;
-    return loadOwnerMoved(s.account.accountId).has(channelIdHexLower) ? chats.accountIdentity() : null;
-  });
-  onCleanup(() => installMovedOwnerIdentity(null));
+  // 2026-11-20: owner proofs by the CURRENT identity, as iOS and Android sign
+  // them (ADR-0074 section 3.5: the owner key moves to the new seed's); before,
+  // only the channels this device itself had handed over were, so a web device
+  // and a phone of one account signed one channel with two keys and the
+  // service refused one of them for good. A channel whose key did not move
+  // yet is moved by the owner-key repair (`channel-owner-repair.ts`).
+  // Co-publisher proofs by the lineage identity, the one the appointed binding
+  // names. One mapping in `channels/api.ts` (`ownerProofIdentity`,
+  // `coPublisherProofIdentity`).
+  installAccountIdentities(() => proofIdentitiesOf(chats));
+  onCleanup(() => installAccountIdentities(null));
 
   // Every run ends by telling the readers the record changed, which runs the
   // effect below again: a step that keeps failing is retried with a growing

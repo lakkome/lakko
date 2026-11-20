@@ -167,11 +167,11 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /** Seal + publish one envelope into a group. */
-  async function send(entry: ActiveGroup, envelope: Uint8Array): Promise<void> {
+  async function send(entry: ActiveGroup, envelope: Uint8Array, personAction = false): Promise<void> {
     const secrets = auth.identitySecrets();
     if (secrets === null || chats.identity() === null) throw new Error("Sign in again.");
     if (readIsActive(entry.group) === false) throw new Error("You are no longer in this group.");
-    await publisher.broadcastControl(secrets, entry.group, envelope);
+    await publisher.broadcastControl(secrets, entry.group, envelope, { personAction });
   }
 
   /** Growth — re-send every held shared PIN (never an unpin: a newcomer
@@ -320,7 +320,7 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
         const stamp = freshPinStamp(Date.now(), stored);
         const wasm = await loadWasm();
         const envelope = wasm.composePinEnvelope(BigInt(messageId), pinned, stamp);
-        await send(entry, envelope);
+        await send(entry, envelope, true);
         // Apply locally the way a receiver would: the stamp is by
         // construction strictly newer than what is stored, so the order
         // accepts it; the store is what the bar derives from.

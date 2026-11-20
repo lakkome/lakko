@@ -575,7 +575,9 @@ public final class ChatClient {
             registeredCommitHold.recordApplied(groupIdHex: groupIdHex, rowId: message.id)
             // ADR-0091 phase 2 — evidence for the behind verdict and the
             // re-admitter's "the leaf is writing" rule.
-            reentryObservations.noteApplied(groupIdHex: groupIdHex)
+            reentryObservations.noteApplied(
+                groupIdHex: groupIdHex,
+                createdAtMs: ChatRepository.parseDsTimestampMs(message.createdAt).map { UInt64(max(0, $0)) })
             if case .application(_, let senderLeaf?, _) = processed, let localEpoch {
                 reentryObservations.noteLeafActivity(groupIdHex: groupIdHex, leaf: senderLeaf, epoch: localEpoch)
             }

@@ -95,7 +95,9 @@ public struct ConversationReentryRecord: Codable, Equatable, Sendable {
     /// framed above it failed, a publish was refused, or reads were refused.
     /// Journal repair is held while it is set (section 2).
     public var evidence: Bool = false
-    /// The newest `latest_epoch` a read of this journal named.
+    /// The newest `latest_epoch` a read of this journal named. Diagnostic
+    /// only: a re-entry request never names it (walk-3 rule W3-R1, every
+    /// request probes the journal right before it is minted).
     public var latestSeen: UInt64?
     /// The requests sent, oldest first, at most ``reentryRequestsKept()``.
     public var requests: [ReentrySentRequest] = []
@@ -185,6 +187,10 @@ public final class ReentryObservations {
         /// Leaf index -> (epoch, when) of the last application message this
         /// device decrypted from it (the re-admitter's "leaf is writing").
         var leafActivity: [UInt32: (epoch: UInt64, atMs: UInt64)] = [:]
+        /// The largest DS stamp of a row applied since the last
+        /// ``takeLastAppliedRowAtMs(groupIdHex:)``: what the durable
+        /// ``ReentryRowClockStore`` is raised to after the read.
+        var lastAppliedRowAtMs: UInt64?
     }
 
     private let lock = NSLock()
@@ -197,10 +203,25 @@ public final class ReentryObservations {
 
     /// A row applied: the failures before it are no longer "since the last
     /// applied row".
-    public func noteApplied(groupIdHex: String) {
+    /// `createdAtMs` is the row's DS stamp (the walk-2 rule R1: the gap
+    /// starts no later than the newest row this device applied).
+    public func noteApplied(groupIdHex: String, createdAtMs: UInt64? = nil) {
         lock.lock(); defer { lock.unlock() }
         entries[groupIdHex, default: Entry()].failedRowAboveLocal = false
         entries[groupIdHex]?.firstFailedRowAtMs = nil
+        if let createdAtMs {
+            let held = entries[groupIdHex]?.lastAppliedRowAtMs ?? 0
+            entries[groupIdHex]?.lastAppliedRowAtMs = max(held, createdAtMs)
+        }
+    }
+
+    /// The largest stamp of a row applied since the last call, then
+    /// forgotten (the caller writes it to the durable clock).
+    public func takeLastAppliedRowAtMs(groupIdHex: String) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        let applied = entries[groupIdHex]?.lastAppliedRowAtMs
+        entries[groupIdHex]?.lastAppliedRowAtMs = nil
+        return applied
     }
 
     /// A row failed to apply. `sealed` is its framed epoch, `local` the
@@ -272,6 +293,156 @@ public final class ReentryObservations {
     public func reset() {
         lock.lock(); defer { lock.unlock() }
         entries.removeAll()
+    }
+}
+
+// MARK: - When this device last knew the conversation (walk-2 rule R1)
+
+/// Per account and conversation, durable: the newest DS stamp of a row this
+/// device applied there (or of an own publish the DS accepted), and the local
+/// time of the last read of the journal that was not refused. Not gap
+/// bookkeeping: both survive "back in step", and go with the group and on
+/// Forget device. The gap a request names starts no later than either
+/// (``ConversationReentryRules/gapStart(firstSkippedMs:lastKnownRowMs:lastReadOkMs:suspicionSinceMs:nowMs:)``),
+/// so a device that fell behind through refused reads (no row skipped)
+/// still names when it last knew the conversation.
+public struct ReentryRowClock: Codable, Equatable, Sendable {
+    public var lastKnownRowMs: UInt64?
+    public var lastReadOkMs: UInt64?
+
+    public init(lastKnownRowMs: UInt64? = nil, lastReadOkMs: UInt64? = nil) {
+        self.lastKnownRowMs = lastKnownRowMs
+        self.lastReadOkMs = lastReadOkMs
+    }
+}
+
+public struct ReentryRowClockStore {
+    /// The last good read is written at most once a minute; a slightly
+    /// earlier value is the safe side (the gap starts earlier). Chosen, not
+    /// measured.
+    public static let readOkWriteIntervalMs: UInt64 = 60_000
+
+    let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public static func key(_ accountIdB64: String) -> String {
+        "lakko.conversation-reentry.row-clock.v1.\(accountIdB64)"
+    }
+
+    private func all(_ accountIdB64: String) -> [String: ReentryRowClock] {
+        defaults.data(forKey: Self.key(accountIdB64))
+            .flatMap { try? JSONDecoder().decode([String: ReentryRowClock].self, from: $0) } ?? [:]
+    }
+
+    private func update(
+        _ accountIdB64: String, _ groupIdHex: String, _ change: (inout ReentryRowClock) -> Bool
+    ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = all(accountIdB64)
+        var clock = map[groupIdHex] ?? ReentryRowClock()
+        guard change(&clock) else { return }
+        map[groupIdHex] = clock
+        defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+    }
+
+    public func load(accountIdB64: String, groupIdHex: String) -> ReentryRowClock {
+        all(accountIdB64)[groupIdHex] ?? ReentryRowClock()
+    }
+
+    /// A row stamped `atMs` applied here (or an own publish was accepted):
+    /// the clock only moves forward.
+    public func noteRowKnown(accountIdB64: String, groupIdHex: String, atMs: UInt64) {
+        update(accountIdB64, groupIdHex) { clock in
+            guard atMs > (clock.lastKnownRowMs ?? 0) else { return false }
+            clock.lastKnownRowMs = atMs
+            return true
+        }
+    }
+
+    /// A read of the journal was not refused at `nowMs`.
+    public func noteReadOk(accountIdB64: String, groupIdHex: String, nowMs: UInt64) {
+        update(accountIdB64, groupIdHex) { clock in
+            if let last = clock.lastReadOkMs, nowMs >= last, nowMs < last &+ Self.readOkWriteIntervalMs {
+                return false
+            }
+            clock.lastReadOkMs = nowMs
+            return true
+        }
+    }
+
+    /// The device came back by a re-entry Welcome at `nowMs`: it has applied
+    /// no row of the new group yet.
+    public func noteReentryJoined(accountIdB64: String, groupIdHex: String, nowMs: UInt64) {
+        update(accountIdB64, groupIdHex) { clock in
+            clock = ReentryRowClock(lastKnownRowMs: nil, lastReadOkMs: nowMs)
+            return true
+        }
+    }
+
+    public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = all(accountIdB64)
+        guard map.removeValue(forKey: groupIdHex) != nil else { return }
+        defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+    }
+}
+
+// MARK: - The knock key a member was last sent (walk-2 rule R4)
+
+/// What this device last DELIVERED of a group's knock key to the members:
+/// the key version and the member set (leaf signature keys, base64) at that
+/// successful broadcast. Durable per account and group; set only after the
+/// broadcast went out, so a send that was skipped, refused while behind or
+/// failed leaves the send due.
+public struct ReentryKnockKeySentMark: Codable, Equatable, Sendable {
+    public let version: UInt16
+    public let members: [String]
+
+    public init(version: UInt16, members: [String]) {
+        self.version = version
+        self.members = members.sorted()
+    }
+}
+
+public struct ReentryKnockKeySentStore {
+    let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public static func key(_ accountIdB64: String) -> String {
+        "lakko.conversation-reentry.knock-key-sent.v1.\(accountIdB64)"
+    }
+
+    private func all(_ accountIdB64: String) -> [String: ReentryKnockKeySentMark] {
+        defaults.data(forKey: Self.key(accountIdB64))
+            .flatMap { try? JSONDecoder().decode([String: ReentryKnockKeySentMark].self, from: $0) } ?? [:]
+    }
+
+    public func load(accountIdB64: String, groupIdHex: String) -> ReentryKnockKeySentMark? {
+        all(accountIdB64)[groupIdHex]
+    }
+
+    public func save(_ mark: ReentryKnockKeySentMark, accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = all(accountIdB64)
+        map[groupIdHex] = mark
+        defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+    }
+
+    public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = all(accountIdB64)
+        guard map.removeValue(forKey: groupIdHex) != nil else { return }
+        defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
     }
 }
 
@@ -468,13 +639,20 @@ public struct ReentryGapLook: Equatable, Sendable {
     /// The moment the device came back: the gap line's end.
     public let gapToMs: UInt64
     public var lastLookMs: UInt64?
+    /// The route of the request that brought this device back (W3-R3: a
+    /// bundle row without an author is placed by it).
+    public let route: String?
 
-    public init(groupIdHex: String, secret: Data, gapFromMs: UInt64, gapToMs: UInt64, lastLookMs: UInt64? = nil) {
+    public init(
+        groupIdHex: String, secret: Data, gapFromMs: UInt64, gapToMs: UInt64,
+        lastLookMs: UInt64? = nil, route: String? = nil
+    ) {
         self.groupIdHex = groupIdHex
         self.secret = secret
         self.gapFromMs = gapFromMs
         self.gapToMs = gapToMs
         self.lastLookMs = lastLookMs
+        self.route = route
     }
 }
 
@@ -488,6 +666,7 @@ public struct ReentryGapLookStore {
         let gapFromMs: UInt64
         let gapToMs: UInt64
         var lastLookMs: UInt64?
+        var route: String?
     }
 
     let defaults: UserDefaults
@@ -547,7 +726,7 @@ public struct ReentryGapLookStore {
               let secret = try? AES.GCM.open(box, using: SymmetricKey(data: keyBytes)) else { return nil }
         return ReentryGapLook(
             groupIdHex: groupIdHex, secret: secret, gapFromMs: stored.gapFromMs,
-            gapToMs: stored.gapToMs, lastLookMs: stored.lastLookMs)
+            gapToMs: stored.gapToMs, lastLookMs: stored.lastLookMs, route: stored.route)
     }
 
     /// Store `look` (replacing any for its group). `false` when the account
@@ -561,7 +740,8 @@ public struct ReentryGapLookStore {
         else { return false }
         var map = storedRows(accountIdB64)
         map[look.groupIdHex] = Stored(
-            sealedSecret: sealed, gapFromMs: look.gapFromMs, gapToMs: look.gapToMs, lastLookMs: look.lastLookMs)
+            sealedSecret: sealed, gapFromMs: look.gapFromMs, gapToMs: look.gapToMs, lastLookMs: look.lastLookMs,
+            route: look.route)
         write(map, accountIdB64)
         return true
     }
@@ -659,8 +839,8 @@ public enum ConversationReentryRules {
             || evidence.refusedReads >= reentryRefusedReadsToSuspect() {
             next.evidence = true
         }
-        if next.gapFromMs == nil, next.behind != .inStep, let first = evidence.firstFailedRowAtMs {
-            next.gapFromMs = first
+        if next.behind != .inStep, let first = evidence.firstFailedRowAtMs {
+            next.gapFromMs = min(next.gapFromMs ?? first, first)
         }
         let cleared = record.behind != .inStep && next.behind == .inStep
         if cleared {
@@ -689,12 +869,35 @@ public enum ConversationReentryRules {
     /// `401`, if it comes, is evidence), but no repeat envelope, typing or
     /// read receipt: each would be sealed at a stale epoch nobody can open
     /// (section 2). `isPersonContent` is a publish that carries a wake.
-    public static func sendAllowed(behind: ReentryBehind, isPersonContent: Bool) -> Bool {
+    ///
+    /// Walk-3 rule W3-R2: `readRefused` (a read of this journal was refused
+    /// with an unskewed `401` and no read has been answered since) holds every
+    /// automatic send even while still in step, since the refusal may be the
+    /// first sign of a commit this device missed. The person's own content is
+    /// unchanged.
+    ///
+    /// Walk-3 rule W3-R5: `personAction` (the person's own act that is not a
+    /// message: an edit, a deletion, a reaction, a content op, a shared pin, a
+    /// group setting, a contact request inside the group) is held ONLY while
+    /// the conversation is suspected or confirmed behind, never on a refused
+    /// read alone: it is attempted, and its `401` is evidence.
+    public static func sendAllowed(
+        behind: ReentryBehind, isPersonContent: Bool, readRefused: Bool = false, personAction: Bool = false
+    ) -> Bool {
+        if personAction { return !behind.stopsActing }
+        if readRefused, !isPersonContent { return false }
         switch behind {
         case .inStep: return true
         case .suspected: return isPersonContent
         case .confirmed: return false
         }
+    }
+
+    /// Walk-2 rule R5 — the moment a chat starts waiting, an error it showed
+    /// before (a send, a membership action) is cleared: nothing in a waiting
+    /// chat can be retried, and the waiting note says why.
+    public static func clearsChatErrors(wasWaiting: Bool, isWaiting: Bool) -> Bool {
+        !wasWaiting && isWaiting
     }
 
     /// Journal repair (ADR-0057) must not Replace while there is evidence the
@@ -807,6 +1010,41 @@ public enum ConversationReentryRules {
         ])
     }
 
+    /// Walk-2 rule R1 — where the gap starts: the first row this device
+    /// skipped, but never later than when it last knew the conversation (the
+    /// newest row it applied, else its last good read, else when it first
+    /// suspected, else now). Never in the future. The request carries this
+    /// value as `gap_from_ms`, and the gap line starts at it.
+    public static func gapStart(
+        firstSkippedMs: UInt64?, lastKnownRowMs: UInt64?, lastReadOkMs: UInt64?,
+        suspicionSinceMs: UInt64?, nowMs: UInt64
+    ) -> UInt64 {
+        let known = lastKnownRowMs ?? lastReadOkMs ?? suspicionSinceMs ?? nowMs
+        return min(firstSkippedMs.map { min($0, known) } ?? known, nowMs)
+    }
+
+    /// Walk-2 rule R2 — where a gap line starting at `fromMs` goes among the
+    /// conversation's rows: after the last row at or before its start, i.e.
+    /// before the first row stamped later than `fromMs`; at the end when
+    /// there is none. A row with no readable stamp does not decide.
+    static func gapLineIndex(_ messages: [ChatMessage], fromMs: UInt64) -> Int {
+        messages.firstIndex { message in
+            guard let ms = ChatRepository.parseDsTimestampMs(message.createdAt), ms >= 0 else { return false }
+            return UInt64(ms) > fromMs
+        } ?? messages.count
+    }
+
+    /// Walk-2 rule R4 — whether the knock key is due to the members: never
+    /// delivered, delivered at another version, or a current member was not
+    /// in the set at the last delivery.
+    public static func knockKeySendDue(
+        mark: ReentryKnockKeySentMark?, version: UInt16, members: [String]
+    ) -> Bool {
+        guard let mark, mark.version == version else { return true }
+        let delivered = Set(mark.members)
+        return members.contains { !delivered.contains($0) }
+    }
+
     // MARK: The gap history (section 7)
 
     /// The exporter label of the gap history secret. A client convention:
@@ -896,6 +1134,20 @@ public enum ConversationReentryRules {
     /// person of a one-to-one never send it.
     public static func resendsPushRoutingSecret(ownRole: Role?) -> Bool {
         ownRole == .owner || ownRole == .admin
+    }
+
+    /// A gap bundle row with no author: its direction on this device, read
+    /// from the sender's and the route of the request (the Android
+    /// `reentryBundleDirection`). The same account keeps it, a one-to-one's
+    /// other person swaps it, a group's re-admitter reads as incoming. A
+    /// system row stays one.
+    public static func bundleDirection(route: String?, senderDirection: String) -> String {
+        if senderDirection == "system" { return "system" }
+        switch route {
+        case "own-device": return senderDirection
+        case "mailbox": return senderDirection == "outgoing" ? "incoming" : "outgoing"
+        default: return "incoming"
+        }
     }
 
     // MARK: Quiet refusals

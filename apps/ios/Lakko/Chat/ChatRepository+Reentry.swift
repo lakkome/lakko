@@ -61,9 +61,14 @@ extension ChatRepository {
         if reentryStopsActing(groupIdHex: groupIdHex) { throw BehindInConversation() }
     }
 
-    func requireSendAllowedWhileBehind(groupIdHex: String, isPersonContent: Bool) throws {
+    func requireSendAllowedWhileBehind(groupIdHex: String, isPersonContent: Bool, personAction: Bool = false) throws {
         let behind = reentryBehind(groupIdHex: groupIdHex)
-        guard ConversationReentryRules.sendAllowed(behind: behind, isPersonContent: isPersonContent) else {
+        // Walk-3 rule W3-R2 — a refused read with no answered read since
+        // holds the automatic sends too. Quiet, like the behind refusal.
+        let readRefused = chatClient.reentryObservations.snapshot(groupIdHex: groupIdHex).refusedReads > 0
+        guard ConversationReentryRules.sendAllowed(
+            behind: behind, isPersonContent: isPersonContent, readRefused: readRefused,
+            personAction: personAction) else {
             throw BehindInConversation()
         }
     }
@@ -88,6 +93,8 @@ extension ChatRepository {
             reentryHistoryOwed.load(accountIdB64: accountIdB64).filter { $0.groupIdHex != groupIdHex },
             accountIdB64: accountIdB64)
         reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        reentryRowClock.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        reentryKnockKeySent.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         chatClient.reentryObservations.clear(groupIdHex: groupIdHex)
     }
 
@@ -107,14 +114,36 @@ extension ChatRepository {
               readIsActive({ try record.group.isActive() }) == true,
               let localEpoch = try? record.group.epoch() else { return }
         let observations = chatClient.reentryObservations
+        // Walk-3 rule W3-R6 — whether this answer ends a refused-read hold.
+        let refusedBefore = observations.snapshot(groupIdHex: groupIdHex).refusedReads > 0
         observations.noteReadAnswered(groupIdHex: groupIdHex)
+        // Walk-2 rule R1 — what this read showed of the conversation is
+        // durable before any request can go out.
+        noteConversationKnown(
+            groupIdHex: groupIdHex, rowAtMs: observations.takeLastAppliedRowAtMs(groupIdHex: groupIdHex),
+            readOk: true)
         let evidence = observations.snapshot(groupIdHex: groupIdHex)
         let held = chatClient.registeredCommitHold.hold(groupIdHex: groupIdHex) != nil
         let observation = ConversationReentryRules.observation(
             ownCommitOwed: ownCommitOwed(groupIdHex: groupIdHex, record: record),
             rowsReturned: raw.messages.count, hasMore: raw.hasMore, held: held,
             latestEpoch: raw.latestEpoch, localEpoch: localEpoch, evidence: evidence)
-        foldReentry(groupIdHex: groupIdHex, observation: observation, evidence: evidence)
+        foldReentry(
+            groupIdHex: groupIdHex, observation: observation, evidence: evidence,
+            answeredAfterRefusal: refusedBefore)
+    }
+
+    /// Walk-2 rule R1 — raise the durable clock: a row stamped `rowAtMs`
+    /// applied (or an own publish was accepted), and, with `readOk`, a read
+    /// of the journal was answered now.
+    func noteConversationKnown(groupIdHex: String, rowAtMs: UInt64?, readOk: Bool = false) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        if let rowAtMs {
+            reentryRowClock.noteRowKnown(accountIdB64: accountIdB64, groupIdHex: groupIdHex, atMs: rowAtMs)
+        }
+        if readOk {
+            reentryRowClock.noteReadOk(accountIdB64: accountIdB64, groupIdHex: groupIdHex, nowMs: nowU64)
+        }
     }
 
     /// A read of the journal was refused.
@@ -150,8 +179,11 @@ extension ChatRepository {
         return false
     }
 
+    /// `answeredAfterRefusal`: this observation is an answered read that
+    /// follows one or more refused reads (walk-3 rule W3-R6).
     private func foldReentry(
-        groupIdHex: String, observation: FfiBehindObservation, evidence: ReentryObservations.Snapshot
+        groupIdHex: String, observation: FfiBehindObservation, evidence: ReentryObservations.Snapshot,
+        answeredAfterRefusal: Bool = false
     ) {
         let previous = reentryRecord(groupIdHex: groupIdHex)
         let (next, cleared) = ConversationReentryRules.fold(
@@ -170,11 +202,18 @@ extension ChatRepository {
             chatClient.reentryObservations.clear(groupIdHex: groupIdHex)
             saveReentry(kept, groupIdHex: groupIdHex)
             state = state.with(threads: buildThreadList())
+            resendOwnStateBackInStep(groupIdHex: groupIdHex)
             return
         }
         if next != previous {
             saveReentry(next, groupIdHex: groupIdHex)
             if next.behind != previous.behind { state = state.with(threads: buildThreadList()) }
+        }
+        // Walk-3 rule W3-R6 — a refused-read hold that ended with the
+        // conversation in step throughout: what was held goes as after
+        // coming back in step.
+        if answeredAfterRefusal, previous.behind == .inStep, next.behind == .inStep {
+            resendOwnStateBackInStep(groupIdHex: groupIdHex)
         }
         if next.behind.stopsActing {
             Task { @MainActor [weak self] in await self?.sendReentryRequestIfDue(groupIdHex: groupIdHex) }
@@ -185,6 +224,22 @@ extension ChatRepository {
         guard !keyPackages.isEmpty, let identity = canonicalIdentity else { return }
         for keyPackage in keyPackages { try? identity.forgetKeyPackage(keyPackage: keyPackage) }
         persistSnapshotBestEffort()
+    }
+
+    /// Walk-3 rule W3-R5 — back in step (behind -> in step by a read, or the
+    /// re-entry joined; W3-R6: or a refused-read hold ended in step): this device re-sends its own growth-time state for
+    /// the conversation, the re-send a newcomer's growth triggers (profile,
+    /// group name, photo, reactions setting, handle, shared pins, shared
+    /// channels, the knock key as owner or admin; each envelope's own rule
+    /// decides whether this device sends it). What this client stores first
+    /// by design goes too: an owed group photo, and an anonymous ballot that
+    /// failed while behind.
+    func resendOwnStateBackInStep(groupIdHex: String) {
+        guard groups[groupIdHex] != nil, !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) else { return }
+        resendGroupStateForReturningDevice(groupIdHex: groupIdHex, includeRoutingSecret: false)
+        Task { @MainActor [weak self] in await self?.sendOwedGroupPhotos() }
+        BallotQueue.shared.retryFailed(groupIdHex: groupIdHex)
+        reentryBackInStepObserver?(groupIdHex)
     }
 
     // MARK: - The waiting note (UX 2.2)
@@ -251,28 +306,47 @@ extension ChatRepository {
         reentrySending.insert(groupIdHex)
         defer { reentrySending.remove(groupIdHex) }
         let bound = binding.capture()
-        // `epoch_left` is the latest epoch the device read. One suspected by
-        // refused reads read none: an empty knock is the epoch probe (one
-        // `ds-knock` token, ADR-0053).
-        var epochLeft = current.latestSeen
-        if epochLeft == nil {
-            epochLeft = try? await dsClient.knock(groupId: record.groupId, payloads: []).epoch
-            guard bound.isCurrent else { return }
+        // Walk-3 rule W3-R1 — the destination first: a request with nowhere
+        // to go mints nothing.
+        let kind = groupKind(groupIdHex: groupIdHex) ?? .group
+        let route = reentryRoute(ownDeviceInConversation: ownDeviceInConversation(group: record.group), kind: kind)
+        guard let destination = reentryDestination(route: route, groupIdHex: groupIdHex) else {
+            ReentryLog.emit("conversation re-entry request not sent: no destination by route "
+                + "\(ConversationReentryRules.routeName(route))")
+            retrySoon(groupIdHex: groupIdHex)
+            return
         }
-        guard let epochLeft else {
+        // Then `epoch_left`: EVERY request (the first and every resend) asks
+        // the journal right before minting, with an empty knock (one
+        // `ds-knock` token, ADR-0053). Never a stored latest epoch: one kept
+        // from an earlier read can be stale by many commits, and a request
+        // naming it is never acted on.
+        let probed = try? await dsClient.knock(groupId: record.groupId, payloads: []).epoch
+        // The probe waited: what it answered is for the handle and the state
+        // it was asked for.
+        guard bound.isCurrent, groups[groupIdHex] === record else { return }
+        current = reentryStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        guard current.behind.stopsActing else { return }
+        guard let epochLeft = probed else {
             ReentryLog.emit("conversation re-entry request not sent: the latest epoch is unknown")
             retrySoon(groupIdHex: groupIdHex)
             return
         }
-        let kind = groupKind(groupIdHex: groupIdHex) ?? .group
-        let route = reentryRoute(ownDeviceInConversation: ownDeviceInConversation(group: record.group), kind: kind)
+        // Walk-2 rule R1 — the gap starts no later than when this device last
+        // knew the conversation, so a device that fell behind through refused
+        // reads (nothing skipped) still names it. Kept as the record's start,
+        // so the gap line later starts at the value the request carried.
+        let clock = reentryRowClock.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        let gapFromMs = ConversationReentryRules.gapStart(
+            firstSkippedMs: current.gapFromMs, lastKnownRowMs: clock.lastKnownRowMs,
+            lastReadOkMs: clock.lastReadOkMs, suspicionSinceMs: current.behind.sinceMs, nowMs: now)
         let keyPackage: Data
         let envelope: Data
         do {
             keyPackage = try identity.createReentryKeyPackage(groupId: record.groupId, epochLeft: epochLeft)
             envelope = try composeConversationReentryEnvelope(
                 groupId: record.groupId, epochLeft: epochLeft,
-                gapFromMs: current.gapFromMs ?? current.behind.sinceMs ?? now, keyPackage: keyPackage)
+                gapFromMs: gapFromMs, keyPackage: keyPackage)
         } catch {
             ReentryLog.emit("conversation re-entry request not built: \(ErrorLogTag.of(error))")
             retrySoon(groupIdHex: groupIdHex)
@@ -292,11 +366,12 @@ extension ChatRepository {
             return
         }
         current.requests = kept
+        current.gapFromMs = gapFromMs
         current.lastSentMs = now
         current.lastRoute = ConversationReentryRules.routeName(route)
         guard bound.isCurrent, saveReentry(current, groupIdHex: groupIdHex) else { return }
         do {
-            try await sendReentryEnvelope(envelope, route: route, record: record, groupIdHex: groupIdHex)
+            try await sendReentryEnvelope(envelope, destination: destination, record: record)
             ReentryLog.emit("conversation re-entry request sent by route \(ConversationReentryRules.routeName(route))")
         } catch {
             guard bound.isCurrent else { return }
@@ -315,30 +390,48 @@ extension ChatRepository {
         saveReentry(record, groupIdHex: groupIdHex)
     }
 
-    private struct NoRoute: Error {}
+    /// Where a re-entry request goes, resolved before anything is minted.
+    enum ReentryDestination {
+        case ownDevice(@MainActor (Data) async -> Void)
+        case mailbox(ReachCenter.WritePlan)
+        case knock(version: UInt16, publicKey: Data)
+    }
 
-    private func sendReentryEnvelope(
-        _ envelope: Data, route: FfiReentryRoute, record: GroupRecord, groupIdHex: String
-    ) async throws {
+    /// The destination of `route`, or `nil` when this device has none yet
+    /// (no DeviceGroup sender, no reach grant to the other person, no knock
+    /// key).
+    func reentryDestination(route: FfiReentryRoute, groupIdHex: String) -> ReentryDestination? {
         switch route {
         case .ownDevice:
             // Route 1 — a DeviceGroup service envelope to the account's other
             // devices.
-            guard let sender = reentryOwnDeviceSender else { throw NoRoute() }
-            await sender(envelope)
+            return reentryOwnDeviceSender.map { .ownDevice($0) }
         case .mailbox:
             // Route 2 — a sealed row to the other person's account mailbox,
             // under a reach grant this device holds.
             guard let other = otherPersonKey(groupIdHex: groupIdHex),
-                  let plan = ReachCenter.shared.writePlan(toAccountKey: other) else { throw NoRoute() }
+                  let plan = ReachCenter.shared.writePlan(toAccountKey: other) else { return nil }
+            return .mailbox(plan)
+        case .knock:
+            // Route 3 — sealed to the group's knock key.
+            guard let knock = reentryKnockKey(groupIdHex: groupIdHex) else { return nil }
+            return .knock(version: knock.version, publicKey: knock.publicKey)
+        }
+    }
+
+    private func sendReentryEnvelope(
+        _ envelope: Data, destination: ReentryDestination, record: GroupRecord
+    ) async throws {
+        switch destination {
+        case .ownDevice(let sender):
+            await sender(envelope)
+        case .mailbox(let plan):
             let row = try plan.target.seal(kind: .conversationReentry, body: envelope)
             _ = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
                 try await self.dsClient.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: auth)
             }
-        case .knock:
-            // Route 3 — sealed to the group's knock key.
-            guard let knock = reentryKnockKey(groupIdHex: groupIdHex) else { throw NoRoute() }
-            let row = try sealReentryKnockRow(knockPk: knock.publicKey, knockVersion: knock.version, envelope: envelope)
+        case .knock(let version, let publicKey):
+            let row = try sealReentryKnockRow(knockPk: publicKey, knockVersion: version, envelope: envelope)
             _ = try await dsClient.knock(groupId: record.groupId, payloads: [row])
         }
     }
@@ -354,25 +447,41 @@ extension ChatRepository {
 
     // MARK: - The knock key in-group (route 3)
 
-    /// The owner sends the group's knock key to every member once per
-    /// version (section 3, route 3): a plain member holds no knock seed.
-    /// Called from the owner's knock reconcile.
+    /// The owner or an admin (both hold the knock seeds) sends the group's
+    /// knock key to the members (section 3, route 3): a plain member holds
+    /// no knock seed. Walk-2 rule R4: due when the version differs from the
+    /// last delivered one, or a current member was not in the set at the last
+    /// delivery (``ConversationReentryRules/knockKeySendDue(mark:version:members:)``);
+    /// the mark is set only after the broadcast went out, so a send refused
+    /// while behind or failed stays due. Called from the owner's knock
+    /// reconcile, on growth, after a replacement and at every poll tail.
     func publishKnockKeyIfOwed(groupIdHex: String) async {
-        guard let accountIdB64 = currentAccountIdB64, ownsGroup(groupIdHex: groupIdHex),
-              !reentryStopsActing(groupIdHex: groupIdHex),
-              let knock = knockKey(groupIdHex: groupIdHex) else { return }
-        var row = KnockVersionStore.load(accountIdB64, groupIdHex)
-            ?? KnockVersionStore.Row(version: knock.version, admins: [], sent: [])
-        let tag = "pk|\(knock.version)"
-        guard !row.sent.contains(tag) else { return }
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex],
+              !reentryKnockKeySending.contains(groupIdHex),
+              !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+              !reentryStopsActing(groupIdHex: groupIdHex) else { return }
+        let role = ownRole(groupIdHex: groupIdHex)
+        guard role == .owner || role == .admin, let knock = knockKey(groupIdHex: groupIdHex),
+              let members = PushGroupRouting.memberSignatureKeys(group: record.group) else { return }
+        guard ConversationReentryRules.knockKeySendDue(
+            mark: reentryKnockKeySent.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+            version: knock.version, members: members) else { return }
+        reentryKnockKeySending.insert(groupIdHex)
+        defer { reentryKnockKeySending.remove(groupIdHex) }
+        let bound = binding.capture()
         do {
             let envelope = try composeKnockKeyEnvelope(knockVersion: knock.version, knockPk: knock.publicKey)
             try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
-            row = KnockVersionStore.load(accountIdB64, groupIdHex) ?? row
-            row.sent.append(tag)
-            KnockVersionStore.save(row, accountIdB64, groupIdHex)
+            guard bound.isCurrent else { return }
+            // The members captured BEFORE the send: one added meanwhile is
+            // not in the mark, so the key goes again (never one too few).
+            reentryKnockKeySent.save(
+                ReentryKnockKeySentMark(version: knock.version, members: members),
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         } catch {
-            if !ConversationReentryRules.isBehindRefusal(error) { NSLog("[knock] WARN the knock key was not sent in-group; retried on the next change") }
+            if !ConversationReentryRules.isBehindRefusal(error) {
+                NSLog("[knock] WARN the knock key was not sent in-group; retried at a later poll")
+            }
         }
     }
 
@@ -573,17 +682,18 @@ extension ChatRepository {
         back.adoptReentryRecord(old, readFrom: record.readFromAfterReentry ?? old.cursor)
         // UX 2.4 — where messages were sent while out, one local line.
         let now = nowU64
-        // The gap's start: when the first row could not be read (the time
-        // stated in the request); the gap history is looked for from there.
-        let lookFrom = record.gapFromMs.map { min($0, now) } ?? now
-        if let gapFrom = record.gapFromMs, gapFrom <= now {
-            let lowest = back.messages.map(\.id).min() ?? 0
-            back.appendLocalRow(
-                text: ConversationReentryRules.gapMarker(fromMs: gapFrom, toMs: now),
-                messageId: min(0, lowest) - 1,
-                createdAt: Self.isoTimestamp(ms: Int64(clamping: now)))
-        }
+        // The gap's start: the value the request carried (walk-2 rule R1);
+        // the gap history is looked for from there.
+        let clock = reentryRowClock.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        let lookFrom = record.gapFromMs.map { min($0, now) } ?? ConversationReentryRules.gapStart(
+            firstSkippedMs: nil, lastKnownRowMs: clock.lastKnownRowMs, lastReadOkMs: clock.lastReadOkMs,
+            suspicionSinceMs: record.behind.sinceMs, nowMs: now)
+        // Walk-2 rule R2 — the line sits where the gap was by time, after the
+        // last row at or before its start, not at the end.
+        back.insertReentryGapLine(fromMs: lookFrom, toMs: now)
         groups[groupIdHex] = back
+        // Back by a Welcome: no row of the new group applied yet.
+        reentryRowClock.noteReentryJoined(accountIdB64: accountIdB64, groupIdHex: groupIdHex, nowMs: now)
         if let epoch = try? joined.epoch() {
             chatClient.registeredCommitHold.observeEpoch(groupIdHex: groupIdHex, epoch: epoch)
         }
@@ -597,13 +707,17 @@ extension ChatRepository {
         ReentryLog.emit("conversation re-entry: this device is back in the conversation")
         // Everyone whose profile was sealed while out re-introduces itself.
         requestProfilesAfterJoin(groupIdHex: groupIdHex)
+        // Walk-3 rule W3-R5 — and this device re-sends its own.
+        resendOwnStateBackInStep(groupIdHex: groupIdHex)
         if let historySecret {
             // Section 7 — looked for until it arrives or the Delivery Service's
             // retention passes (rule 1 of the 2026-11-19 walk fix), not by one
             // timed wait: the re-admitter sends it only once its own poll
             // reaches the new epoch, which may be days later.
             reentryGapLooks.save(
-                ReentryGapLook(groupIdHex: groupIdHex, secret: historySecret, gapFromMs: lookFrom, gapToMs: now),
+                ReentryGapLook(
+                    groupIdHex: groupIdHex, secret: historySecret, gapFromMs: lookFrom, gapToMs: now,
+                    route: record.lastRoute),
                 accountIdB64: accountIdB64)
             Task { @MainActor [weak self] in
                 await self?.lookForReentryGapHistory(groupIdHex: groupIdHex)
@@ -643,7 +757,8 @@ extension ChatRepository {
                 let gapRows = ConversationReentryRules.gapRows(rows, gapFromMs: owed.gapFromMs)
                 if let sealed = try HistoryBundleCodec.buildForGroup(
                     hex: groupIdHex, rows: gapRows, accountIdB64: accountIdB64, secret: secret,
-                    heldBeforeGap: ConversationReentryRules.gapHeldBefore(rows, gapFromMs: owed.gapFromMs)) {
+                    heldBeforeGap: ConversationReentryRules.gapHeldBefore(rows, gapFromMs: owed.gapFromMs),
+                    ownKey: AuthorIdentity.own(group: record.group).flatMap { Data(base64Encoded: $0) }) {
                     try await WelcomeCourier.publishHistoryBundle(
                         rendezvousPseudonym: ConversationReentryRules.historyRendezvous(secret: secret),
                         sealedBytes: sealed, ds: dsClient)
@@ -698,9 +813,13 @@ extension ChatRepository {
             if RecoveryPayload.isRecoveryRow(row.payload) || StateBundle.isStateRow(row.payload) { continue }
             let filed: HistoryBundleCodec.GapApplied
             do {
+                // Walk-3 rule W3-R3 — each row takes its author, and its
+                // direction from it, against this account's own key here.
+                let ownKey = groups[groupIdHex].flatMap { AuthorIdentity.own(group: $0.group) }
+                    .flatMap { Data(base64Encoded: $0) }
                 filed = try HistoryBundleCodec.applyGapBundle(
                     accountIdB64: accountIdB64, secret: look.secret, sealedBytes: row.payload,
-                    store: messageLogStore)
+                    ownKey: ownKey, route: look.route, store: messageLogStore)
             } catch {
                 continue
             }

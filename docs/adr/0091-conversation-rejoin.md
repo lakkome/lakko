@@ -884,6 +884,194 @@ refusal is already an error (`ConversationBehindError`,
 each client now has a test that a refused broadcast stays pending and goes
 out once back, and web no longer logs that refusal as a broadcast failure.
 
+## Live walk 2, 2026-11-19 and 20
+
+The second walk, on the test stack, with an Android owner (emulator) and two
+members: an Android device and the web client (in the desktop app). The
+member was stopped while the owner sent and changed roles until the journal
+had moved past the DS read window (64 epochs), so every read of the member
+was refused. Evidence in the walk's notes (timeline, logcat key lines,
+screenshots); times are the walk's.
+
+**What worked.** The web member was suspected, confirmed and sent a route 3
+request; the Android owner admitted it (`re-entry admitted: route=knock`,
+epoch 69 at 23:57:05, and in a second cycle epoch 136 at 00:13:44, after the
+owner's app had been stopped and started again while the member waited); the
+replacement landed, the member joined, read the owner's later messages, sent
+again, and drew a gap line both times. The waiting note showed while the
+owner was offline.
+
+**Defects, and how each was fixed (web, iOS and Android, host-tested only;
+nothing below has been walked yet).**
+
+1. **The gap started too late.** A device behind through refused reads skips
+   no row, so the gap's start fell back to the moment of suspicion (web
+   `gapFromMs ?? sinceMs`, Android `gapFromMs ?: now`, iOS the same). The
+   re-admitter's bundle then covered the wrong window (`gap bundle empty:
+   nothing held in the gap`, although the owner held the gap's messages) and
+   the line read 23:56 to 23:57 for a gap that began at 23:47. Now each client
+   keeps, durably per (account, conversation), the newest DS time of a row it
+   applied there or of an own publish the DS accepted, and the local time of
+   its last read that was not refused (written at most once a minute). Both
+   are read progress, kept when the device is back in step and dropped with
+   the conversation; a re-entry join drops the first and sets the second to
+   the join. The gap starts at the earlier of the first skipped row and that
+   last-known time (else the last good read, else the suspicion, else now),
+   known before any request goes out; the request and the line use the same
+   value, and a later request never moves a recorded start later.
+2. **The gap line sat in the wrong place.** In the second cycle it was drawn
+   below a message the owner sent after the replacement but before the
+   device's local join: the line was placed by its end. A line now sits where
+   the gap was by time, after the last entry at or before its start (web
+   `gap-line.ts`, Android `TimelinePresentation.kt`, iOS inserts its system
+   row by the same rule).
+3. **Android never suspected a device behind by refused reads.** Its
+   `own_commit_owed` counted every ADR-0040 outbox entry, acked or not, and the
+   member held an acked sweep entry from a proposal it had swept as an admin;
+   nothing deleted acked sweep entries (the restart collector skips sweep
+   entries and every sweep reader asks for an un-acked one). Android now
+   counts only un-acked entries and a staged sweep, as web and iOS did, and
+   deletes a sweep entry once acked (and those already on disk); nothing still
+   owed is deleted.
+4. **Android sent the request only from the tail of an applied poll**, which a
+   device whose every read is refused never reaches. It now also starts the
+   request from the refused-read fold, outside the poll's locks, as iOS did.
+5. **The knock key did not reach a new member until the owner's app
+   restarted** (Android). The member was added by the owner's own sweep, and
+   the send was due only when one applied poll batch saw the group grow; the
+   in-memory "sent version" then held. On every client the knock key is now
+   due when its version changed or a current member was not among the members
+   at the last delivered send; the mark is written only after a send went out
+   (a skipped, failed or behind-refused send marks nothing). Web had judged
+   growth by member count (a remove and an add in one commit went unserved);
+   iOS kept an in-memory publisher that forgot a failed send. Behaviour change
+   on iOS: the growth send is no longer jittered or throttled.
+6. **A waiting chat showed an error.** The web chat showed "Could not load new
+   messages. Try again." above the waiting note. A chat suspected or
+   confirmed behind now raises no refresh error, and an error shown before is
+   cleared when it starts waiting. iOS and Android show no refresh error;
+   they now clear the composer's error when the chat starts waiting (iOS at
+   confirmation, where its waiting note appears).
+7. **An Android owner's role change slowed down**, from about 6 s to 14 to 26 s
+   per toggle over a few hundred epochs (toggle-run timestamps). Cause found
+   by reading the code, not by a log line: each admin removal raises the
+   group's knock version (ADR-0087), and on every raise the owner sent every
+   knock seed, version 0 to the current one, again to this account and to
+   each admin, one in-group message each. Android now sends a recipient only
+   the versions it was not yet sent in this session (all again after a
+   restart, a new device of the recipient, a rotation or a re-entry), and a
+   skipped send no longer counts as sent. Web marks each (admin, version) in
+   memory and iOS each (recipient, version) durably, so neither resends the
+   older versions on a raise. Cost on
+   Android: a recipient that lost its stored seeds with no change of device
+   gets them again only after a restart.
+
+**Not covered.** The applied-row time is not raised by the rows a sweep
+applies itself nor, on iOS and web, by a commit published through the commit
+route (the next applied poll raises it). An Android log line found in the
+walk (`sendReadReceipt failed`, 23:33:55) prints an exception whose message
+holds the DS path with a group id; not fixed here.
+
+## Live walk 3, 2026-11-20
+
+The third walk, on the test stack, with an Android owner (emulator) and two
+members in two cycles: an Android member (cycle A) and the web client run
+from a local build (cycle B). As before, the member was stopped while the
+owner sent messages and changed roles until the journal had moved past the DS
+read window (66 role toggles per cycle). Evidence in the walk's notes
+(timelines, logcat, the web console and storage, screenshots, stack samples).
+The iPhone cycle was not run.
+
+**What worked.**
+
+- The Android cycle end to end: the member was suspected and confirmed, sent
+  a route 3 request naming epoch 69, the owner admitted it three seconds
+  later, the replacement landed, the gap bundle arrived (`rows=4`), the gap
+  line was drawn after the last message before the gap and then removed, and
+  messages went both ways after the rejoin.
+- The knock key reached each new member without the owner's app restarting
+  (walk-2 defect 5, fixed).
+- An owner's role change took a flat 5 to 6.5 s per toggle across 66 toggles
+  (walk-2 defect 7, fixed).
+- A waiting web chat showed no error banner (walk-2 defect 6, fixed).
+- No log line on either side carried a journal id or a 64-hex id.
+
+**Defects, and how each was fixed (web, iOS and Android, host-tested only;
+nothing below has been walked yet).**
+
+1. **The web request named a stale epoch, so the member waited forever.**
+   The web behind record held `latest="1"` from an in-step read before the
+   member was stopped (its own local epoch); every later read was refused, so
+   nothing replaced it, the request skipped the probe and named epoch 1, and
+   the owner, at about 67, logged `re-entry request not acted on:
+   other_epoch`. The resend 30 minutes later would have named 1 again. iOS
+   had the same defect (`latestSeen` kept from any read); Android probed only
+   when reads were refused or no epoch was stored, so a device suspected by a
+   drained read and then refused would have resent a stale epoch. On every
+   client each request, the first and every resend, now probes the journal
+   with an empty knock (one `ds-knock` token) right before it mints the
+   re-entry KeyPackage, after the route's destination is known, and names the
+   epoch that answer gives; a stored epoch is never used. A probe that fails
+   or names no epoch mints and sends nothing and is tried again after the
+   short retry (web 60 s, Android 120 s, iOS its retry). The resend schedule
+   of section 3 is unchanged (as soon as behind, then every 30 minutes): a
+   request that names the current epoch is acted on at once by an owner who
+   is not moving the group on, and a member whose owner keeps committing
+   meanwhile retries at the next resend with a fresh epoch.
+2. **Automatic sends went out between refused reads.** The web console showed
+   two refused reads, then `[profile] publish failed (401)` and a failed
+   typing publish, then the confirmation: three refused reads suspect, and
+   the republish and the typing signal went out while the state was still in
+   step. On every client a send that is not the person's own content
+   (repeat envelopes, typing, read receipts, the committer beacon, the knock
+   key, the push routing secret, the own-device fan-out) is now held, quietly,
+   while the conversation is suspected or confirmed and also while a read of
+   its journal was refused (an unskewed `401`) with no answered read since.
+   Held sends go out by their existing paths (owed records, retries, the next
+   growth) and, once a conversation the device was behind in is back in step
+   (a read cleared it or the re-entry joined), by a re-send of the device's
+   own growth-time state for it (profile, group name, photo, reactions
+   setting, handle, shared pins, shared channels, the knock key as owner or
+   admin). The same re-send runs when a read is answered after refused
+   reads that never made the device behind, so what that hold kept goes out
+   then (typing is not re-sent; a read receipt goes out at the next read
+   anyway). The person's own messages keep the section 2 rule. The person's
+   other actions (an edit, a deletion, a reaction, a poll or checklist op, a
+   shared pin, a rename, a group photo or reactions setting, a handle, a
+   contact request inside a group) are held only while the conversation is
+   suspected or confirmed, not after a refused read alone (then they are
+   attempted, and a refusal is evidence); when held they are refused before
+   anything changes locally and the person sees the action's failure text.
+   The first pass of this fix had the clients disagree here (web and iOS held
+   them after one refused read, Android only once behind); all three now
+   follow the rule above.
+3. **Bundled messages had no author.** On the Android member the gap
+   bundle's messages showed a "?" avatar and no name, while the owner's live
+   messages showed the name. The history placeholder (`lakko-mls`) carried no
+   author at all, so every bundle, the pairing bundle included, lost it on
+   every client. Placeholder version 6 appends the author's 32-byte key
+   (versions 1 to 5 refused; on UniFFI `HistoryPlaceholder.authorKey`, on
+   wasm a last `encodeHistoryPlaceholder` argument and
+   `OpenedHistoryPlaceholder.authorKey`). A sending device writes the author
+   it stored for a received row, its own key in the conversation for a row
+   it sent, nothing for a system row. The device that came back files a row
+   as its own (outgoing) when the author is its own key in the conversation,
+   else as the author's; a row naming no author takes its direction from the
+   request's route (Android's earlier rule, now also on web and iOS, which
+   had not remapped directions at all: the owner's own messages would have
+   shown as the member's). A pairing bundle keeps the author of a received
+   row. The row is then named and drawn like a live one.
+4. **Android assembled the backup on the main thread.** A stack sample taken
+   while the owner's emulator was reporting "not responding" caught the main
+   thread in `AutoBackupDriver.runOnce` -> `BackupPersonal.of` ->
+   `receivedProfilesForBackup` -> a state-bundle FFI decode. The ANR itself
+   came with a host under heavy load (an unrelated build process), so this
+   sample is the evidence, not the ANR. The driver now runs its reads, the
+   assembly and the upload on `Dispatchers.Default`. iOS composed the
+   received profiles' envelopes for the backup on the main actor
+   (`OwnBackupEnvelopes.current`); the composing now runs in a detached task
+   after the reads. What is backed up is unchanged.
+
 ## Abuse
 
 - **A stranger cannot cause a replacement.** A valid `K` needs the private

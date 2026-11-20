@@ -387,3 +387,180 @@ public final class PublisherCommitStore {
         IdentitySnapshotStore(scope: scope).deleteSnapshot(accountIdB64: accountIdB64)
     }
 }
+
+// MARK: - Retry of recorded commits
+
+/// What a failed step of a recorded PublisherGroup commit means for its next
+/// try (seen live 2026-11-20: a reseal refused `401 owner-proof-required` was
+/// "retried later" once per entry, back to back, every pass).
+public enum PublisherCommitFailure: Equatable, Sendable {
+    /// The channels service answered with a refusal it gives the same request
+    /// again: `401 owner-proof-required` (this device's publisher proof is
+    /// not accepted for the channel) or `410 channel-deleted`.
+    case refused
+    /// Anything else (a network failure, a 5xx, an unanswered journal step):
+    /// may succeed later.
+    case transient
+
+    /// The kind of `error`.
+    public static func of(_ error: Error) -> PublisherCommitFailure {
+        guard let api = error as? ChannelsApiError else { return .transient }
+        if api.code == ChannelsApiError.publisherRefusedCode
+            || api.code == ChannelsApiError.channelDeletedCode {
+            return .refused
+        }
+        return .transient
+    }
+
+    /// A label for a log line: the service's code, or the error type. Never
+    /// the error's description (a URL in it names the channel).
+    public static func logLabel(_ error: Error) -> String {
+        if let api = error as? ChannelsApiError { return "\(api.status) \(api.code)" }
+        return String(describing: type(of: error))
+    }
+}
+
+/// When a channel's recorded commits are tried again after a failure.
+///
+/// - A refusal (``PublisherCommitFailure/refused``) holds the channel for the
+///   rest of the process: the next try is at the next start or the next
+///   account binding (``PublisherCommitRetry/reset()``). The entries are
+///   KEPT: their commit merged and is on the journal, so the reseal (and an
+///   approve's Welcome) are still owed for the channel to be consistent, and
+///   a refusal that clears (an owner handover that lands, a fixed clock) lets
+///   the next start finish them. A held channel stages no new rotation
+///   (``ChannelPublisherLoops/hasOwedCommit(channelId:entries:)``).
+/// - A transient failure waits ``SweepRegistrationBackoff/delayMs(failures:)``
+///   after it: 30 s, doubling per consecutive failure, at most 10 minutes,
+///   the schedule the client already uses for owed DS registrations.
+///
+/// Pure: the caller supplies the clock.
+public struct PublisherCommitHold: Equatable, Sendable {
+    /// A refusal: no try before the hold is reset.
+    public let refused: Bool
+    /// Consecutive failures, at least 1.
+    public let failures: Int
+    /// When the last failure happened (caller's clock, ms).
+    public let failedAtMs: Int64
+
+    /// The earliest time of the next try (meaningless when refused).
+    public var notBeforeMs: Int64 {
+        failedAtMs + SweepRegistrationBackoff.delayMs(failures: failures)
+    }
+
+    /// Whether the channel may be tried at `nowMs`. A clock that went back
+    /// past the failure allows it (a wait on such a clock means nothing).
+    public func allows(nowMs: Int64) -> Bool {
+        !refused && (nowMs >= notBeforeMs || nowMs < failedAtMs)
+    }
+
+    /// The hold after a `failure` at `nowMs`, given the `previous` one.
+    public static func after(
+        _ previous: PublisherCommitHold?, failure: PublisherCommitFailure, nowMs: Int64
+    ) -> PublisherCommitHold {
+        PublisherCommitHold(
+            refused: failure == .refused,
+            failures: (previous?.failures ?? 0) + 1,
+            failedAtMs: nowMs)
+    }
+}
+
+/// The per-channel holds of the recorded PublisherGroup commits of the
+/// bound account, in memory. Main-actor confined like the store.
+@MainActor
+public final class PublisherCommitRetry {
+    /// The process-wide instance.
+    public static let shared = PublisherCommitRetry()
+
+    private var holds: [String: PublisherCommitHold] = [:]
+    private let clock: () -> Int64
+
+    public init(clock: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }) {
+        self.clock = clock
+    }
+
+    private static func key(_ accountIdB64: String, _ channelIdHex: String) -> String {
+        accountIdB64 + "|" + channelIdHex.lowercased()
+    }
+
+    /// The hold of a channel, if any.
+    public func hold(accountIdB64: String, channelIdHex: String) -> PublisherCommitHold? {
+        holds[Self.key(accountIdB64, channelIdHex)]
+    }
+
+    /// Whether the channel's recorded commits may be tried now.
+    public func mayAttempt(accountIdB64: String, channelIdHex: String) -> Bool {
+        hold(accountIdB64: accountIdB64, channelIdHex: channelIdHex)?.allows(nowMs: clock()) ?? true
+    }
+
+    /// A step of the channel failed with `error`: the new hold.
+    @discardableResult
+    public func noteFailure(accountIdB64: String, channelIdHex: String, error: Error) -> PublisherCommitHold {
+        let key = Self.key(accountIdB64, channelIdHex)
+        let next = PublisherCommitHold.after(holds[key], failure: .of(error), nowMs: clock())
+        holds[key] = next
+        return next
+    }
+
+    /// A run of the channel finished without a failure: no hold.
+    public func noteSuccess(accountIdB64: String, channelIdHex: String) {
+        holds[Self.key(accountIdB64, channelIdHex)] = nil
+    }
+
+    /// Every hold goes (a new process start does the same).
+    public func reset() {
+        holds.removeAll()
+    }
+
+    /// Whether `entry` still owes its DS journal step (a staged commit whose
+    /// verdict the DS has not given). That step is never held: a staged
+    /// commit freezes the group's membership operations, so it is sent again
+    /// every pass, as ADR-0090 / ADR-0081 say; the pass cadence bounds it.
+    public nonisolated static func owesJournal(_ entry: PublisherCommitEntry) -> Bool {
+        entry.journalLost != true && entry.remainingSteps.first == .journal
+    }
+
+    /// Run `entries` (in their recorded order) through `run`. An entry that
+    /// owes its journal step always runs; any other is skipped while its
+    /// channel's hold does not allow a try. A channel stops at its first
+    /// failure in this call, so a pile of entries of one channel costs one
+    /// request, not one per entry. A failure holds the channel only when it
+    /// came from a step after the journal (``reread`` gives the entry as
+    /// recorded after the run). Logs once per failure, with no identifier.
+    public func replay(
+        _ entries: [PublisherCommitEntry], accountIdB64: String,
+        reread: (String) -> PublisherCommitEntry? = { _ in nil },
+        run: (PublisherCommitEntry) async throws -> Void
+    ) async {
+        var stopped: Set<String> = []
+        for entry in entries {
+            let channel = entry.channelIdHex.lowercased()
+            if stopped.contains(channel) { continue }
+            let journal = Self.owesJournal(entry)
+            guard journal || mayAttempt(accountIdB64: accountIdB64, channelIdHex: channel) else {
+                stopped.insert(channel)
+                continue
+            }
+            do {
+                try await run(entry)
+                if !journal { noteSuccess(accountIdB64: accountIdB64, channelIdHex: channel) }
+            } catch {
+                stopped.insert(channel)
+                if Self.owesJournal(reread(entry.id) ?? entry) {
+                    NSLog("Channels: a recorded PublisherGroup commit is still unanswered by the journal (%@); sent again next pass",
+                          PublisherCommitFailure.logLabel(error))
+                    continue
+                }
+                let hold = noteFailure(accountIdB64: accountIdB64, channelIdHex: channel, error: error)
+                if hold.refused {
+                    NSLog("Channels: a recorded PublisherGroup commit was refused by the channels service (%@); kept, not tried again until the next start",
+                          PublisherCommitFailure.logLabel(error))
+                } else {
+                    NSLog("Channels: a recorded PublisherGroup commit did not finish (%@); tried again in %lld s",
+                          PublisherCommitFailure.logLabel(error),
+                          SweepRegistrationBackoff.delayMs(failures: hold.failures) / 1000)
+                }
+            }
+        }
+    }
+}

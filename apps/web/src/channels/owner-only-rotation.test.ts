@@ -75,4 +75,32 @@ describe("rotateChannel", () => {
     await rotateChannel(identity, OWNED, false);
     expect(registry.withPublisherGroup).not.toHaveBeenCalled();
   });
+
+  it("2026-11-20: no rotation is staged while a recorded commit of the channel owes its reseal", async () => {
+    registry.withPublisherGroup.mockResolvedValue(undefined);
+    const owed = {
+      id: "0b".repeat(16),
+      kind: "rotation" as const,
+      channelIdHex: OWNED,
+      groupIdHex: "22".repeat(32),
+      targetEpoch: "5",
+      serverTargetEpoch: 8,
+      commitB64: btoa("rotation"),
+      welcomeB64: null,
+      joinerKeyB64: null,
+      replyGrantB64: null,
+      proofEpoch: "4",
+      proofSeedB64: null,
+      journalLost: false,
+      done: ["journal" as const],
+    };
+    const spy = vi.spyOn(channelsActions, "pendingPublisherCommits").mockReturnValue([owed]);
+    try {
+      await rotateChannel(identity, OWNED, true);
+      expect(registry.withPublisherGroup).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
+

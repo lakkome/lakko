@@ -1422,6 +1422,12 @@ private final class SessionModels: ObservableObject {
         // Bound at construction, so the persisted channel list and publisher
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
+        // 2026-11-20 (ADR-0074) — the channel proof mapping holds from the
+        // first request of the session: owner proofs by the current key,
+        // co-publisher proofs by the lineage key.
+        if let seed = services.authRepository.identitySecrets?.accountIdentitySeed {
+            ChannelPublisherIdentity.installSession(accountIdB64: accountIdB64, currentSeed: seed)
+        }
         // ADR-0073 phase 2 (UX 16.6) — the session's key generation, so a
         // channel created under earlier keys reads as orphaned on the device
         // that reset them.

@@ -375,6 +375,10 @@ internal fun accountKeyRegistrationsDue(
  * and writes the leaves ([recordLeave]).
  */
 public object ChannelSubscriptionSync {
+    /** 2026-11-20 — the per-channel holds of the account reader key's
+     *  registration ([PublisherCommitHold]); reset at unbind. */
+    internal var readerKeyRetry: PublisherCommitRetry = PublisherCommitRetry(warn = {})
+
     private const val TAG = "ChannelSubscriptionSync"
 
     private val mutex = Mutex()
@@ -467,12 +471,22 @@ public object ChannelSubscriptionSync {
             skip = state.registerSkipSet(),
         )
         for ((id, keys) in due) {
+            // 2026-11-20 — a refused or failing registration waits out its
+            // hold (a refusal: until the next binding) instead of being tried
+            // at every reconcile.
+            if (!readerKeyRetry.mayAttempt(account, id)) continue
             try {
                 if (stores.registerAccountKey(state, id, keys)) Log.i(TAG, "the account's reader key of a channel is registered")
+                readerKeyRetry.noteSuccess(account, id)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                Log.w(TAG, "the account's reader key was not registered yet: ${e.javaClass.simpleName}")
+                val hold = readerKeyRetry.noteFailure(account, id, e)
+                Log.w(
+                    TAG,
+                    "the account's reader key was not registered yet (${PublisherCommitFailure.logLabel(e)}); " +
+                        if (hold.refused) "not tried again until the next start" else "tried again after a wait",
+                )
             }
         }
     }

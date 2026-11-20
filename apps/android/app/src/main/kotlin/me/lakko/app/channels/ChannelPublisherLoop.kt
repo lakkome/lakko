@@ -244,6 +244,24 @@ public class ChannelPublisherLoop private constructor(
                     }
                 }
             } ?: return
+            // 2026-11-20 — a group more than one epoch ahead of the service
+            // (a run of commits whose reseal never landed) maps its current
+            // epoch to the service's next one, where the reseal that lands
+            // will seal it.
+            val service = state.epochByChannel.value[channelId]
+            val anchored = service?.let { reanchoredOffset(read.first, ChannelEpochOffsets.get(channelId), it) }
+            if (service != null && anchored != null) {
+                // The service's epoch when it already serves this seed (a
+                // device that applied the whole run after the reseal landed),
+                // else the next one.
+                val atService = state.subscribedSeeds(channelId)[service]?.contentEquals(read.second) == true
+                val target = if (atService) service else service + 1u
+                ChannelEpochOffsets.set(channelId, target.toLong() - read.first.toLong())
+                state.notePublisherSeedAt(channelId, target, read.second)
+                state.anchorSeed(channelId, target, read.second)
+                Log.i(TAG, "a publisher group was ahead of the channel by more than one epoch; re-mapped")
+                return
+            }
             val epoch = ChannelEpochOffsets.channelEpochOf(channelId, read.first) ?: return
             val held = state.keysByChannel.value[channelId] ?: return
             if (held.seedEpoch == epoch && held.seed.contentEquals(read.second)) return
@@ -529,6 +547,24 @@ public class ChannelPublisherLoop private constructor(
         // Section 6 — the admission mark this device advanced goes to every
         // publishing device (only an owner device's mark is counted).
         if (owner) sendAdmissionMarkIfAdvanced(pub, channelId, pg, account)
+        // 2026-11-20 — an owned channel whose owner proof was refused moves
+        // its owner key to the current key first ([ChannelOwnerRepair]).
+        if (owner) {
+            val admission = SubscriberAdmission.forChannels(state, client)
+            ChannelOwnerRepair.repairIfRefused(
+                context = context,
+                accountIdB64 = account,
+                channelId = channelId,
+                refused = PublisherCommitRetry.shared.hold(account, channelId)?.refused == true ||
+                    ChannelSubscriptionSync.readerKeyRetry.hold(account, channelId)?.refused == true ||
+                    admission.isRefused(channelId),
+                client = client,
+            ) {
+                PublisherCommitRetry.shared.noteSuccess(account, channelId)
+                ChannelSubscriptionSync.readerKeyRetry.noteSuccess(account, channelId)
+                admission.clearHold(channelId)
+            }
+        }
         // G-50 / ADR-0090 — recorded commits that still owe a step (an
         // unanswered commit route included).
         if (store != null && store.entries(account).isNotEmpty()) {
@@ -549,6 +585,9 @@ public class ChannelPublisherLoop private constructor(
                 }
             }
         }
+        // 2026-11-20 — every pass, so a mapping broken by commits with no
+        // reseal is re-anchored even when no peer commit arrives.
+        refreshSeedAfterPeerCommit(pub, pg, channelId)
         if (state.takeReplayedCommit(channelId)) recordOwed.mark(channelId)
         if (recordOwed.isOwed(channelId)) {
             reissueRecordOwed(recordOwed, channelId) { ChannelMetaPublisher.reissue(state, client, channelId) }
@@ -1405,6 +1444,15 @@ public class ChannelPublisherLoop private constructor(
             return
         }
         if (!forced && !rotationIsDue(channelId, System.currentTimeMillis())) return
+        // 2026-11-20 — no new rotation while a recorded commit of the channel
+        // still owes its reseal (seen live on iOS: one more epoch merged every
+        // pass, each reseal refused `401`). That reseal, when it lands, seals
+        // a seed no subscriber holds yet to the subscribers listed then, so a
+        // forced rotation (a removed subscriber) is covered by it too.
+        if (PublisherCommitRetry.hasOwedCommit(channelId, state.commitStore?.entries(account).orEmpty())) {
+            Log.i(TAG, "ADR-0090: a recorded commit still owes its reseal; no rotation staged")
+            return
+        }
         knowEpochBeforeCommit(channelId)
         val stored = state.rotationState(channelId)
         val rotationState = if (forced || stored == null) {
@@ -1461,6 +1509,9 @@ public class ChannelPublisherLoop private constructor(
         val since = trailingSince.getOrPut(channelId) { now }
         val pending = state.commitStore?.entries(account)?.any { it.channelIdHex == channelId.lowercase() } == true
         if (!resealTakeoverDue(groupEpoch, service, since, now, pending)) return
+        // 2026-11-20 — a reseal of this channel refused or failed waits out
+        // its hold instead of being tried again every pass.
+        if (!PublisherCommitRetry.shared.mayAttempt(account, channelId)) return
         try {
             pub.withChannel { ids ->
                 resealToSubscribers(
@@ -1474,12 +1525,18 @@ public class ChannelPublisherLoop private constructor(
                 )
             }
             trailingSince.remove(channelId)
+            PublisherCommitRetry.shared.noteSuccess(account, channelId)
             Log.i(TAG, "ADR-0090: an unfinished reseal was taken over")
             afterRotation(channelId)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
-            Log.w(TAG, "an unfinished reseal was not taken over yet: ${e.javaClass.simpleName}")
+            val hold = PublisherCommitRetry.shared.noteFailure(account, channelId, e)
+            Log.w(
+                TAG,
+                "an unfinished reseal was not taken over (${PublisherCommitFailure.logLabel(e)}); " +
+                    if (hold.refused) "not tried again until the next start" else "tried again after a wait",
+            )
         }
     }
 

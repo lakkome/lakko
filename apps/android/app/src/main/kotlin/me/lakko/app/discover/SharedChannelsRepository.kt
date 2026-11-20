@@ -45,8 +45,10 @@ import uniffi.lakko_ffi_uniffi.FfiSharedChannels
  */
 public class SharedChannelsRepository(
     private val account: () -> String?,
-    /** Publish [envelope] into the group (the audited control-message send). */
-    private val broadcast: suspend (groupIdHex: String, envelope: ByteArray) -> Unit,
+    /** Publish [envelope] into the group (the audited control-message send).
+     *  `false` when the send was held (ADR-0091 walk 3, W3-R2: the device may
+     *  be behind there): nothing went out, so nothing is recorded as sent. */
+    private val broadcast: suspend (groupIdHex: String, envelope: ByteArray) -> Boolean,
     /** The group is held on this device and this device is still a member. */
     private val isLive: (groupIdHex: String) -> Boolean,
     private val scope: CoroutineScope,
@@ -107,7 +109,9 @@ public class SharedChannelsRepository(
     private suspend fun sendFreshLocked(acct: String, groupIdHex: String, channels: List<SharedChannel>) {
         val held = _row.value
         val list = SharedList(freshListStamp(System.currentTimeMillis(), held.sent[groupIdHex]), channels)
-        broadcast(groupIdHex, compose(list))
+        // A held send records nothing: the next change re-send finds the
+        // group's list unsent and sends it.
+        if (!broadcast(groupIdHex, compose(list))) return
         install(acct, _row.value.copy(sent = _row.value.sent + (groupIdHex to list)))
     }
 
@@ -160,7 +164,6 @@ public class SharedChannelsRepository(
         if (!isLive(groupIdHex)) return false
         return try {
             broadcast(groupIdHex, compose(sent))
-            true
         } catch (cause: Throwable) {
             log("shared channels growth re-send failed", cause)
             false

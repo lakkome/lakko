@@ -2661,6 +2661,13 @@ public final class ChatViewModel: ObservableObject {
     private func refreshMembership() {
         // ADR-0091 phase 2 — the waiting note (UX 2.2).
         let note = repository.reentryWaitingNote(groupIdHex: groupIdHex)
+        // Walk-2 rule R5 — a chat that starts waiting shows no error left
+        // over from before: the waiting note is what it says now. (A failed
+        // read raises none on this client: the poll is best-effort.)
+        if ConversationReentryRules.clearsChatErrors(wasWaiting: reentryNote != nil, isWaiting: note != nil) {
+            sendError = nil
+            membershipError = nil
+        }
         if note != reentryNote { reentryNote = note }
         let read = repository.membershipStateNow(groupIdHex: groupIdHex)
         // Once the group is wiped there is no handle, and no handle reads as

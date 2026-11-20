@@ -229,6 +229,14 @@ export class DsClientArgError extends Error {
   override name = "DsClientArgError";
 }
 
+/** The endpoint as it may appear in an error message: the route without its
+ *  query and with every run of 16 or more hex digits (a journal, mailbox or
+ *  rendezvous id) replaced by `:id`. Error messages reach logs, which carry no
+ *  identifier (ADR-0078 section 11); `DsHttpError.endpoint` keeps the full value. */
+export function redactedEndpoint(endpoint: string): string {
+  return endpoint.split("?", 1)[0]!.replace(/[0-9a-fA-F]{16,}/g, ":id");
+}
+
 /** Server returned a non-2xx. */
 export class DsHttpError extends Error {
   override name = "DsHttpError";
@@ -241,7 +249,7 @@ export class DsHttpError extends Error {
      *  device's clock is wrong, and the user is told so. */
     public readonly clockSkewed: boolean = false,
   ) {
-    super(`ds ${endpoint} → ${status}: ${body}`);
+    super(`ds ${redactedEndpoint(endpoint)} → ${status}: ${body}`);
   }
 }
 
@@ -249,7 +257,7 @@ export class DsHttpError extends Error {
 export class DsNetworkError extends Error {
   override name = "DsNetworkError";
   constructor(public readonly endpoint: string, cause: unknown) {
-    super(`ds ${endpoint} network error: ${String(cause)}`);
+    super(`ds ${redactedEndpoint(endpoint)} network error: ${String(cause)}`);
   }
 }
 

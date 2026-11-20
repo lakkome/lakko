@@ -2326,6 +2326,41 @@ predecessors). The G-56 research's alternative (a device bound under the
 current key becomes a reader of the account's channels) is not taken: the
 state it handles no longer arises.
 
+## Channel proofs after a rotation (2026-11-20)
+
+Found from an iPhone whose reseals of its own channel were refused `401
+owner-proof-required` for hours. The clients signed channel proofs with
+different keys after a rotation: iOS and Android signed owner proofs with
+the CURRENT seed's key, web with the lineage key except for channels that
+same web device had handed over itself; iOS signed co-publisher proofs with
+the current seed's key, web and Android with the lineage key, while every
+client's appointed binding names the lineage key. The section 3.5 handover is
+tried once by a kept device and covers only the channels a device created or
+publishes. Built the same day on web (and the desktop app), iOS and Android,
+host-tested only, not walked; which of these broke the iPhone's channel was
+not established:
+
+- **Owner proofs use the current key on every client**, a new channel's
+  registration included. Each client has one mapping every owner-signed
+  request goes through (iOS `ChannelsClient.ownerSigner`, web `ownerSigner`
+  in `channels/api.ts`, Android `ChannelsClient.ownerSigner` with the owner
+  succession): an identity of the account, lineage or current, is signed for
+  by the current one, so no caller can pass the wrong one. Only the handover
+  signs by exact keys (iOS `ownerSignerExact`, web `putChannelOwner`, Android
+  `ownerSignerExact`).
+- **Co-publisher proofs use the lineage key on every client**, the key the
+  binding the owner appointed was composed with. A co-publisher cannot move
+  its own appointment, and the lineage key is the one a rotation never
+  changes, so no co-publisher is refused after a rotation and no repair is
+  needed. iOS also sends its in-group binding under the lineage identity (it
+  sent it under the device leaf).
+- **Owner-key repair.** An owner device whose own channel refuses an owner
+  proof (`401 owner-proof-required`) runs the section 3.5 handover from each
+  own predecessor key, newest first, to the current key; once it lands the
+  held channel work runs again. Once per channel per process; a try with no
+  answer runs again next pass. A channel no key of the account owns is left
+  alone and logged.
+
 ## Not verified
 
 - Outside sprint T1 nothing here was built or run; every line number is

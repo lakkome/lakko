@@ -885,6 +885,16 @@ export interface BroadcastControlOptions {
    * devices read there. Everything else is refused ({@link HeldForSuccessor}).
    */
   readonly intoSupersededSession?: boolean;
+  /**
+   * ADR-0091 live walk 3 — an action the person took (an edit, a deletion, a
+   * reaction, a poll or checklist op, a shared pin, a rename, a group photo or
+   * reactions setting, a handle, a contact request inside a group). Held
+   * only while the device is suspected or confirmed behind, never for a
+   * refused read alone: then it is attempted, and its refusal is evidence
+   * the person sees. Omitted: an automatic send, held also after a refused
+   * read until a read is answered.
+   */
+  readonly personAction?: boolean;
 }
 
 export class ChatClient {
@@ -1140,6 +1150,9 @@ export class ChatClient {
     // a service envelope published outside the chat route (a profile right
     // after a Welcome) is still recognised as an echo there.
     markOwnPublished(base64Encode(groupId), publish.id);
+    // Live walk 2 — the newest row this device knows in the conversation
+    // starts a later gap (ADR-0091 section 2), known before any request.
+    conversationBehind.noteOwnRowAccepted(base64Encode(groupId), rowTimeMs(publish.createdAt));
 
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -1272,10 +1285,14 @@ export class ChatClient {
     if (options.intoSupersededSession !== true) refuseDeadSession(group);
     // ADR-0091 section 2 (C-93) — no repeat envelope, typing signal, read
     // receipt or call signal while this device is behind: each would be
-    // sealed at an epoch nobody can open.
+    // sealed at an epoch nobody can open. Live walk 3: nor after a refused
+    // read until a read is answered again.
     {
       const key = groupKeyOf(group);
-      if (key !== null && conversationBehind.stopsActing(key)) throw new ConversationBehindError();
+      const held =
+        key !== null &&
+        (options.personAction === true ? conversationBehind.stopsActing(key) : conversationBehind.holdsAutomaticSends(key));
+      if (held) throw new ConversationBehindError();
     }
     const myIdentity = await this.resolveIdentity(identity);
 
@@ -1795,6 +1812,9 @@ export class ChatClient {
       // another chat's row of the same id (see `markOwnPublishedCommit`).
       if (isOwnPublished(groupIdB64, message.id)) {
         matchedEchoes.push(message.id);
+        // Live walk 2 — the gap starts no later than this device's newest
+        // row in the conversation, its own included.
+        conversationBehind.noteOwnRowAccepted(groupIdB64, rowTimeMs(message.createdAt));
         continue;
       }
       // ADR-0092 section 3.6 — an anonymous ballot is NOT an MLS message: a
@@ -1852,7 +1872,7 @@ export class ChatClient {
         continue;
       }
       registeredCommitHolds.recordApplied(groupIdB64, message.id);
-      conversationBehind.noteAppliedRow(groupIdB64);
+      conversationBehind.noteAppliedRow(groupIdB64, rowTimeMs(message.createdAt));
       // ADR-0091 section 4 — a leaf that writes at the current epoch is not
       // behind: a re-entry for it within the hour is refused.
       if (processed.kind === "Application" && processed.senderLeaf !== undefined) {

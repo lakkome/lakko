@@ -54,6 +54,7 @@ import { ownsGroup } from "./group-owner";
 import { sendKnockKeyIfDue } from "./knock-key";
 import { markOwnPublished } from "./own-published";
 import { ownPersonKeyB64 } from "./person-key";
+import { resolveMemberIdentity, type RosterMember } from "./author-identity";
 import { handleReentryRequest, installReentryIntake, type ReentryArrival } from "./reentry-admit";
 import {
   afterGroupPollForGapHistory,
@@ -192,6 +193,12 @@ export function ConversationRejoinRuntime(): JSX.Element {
       sendKnock: async (groupId, row) => {
         await ds.knock(groupId, [row]);
       },
+      // Live walk 3: every request names the epoch the DS answers now (an
+      // empty knock, one `ds-knock` token), never a stored one.
+      probeEpoch: async (groupId) => {
+        const probe = await ds.knock(groupId, []).catch(() => null);
+        return probe === null || probe.epoch === null ? null : BigInt(probe.epoch);
+      },
     };
   }
 
@@ -213,22 +220,12 @@ export function ConversationRejoinRuntime(): JSX.Element {
     if (entry === undefined) return;
     requesting.add(groupIdB64);
     try {
-      let epochLeft = conversationBehind.latestEpoch(groupIdB64);
-      if (epochLeft === undefined) {
-        // Suspected only through refused reads: no read named the journal's
-        // epoch. An empty knock is the probe (its answer carries the latest
-        // registered epoch; one `ds-knock` token), as on iOS and Android.
-        if (!reentryRequestMayBeDue(groupIdB64, state)) return;
-        const probe = await ds.knock(entry.group.groupId, []).catch(() => null);
-        if (probe === null || probe.epoch === null) return;
-        epochLeft = BigInt(probe.epoch);
-      }
+      if (!reentryRequestMayBeDue(groupIdB64, state)) return;
       const wasm = await loadWasm();
       await requestReentryIfDue(
         entry.group,
         {
           state,
-          epochLeft,
           gapFromMs: conversationBehind.gap(groupIdB64).gapFromMs ?? state.sinceMs ?? Date.now(),
         },
         requestPorts(wasm),
@@ -328,7 +325,28 @@ export function ConversationRejoinRuntime(): JSX.Element {
     if (account === null) return null;
     const deviceKey = await getDeviceKey(account);
     if (deviceKey === null) return null;
-    return buildGapHistoryBundle({ accountIdB64: account, deviceKey, secret, slotHex: bytesToHex(group.groupId), fromMs });
+    return buildGapHistoryBundle({
+      accountIdB64: account,
+      deviceKey,
+      secret,
+      slotHex: bytesToHex(group.groupId),
+      fromMs,
+      ownAuthorKeyB64: ownAuthorKeyIn(group),
+    });
+  }
+
+  /**
+   * Live walk 3 — this account's key in `group` as every sent row names it:
+   * the person this device's own leaf resolves to (`send-text.ts`). `null`
+   * when the roster cannot be read.
+   */
+  function ownAuthorKeyIn(group: WasmGroup | undefined): string | null {
+    if (group === undefined) return null;
+    try {
+      return resolveMemberIdentity(group.members() as RosterMember[], group.ownLeafIndex) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -428,12 +446,21 @@ export function ConversationRejoinRuntime(): JSX.Element {
         const result = await ds.fetchRendezvous(rendezvous, { after: 0, limit: GAP_LOOK_READ_LIMIT, waitSecs: 0 });
         return result.messages.map((m) => m.payload);
       },
-      apply: async (secret, sealed) => {
+      apply: async (secret, sealed, groupIdB64, route) => {
         const account = sessionAccount(auth.state());
         if (account === null) return null;
         const deviceKey = await getDeviceKey(account);
         if (deviceKey === null) return null;
-        return applyGapHistoryBundle({ accountIdB64: account, deviceKey, secret, sealedBytes: sealed });
+        // Live walk 3: a bundled row names its author; it is this account's
+        // own when the author is its key in the conversation.
+        return applyGapHistoryBundle({
+          accountIdB64: account,
+          deviceKey,
+          secret,
+          sealedBytes: sealed,
+          ownAuthorKeyB64: ownAuthorKeyIn(chats.get(groupIdB64)?.group),
+          route,
+        });
       },
       received: (groupIdB64, gapToMs, filed) => {
         narrowGapLine(groupIdB64, gapToMs, { complete: filed.complete, earliestMs: filed.earliestMs });
@@ -454,6 +481,17 @@ export function ConversationRejoinRuntime(): JSX.Element {
       if (receive.coordinator.isForeground(g)) lookFor(g);
     }
   }
+
+  // ADR-0091 live walk 3 — back in step: re-send this device's own group
+  // state (profile, name, photo, reactions setting, handle, pins, shared
+  // channels), which it held while behind and which nothing else would send
+  // before the group next grows.
+  onCleanup(
+    conversationBehind.onBackInStep((groupIdB64) => {
+      const entry = chats.get(groupIdB64);
+      if (entry !== undefined) resendGrowthState(entry.group);
+    }),
+  );
 
   installGapLookRequester(lookFor);
   onCleanup(() => installGapLookRequester(null));
@@ -487,7 +525,7 @@ export function ConversationRejoinRuntime(): JSX.Element {
         const knock = await knockKeyFor(wasm, account, g, chats.conversationAccountIdentity());
         return knock === null ? null : { version: knock.version, publicKey: knock.publicKey };
       },
-      memberCount: (g) => rosterOf(g).length,
+      memberKeys: (g) => rosterOf(g).map((m) => base64Encode(m.signaturePublicKey)),
       compose: (version, pk) => wasm.composeKnockKeyEnvelope(version, pk),
       broadcast: async (g, envelope) => {
         await chat.broadcastControl(auth.identitySecrets(), g, envelope);
@@ -506,7 +544,7 @@ export function ConversationRejoinRuntime(): JSX.Element {
     now: () => Date.now(),
     identity: () => chats.identity(),
     persistDurable,
-    fetchGapHistory: ({ groupIdB64, channel, gapFromMs, gapToMs }) => {
+    fetchGapHistory: ({ groupIdB64, channel, gapFromMs, gapToMs, route }) => {
       void (async () => {
         const account = sessionAccount(auth.state());
         if (account === null) return;
@@ -515,7 +553,7 @@ export function ConversationRejoinRuntime(): JSX.Element {
         // Durable: the device keeps looking until the messages arrive or the
         // DS retention passed, across restarts (live walk 2026-11-19: the
         // re-admitter posted after a one-shot wait had closed).
-        const stored = await recordGapLook({ groupIdB64, secret: channel.secret, gapFromMs, gapToMs }, deviceKey);
+        const stored = await recordGapLook({ groupIdB64, secret: channel.secret, gapFromMs, gapToMs, route }, deviceKey);
         if (!stored) {
           // eslint-disable-next-line no-console
           console.warn("chat re-entry: gap look not recorded");

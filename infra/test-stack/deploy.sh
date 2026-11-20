@@ -73,7 +73,10 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
   # VITE_LAKKO_PUBLIC_ORIGIN: the absolute origin of the link preview picture
   # (apps/web/scripts/link-previews.mjs); without it the tags would point at
   # lakko.me.
-  (cd "$REPO/apps/web" && VITE_LAKKO_SFU_URL="wss://$DOMAIN/sfu" \
+  # A desktop build's VITE_LAKKO_PLATFORM left in the calling shell would make
+  # this the desktop-mode client, which a browser cannot sign in with (seen
+  # 2026-11-19); the browser build never inherits it.
+  (cd "$REPO/apps/web" && unset VITE_LAKKO_PLATFORM && VITE_LAKKO_SFU_URL="wss://$DOMAIN/sfu" \
     VITE_LAKKO_PUBLIC_ORIGIN="https://$DOMAIN" \
     VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off \
     VITE_LAKKO_ANON_TOKEN_REFILL=on-demand \

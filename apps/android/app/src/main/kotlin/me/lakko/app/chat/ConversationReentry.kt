@@ -142,7 +142,9 @@ internal object NativeReentryRequestDue : ReentryRequestDue {
 
 /**
  * What this device keeps per conversation. [latestEpoch] is the newest
- * `latest_epoch` a read named (the request's `epoch_left`), [gapFromMs] the
+ * `latest_epoch` a read named (bookkeeping only: since walk 3, W3-R1, a
+ * request's `epoch_left` always comes from a fresh probe,
+ * [probeReentryEpochLeft]), [gapFromMs] the
  * time of the first row this device could not read (the request's
  * `gap_from_ms` and the start of the gap line), [lastRequestSentMs] when the
  * last request went out.
@@ -157,13 +159,94 @@ internal data class ConversationBehindEntry(
     val gapFromMs: Long? = null,
     val latestEpoch: Long? = null,
     val lastRequestSentMs: Long? = null,
+    /**
+     * Walk 2, R1 — the DS time of the newest row this device applied in the
+     * conversation, or of its own publish the DS accepted. Not gap
+     * bookkeeping: it survives "back in step".
+     */
+    val lastKnownRowMs: Long? = null,
+    /** Walk 2, R1 — local time of the last read of the journal that was not
+     *  refused (written at most once a minute). Survives "back in step". */
+    val lastReadOkMs: Long? = null,
 ) {
     val state: BehindState get() = BehindState(level, sinceMs)
 
     /** Nothing worth keeping on disk. */
     val isEmpty: Boolean
         get() = level == BehindLevel.IN_STEP && refusedReads == 0 && !failedRowAboveLocal &&
-            !publishRefused && gapFromMs == null && lastRequestSentMs == null
+            !publishRefused && gapFromMs == null && lastRequestSentMs == null &&
+            lastKnownRowMs == null && lastReadOkMs == null
+
+    /** What survives the conversation coming back in step: the read progress. */
+    fun progressOnly(): ConversationBehindEntry =
+        ConversationBehindEntry(lastKnownRowMs = lastKnownRowMs, lastReadOkMs = lastReadOkMs)
+}
+
+/**
+ * Walk 2, defect 3 — after a refused read is folded, whether this device asks
+ * to be brought back from the refused-read path: whenever it now stops acting.
+ * With every read refused no poll applies, so the poll tail never runs;
+ * whether a request is in fact due stays the core's rule.
+ */
+internal fun reentryRequestAfterRefusedRead(state: BehindState): Boolean = state.level != BehindLevel.IN_STEP
+
+/**
+ * Walk 3, W3-R1 — the `epoch_left` of a re-entry request: what [probe] (an
+ * empty knock made right before minting, after the route is resolved) names.
+ * Never a stored epoch: one kept from an earlier read goes stale while reads
+ * are refused, and the re-admitter does not act on a request naming another
+ * epoch. `null` when the probe failed or named none: nothing is minted,
+ * recorded or sent, and the request is tried again shortly.
+ */
+internal suspend fun probeReentryEpochLeft(probe: suspend () -> ULong?): ULong? =
+    try {
+        probe()
+    } catch (cause: kotlinx.coroutines.CancellationException) {
+        throw cause
+    } catch (_: Throwable) {
+        null
+    }
+
+/**
+ * Walk 3, W3-R2 — whether automatic sends into this conversation (repeat
+ * envelopes, typing, read receipts, the committer beacon, the knock key, the
+ * push routing secret, the own-device fan-out) are held: while the device is
+ * suspected or confirmed behind, and while a read of the journal was refused
+ * (an unskewed `401`) with no answered read since ([ConversationBehindTracker.observe]
+ * resets the count). The person's own content is not decided here.
+ */
+internal fun automaticSendsHeld(e: ConversationBehindEntry): Boolean =
+    e.level != BehindLevel.IN_STEP || e.refusedReads > 0
+
+/**
+ * Walk 3, W3-R5 — whether the person's own action (not a message) is held:
+ * only while the device is suspected or confirmed behind. A refused read
+ * alone does not hold it; it is attempted, and a `401` on it is evidence.
+ */
+internal fun personActionHeld(e: ConversationBehindEntry): Boolean = e.level != BehindLevel.IN_STEP
+
+/**
+ * Walk 3, W3-R5 — the refusal of a held person action. It carries no text of
+ * its own, so each action shows its ordinary failure message
+ * ([chatErrorText] falls back to the action's key).
+ */
+internal fun personActionHeldError(): ChatError =
+    ChatError("this device may be behind in this conversation", IllegalStateException("behind"))
+
+/** `lastReadOkMs` is written at most this often. Chosen, not measured. */
+internal const val READ_OK_WRITE_INTERVAL_MS: Long = 60_000L
+
+/**
+ * Walk 2, R1 — where the gap starts: the first skipped row's time when there
+ * is one, else (and never later than) the newest row this device knows it
+ * applied, else the last read that was not refused, else when the suspicion
+ * began, else [nowMs]. The request's `gap_from_ms` and the gap line both use
+ * this value, so the re-admitter bundles the rows this device in fact lacks.
+ */
+internal fun reentryGapStart(e: ConversationBehindEntry, nowMs: Long): Long {
+    val fallback = e.lastKnownRowMs ?: e.lastReadOkMs ?: e.sinceMs.takeIf { it > 0L } ?: nowMs
+    val skipped = e.gapFromMs ?: return fallback
+    return minOf(skipped, fallback)
 }
 
 /** Where [ConversationBehindTracker] keeps its entries. */
@@ -230,6 +313,24 @@ internal class ConversationBehindTracker(
     /** Every conversation's entry, by group id hex (lower case). */
     val state: StateFlow<Map<String, ConversationBehindEntry>> = entries.asStateFlow()
 
+    /**
+     * Walk 3, W3-R5 — told the group id hex when a conversation goes from
+     * behind (suspected or confirmed) back in step: by a read, or by the
+     * re-entry joining ([cameBack]); and (W3-R6) when a read is answered
+     * after refused reads that never made it behind. Called synchronously;
+     * the listener launches its own work.
+     */
+    @Volatile
+    var onBackInStep: ((groupIdHex: String) -> Unit)? = null
+
+    private fun notifyBackInStep(groupIdHex: String) {
+        try {
+            onBackInStep?.invoke(groupIdHex.lowercase())
+        } catch (_: Throwable) {
+            // the listener's own failure is its own
+        }
+    }
+
     fun bind(accountIdB64: String) {
         if (account == accountIdB64) return
         account = accountIdB64
@@ -247,6 +348,9 @@ internal class ConversationBehindTracker(
     /** The device stops acting in [groupIdHex] (`behindStateStopsActing`). */
     fun stopsActing(groupIdHex: String): Boolean = entry(groupIdHex).level != BehindLevel.IN_STEP
 
+    /** Walk 3, W3-R2 — automatic sends into [groupIdHex] are held ([automaticSendsHeld]). */
+    fun holdsAutomaticSends(groupIdHex: String): Boolean = automaticSendsHeld(entry(groupIdHex))
+
     /** Shown: the composer is replaced by the waiting note. */
     fun isConfirmed(groupIdHex: String): Boolean = entry(groupIdHex).level == BehindLevel.CONFIRMED
 
@@ -260,16 +364,44 @@ internal class ConversationBehindTracker(
         return e.failedRowAboveLocal || e.publishRefused || e.refusedReads >= refusedReadsToSuspect()
     }
 
-    /** A row of [groupIdHex] was skipped (it could not be applied). */
+    /**
+     * A row of [groupIdHex] was skipped (it could not be applied). [rowAtMs]
+     * is the first skipped row's DS time; when it is unknown the gap start
+     * falls back to the read progress ([reentryGapStart]), never to the
+     * moment of the skip.
+     */
     fun noteSkipped(groupIdHex: String, sealedEpoch: ULong?, localEpoch: ULong?, rowAtMs: Long?) {
         update(groupIdHex) { e ->
             val above = sealedEpoch != null && localEpoch != null && sealedEpoch > localEpoch
             e.copy(
                 failedRowAboveLocal = e.failedRowAboveLocal || above,
-                gapFromMs = e.gapFromMs ?: rowAtMs?.takeIf { it > 0L } ?: clock(),
+                gapFromMs = e.gapFromMs ?: rowAtMs?.takeIf { it > 0L },
             )
         }
     }
+
+    /**
+     * Walk 2, R1 — a row of [groupIdHex] was applied, or this device's own
+     * publish was accepted, at DS time [atMs]. Only ever moves forward.
+     */
+    fun noteRowKnown(groupIdHex: String, atMs: Long?) {
+        val at = atMs?.takeIf { it > 0L } ?: return
+        val known = entry(groupIdHex).lastKnownRowMs
+        if (known != null && known >= at) return
+        update(groupIdHex) { e -> if ((e.lastKnownRowMs ?: Long.MIN_VALUE) >= at) e else e.copy(lastKnownRowMs = at) }
+    }
+
+    /** Walk 2, R1 — a read of [groupIdHex] was answered (not refused). */
+    fun noteReadOk(groupIdHex: String) {
+        val now = clock()
+        val last = entry(groupIdHex).lastReadOkMs
+        // A clock that moved back writes once.
+        if (last != null && now - last in 0 until READ_OK_WRITE_INTERVAL_MS) return
+        update(groupIdHex) { it.copy(lastReadOkMs = now) }
+    }
+
+    /** Walk 2, R1 — the gap start of [groupIdHex] now ([reentryGapStart]). */
+    fun gapStartMs(groupIdHex: String): Long = reentryGapStart(entry(groupIdHex), clock())
 
     /** A row of [groupIdHex] applied: "since the last applied row" restarts. */
     fun noteApplied(groupIdHex: String) {
@@ -303,9 +435,14 @@ internal class ConversationBehindTracker(
         latestEpoch: ULong?,
         localEpoch: ULong,
     ): BehindState {
+        noteReadOk(groupIdHex)
         val before = entry(groupIdHex)
+        // Walk 3, W3-R6 — a refused-read hold that ends without the device
+        // ever having been behind: what it held is re-sent as on back-in-step.
+        val holdEnding = before.refusedReads > 0 && before.level == BehindLevel.IN_STEP
         val reset = if (before.refusedReads != 0) update(groupIdHex) { it.copy(refusedReads = 0) } else before
         val next = fold(groupIdHex, reset, ownCommitOwed, drained, latestEpoch, localEpoch)
+        if (holdEnding && next.level == BehindLevel.IN_STEP) notifyBackInStep(groupIdHex)
         // The request's `epoch_left`: kept only while the device stops acting
         // (an in-step device keeps no entry, so a poll writes nothing).
         if (next.level != BehindLevel.IN_STEP && latestEpoch != null) {
@@ -337,9 +474,11 @@ internal class ConversationBehindTracker(
             clock(),
         )
         if (next.level == BehindLevel.IN_STEP && e.level != BehindLevel.IN_STEP) {
-            // Cleared: what the suspicion rested on goes with it.
-            replace(groupIdHex, ConversationBehindEntry())
+            // Cleared: what the suspicion rested on goes with it; the read
+            // progress stays (walk 2, R1).
+            replace(groupIdHex, entry(groupIdHex).progressOnly())
             reentryLog(false, "conversation back in step (local=$localEpoch)")
+            notifyBackInStep(groupIdHex)
         } else if (next.level == BehindLevel.IN_STEP) {
             // In step and stays so: a drained read at or below the local epoch
             // also forgets a stale skip time (a garbage row skipped earlier).
@@ -362,13 +501,21 @@ internal class ConversationBehindTracker(
         update(groupIdHex) { it.copy(lastRequestSentMs = atMs) }
     }
 
-    /** The device came back: everything about [groupIdHex] goes. */
-    fun cleared(groupIdHex: String) {
-        replace(groupIdHex, ConversationBehindEntry())
+    /**
+     * The device came back by a Welcome at [atMs]: the suspicion goes, and
+     * so does the newest known row (it applied none since joining); the last
+     * good read is the join (walk 2, R1).
+     */
+    fun cameBack(groupIdHex: String, atMs: Long) {
+        replace(groupIdHex, ConversationBehindEntry(lastReadOkMs = atMs))
+        notifyBackInStep(groupIdHex)
     }
 
-    /** The conversation went from this device (an end, a delete). */
-    fun forget(groupIdHex: String) = cleared(groupIdHex)
+    /** The conversation went from this device (an end, a delete): everything
+     *  about [groupIdHex] goes, the read progress included. */
+    fun forget(groupIdHex: String) {
+        replace(groupIdHex, ConversationBehindEntry())
+    }
 
     private fun update(groupIdHex: String, change: (ConversationBehindEntry) -> ConversationBehindEntry): ConversationBehindEntry {
         val k = groupIdHex.lowercase()
@@ -720,11 +867,21 @@ internal fun knockKeySender(isOwner: Boolean, isAdmin: Boolean, afterReentry: Bo
     isOwner || (afterReentry && isAdmin)
 
 /**
- * Whether the owner (re)sends its knock key in-group: on a version it has not
- * sent yet, and on growth (a newcomer holds none), as the group name is.
+ * What the owner last sent its knock key with, successfully: the key's
+ * version and the group's members (leaf signature keys, hex) at that send.
  */
-internal fun knockKeyResendDue(sentVersion: Int?, currentVersion: Int, grew: Boolean): Boolean =
-    sentVersion == null || sentVersion != currentVersion || grew
+internal data class KnockKeySentMark(val version: Int, val members: Set<String>)
+
+/**
+ * Walk 2, R4 — whether the owner (re)sends its knock key in-group: on a
+ * version it has not sent, and while the group holds a member that was not in
+ * it at the last successful send (a newcomer holds none). Judged against the
+ * members themselves, never a "grew" flag of one poll: a growth seen while a
+ * send was skipped or failed keeps the send due. [mark] is set only after a
+ * successful broadcast, and cleared at re-entry.
+ */
+internal fun knockKeyResendDue(mark: KnockKeySentMark?, currentVersion: Int, currentMembers: Set<String>): Boolean =
+    mark == null || mark.version != currentVersion || !mark.members.containsAll(currentMembers)
 
 // ---------------------------------------------------------------------------
 // The gap line (`docs/ux/conversation-rejoin.md` 2.4)
@@ -881,6 +1038,14 @@ internal fun waitingSecondLine(
     }
 }
 
+/**
+ * Walk 2, R5 — the composer's error line while the chat waits to be brought
+ * back: none (a failed read or send while behind raises no error, and one
+ * already shown is cleared when the waiting starts).
+ */
+internal fun composerErrorWhileWaiting(waiting: Boolean, error: me.lakko.app.l10n.UiText?): me.lakko.app.l10n.UiText? =
+    if (waiting) null else error
+
 /** What the waiting note needs: since when this chat waits (for the
  *  30-second rule) and who can bring the device back, `null` when unknown. */
 internal data class ReentryWaitingNote(val sinceMs: Long, val helper: ReentryHelper?)
@@ -965,6 +1130,39 @@ internal fun reentryBundleDirection(route: ReentryRouteKind, senderDirection: St
     route == ReentryRouteKind.OWN_DEVICE -> senderDirection
     route == ReentryRouteKind.MAILBOX -> if (senderDirection == "outgoing") "incoming" else "outgoing"
     else -> "incoming"
+}
+
+/**
+ * Walk 3, W3-R3 — a gap bundle row as this device keeps it. A placeholder
+ * that names its author ([authorKeyB64], base64) gives the row that author
+ * and the direction it has here: outgoing when the author is this account's
+ * own key in the conversation ([ownKeyB64]), else incoming, so the row
+ * renders with the author's name and avatar exactly like a live one. With
+ * no author the direction is read from the sender's ([reentryBundleDirection]).
+ * A system row stays one and names nobody.
+ */
+internal fun reentryBundleRow(
+    row: PersistedMessage,
+    authorKeyB64: String?,
+    ownKeyB64: String?,
+    route: ReentryRouteKind,
+): PersistedMessage = when {
+    row.direction == "system" -> row.copy(authorKeyB64 = null)
+    authorKeyB64 != null -> row.copy(
+        authorKeyB64 = authorKeyB64,
+        direction = if (ownKeyB64 != null && sameKeyB64(authorKeyB64, ownKeyB64)) "outgoing" else "incoming",
+    )
+    else -> row.copy(authorKeyB64 = null, direction = reentryBundleDirection(route, row.direction))
+}
+
+/** Two standard-base64 keys name the same bytes. */
+private fun sameKeyB64(a: String, b: String): Boolean {
+    if (a == b) return true
+    return try {
+        java.util.Base64.getDecoder().decode(a).contentEquals(java.util.Base64.getDecoder().decode(b))
+    } catch (_: IllegalArgumentException) {
+        false
+    }
 }
 
 /**

@@ -68,3 +68,20 @@ internal fun channelEpochFor(groupEpoch: ULong, offset: Long): UInt? {
     val e = groupEpoch.toLong() + offset
     return if (e < 0 || e > UInt.MAX_VALUE.toLong()) null else e.toUInt()
 }
+
+/**
+ * 2026-11-20 — the offset that makes the mapping hold again, or `null` when
+ * it holds. Each owner commit is meant to move the service by one epoch with
+ * its reseal, so the group is never more than one epoch ahead of the
+ * service; a run of commits whose reseal never landed (seen live: about 150
+ * rotations refused `401`) leaves it far ahead, and the mapping then names
+ * service epochs that will never carry its seed. The reseal that does land
+ * seals the group's CURRENT seed at [serviceEpoch] + 1, so that is where the
+ * current MLS epoch maps. Pure.
+ */
+internal fun reanchoredOffset(groupEpoch: ULong, offset: Long, serviceEpoch: UInt): Long? {
+    val next = serviceEpoch.toLong() + 1
+    if (groupEpoch.toLong() + offset <= next) return null
+    return next - groupEpoch.toLong()
+}
+

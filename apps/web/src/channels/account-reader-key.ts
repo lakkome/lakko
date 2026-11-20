@@ -29,10 +29,28 @@ import { liveRegisterSecret } from "./channel-subscription-register";
 import { bytesToHex, channelIdFromHex, type WasmIdentity } from "./composer";
 import { admitSubscriber } from "./subscriber-admission";
 import { b64ToBytes } from "../profile/avatar-model";
+import { holdAllows, PublisherCommitRetry, publisherCommitFailureLabel, type PublisherCommitHold } from "./publisher-commit-outbox";
 
 /** One attempt per channel per this long after a failure (chosen). */
-const RETRY_AFTER_MS = 10 * 60 * 1000;
-const lastFailure = new Map<string, number>();
+/** The holds after a failure (2026-11-20): a refusal (`401
+ *  owner-proof-required`) waits for the next start, anything else 30 s,
+ *  doubling to 10 minutes (`publisher-commit-outbox`). */
+const holds = new PublisherCommitRetry();
+
+/** Forget the holds (a new session). */
+export function resetAccountReaderKeyHolds(): void {
+  holds.reset();
+}
+
+/** Whether the registration of `idHex` was refused (a refused owner proof). */
+export function accountReaderKeyRefused(idHex: string): boolean {
+  return holds.hold(idHex)?.refused === true;
+}
+
+/** Drop the hold of `idHex` (its owner key was repaired). */
+export function clearAccountReaderKeyHold(idHex: string): void {
+  holds.noteSuccess(idHex);
+}
 
 /** The hex public key of the account's live register key, or `null`. */
 export async function accountReaderKeyHex(idHex: string): Promise<string | null> {
@@ -55,19 +73,19 @@ export function readerKeyStep(input: {
   readonly publishing: boolean;
   readonly keyHex: string | null;
   readonly registeredHex: string | null;
-  readonly lastFailureMs: number | undefined;
+  readonly hold: PublisherCommitHold | undefined;
   readonly nowMs: number;
 }): "register" | "nothing" {
   if (!input.publishing || input.keyHex === null) return "nothing";
   if (input.registeredHex === input.keyHex) return "nothing";
-  if (input.lastFailureMs !== undefined && input.nowMs - input.lastFailureMs < RETRY_AFTER_MS) return "nothing";
+  if (input.hold !== undefined && !holdAllows(input.hold, input.nowMs)) return "nothing";
   return "register";
 }
 
 /**
  * Register the account's reader key for a channel this device publishes in,
  * once, and hand it the current seed. Best effort: a failure is retried by a
- * later publisher pass (after {@link RETRY_AFTER_MS}). Never throws.
+ * later publisher pass (after its hold). Never throws.
  */
 export async function ensureAccountReaderKey(identity: WasmIdentity, idHex: string): Promise<void> {
   const keyHex = await accountReaderKeyHex(idHex);
@@ -75,17 +93,21 @@ export async function ensureAccountReaderKey(identity: WasmIdentity, idHex: stri
     publishing: channelsState.keysByChannel().has(idHex),
     keyHex,
     registeredHex: channelsActions.accessOf(idHex).readerKeyRegisteredHex ?? null,
-    lastFailureMs: lastFailure.get(idHex),
+    hold: holds.hold(idHex),
     nowMs: Date.now(),
   });
   if (step !== "register" || keyHex === null) return;
   try {
     await registerReaderKey(identity, idHex, keyHex);
-    lastFailure.delete(idHex);
+    holds.noteSuccess(idHex);
   } catch (err) {
-    lastFailure.set(idHex, Date.now());
+    const hold = holds.noteFailure(idHex, err);
     // eslint-disable-next-line no-console
-    console.warn("[channels] the account's reader key was not registered; tried again later", err instanceof Error ? err.name : "");
+    console.warn(
+      `[channels] the account's reader key was not registered (${publisherCommitFailureLabel(err)}); ${
+        hold.refused ? "not tried again until the next start" : "tried again after a wait"
+      }`,
+    );
     return;
   }
   // Written with the channel log's next flush. Lost (a crash before it),

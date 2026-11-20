@@ -290,6 +290,10 @@ enum AccountLocalDataWipe {
             standard.removeObject(forKey: ReentryAdmissionMemory.key(accountIdB64))
             standard.removeObject(forKey: ReentryKnockKeyStore.key(accountIdB64))
             standard.removeObject(forKey: ReentryHistoryOwed.key(accountIdB64))
+            // When this device last knew each conversation, and the knock
+            // keys it delivered (walk-2 rules R1 and R4).
+            standard.removeObject(forKey: ReentryRowClockStore.key(accountIdB64))
+            standard.removeObject(forKey: ReentryKnockKeySentStore.key(accountIdB64))
             // The gap histories still looked for, and their wrap key.
             ReentryGapLookStore.wipe(accountIdB64: accountIdB64, defaults: standard)
         }

@@ -2802,7 +2802,8 @@ export class ContactsClient {
       ...(this.onPersist === undefined ? {} : { onPersist: this.onPersist }),
     });
     try {
-      await chat.broadcastControl(identity, group, envelope);
+      // The person's own request (ADR-0091 live walk 3).
+      await chat.broadcastControl(identity, group, envelope, { personAction: true });
     } catch (err) {
       throw ContactsError.wrap(err);
     }

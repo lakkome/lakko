@@ -223,6 +223,10 @@ extension ChatRepository {
         guard let identity = canonicalIdentity, let record = groups[groupIdHex] else {
             throw ContentSendError.notReady
         }
+        // Walk-3 rule W3-R5 — a vote is the person's own act: held while the
+        // conversation is behind (the ballot shows as failed, Try again), and
+        // re-sent once back in step.
+        try requireSendAllowedWhileBehind(groupIdHex: groupIdHex, isPersonContent: false, personAction: true)
         try await chatClient.publishRawRow(identity: identity, group: record.group, row: row)
     }
 

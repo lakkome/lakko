@@ -171,7 +171,7 @@ public class ChannelPublisherIdentity(
                 current.close()
                 ChannelOwnerSuccession.clear()
             } else {
-                ChannelOwnerSuccession.install(boundKey, current)
+                ChannelOwnerSuccession.install(boundKey, current, currentAccountSeed)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "channel owner succession not applied", e)

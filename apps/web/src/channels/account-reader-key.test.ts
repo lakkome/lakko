@@ -151,13 +151,18 @@ describe("the account's reader key on the publishing device", () => {
   });
 
   it("only the publishing device registers, and a failure waits before the next try", () => {
-    const base = { keyHex: "aa", registeredHex: null, lastFailureMs: undefined, nowMs: 1_000_000 };
+    const base = { keyHex: "aa", registeredHex: null, hold: undefined, nowMs: 1_000_000 };
     expect(readerKeyStep({ ...base, publishing: true })).toBe("register");
     expect(readerKeyStep({ ...base, publishing: false })).toBe("nothing");
     expect(readerKeyStep({ ...base, publishing: true, registeredHex: "aa" })).toBe("nothing");
     expect(readerKeyStep({ ...base, publishing: true, registeredHex: "bb" })).toBe("register");
-    expect(readerKeyStep({ ...base, publishing: true, lastFailureMs: 1_000_000 - 1000 })).toBe("nothing");
-    expect(readerKeyStep({ ...base, publishing: true, lastFailureMs: 1_000_000 - 11 * 60 * 1000 })).toBe("register");
+    // A transient failure: 30 s, then a try.
+    const transient = { refused: false, failures: 1, failedAtMs: 1_000_000 - 1000 };
+    expect(readerKeyStep({ ...base, publishing: true, hold: transient })).toBe("nothing");
+    expect(readerKeyStep({ ...base, publishing: true, nowMs: 1_000_000 + 30_000, hold: transient })).toBe("register");
+    // 2026-11-20: a refusal waits for the next start, however long it is.
+    const refused = { refused: true, failures: 1, failedAtMs: 0 };
+    expect(readerKeyStep({ ...base, publishing: true, nowMs: 86_400_000, hold: refused })).toBe("nothing");
   });
 
   it("a private channel's rotation reseals to it even above the admission mark", async () => {

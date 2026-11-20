@@ -586,11 +586,17 @@ public final class ChatRepository: ObservableObject {
     let reentryKnockKeys = ReentryKnockKeyStore()
     /// The gap histories this device owes as a re-admitter.
     let reentryHistoryOwed = ReentryHistoryOwed()
+    /// When this device last knew each conversation (walk-2 rule R1).
+    let reentryRowClock = ReentryRowClockStore()
+    /// The knock key this device last delivered to each group (walk-2 rule R4).
+    let reentryKnockKeySent = ReentryKnockKeySentStore()
     /// Bumped whenever a behind record changes, so the open chat re-reads its
     /// waiting note.
     @Published public internal(set) var reentryRevision: Int = 0
     /// The groups a request is being sent for now (one at a time per group).
     var reentrySending: Set<String> = []
+    /// The groups a knock-key broadcast is in flight for now.
+    var reentryKnockKeySending: Set<String> = []
     /// The gap histories this device, back after a re-entry, still looks for
     /// (durable; the secret sealed at rest).
     let reentryGapLooks = ReentryGapLookStore()
@@ -600,6 +606,10 @@ public final class ChatRepository: ObservableObject {
     /// DeviceGroup service envelope. Wired by the composition root to the
     /// DeviceGroup sync runtime; `nil` until then (route 1 then cannot send).
     var reentryOwnDeviceSender: (@MainActor (Data) async -> Void)?
+
+    /// Walk-3 rule W3-R5 — told the group of each back-in-step re-send.
+    /// Tests only.
+    var reentryBackInStepObserver: (@MainActor (String) -> Void)?
 
     /// ADR-0087 — bumped on every accepted group photo or reactions setting,
     /// so the list, the open chat and the info screen re-read them.
@@ -762,25 +772,6 @@ public final class ChatRepository: ObservableObject {
             },
             envelope: { [weak self] groupIdHex in
                 self?.groupReactionsEnvelopeForResend(groupIdHex: groupIdHex)
-            },
-            nowMs: { Self.nowMs() },
-            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
-            sleep: { ms in
-                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
-            }
-        )
-    )
-
-    /// ADR-0091 phase 2 section 3 (route 3) — the growth re-send of the
-    /// group's knock key, by the owner, the same shape.
-    lazy var knockKeyPublisher = GroupNamePublisher(
-        ports: GroupNamePublisher.Ports(
-            send: { [weak self] groupIdHex, bytes in
-                guard let self else { return }
-                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
-            },
-            envelope: { [weak self] groupIdHex in
-                self?.knockKeyEnvelopeForResend(groupIdHex: groupIdHex)
             },
             nowMs: { Self.nowMs() },
             jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
@@ -1250,7 +1241,6 @@ public final class ChatRepository: ObservableObject {
         groupPhotoPublisher.reset()
         groupReactionsPublisher.reset()
         groupHandlePublisher.reset()
-        knockKeyPublisher.reset()
         // ADR-0052 — and for a scheduled shared-pin re-send.
         pinPublisher.reset()
         // ADR-0059 — and the shared-channels row + its growth re-sends.
@@ -2463,7 +2453,7 @@ public final class ChatRepository: ObservableObject {
         let bytes = try composeGroupNameEnvelope(
             groupName: FfiGroupName(name: trimmed, updatedAtMs: stamp))
         let bound = binding.capture()
-        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)
         // Under the name chain so a concurrent receive cannot interleave its
         // read-decide-write with this write.
         try await groupNameLock.run(groupIdHex: groupIdHex) { [self] in
@@ -2650,7 +2640,7 @@ public final class ChatRepository: ObservableObject {
         let op = FfiPinOp(messageId: messageId, pinned: pinned, updatedAtMs: stamp)
         let bytes = composePinEnvelope(op: op)
         let bound = binding.capture()
-        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)
         // Under the pin chain so a concurrent receive cannot interleave its
         // read-decide-write with this write.
         try await pinLock.run(groupIdHex: groupIdHex) { [self] in
@@ -2910,13 +2900,11 @@ public final class ChatRepository: ObservableObject {
             let photo = groupPhotoPublisher
             let reactions = groupReactionsPublisher
             let handle = groupHandlePublisher
-            let knock = knockKeyPublisher
             Task {
                 await publisher.publishNow(groupIdHex: groupIdHex)
                 await photo.publishNow(groupIdHex: groupIdHex)
                 await reactions.publishNow(groupIdHex: groupIdHex)
                 await handle.publishNow(groupIdHex: groupIdHex)
-                await knock.publishNow(groupIdHex: groupIdHex)
             }
         } else {
             groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
@@ -2925,10 +2913,12 @@ public final class ChatRepository: ObservableObject {
             groupPhotoPublisher.noteGrowth(groupIdHex: groupIdHex)
             groupReactionsPublisher.noteGrowth(groupIdHex: groupIdHex)
             groupHandlePublisher.noteGrowth(groupIdHex: groupIdHex)
-            // ADR-0091 phase 2 — and the knock key a newcomer needs for
-            // route 3 (the owner's only).
-            knockKeyPublisher.noteGrowth(groupIdHex: groupIdHex)
         }
+        // ADR-0091 phase 2 — and the knock key a newcomer needs for route 3.
+        // Durable (walk-2 rule R4): the growth makes the send due until a
+        // broadcast that included the newcomer went out; a send skipped or
+        // failed now goes at a later poll.
+        Task { @MainActor [weak self] in await self?.publishKnockKeyIfOwed(groupIdHex: groupIdHex) }
         // ADR-0052 decision 3 — nor the epochs the shared pins were sent in.
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0059 section 6 — nor the channels this device shares there.
@@ -2939,22 +2929,32 @@ public final class ChatRepository: ObservableObject {
     /// the group's state was sent in, and its leaf key did not change, so no
     /// member saw growth: what growth re-sends goes again (each publisher's
     /// own rules decide who sends), and the routing secret with it.
-    func resendGroupStateForReturningDevice(groupIdHex: String) {
+    ///
+    /// `includeRoutingSecret` is `false` for this device's own back-in-step
+    /// re-send (walk-3 rule W3-R5), whose list does not name it.
+    func resendGroupStateForReturningDevice(groupIdHex: String, includeRoutingSecret: Bool = true) {
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
         // Sent at once, as after this device's own add: the re-admitter is
         // the owner or an admin (or the account's own device), and the
         // returning device needs the knock key and the group's state now.
         // Each envelope's own rule decides whether this device sends it.
         let publishers = [groupNamePublisher, groupPhotoPublisher, groupReactionsPublisher,
-                          groupHandlePublisher, knockKeyPublisher]
+                          groupHandlePublisher]
         Task {
             for publisher in publishers { await publisher.publishNow(groupIdHex: groupIdHex) }
         }
+        // The knock key: its mark is cleared so the replacement re-sends it
+        // (walk-2 rule R4; the returning leaf key did not change).
+        if let accountIdB64 = currentAccountIdB64 {
+            reentryKnockKeySent.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+        Task { @MainActor [weak self] in await self?.publishKnockKeyIfOwed(groupIdHex: groupIdHex) }
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
         sharedChannels.noteGrowth(groupIdHex: groupIdHex)
         // The routing secret only from an owner or an admin: a plain member
         // (the other person of a one-to-one, a route-1 sibling) does not.
-        if ConversationReentryRules.resendsPushRoutingSecret(ownRole: ownRole(groupIdHex: groupIdHex)) {
+        if includeRoutingSecret,
+           ConversationReentryRules.resendsPushRoutingSecret(ownRole: ownRole(groupIdHex: groupIdHex)) {
             redistributePushRoutingSecret(groupIdHex: groupIdHex)
         }
     }
@@ -4950,10 +4950,12 @@ public final class ChatRepository: ObservableObject {
             // last op id; `nil` for an op applied on this device alone.
             var opMessageId: Int64?
             if !localOnly {
+                // Walk-3 rule W3-R5 — every op here is the person's own act.
                 opMessageId = try await sealAndPublishLocked(
                     groupIdHex: groupIdHex,
                     plaintextBytes: envelopeBytes,
-                    wake: wake
+                    wake: wake,
+                    personAction: true
                 ).messageId
             }
             guard let record = groups[groupIdHex] else { return }
@@ -4986,16 +4988,23 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0054 decision 1 — the wake rides the signed publish as the
     /// `x-lakko-wake` header and the DS forwards it after appending the row;
     /// this device makes no push-gw request.
+    ///
+    /// `personAction` (walk-3 rule W3-R5): the person's own act (a shared
+    /// pin, a group setting, a contact request inside the group), held only
+    /// while the conversation is behind; everything else sent here is
+    /// automatic and also held after a refused read.
     public func publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: Data,
-        wake: DsWake.Kind? = nil
+        wake: DsWake.Kind? = nil,
+        personAction: Bool = false
     ) async throws {
         // ADR-0045 — the seal and the publish are SERIALIZED against the
         // regions that move this group's epoch. See ``sealAndPublishLocked``.
         _ = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
             try await sealAndPublishLocked(
-                groupIdHex: groupIdHex, plaintextBytes: plaintextBytes, wake: wake)
+                groupIdHex: groupIdHex, plaintextBytes: plaintextBytes, wake: wake,
+                personAction: personAction)
         }
         persistSnapshotBestEffort()
     }
@@ -5053,7 +5062,8 @@ public final class ChatRepository: ObservableObject {
     func sealAndPublishLocked(
         groupIdHex: String,
         plaintextBytes: Data,
-        wake: DsWake.Kind? = nil
+        wake: DsWake.Kind? = nil,
+        personAction: Bool = false
     ) async throws -> SendMessageResult {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped")
@@ -5063,7 +5073,9 @@ public final class ChatRepository: ObservableObject {
         }
         // ADR-0091 phase 2 section 2 — while behind, no repeat envelope,
         // typing or receipt; once confirmed nothing at all (UX 2.2).
-        try requireSendAllowedWhileBehind(groupIdHex: groupIdHex, isPersonContent: wake != nil)
+        // Walk-3 rule W3-R5 — the person's own act is held only while behind.
+        try requireSendAllowedWhileBehind(
+            groupIdHex: groupIdHex, isPersonContent: wake != nil, personAction: personAction)
         let bound = binding.capture()
         var pushWake: DsWake?
         if let wake { pushWake = await self.pushWake(groupIdHex: groupIdHex, kind: wake) }
@@ -5089,6 +5101,11 @@ public final class ChatRepository: ObservableObject {
         // edit, a deletion or a reaction to `groups[groupIdHex]`) is done to
         // the record that is there now.
         try requireCommitRegion(bound)
+        // ADR-0091 walk-2 rule R1 — an own publish the DS accepted is a row
+        // this device knows.
+        noteConversationKnown(
+            groupIdHex: groupIdHex,
+            rowAtMs: Self.parseDsTimestampMs(result.createdAt).map { UInt64(max(0, $0)) })
         return result
     }
 
@@ -5684,6 +5701,9 @@ public final class ChatRepository: ObservableObject {
         // A device that came back keeps looking for its gap history (throttled).
         Task { @MainActor [weak self] in await self?.lookForReentryGapHistory(groupIdHex: groupIdHex) }
         if reentryStopsActing(groupIdHex: groupIdHex) { return }
+        // Walk-2 rule R4 — a knock key still owed to a member (a growth whose
+        // send was skipped or failed) goes from here; a no-op when delivered.
+        Task { @MainActor [weak self] in await self?.publishKnockKeyIfOwed(groupIdHex: groupIdHex) }
         // ADR-0057, live walk 2026-09-29 — the owner claims the journal on
         // open, once per session, then re-checks its registrars against the
         // roster (obligation 3). Not left to the lazy claim: an UNCLAIMED
@@ -11260,6 +11280,19 @@ final class GroupRecord {
         }
         if changed { messages = next }
         return changed
+    }
+
+    /// ADR-0091 phase 2 UX 2.4, walk-2 rule R2 — the gap line, stored as a
+    /// local system row where the gap was by time: after the last row at or
+    /// before `fromMs`, before the first row stamped later. Stamped with its
+    /// start, so the timeline's days and runs read it in order.
+    func insertReentryGapLine(fromMs: UInt64, toMs: UInt64) {
+        let line = ChatMessage(
+            messageId: nextLocalId(),
+            direction: .system,
+            text: ConversationReentryRules.gapMarker(fromMs: fromMs, toMs: max(fromMs, toMs)),
+            createdAt: ChatRepository.isoTimestamp(ms: Int64(clamping: fromMs)))
+        messages.insert(line, at: ConversationReentryRules.gapLineIndex(messages, fromMs: fromMs))
     }
 
     func appendLocalRow(text: String, messageId: Int64, createdAt: String) {

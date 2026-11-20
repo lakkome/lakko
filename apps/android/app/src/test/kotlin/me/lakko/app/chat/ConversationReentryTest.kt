@@ -168,14 +168,164 @@ class ConversationReentryTest {
     }
 
     @Test
-    fun `cleared on landing forgets the entry and persists it`() {
+    fun `coming back forgets the suspicion and the newest row, and the join is the last good read`() {
         val store = MemoryBehindStore()
         val t = tracker(store)
+        t.noteRowKnown("ab", 400L)
         t.noteSkipped("ab", 7uL, 6uL, 10L)
         t.observe("ab", false, true, 7uL, 6uL)
-        t.cleared("AB")
+        t.cameBack("AB", 2_000_000L)
         assertFalse(t.stopsActing("ab"))
+        val kept = store.saved["acct"].orEmpty()["ab"]
+        assertEquals(ConversationBehindEntry(lastReadOkMs = 2_000_000L), kept)
+        assertEquals("applied none since joining: the join starts any later gap", 2_000_000L, t.gapStartMs("ab"))
+    }
+
+    @Test
+    fun `forgetting the conversation drops the read progress too`() {
+        val store = MemoryBehindStore()
+        val t = tracker(store)
+        t.noteRowKnown("ab", 400L)
+        t.forget("AB")
         assertTrue(store.saved["acct"].orEmpty().isEmpty())
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk 2, R1 — where the gap starts
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `with every read refused the gap starts at the newest row applied, not when it was suspected`() {
+        val clock = Clock(now = 1_000_000L)
+        val t = tracker(clock = clock)
+        t.noteRowKnown("ab", 900_000L)
+        t.observe("ab", false, false, null, 6uL)
+        clock.now = 5_000_000L
+        repeat(3) { t.noteReadRefused("ab", ownCommitOwed = false, localEpoch = 6uL) }
+        assertTrue(t.stopsActing("ab"))
+        assertNull("no row was skipped: every read was refused", t.entry("ab").gapFromMs)
+        assertEquals(900_000L, t.gapStartMs("ab"))
+    }
+
+    @Test
+    fun `the gap start falls back to the last good read, then the suspicion, then now`() {
+        assertEquals(42L, reentryGapStart(ConversationBehindEntry(lastReadOkMs = 42L, sinceMs = 50L), 99L))
+        assertEquals(50L, reentryGapStart(ConversationBehindEntry(sinceMs = 50L), 99L))
+        assertEquals(99L, reentryGapStart(ConversationBehindEntry(), 99L))
+        assertEquals(
+            "a row known applied is preferred to the last good read",
+            30L,
+            reentryGapStart(ConversationBehindEntry(lastKnownRowMs = 30L, lastReadOkMs = 42L), 99L),
+        )
+    }
+
+    @Test
+    fun `a skipped row starts the gap only when it is the earlier`() {
+        assertEquals(10L, reentryGapStart(ConversationBehindEntry(gapFromMs = 10L, lastKnownRowMs = 30L), 99L))
+        assertEquals(
+            "a row applied after the first skipped one never moves the start later",
+            30L,
+            reentryGapStart(ConversationBehindEntry(gapFromMs = 60L, lastKnownRowMs = 30L), 99L),
+        )
+    }
+
+    @Test
+    fun `a skipped row with no time does not start the gap at the moment of the skip`() {
+        val clock = Clock(now = 7_000_000L)
+        val t = tracker(clock = clock)
+        t.noteRowKnown("ab", 500L)
+        t.noteSkipped("ab", 7uL, 6uL, rowAtMs = null)
+        assertNull(t.entry("ab").gapFromMs)
+        assertEquals(500L, t.gapStartMs("ab"))
+    }
+
+    @Test
+    fun `the newest known row only moves forward`() {
+        val t = tracker()
+        t.noteRowKnown("ab", 500L)
+        t.noteRowKnown("ab", 300L)
+        t.noteRowKnown("ab", null)
+        assertEquals(500L, t.entry("ab").lastKnownRowMs)
+        t.noteRowKnown("ab", 800L)
+        assertEquals(800L, t.entry("ab").lastKnownRowMs)
+    }
+
+    @Test
+    fun `the last good read is written at most once a minute`() {
+        val store = MemoryBehindStore()
+        val clock = Clock(now = 1_000_000L)
+        val t = tracker(store, clock)
+        t.observe("ab", false, false, null, 6uL)
+        assertEquals(1_000_000L, t.entry("ab").lastReadOkMs)
+        clock.now += 30_000L
+        t.observe("ab", false, false, null, 6uL)
+        assertEquals("within the minute nothing is written", 1_000_000L, t.entry("ab").lastReadOkMs)
+        clock.now += 31_000L
+        t.observe("ab", false, false, null, 6uL)
+        assertEquals(1_061_000L, t.entry("ab").lastReadOkMs)
+        assertEquals(1_061_000L, store.saved["acct"].orEmpty()["ab"]?.lastReadOkMs)
+    }
+
+    @Test
+    fun `the read progress survives coming back in step`() {
+        val t = tracker()
+        t.noteRowKnown("ab", 500L)
+        t.noteSkipped("ab", 7uL, 6uL, 10L)
+        t.observe("ab", false, true, 7uL, 6uL)
+        assertTrue(t.stopsActing("ab"))
+        t.observe("ab", false, true, 7uL, 7uL)
+        assertFalse(t.stopsActing("ab"))
+        assertEquals(500L, t.entry("ab").lastKnownRowMs)
+        assertNull(t.entry("ab").gapFromMs)
+        assertEquals(BehindLevel.IN_STEP, t.entry("ab").level)
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk 2, defects 2 and 3 — a device that once swept is still suspected
+    // -----------------------------------------------------------------------
+
+    private fun outboxEntry(acked: Boolean, isSweep: Boolean) = PendingCommitEntry(
+        id = "e",
+        accountId = "acct",
+        groupId = "g",
+        targetEpoch = "2",
+        commitB64 = "AA==",
+        acked = acked,
+        isSweep = isSweep,
+    )
+
+    @Test
+    fun `refused reads suspect a device whose only outbox entry is an acked sweep, and a request is due`() {
+        val t = tracker()
+        // The walk: the member had once swept as admin; its entry was acked
+        // and never collected, and it kept `own_commit_owed` true forever.
+        val owed = ownCommitOwedBy(stagedSweep = false, entries = listOf(outboxEntry(acked = true, isSweep = true)))
+        assertFalse(owed)
+        var state = BehindState.IN_STEP
+        repeat(3) { state = t.noteReadRefused("ab", ownCommitOwed = owed, localEpoch = 6uL) }
+        assertTrue(t.stopsActing("ab"))
+        assertTrue("the refused-read path asks to come back", reentryRequestAfterRefusedRead(state))
+        assertTrue(
+            "a confirmed device's first request is due at once",
+            ReentryRequestDue { s, last, _ -> s.level != BehindLevel.IN_STEP && last == null }.due(t.entry("ab").state, null, 0L),
+        )
+    }
+
+    @Test
+    fun `no request after a refused read while still in step`() {
+        assertFalse(reentryRequestAfterRefusedRead(BehindState.IN_STEP))
+        assertTrue(reentryRequestAfterRefusedRead(BehindState(BehindLevel.SUSPECTED, 1L)))
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk 2, R5 — the waiting chat shows no error
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a waiting chat clears the composer's error and keeps it otherwise`() {
+        val error = me.lakko.app.l10n.UiText("chat.error.send")
+        assertNull(composerErrorWhileWaiting(waiting = true, error))
+        assertEquals(error, composerErrorWhileWaiting(waiting = false, error))
     }
 
     @Test
@@ -277,11 +427,61 @@ class ConversationReentryTest {
     }
 
     @Test
-    fun `the owner re-sends the knock key on a new version and on growth`() {
-        assertTrue(knockKeyResendDue(null, 0, false))
-        assertFalse(knockKeyResendDue(0, 0, false))
-        assertTrue(knockKeyResendDue(0, 1, false))
-        assertTrue(knockKeyResendDue(1, 1, true))
+    fun `the owner re-sends the knock key on a new version and to a member it was not sent to`() {
+        val two = setOf("a", "b")
+        assertTrue("never sent", knockKeyResendDue(null, 0, two))
+        assertFalse(knockKeyResendDue(KnockKeySentMark(0, two), 0, two))
+        assertTrue("a new version", knockKeyResendDue(KnockKeySentMark(0, two), 1, two))
+        assertTrue("a newcomer", knockKeyResendDue(KnockKeySentMark(1, two), 1, two + "c"))
+        assertFalse("a member leaving owes nothing", knockKeyResendDue(KnockKeySentMark(1, two), 1, setOf("a")))
+    }
+
+    @Test
+    fun `a growth seen while the send was skipped stays due until a send goes out`() {
+        // Walk 2: the owner sent the key into the group alone; the member its
+        // own sweep added was never seen as growth by a poll, so it got the
+        // key only after a restart. The mark is the members at the last
+        // SUCCESSFUL send: a skipped send writes no mark.
+        val alone = KnockKeySentMark(0, setOf("owner"))
+        val withMember = setOf("owner", "member")
+        assertTrue(knockKeyResendDue(alone, 0, withMember))
+        // A later poll with no growth of its own: still due.
+        assertTrue(knockKeyResendDue(alone, 0, withMember))
+        // Sent: the mark now holds the member.
+        assertFalse(knockKeyResendDue(KnockKeySentMark(0, withMember), 0, withMember))
+    }
+
+    @Test
+    fun `knock seeds go to a recipient only for the versions it was not sent`() {
+        val devices = setOf("d1")
+        assertEquals("never sent: every version", 0..3, knockSeedVersionsToSend(null, 3, devices))
+        assertTrue("current: nothing", knockSeedVersionsToSend(KnockSeedSentMark(3, devices), 3, devices).isEmpty())
+        assertEquals("a bump: only the new version", 4..4, knockSeedVersionsToSend(KnockSeedSentMark(3, devices), 4, devices))
+        assertEquals(
+            "a device that was not there gets every version",
+            0..4,
+            knockSeedVersionsToSend(KnockSeedSentMark(3, devices), 4, devices + "d2"),
+        )
+        assertEquals(
+            "a mark newer than the version (a reset) sends every version",
+            0..1,
+            knockSeedVersionsToSend(KnockSeedSentMark(5, devices), 1, devices),
+        )
+    }
+
+    @Test
+    fun `the seeds sent per role change stay constant as admin removals add up`() {
+        // Walk 2, defect 6: each removal bumps the version; before, every
+        // version went out again on every bump (one in-group message each).
+        var mark: KnockSeedSentMark? = null
+        val devices = setOf("d1")
+        val perBump = mutableListOf<Int>()
+        for (version in 0..60) {
+            val send = knockSeedVersionsToSend(mark, version, devices)
+            if (version > 0) perBump += send.count()
+            mark = KnockSeedSentMark(version, devices)
+        }
+        assertTrue(perBump.all { it == 1 })
     }
 
     @Test
@@ -291,7 +491,7 @@ class ConversationReentryTest {
         assertFalse("an admin does not re-send on every growth", knockKeySender(false, true, false))
         assertTrue("the admin who re-admitted sends it at once", knockKeySender(false, true, true))
         assertFalse("a plain member never sends it", knockKeySender(false, false, true))
-        assertTrue("a re-admission always re-sends", knockKeyResendDue(sentVersion = 2, currentVersion = 2, grew = true))
+        assertTrue("a re-admission clears the mark, so it re-sends", knockKeyResendDue(mark = null, currentVersion = 2, currentMembers = setOf("a")))
     }
 
     @Test
@@ -641,5 +841,251 @@ class ConversationReentryTest {
             onSkipped = { _, sealed, local -> skipped += sealed to local },
         ) { _, _ -> }
         assertTrue(skipped.isEmpty())
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk 3, W3-R1 — the epoch a request names comes from a fresh probe
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `the request names the epoch the probe answered, never another`() = kotlinx.coroutines.runBlocking {
+        assertEquals(67uL, probeReentryEpochLeft { 67uL })
+        // A probe that names no epoch, or fails, gives nothing to send.
+        assertNull(probeReentryEpochLeft { null })
+        assertNull(probeReentryEpochLeft { throw java.io.IOException("offline") })
+    }
+
+    @Test
+    fun `a cancelled probe is not swallowed`() {
+        var cancelled = false
+        try {
+            kotlinx.coroutines.runBlocking {
+                probeReentryEpochLeft { throw kotlinx.coroutines.CancellationException("left") }
+            }
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
+    }
+
+    @Test
+    fun `every request probes after the route is resolved and never reads a stored epoch`() {
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        val body = source.substringAfter("    private suspend fun requestReentryIfDue(groupIdHex: String) {")
+            .substringBefore("\n    }\n")
+        // No stored epoch anywhere in the request.
+        assertFalse("entry.latestEpoch" in body)
+        // One probe, unconditional (no "only when reads are refused").
+        assertEquals(1, Regex("""dsClient\.knock\(record\.groupId, emptyList\(\)\)""").findAll(body).count())
+        assertFalse("readsRefused" in body)
+        val probe = body.indexOf("probeReentryEpochLeft")
+        val due = body.indexOf("reentryRequestDue.due(")
+        val route = body.indexOf("reentryRouteLocked(")
+        val knockKey = body.indexOf("knockKeys.get(")
+        val mint = body.indexOf("createReentryKeyPackage(")
+        val record = body.indexOf("reentryRecords.put(")
+        assertTrue(due in 0 until route)
+        assertTrue(route in 0 until probe)
+        assertTrue(knockKey in 0 until probe)
+        assertTrue(probe in 0 until mint)
+        assertTrue(mint in 0 until record)
+        // A failed probe retries after the short wait and sends nothing.
+        val onFail = body.substringAfter("probeReentryEpochLeft").substringBefore("return")
+        assertTrue("reentryRetryAfterFailureMs" in onFail)
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk 3, W3-R2 — automatic sends are held after a refused read
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `one refused read holds automatic sends until a read is answered`() {
+        val t = tracker()
+        assertFalse(t.holdsAutomaticSends("ab"))
+        t.noteReadRefused("ab", ownCommitOwed = false, localEpoch = 6uL)
+        // Not yet suspected (three refused reads suspect), but held.
+        assertFalse(t.stopsActing("ab"))
+        assertTrue(t.holdsAutomaticSends("ab"))
+        // Another conversation is not touched.
+        assertFalse(t.holdsAutomaticSends("cd"))
+        // An answered read in step releases them.
+        t.observe("ab", ownCommitOwed = false, drained = true, latestEpoch = 6uL, localEpoch = 6uL)
+        assertFalse(t.holdsAutomaticSends("ab"))
+    }
+
+    @Test
+    fun `suspected or confirmed holds automatic sends with no refused read`() {
+        assertTrue(automaticSendsHeld(ConversationBehindEntry(level = BehindLevel.SUSPECTED)))
+        assertTrue(automaticSendsHeld(ConversationBehindEntry(level = BehindLevel.CONFIRMED)))
+        assertTrue(automaticSendsHeld(ConversationBehindEntry(refusedReads = 2)))
+        assertFalse(automaticSendsHeld(ConversationBehindEntry()))
+        // An answered read that leaves the device suspected keeps them held.
+        val t = tracker()
+        t.observe("ab", ownCommitOwed = false, drained = true, latestEpoch = 9uL, localEpoch = 6uL)
+        assertTrue(t.holdsAutomaticSends("ab"))
+    }
+
+    @Test
+    fun `every automatic send path asks the held rule, the person's own sends do not`() {
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        fun body(signature: String): String =
+            source.substringAfter(signature).substringBefore("\n    }\n")
+        for (sig in listOf(
+            "    private suspend fun sendTypingOnMlsThread(",
+            "    private suspend fun sendReadReceiptOnMlsThread(",
+            "    private suspend fun emitCommitterBeaconIfDueOnMlsThread(",
+            "    private suspend fun fanOut(",
+        )) {
+            assertTrue("$sig is not held after a refused read", "behindHoldsAutomaticSends(groupIdHex)" in body(sig))
+        }
+        val broadcast = body("    private suspend fun broadcastControlToGroup(")
+        assertTrue("automatic: Boolean = true" in broadcast)
+        assertTrue(Regex("""if \(automatic\) \{\s*if \(behindHoldsAutomaticSends\(groupIdHex\)\) return null\s*\} else \{\s*requirePersonActionAllowed\(groupIdHex\)""").containsMatchIn(broadcast))
+        // The person's own envelopes keep the section 2 rule.
+        for (sig in listOf(
+            "    public suspend fun setSharedPin(",
+            "    public suspend fun setGroupName(",
+            "    public suspend fun setGroupPhoto(",
+            "    public suspend fun setGroupReactions(",
+            "    public suspend fun adoptSignedHandle(",
+            "    public suspend fun sendGroupContactRequest(",
+        )) {
+            assertTrue("$sig is marked automatic", "automatic = false" in source.substringAfter(sig).substringBefore("\n    }\n"))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk 3, W3-R5 — the person's own actions
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a person action is attempted after one refused read, held only while behind`() {
+        val t = tracker()
+        t.noteReadRefused("ab", ownCommitOwed = false, localEpoch = 6uL)
+        // Automatic sends wait; the person's own action is attempted.
+        assertTrue(t.holdsAutomaticSends("ab"))
+        assertFalse(personActionHeld(t.entry("ab")))
+        assertFalse(t.stopsActing("ab"))
+        // Suspected or confirmed: held.
+        assertTrue(personActionHeld(ConversationBehindEntry(level = BehindLevel.SUSPECTED)))
+        assertTrue(personActionHeld(ConversationBehindEntry(level = BehindLevel.CONFIRMED)))
+        assertFalse(personActionHeld(ConversationBehindEntry(refusedReads = 2)))
+        repeat(2) { t.noteReadRefused("ab", ownCommitOwed = false, localEpoch = 6uL) }
+        assertTrue(personActionHeld(t.entry("ab")))
+    }
+
+    @Test
+    fun `a held person action shows that action's own failure message`() {
+        val held = personActionHeldError()
+        for (key in listOf("chat.error.edit", "chat.error.delete_message", "chat.error.react", "chat.error.pin", "chat.send.failed")) {
+            assertEquals(
+                me.lakko.app.l10n.UiText(key),
+                chatErrorText(held, key, retryMaySucceed = { false }),
+            )
+        }
+    }
+
+    @Test
+    fun `every person action is refused while behind before anything is applied locally`() {
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        fun body(signature: String): String = source.substringAfter(signature).substringBefore("\n    }\n")
+        // Edit, delete and reaction run inside the person-action gate.
+        for (sig in listOf(
+            "    public suspend fun editMessage(",
+            "    public suspend fun deleteMessage(",
+            "    public suspend fun reactToMessage(",
+        )) {
+            assertTrue("$sig is not gated", "personAction(groupIdHex) {" in body(sig))
+        }
+        val person = body("    private suspend fun <T> personAction(")
+        assertTrue("requirePersonActionAllowed(groupIdHex)" in person)
+        assertTrue("withPublishEvidence(groupIdHex)" in person)
+        // Poll, checklist and article ops: refused before the fold.
+        val op = body("    public suspend fun sendContentOp(")
+        val gate = op.indexOf("requirePersonActionAllowed(groupIdHex)")
+        assertTrue(gate >= 0)
+        assertTrue(gate < op.indexOf("record.addContentOp("))
+        assertTrue(gate < op.indexOf("publishPreparedSend("))
+        // The control-message person actions: the send throws before the
+        // local apply that follows it.
+        for ((sig, apply) in listOf(
+            "    public suspend fun setSharedPin(" to "PinStore.saveShared(applicationContext, accountIdB64, groupIdHex",
+            "    public suspend fun setGroupName(" to "if (!storeFirst) GroupNameStore.save(",
+            "    public suspend fun setGroupPhoto(" to "GroupSettingsStore.savePhoto(",
+            "    public suspend fun setGroupReactions(" to "GroupSettingsStore.saveReactions(",
+        )) {
+            val b = body(sig)
+            val send = b.indexOf("automatic = false")
+            assertTrue("$sig sends as a person", send >= 0)
+            assertTrue("$sig applies before sending", send < b.lastIndexOf(apply))
+        }
+        // The refusal is a thrown error, never a null a caller could take for sent.
+        val required = body("    internal fun requirePersonActionAllowed(")
+        assertTrue("throw personActionHeldError()" in required)
+    }
+
+    @Test
+    fun `back in step is told once, by a read or by the re-entry joining`() {
+        val t = tracker()
+        val told = mutableListOf<String>()
+        t.onBackInStep = { told += it }
+        // In step and staying so: nothing.
+        t.observe("AB", ownCommitOwed = false, drained = true, latestEpoch = 6uL, localEpoch = 6uL)
+        assertTrue(told.isEmpty())
+        // Suspected, then a read shows it in step.
+        t.observe("AB", ownCommitOwed = false, drained = true, latestEpoch = 7uL, localEpoch = 6uL)
+        assertTrue(t.stopsActing("ab"))
+        t.observe("AB", ownCommitOwed = false, drained = true, latestEpoch = 7uL, localEpoch = 7uL)
+        assertEquals(listOf("ab"), told)
+        // The re-entry joined.
+        t.cameBack("CD", 5_000L)
+        assertEquals(listOf("ab", "cd"), told)
+        // A listener that throws does not break the fold.
+        t.onBackInStep = { error("boom") }
+        t.observe("ef", ownCommitOwed = false, drained = true, latestEpoch = 9uL, localEpoch = 6uL)
+        t.observe("ef", ownCommitOwed = false, drained = true, latestEpoch = 9uL, localEpoch = 9uL)
+        assertFalse(t.stopsActing("ef"))
+    }
+
+    @Test
+    fun `a refused-read hold that ends in step is told like back in step (W3-R6)`() {
+        val t = tracker()
+        val told = mutableListOf<String>()
+        t.onBackInStep = { told += it }
+        // An answered read with no refusal before it: nothing.
+        t.observe("ab", ownCommitOwed = false, drained = true, latestEpoch = 6uL, localEpoch = 6uL)
+        assertTrue(told.isEmpty())
+        // Refused, then answered in step: told once.
+        t.noteReadRefused("ab", ownCommitOwed = false, localEpoch = 6uL)
+        assertFalse(t.stopsActing("ab"))
+        t.observe("ab", ownCommitOwed = false, drained = true, latestEpoch = 6uL, localEpoch = 6uL)
+        assertEquals(listOf("ab"), told)
+        t.observe("ab", ownCommitOwed = false, drained = true, latestEpoch = 6uL, localEpoch = 6uL)
+        assertEquals(listOf("ab"), told)
+        // Refused, then an answered read that suspects: not told.
+        t.noteReadRefused("ab", ownCommitOwed = false, localEpoch = 6uL)
+        t.observe("ab", ownCommitOwed = false, drained = true, latestEpoch = 8uL, localEpoch = 6uL)
+        assertTrue(t.stopsActing("ab"))
+        assertEquals(listOf("ab"), told)
+    }
+
+    @Test
+    fun `back in step re-sends this device's own growth-time state`() {
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        assertTrue(
+            "tracker.onBackInStep = { hex -> pushScope.launchSession { resendOwnGrowthStateBestEffort(hex) } }" in source,
+        )
+        val body = source.substringAfter("    private suspend fun resendOwnGrowthStateBestEffort(groupIdHex: String) {")
+            .substringBefore("\n    }\n")
+        for (step in listOf(
+            "profileRepublish.publishNow(groupIdHex)",
+            "groupNameRepublish.publishNow(groupIdHex)",
+            "groupSettingsRepublish.publishNow(groupIdHex)",
+            "pinRepublish.onGrowth(groupIdHex)",
+            "sharedChannels.groupGrew(groupIdHex)",
+            "distributeKnockKeyIfDueBestEffort(groupIdHex, afterReentry = true)",
+        )) {
+            assertTrue("$step missing", step in body)
+        }
     }
 }

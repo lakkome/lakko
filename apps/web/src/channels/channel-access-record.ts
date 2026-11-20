@@ -174,6 +174,33 @@ export function channelEpochOfGroup(record: ChannelAccessRecord, groupEpoch: big
   return Number(groupEpoch) + (record.epochOffset ?? 0);
 }
 
+/**
+ * 2026-11-20 — the offset that makes the mapping hold again, or `null` when
+ * it holds. Each owner commit is meant to move the service by one epoch with
+ * its reseal, so the group is never more than one epoch ahead of the
+ * service; a run of commits whose reseal never landed (seen live: about 150
+ * rotations refused `401`) leaves it far ahead, and the mapping then names
+ * service epochs that will never carry its seed. The reseal that does land
+ * seals the group's CURRENT seed at `serviceEpoch + 1`, so that is where the
+ * current MLS epoch maps. Pure.
+ */
+export function reanchoredEpochOffset(
+  groupEpoch: bigint | number,
+  offset: number | undefined,
+  serviceEpoch: number,
+): number | null {
+  const next = serviceEpoch + 1;
+  if (Number(groupEpoch) + (offset ?? 0) <= next) return null;
+  return next - Number(groupEpoch);
+}
+
+/** The offset after this device's own reseal of the group's current seed
+ *  landed the service at `landedEpoch` (exact); `undefined` for 0. Pure. */
+export function landedEpochOffset(groupEpoch: bigint | number, landedEpoch: number): number | undefined {
+  const offset = landedEpoch - Number(groupEpoch);
+  return offset === 0 ? undefined : offset;
+}
+
 /** One publisher the owner approved here. */
 export interface PublisherEntry {
   readonly accountKeyB64: string;
@@ -418,7 +445,9 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
     ...(isB64(r.ownerAccountKeyB64) && r.ownerAccountKeyB64.length === KEY_B64_LEN
       ? { ownerAccountKeyB64: r.ownerAccountKeyB64 }
       : {}),
-    ...(typeof r.epochOffset === "number" && Number.isInteger(r.epochOffset) && r.epochOffset > 0
+    // Negative since 2026-11-20: a group whose commits outran the service
+    // (reseals that never landed) maps below its MLS epoch.
+    ...(typeof r.epochOffset === "number" && Number.isSafeInteger(r.epochOffset) && r.epochOffset !== 0
       ? { epochOffset: r.epochOffset }
       : {}),
     ...(r.rotateRequestOwed === true ? { rotateRequestOwed: true } : {}),

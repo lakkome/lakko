@@ -444,6 +444,14 @@ public class ChatClient(
         val events = mutableListOf<IncomingChatEvent>()
         val skipped = mutableListOf<SkippedRow>()
         var lastRowApplied = false
+        // ADR-0091 walk 2, R1 — the newest DS time among the rows this batch
+        // applied (own echoes and side rows included: they are rows this
+        // device holds).
+        var lastAppliedAtMs: Long? = null
+        fun noteAppliedAt(createdAt: String?) {
+            val at = me.lakko.app.ui.chat.parseMessageTimeMs(createdAt) ?: return
+            if (lastAppliedAtMs == null || at > lastAppliedAtMs!!) lastAppliedAtMs = at
+        }
         // ADR-0091 phase 1 — a failed row is classified before it is skipped:
         // the commit the DS registered as this device's next epoch is HELD
         // (the batch stops at it, the cursor stays before it, it is retried
@@ -465,12 +473,17 @@ public class ChatClient(
             // another chat's row of the same number — a fetched row, silently
             // discarded with the cursor advanced past it, which is what kept
             // incoming calls from ringing outside the open chat.
-            isOwnEchoRow = { id -> ownPublished.consume(groupIdHex, id) },
+            isOwnEchoRow = { id ->
+                ownPublished.consume(groupIdHex, id).also { own ->
+                    if (own) noteAppliedAt(raw.messages.firstOrNull { it.id == id }?.createdAt)
+                }
+            },
             // ADR-0092 section 3.6 — an anonymous ballot is a journal row
             // that is NOT an MLS message; it never reaches the MLS group.
             takeSideRow = { row ->
                 if (isPollBallotRowSafe(row.payload)) {
                     events.add(IncomingChatEvent.PollBallotRow(row.id, row.payload, row.createdAt))
+                    noteAppliedAt(row.createdAt)
                     true
                 } else {
                     false
@@ -505,6 +518,7 @@ public class ChatClient(
             },
         ) { message, processed ->
             lastRowApplied = true
+            noteAppliedAt(message.createdAt)
             // The roster is read HERE, one line after the apply, because that
             // is the epoch this row decrypted at — a leaf resolved any later
             // can name whoever was added into a vacated slot since. Read PER
@@ -546,6 +560,7 @@ public class ChatClient(
             held = applied.held,
             skipped = skipped,
             lastRowApplied = lastRowApplied,
+            lastAppliedAtMs = lastAppliedAtMs,
         )
     }
 }
@@ -2026,6 +2041,9 @@ public data class PollMessagesResult(
     /** ADR-0091 phase 2 — the batch's last MLS row applied (nothing failed
      *  since the last applied row). */
     val lastRowApplied: Boolean = false,
+    /** ADR-0091 walk 2, R1 — the newest DS time (ms) among the rows this
+     *  batch applied, `null` when it applied none. */
+    val lastAppliedAtMs: Long? = null,
 )
 
 /** ADR-0091 phase 2 — one skipped row: no identifier, epochs and time only. */

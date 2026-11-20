@@ -100,6 +100,14 @@ public final class BallotQueue: ObservableObject {
         run(entry.key)
     }
 
+    /// Walk-3 rule W3-R5 — the conversation is back in step: every ballot
+    /// that failed in it goes again, as `Try again` would.
+    public func retryFailed(groupIdHex: String) {
+        for entry in entries where entry.groupIdHex == groupIdHex && entry.failed {
+            retry(groupIdHex: groupIdHex, pollMessageId: entry.pollMessageId)
+        }
+    }
+
     /// `Try again` on a failed ballot: a fresh delay.
     public func retry(groupIdHex: String, pollMessageId: Int64) {
         let key = "\(groupIdHex):\(pollMessageId)"

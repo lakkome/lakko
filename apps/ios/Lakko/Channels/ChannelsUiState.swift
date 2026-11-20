@@ -660,6 +660,16 @@ public final class ChannelsUiState: ObservableObject {
         persistChannelLog()
     }
 
+    /// 2026-11-20 — drop every kept seed of `channelId` above `epoch`: seeds
+    /// filed under a mapping that no longer holds (``ChannelDeviceAdmission/anchor(channelId:state:mls:epoch:seed:)``).
+    /// The service never served an epoch above its next one, so none of them
+    /// is a seed a reader holds.
+    public func dropSubscribedSeeds(channelId: String, above epoch: UInt32) {
+        guard let byEpoch = subscribedSeedsByChannel[channelId], byEpoch.keys.contains(where: { $0 > epoch }) else { return }
+        subscribedSeedsByChannel[channelId] = byEpoch.filter { $0.key <= epoch }
+        persistChannelLog()
+    }
+
     /// The recovered `epoch -> seed` map for `channelId`
     /// (empty when no envelope has been opened yet).
     public func subscribedSeeds(channelId: String) -> [UInt32: Data] {

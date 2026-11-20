@@ -624,4 +624,261 @@ final class ConversationReentryTests: XCTestCase {
             XCTAssertEqual(entries.first?.message.messageId, -1)
         }
     }
+
+    // MARK: - Walk 2 (2026-11-20)
+
+    /// R1 — the gap starts no later than when the device last knew the
+    /// conversation; a device behind through refused reads skipped no row.
+    func testTheGapStartsNoLaterThanWhenTheDeviceLastKnewTheConversation() {
+        // Refused reads, nothing skipped: the newest row applied.
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: nil, lastKnownRowMs: 5_000, lastReadOkMs: 7_000,
+            suspicionSinceMs: 9_000, nowMs: 10_000), 5_000)
+        // No row applied: the last good read, then the suspicion, then now.
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: nil, lastKnownRowMs: nil, lastReadOkMs: 7_000,
+            suspicionSinceMs: 9_000, nowMs: 10_000), 7_000)
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: nil, lastKnownRowMs: nil, lastReadOkMs: nil,
+            suspicionSinceMs: 9_000, nowMs: 10_000), 9_000)
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: nil, lastKnownRowMs: nil, lastReadOkMs: nil,
+            suspicionSinceMs: nil, nowMs: 10_000), 10_000)
+        // A skipped row decides only when it is earlier.
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: 6_000, lastKnownRowMs: 5_000, lastReadOkMs: nil,
+            suspicionSinceMs: 9_000, nowMs: 10_000), 5_000)
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: 4_000, lastKnownRowMs: 5_000, lastReadOkMs: nil,
+            suspicionSinceMs: 9_000, nowMs: 10_000), 4_000)
+        // Never in the future.
+        XCTAssertEqual(ConversationReentryRules.gapStart(
+            firstSkippedMs: nil, lastKnownRowMs: 12_000, lastReadOkMs: nil,
+            suspicionSinceMs: nil, nowMs: 10_000), 10_000)
+    }
+
+    func testTheRowClockKeepsTheNewestRowAndTheLastGoodReadAtMostOnceAMinute() {
+        let store = ReentryRowClockStore(defaults: suite())
+        store.noteRowKnown(accountIdB64: account, groupIdHex: "aa", atMs: 5_000)
+        store.noteRowKnown(accountIdB64: account, groupIdHex: "aa", atMs: 4_000)
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa").lastKnownRowMs, 5_000, "never backward")
+        store.noteReadOk(accountIdB64: account, groupIdHex: "aa", nowMs: 100_000)
+        store.noteReadOk(accountIdB64: account, groupIdHex: "aa", nowMs: 130_000)
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa").lastReadOkMs, 100_000,
+                       "written at most once a minute")
+        store.noteReadOk(accountIdB64: account, groupIdHex: "aa", nowMs: 160_000)
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa").lastReadOkMs, 160_000)
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "bb"), ReentryRowClock())
+
+        // Back by a Welcome: no row of the new group applied yet.
+        store.noteReentryJoined(accountIdB64: account, groupIdHex: "aa", nowMs: 200_000)
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa"),
+                       ReentryRowClock(lastKnownRowMs: nil, lastReadOkMs: 200_000))
+
+        store.remove(accountIdB64: account, groupIdHex: "aa")
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa"), ReentryRowClock())
+
+        AccountStoreGate.seal(account)
+        defer { AccountStoreGate.open(account) }
+        store.noteRowKnown(accountIdB64: account, groupIdHex: "aa", atMs: 9_000)
+        XCTAssertNil(store.load(accountIdB64: account, groupIdHex: "aa").lastKnownRowMs, "a sealed account takes none")
+    }
+
+    func testTheObservationsKeepTheNewestAppliedRowUntilTaken() {
+        let seen = ReentryObservations(nowMs: { 0 })
+        seen.noteApplied(groupIdHex: "g", createdAtMs: 30)
+        seen.noteApplied(groupIdHex: "g", createdAtMs: 20)
+        seen.noteApplied(groupIdHex: "g")
+        XCTAssertEqual(seen.takeLastAppliedRowAtMs(groupIdHex: "g"), 30)
+        XCTAssertNil(seen.takeLastAppliedRowAtMs(groupIdHex: "g"), "taken once")
+    }
+
+    /// The fold keeps the EARLIEST failed row, also after a request stored a
+    /// start.
+    func testTheGapStartOnlyMovesEarlier() {
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 5)
+        behind.gapFromMs = 800
+        let e = evidence(aboveLocal: true, firstAt: 400)
+        let folded = ConversationReentryRules.fold(
+            behind, observation: observation(latest: 9, local: 6, evidence: e), evidence: e, nowMs: 1_000)
+        XCTAssertEqual(folded.record.gapFromMs, 400)
+        let later = evidence(aboveLocal: true, firstAt: 900)
+        XCTAssertEqual(ConversationReentryRules.fold(
+            folded.record, observation: observation(latest: 9, local: 6, evidence: later),
+            evidence: later, nowMs: 1_000).record.gapFromMs, 400)
+    }
+
+    /// R2 — the line goes after the last row at or before its start, so a
+    /// message sent after the replacement but before this device came back
+    /// sits below it.
+    func testAGapLineSitsWhereTheGapWasByTime() throws {
+        func row(_ id: Int64, _ ms: Int64) -> ChatMessage {
+            ChatMessage(messageId: id, direction: .incoming, text: "m\(id)",
+                        createdAt: ChatRepository.isoTimestamp(ms: ms))
+        }
+        let rows = [row(1, 1_000), row(2, 5_000), row(3, 6_000), row(4, 9_000)]
+        XCTAssertEqual(ConversationReentryRules.gapLineIndex(rows, fromMs: 5_000), 2, "after the row at its start")
+        XCTAssertEqual(ConversationReentryRules.gapLineIndex(rows, fromMs: 500), 0)
+        XCTAssertEqual(ConversationReentryRules.gapLineIndex(rows, fromMs: 10_000), 4, "at the end")
+        let unstamped = ChatMessage(messageId: 9, direction: .incoming, text: "x", createdAt: "")
+        XCTAssertEqual(ConversationReentryRules.gapLineIndex([unstamped] + rows, fromMs: 500), 1,
+                       "a row with no stamp does not decide")
+
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x53, count: 32))
+        let record = GroupRecord(group: try Group.create(identity: identity, kind: .group),
+                                 groupId: Data(repeating: 0x79, count: 32))
+        // The second cycle: an earlier gap line, then a message sent after the
+        // replacement (stamped 6 000) but held before this device came back
+        // at 8 000.
+        record.appendLocalRow(
+            text: ConversationReentryRules.gapMarker(fromMs: 100, toMs: 200), messageId: -1,
+            createdAt: ChatRepository.isoTimestamp(ms: 100))
+        record.appendContentRow(row(1, 1_000))
+        record.appendContentRow(row(2, 6_000))
+        record.insertReentryGapLine(fromMs: 5_000, toMs: 8_000)
+        let texts = record.messages.map(\.text)
+        XCTAssertEqual(texts, [
+            ConversationReentryRules.gapMarker(fromMs: 100, toMs: 200), "m1",
+            ConversationReentryRules.gapMarker(fromMs: 5_000, toMs: 8_000), "m2",
+        ])
+        let line = try XCTUnwrap(record.messages.first { $0.text.contains("from=5000") })
+        XCTAssertEqual(ChatRepository.parseDsTimestampMs(line.createdAt), 5_000, "stamped with its start")
+        XCTAssertLessThan(line.messageId, -1, "a fresh local id below every other")
+    }
+
+    /// R4 — due until a delivery reached every current member at the
+    /// current version.
+    func testTheKnockKeyIsDueUntilADeliveryReachedEveryMember() {
+        XCTAssertTrue(ConversationReentryRules.knockKeySendDue(mark: nil, version: 0, members: ["a"]))
+        let mark = ReentryKnockKeySentMark(version: 1, members: ["b", "a"])
+        XCTAssertFalse(ConversationReentryRules.knockKeySendDue(mark: mark, version: 1, members: ["a", "b"]))
+        XCTAssertFalse(ConversationReentryRules.knockKeySendDue(mark: mark, version: 1, members: ["a"]),
+                       "a member who left changes nothing")
+        XCTAssertTrue(ConversationReentryRules.knockKeySendDue(mark: mark, version: 1, members: ["a", "b", "c"]),
+                      "a newcomer makes it due")
+        XCTAssertTrue(ConversationReentryRules.knockKeySendDue(mark: mark, version: 2, members: ["a", "b"]),
+                      "a new version makes it due")
+
+        let store = ReentryKnockKeySentStore(defaults: suite())
+        XCTAssertNil(store.load(accountIdB64: account, groupIdHex: "aa"))
+        store.save(mark, accountIdB64: account, groupIdHex: "aa")
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa"), mark)
+        store.remove(accountIdB64: account, groupIdHex: "aa")
+        XCTAssertNil(store.load(accountIdB64: account, groupIdHex: "aa"))
+    }
+
+    /// R5 — only the moment a chat starts waiting clears its errors.
+    func testAChatStartingToWaitClearsItsErrors() {
+        XCTAssertTrue(ConversationReentryRules.clearsChatErrors(wasWaiting: false, isWaiting: true))
+        XCTAssertFalse(ConversationReentryRules.clearsChatErrors(wasWaiting: true, isWaiting: true))
+        XCTAssertFalse(ConversationReentryRules.clearsChatErrors(wasWaiting: false, isWaiting: false))
+        XCTAssertFalse(ConversationReentryRules.clearsChatErrors(wasWaiting: true, isWaiting: false))
+    }
+
+    // MARK: - Walk 3 (2026-11-20)
+
+    /// W3-R2 — a refused read with no answered read since holds every send
+    /// that is not the person's own content, even in step; the person's own
+    /// content is unchanged.
+    func testAnAutomaticSendIsHeldWhileAReadOfTheJournalIsRefused() {
+        XCTAssertFalse(ConversationReentryRules.sendAllowed(
+            behind: .inStep, isPersonContent: false, readRefused: true))
+        XCTAssertTrue(ConversationReentryRules.sendAllowed(
+            behind: .inStep, isPersonContent: true, readRefused: true))
+        XCTAssertTrue(ConversationReentryRules.sendAllowed(
+            behind: .suspected(sinceMs: 1), isPersonContent: true, readRefused: true))
+        XCTAssertFalse(ConversationReentryRules.sendAllowed(
+            behind: .confirmed(sinceMs: 1), isPersonContent: true, readRefused: true))
+        XCTAssertTrue(ConversationReentryRules.sendAllowed(
+            behind: .inStep, isPersonContent: false, readRefused: false))
+
+        // What feeds it: a refusal counts until a read is answered.
+        let observations = ReentryObservations()
+        observations.noteReadRefused(groupIdHex: "aa")
+        XCTAssertGreaterThan(observations.snapshot(groupIdHex: "aa").refusedReads, 0)
+        observations.noteReadAnswered(groupIdHex: "aa")
+        XCTAssertEqual(observations.snapshot(groupIdHex: "aa").refusedReads, 0)
+    }
+
+    /// W3-R5 — the person's own act is held only while behind, never on a
+    /// refused read alone.
+    func testAPersonActionIsHeldOnlyWhileBehind() {
+        XCTAssertTrue(ConversationReentryRules.sendAllowed(
+            behind: .inStep, isPersonContent: false, readRefused: true, personAction: true))
+        XCTAssertFalse(ConversationReentryRules.sendAllowed(
+            behind: .suspected(sinceMs: 1), isPersonContent: false, personAction: true))
+        XCTAssertFalse(ConversationReentryRules.sendAllowed(
+            behind: .confirmed(sinceMs: 1), isPersonContent: false, personAction: true))
+        XCTAssertTrue(ConversationReentryRules.sendAllowed(
+            behind: .inStep, isPersonContent: false, personAction: true))
+    }
+
+    /// W3-R3 — what author key a bundled row carries.
+    func testABundledRowCarriesItsAuthorKey() {
+        let them = Data(repeating: 0x21, count: 32)
+        let stamped = Data(repeating: 0x22, count: 32)
+        let own = Data(repeating: 0x23, count: 32)
+        func row(_ direction: String, _ author: Data?) -> PersistedMessage {
+            PersistedMessage(messageId: 1, direction: direction, text: "x", attachments: [],
+                             createdAt: "2026-11-20T10:00:00Z", authorKeyB64: author.map(base64Encode))
+        }
+        XCTAssertEqual(HistoryBundleCodec.placeholderAuthorKey(row("incoming", them), ownKey: own), them)
+        XCTAssertNil(HistoryBundleCodec.placeholderAuthorKey(row("incoming", nil), ownKey: own))
+        XCTAssertEqual(HistoryBundleCodec.placeholderAuthorKey(row("outgoing", stamped), ownKey: own), own,
+                       "an outgoing row carries this account's key in the conversation")
+        XCTAssertEqual(HistoryBundleCodec.placeholderAuthorKey(row("outgoing", stamped), ownKey: nil), stamped)
+        XCTAssertNil(HistoryBundleCodec.placeholderAuthorKey(row("system", them), ownKey: own))
+        XCTAssertNil(HistoryBundleCodec.placeholderAuthorKey(row("incoming", Data([1, 2, 3])), ownKey: own),
+                     "only a 32-byte key travels")
+    }
+
+    /// W3-R3 — a gap bundle row on the device that came back: the author
+    /// decides the direction; without one, the route rule.
+    func testAGapBundleRowTakesItsAuthorAndDirection() {
+        let own = Data(repeating: 0x31, count: 32)
+        let other = Data(repeating: 0x32, count: 32)
+        func row(_ direction: String) -> PersistedMessage {
+            PersistedMessage(messageId: 5, direction: direction, text: "hi", attachments: [],
+                             createdAt: "2026-11-20T10:00:00Z")
+        }
+        // The re-admitter's own message, written by someone else.
+        let theirs = HistoryBundleCodec.gapRow(row("outgoing"), author: other, ownKey: own, route: "knock")
+        XCTAssertEqual(theirs.direction, "incoming")
+        XCTAssertEqual(theirs.authorKeyB64, base64Encode(other))
+        // This person's own message, which the re-admitter received.
+        let mine = HistoryBundleCodec.gapRow(row("incoming"), author: own, ownKey: own, route: "knock")
+        XCTAssertEqual(mine.direction, "outgoing")
+        XCTAssertEqual(mine.authorKeyB64, base64Encode(own))
+        XCTAssertEqual(HistoryBundleCodec.gapRow(row("system"), author: other, ownKey: own, route: "knock").direction,
+                       "system")
+        // No author: the route rule.
+        XCTAssertEqual(HistoryBundleCodec.gapRow(row("outgoing"), author: nil, ownKey: own, route: "mailbox").direction,
+                       "incoming")
+        XCTAssertEqual(HistoryBundleCodec.gapRow(row("incoming"), author: nil, ownKey: own, route: "mailbox").direction,
+                       "outgoing")
+        XCTAssertEqual(HistoryBundleCodec.gapRow(row("outgoing"), author: nil, ownKey: own, route: "own-device").direction,
+                       "outgoing")
+        XCTAssertEqual(HistoryBundleCodec.gapRow(row("outgoing"), author: nil, ownKey: own, route: "knock").direction,
+                       "incoming")
+        XCTAssertEqual(HistoryBundleCodec.gapRow(row("outgoing"), author: nil, ownKey: own, route: nil).direction,
+                       "incoming")
+        XCTAssertNil(HistoryBundleCodec.gapRow(row("incoming"), author: nil, ownKey: own, route: nil).authorKeyB64)
+        // A pairing bundle (the same account): incoming rows take the author,
+        // directions stay.
+        let paired = HistoryBundleCodec.pairingRow(row("incoming"), author: other)
+        XCTAssertEqual(paired.direction, "incoming")
+        XCTAssertEqual(paired.authorKeyB64, base64Encode(other))
+        XCTAssertEqual(HistoryBundleCodec.pairingRow(row("outgoing"), author: other).direction, "outgoing")
+    }
+
+    /// W3-R3 — the route that brought the device back survives in the gap
+    /// look, so a row without an author is still placed by it.
+    func testAGapLookKeepsTheRouteOfTheRequest() throws {
+        let store = ReentryGapLookStore(defaults: suite(), wrapKey: { _, _ in Data(repeating: 9, count: 32) })
+        let look = ReentryGapLook(
+            groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 2, route: "mailbox")
+        XCTAssertTrue(store.save(look, accountIdB64: account))
+        XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa")?.route, "mailbox")
+    }
 }

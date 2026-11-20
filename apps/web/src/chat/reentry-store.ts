@@ -204,8 +204,9 @@ export function recordReentryRequest(
     groupIdB64: input.groupIdB64,
     keyPackagesB64: kept,
     epochLeft: input.epochLeft.toString(),
-    // The gap starts where the first request said it did.
-    gapFromMs: prior?.gapFromMs ?? input.gapFromMs,
+    // The gap starts at the earliest start a request named (live walk 2: a
+    // later request may know an earlier start, never a later one).
+    gapFromMs: prior === undefined ? input.gapFromMs : Math.min(prior.gapFromMs, input.gapFromMs),
     lastSentMs: input.sentAtMs,
     route: input.route,
   };
@@ -366,7 +367,7 @@ export function storeKnockKey(groupIdB64: string, key: HeldKnockKey, owner?: str
   }
 }
 
-/** What the owner last sent the group: `version:memberCount`. */
+/** What the owner last delivered to the group ({@link knockKeySentMarkOf}). */
 export function knockKeySentMark(groupIdB64: string, owner?: string): string | undefined {
   const a = account(owner);
   if (a === null) return undefined;
@@ -391,17 +392,34 @@ export function clearKnockKeySentMark(groupIdB64: string, owner?: string): void 
 }
 
 /**
- * Whether the owner sends the knock key now: a new version, or the group
- * grew since the last send (section 3: "re-sent on a version change and on
- * growth"). A shrink sends nothing.
+ * The mark of a delivered knock key: its version and the members it reached
+ * (a short fingerprint of each leaf signature key, standard base64).
  */
-export function knockKeySendDue(sentMark: string | undefined, version: number, memberCount: number): boolean {
+export function knockKeySentMarkOf(version: number, memberKeysB64: readonly string[]): string {
+  return `${version}|${[...new Set(memberKeysB64.map(knockKeyMemberFingerprint))].sort().join(",")}`;
+}
+
+/** The first 12 base64 characters (9 bytes) of a member key. */
+function knockKeyMemberFingerprint(keyB64: string): string {
+  return keyB64.slice(0, 12);
+}
+
+/**
+ * Whether the owner sends the knock key now (section 3: "re-sent on a version
+ * change and on growth"): no delivery yet, a new version, or a current member
+ * the last delivery did not reach. Judged against the members of the last
+ * DELIVERED send, not a growth one poll saw (live walk 2, 2026-11-19: a
+ * growth seen while the send was skipped stayed unserved), so a remove and an
+ * add in one commit also count. A shrink sends nothing.
+ */
+export function knockKeySendDue(sentMark: string | undefined, version: number, memberKeysB64: readonly string[]): boolean {
   if (sentMark === undefined) return true;
-  const [v, m] = sentMark.split(":");
-  const sentVersion = Number(v);
-  const sentMembers = Number(m);
-  if (!Number.isFinite(sentVersion) || !Number.isFinite(sentMembers)) return true;
-  return sentVersion !== version || memberCount > sentMembers;
+  const bar = sentMark.indexOf("|");
+  if (bar < 0) return true;
+  const sentVersion = Number(sentMark.slice(0, bar));
+  if (!Number.isFinite(sentVersion) || sentVersion !== version) return true;
+  const reached = new Set(sentMark.slice(bar + 1).split(",").filter((f) => f.length > 0));
+  return memberKeysB64.some((k) => !reached.has(knockKeyMemberFingerprint(k)));
 }
 
 // ---------- the re-admitter's owed sends (section 7) -----------------------
@@ -471,6 +489,9 @@ export interface StoredGapLook {
   readonly gapToMs: number;
   /** When it last looked (0: never). */
   readonly lastLookMs: number;
+  /** The route of the request the device came back by (live walk 3): a
+   *  bundled row that names no author takes its direction from it. */
+  readonly route?: ReentryRouteName;
 }
 
 function isGapLook(raw: unknown): raw is StoredGapLook {
@@ -481,7 +502,8 @@ function isGapLook(raw: unknown): raw is StoredGapLook {
     typeof r.sealedSecretB64 === "string" &&
     typeof r.gapFromMs === "number" &&
     typeof r.gapToMs === "number" &&
-    typeof r.lastLookMs === "number"
+    typeof r.lastLookMs === "number" &&
+    (r.route === undefined || r.route === "own-device" || r.route === "mailbox" || r.route === "knock")
   );
 }
 

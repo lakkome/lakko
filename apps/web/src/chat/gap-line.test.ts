@@ -9,15 +9,28 @@ import { gapLineTimes, insertByMessageId, placeGapLines } from "./gap-line";
 import { addGapLine, gapLines, narrowGapLine } from "./reentry-store";
 
 describe("placement", () => {
-  it("sits before the first entry at or after the time the device came back", () => {
-    const p = placeGapLines([100, 200, Number.NaN, 400], [{ fromMs: 50, toMs: 300 }]);
+  it("sits after the last entry at or before the gap's start", () => {
+    const p = placeGapLines([100, 200, Number.NaN, 400], [{ fromMs: 200, toMs: 300 }]);
     expect([...p.before.keys()]).toEqual([3]);
     expect(p.trailing).toEqual([]);
   });
 
-  it("at the bottom when nothing happened since", () => {
+  it("a message sent after the replacement but before the local join stays below the line", () => {
+    // Live walk 2, cycle 2: the gap ran from 1000 to the replacement; a
+    // message at 1500 is readable; the device joined locally at 1600.
+    const p = placeGapLines([500, 1000, 1500], [{ fromMs: 1000, toMs: 1600 }]);
+    expect([...p.before.keys()]).toEqual([2]);
+    expect(p.trailing).toEqual([]);
+  });
+
+  it("at the bottom when nothing happened after its start", () => {
+    const p = placeGapLines([100, 200], [{ fromMs: 250, toMs: 300 }]);
+    expect(p.trailing).toEqual([{ fromMs: 250, toMs: 300 }]);
+  });
+
+  it("first when every entry is later", () => {
     const p = placeGapLines([100, 200], [{ fromMs: 50, toMs: 300 }]);
-    expect(p.trailing).toEqual([{ fromMs: 50, toMs: 300 }]);
+    expect([...p.before.keys()]).toEqual([0]);
   });
 
   it("the date is shown once on the same day", () => {

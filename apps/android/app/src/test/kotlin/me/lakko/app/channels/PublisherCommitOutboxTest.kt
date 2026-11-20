@@ -303,4 +303,124 @@ class PublisherCommitOutboxTest {
         runPublisherCommit(removal, r, quiet)
         assertEquals(removal.id, r.finished?.id)
     }
+
+    // ---- Retry of recorded commits (2026-11-20) ----
+
+    private val refusal = ChannelsApiException(401, "owner-proof-required", "this route needs a valid channel owner proof")
+
+    private fun merged(n: Int, channel: String) = rotation.copy(
+        id = n.toString(16).padStart(32, '0'),
+        channelIdHex = channel,
+        done = listOf(PublisherCommitEntry.Step.JOURNAL),
+    )
+
+    @Test
+    fun `a refusal is the owner proof or a deleted channel, and nothing else`() {
+        assertEquals(PublisherCommitFailure.REFUSED, PublisherCommitFailure.of(refusal))
+        assertEquals(PublisherCommitFailure.REFUSED, PublisherCommitFailure.of(ChannelsApiException(410, "channel-deleted", "")))
+        assertEquals(PublisherCommitFailure.REFUSED, PublisherCommitFailure.of(IllegalStateException("wrapped", refusal)))
+        assertEquals(PublisherCommitFailure.TRANSIENT, PublisherCommitFailure.of(ChannelsApiException(503, "internal", "")))
+        assertEquals(PublisherCommitFailure.TRANSIENT, PublisherCommitFailure.of(ChannelsApiException(409, "stale-target-epoch", "")))
+        assertEquals(PublisherCommitFailure.TRANSIENT, PublisherCommitFailure.of(java.io.IOException("reset")))
+        assertEquals("401 owner-proof-required", PublisherCommitFailure.logLabel(refusal))
+    }
+
+    @Test
+    fun `a pile of refused entries of one channel costs one request and is held until the next start`() = runTest {
+        var now = 1_000_000L
+        val retry = PublisherCommitRetry(clock = { now }, warn = {})
+        val entries = (0 until 172).map { merged(it, "11".repeat(16)) }
+        var calls = 0
+        retry.replay(entries, "acct") {
+            calls += 1
+            throw refusal
+        }
+        assertEquals(1, calls)
+        assertEquals(true, retry.hold("acct", "11".repeat(16))?.refused)
+        now += 24 * 3_600_000L
+        retry.replay(entries, "acct") { calls += 1 }
+        assertEquals(1, calls)
+        retry.reset()
+        retry.replay(entries, "acct") { calls += 1 }
+        assertEquals(1 + entries.size, calls)
+    }
+
+    @Test
+    fun `a refused channel does not hold another channel`() = runTest {
+        val retry = PublisherCommitRetry(clock = { 0L }, warn = {})
+        val a = merged(1, "11".repeat(16))
+        val b = merged(2, "33".repeat(16))
+        val c = merged(3, "11".repeat(16))
+        val ran = ArrayList<String>()
+        retry.replay(listOf(a, b, c), "acct") { e ->
+            ran += e.id
+            if (e.channelIdHex == a.channelIdHex) throw refusal
+        }
+        assertEquals(listOf(a.id, b.id), ran)
+        assertTrue(retry.mayAttempt("acct", b.channelIdHex))
+    }
+
+    @Test
+    fun `a transient failure waits 30 s doubling to 10 minutes`() = runTest {
+        var now = 5_000_000L
+        val retry = PublisherCommitRetry(clock = { now }, warn = {})
+        val entries = listOf(merged(1, "11".repeat(16)), merged(2, "11".repeat(16)))
+        var calls = 0
+        val fail: suspend (PublisherCommitEntry) -> Unit = {
+            calls += 1
+            throw java.io.IOException("timeout")
+        }
+        retry.replay(entries, "acct", run = fail)
+        assertEquals(1, calls)
+        now += 29_999
+        retry.replay(entries, "acct", run = fail)
+        assertEquals(1, calls)
+        now += 1
+        retry.replay(entries, "acct", run = fail)
+        assertEquals(2, calls)
+        now += 59_999
+        assertFalse(retry.mayAttempt("acct", "11".repeat(16)))
+        now += 1
+        assertTrue(retry.mayAttempt("acct", "11".repeat(16)))
+        assertEquals(30_000L, PublisherCommitHold.backoffMs(1))
+        assertEquals(600_000L, PublisherCommitHold.backoffMs(40))
+        retry.replay(entries, "acct") { calls += 1 }
+        assertNull(retry.hold("acct", "11".repeat(16)))
+        assertEquals(4, calls)
+    }
+
+    @Test
+    fun `no rotation is staged while a commit of the channel owes its journal step or reseal`() {
+        val owed = merged(1, "11".repeat(16))
+        assertTrue(PublisherCommitRetry.hasOwedCommit("11".repeat(16).uppercase(), listOf(owed)))
+        assertFalse(PublisherCommitRetry.hasOwedCommit("33".repeat(16), listOf(owed)))
+        assertFalse(PublisherCommitRetry.hasOwedCommit("11".repeat(16), listOf(owed.withStepDone(PublisherCommitEntry.Step.RESEAL))))
+        val welcomeOnly = approve.withStepDone(PublisherCommitEntry.Step.JOURNAL).withStepDone(PublisherCommitEntry.Step.RESEAL)
+        assertFalse(PublisherCommitRetry.hasOwedCommit(approve.channelIdHex, listOf(welcomeOnly)))
+        assertTrue(PublisherCommitRetry.hasOwedCommit(approve.channelIdHex, listOf(approve)))
+        assertFalse(PublisherCommitRetry.hasOwedCommit(approve.channelIdHex, listOf(approve.copy(journalLost = true))))
+    }
+
+    @Test
+    fun `an entry owing its journal step is never held`() = runTest {
+        val retry = PublisherCommitRetry(clock = { 0L }, warn = {})
+        retry.noteFailure("acct", approve.channelIdHex, refusal)
+        var calls = 0
+        repeat(3) {
+            retry.replay(listOf(approve), "acct", reread = { approve }) {
+                calls += 1
+                throw java.io.IOException("unanswered")
+            }
+        }
+        assertEquals(3, calls)
+        assertEquals(1, retry.hold("acct", approve.channelIdHex)?.failures)
+        val fresh = PublisherCommitRetry(clock = { 0L }, warn = {})
+        fresh.replay(
+            listOf(approve),
+            "acct",
+            reread = { approve.withStepDone(PublisherCommitEntry.Step.JOURNAL) },
+        ) { throw refusal }
+        assertEquals(true, fresh.hold("acct", approve.channelIdHex)?.refused)
+    }
 }
+

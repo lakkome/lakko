@@ -487,6 +487,20 @@ public class ChatViewModel(
         // check of its people and whatever an accepted reset still owes this
         // group. Fire-and-forget inside the repository; nothing is shown.
         repo.checkResetsOnOpen(groupIdHex)
+        // ADR-0091 walk 2, R5 — a chat that waits to be brought back shows no
+        // error: one already shown (from a send refused while only suspected)
+        // is cleared when the waiting starts, so it does not come back stale
+        // with the composer.
+        viewModelScope.launch {
+            reentryWaiting.collect { note ->
+                if (note != null) {
+                    composer.update {
+                        val kept = me.lakko.app.chat.composerErrorWhileWaiting(waiting = true, it.sendError)
+                        if (kept == it.sendError) it else it.copy(sendError = kept)
+                    }
+                }
+            }
+        }
         // Manually combine two StateFlows — kotlinx-coroutines
         // has no synchronous `combine` for two StateFlows;
         // two parallel collectors keep the derived flow hot
@@ -4029,7 +4043,19 @@ public class ChatViewModel(
      *  screen's receive loop. Receiving is otherwise automatic; there is no
      *  Refresh button. */
     public fun pollNow() {
-        viewModelScope.launch { repo.pollGroup(groupIdHex) }
+        viewModelScope.launch {
+            // A refused or failed read is the receive loop's business (it
+            // backs off and retries); an uncaught one here took the whole app
+            // down each time the chat opened while the DS refused this
+            // device's reads (ADR-0091 walk 4).
+            try {
+                repo.pollGroup(groupIdHex)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "first poll failed (${me.lakko.app.chat.errorLogTag(cause)})")
+            }
+        }
     }
 
     /**

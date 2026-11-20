@@ -276,29 +276,79 @@ async function fetchJson<T>(
 
 /** The channel owner signer of `channelIdHex` for the account identity
  *  (ADR-0059 section 1). Only the account that created the channel derives
- *  the key the server registered for it. */
+ *  the key the server registered for it. 2026-11-20 (ADR-0074): every owner
+ *  request goes through this ONE mapping ({@link ownerProofIdentity}), so no
+ *  caller can sign with the wrong one of the account's identities; only the
+ *  handover ({@link putChannelOwner}) signs by exact keys. */
 async function ownerSigner(
   accountIdentity: Identity,
   channelIdHex: string,
 ): Promise<ChannelOwnerSigner> {
   const wasm = await loadWasm();
-  // ADR-0074 section 3.5: once a channel's owner key was handed over to the
-  // key of the account's NEW identity, owner requests are signed by it. The
-  // identity passed in is the one whose MLS provider holds the
-  // PublisherGroup (the conversation identity), which after a rotation is
-  // the predecessor.
-  const moved = movedOwnerIdentity?.(channelIdHex.toLowerCase()) ?? null;
-  return wasm.channelOwnerSigner(moved ?? accountIdentity, hexToBytesStrict(channelIdHex));
+  return wasm.channelOwnerSigner(ownerProofIdentity(accountIdentity), hexToBytesStrict(channelIdHex));
 }
 
-/** The identity whose owner key a channel was handed over to, or `null`
- *  when it was not (installed by the session; see {@link handOverChannelOwner}). */
-let movedOwnerIdentity: ((channelIdHexLower: string) => Identity | null) | null = null;
+/** 2026-11-20 (ADR-0074) — the account's identities, for the owner and
+ *  co-publisher proof rules (installed by the session; see
+ *  `OwedKeyRotation.tsx`). */
+let accountIdentities: (() => { readonly current: Identity; readonly lineage: Identity } | null) | null = null;
 
-export function installMovedOwnerIdentity(
-  source: ((channelIdHexLower: string) => Identity | null) | null,
+/**
+ * The pair the session installs, from the chat context: the current identity,
+ * and the lineage one, which is the OLDEST own predecessor (the conversation
+ * key the device binding names; it stays the oldest across a second
+ * rotation, the later keys becoming intermediates), else the current one (a
+ * device bound under the current key), the same rule as iOS
+ * `ChannelPublisherIdentity.ownerSeed` and Android's bound identity. Pure.
+ */
+export function proofIdentitiesOf(src: {
+  readonly accountIdentity: () => Identity | null;
+  readonly conversationAccountIdentity: () => Identity | null;
+}): { readonly current: Identity; readonly lineage: Identity } | null {
+  const current = src.accountIdentity();
+  const lineage = src.conversationAccountIdentity();
+  return current === null || lineage === null ? null : { current, lineage };
+}
+
+export function installAccountIdentities(
+  source: (() => { readonly current: Identity; readonly lineage: Identity } | null) | null,
 ): void {
-  movedOwnerIdentity = source;
+  accountIdentities = source;
+}
+
+function sameIdentityKey(a: Identity, b: Identity): boolean {
+  const x = a.signaturePublicKey;
+  const y = b.signaturePublicKey;
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
+/**
+ * The identity an owner proof is signed with: the account's CURRENT
+ * identity, the key the owner key moves to on a rotation (ADR-0074 section
+ * 3.5, the owner-key repair), whichever of the account's identities the
+ * caller passed, as on iOS and Android. An identity that is neither of this
+ * account's is used as passed. Exported for tests.
+ */
+export function ownerProofIdentity(passed: Identity): Identity {
+  const ids = accountIdentities?.() ?? null;
+  if (ids === null) return passed;
+  if (!sameIdentityKey(passed, ids.current) && !sameIdentityKey(passed, ids.lineage)) return passed;
+  return ids.current;
+}
+
+/**
+ * The identity a co-publisher proof is signed with: the account's lineage
+ * identity, the one the binding the channel's owner appointed was composed
+ * with (the knock and the in-group binding). A co-publisher cannot move its
+ * own appointment, so its key must be the one a rotation never changes. iOS
+ * and Android sign by the same rule. An identity that is neither of this
+ * account's is used as passed. Exported for tests.
+ */
+export function coPublisherProofIdentity(passed: Identity): Identity {
+  const ids = accountIdentities?.() ?? null;
+  if (ids === null) return passed;
+  if (!sameIdentityKey(passed, ids.current) && !sameIdentityKey(passed, ids.lineage)) return passed;
+  return ids.lineage;
 }
 
 /**
@@ -434,7 +484,7 @@ async function publisherProofHeader(
       signer.free();
     }
   }
-  const signer = wasm.channelCoPublisherSigner(accountIdentity, hexToBytesStrict(channelIdHex));
+  const signer = wasm.channelCoPublisherSigner(coPublisherProofIdentity(accountIdentity), hexToBytesStrict(channelIdHex));
   try {
     return { [wasm.channelCoPublisherProofHeaderName()]: signer.sign(method, path, query, body) };
   } finally {

@@ -180,4 +180,80 @@ final class HistoryBundleMediaTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.messageId == 3 }?.forward, forward)
         XCTAssertNil(rows.first { $0.messageId == 1 }?.reply)
     }
+
+    // MARK: - ADR-0091 walk 3 (W3-R3): the author travels
+
+    private func authored(_ id: Int64, _ direction: String, _ author: Data?) -> PersistedMessage {
+        PersistedMessage(
+            messageId: id, direction: direction, text: "m\(id)", attachments: [],
+            createdAt: "2026-11-20T12:00:0\(id)Z", authorKeyB64: author.map { $0.base64EncodedString() })
+    }
+
+    /// Seen live 2026-11-20: every row of a gap bundle reached the device
+    /// that came back with no author, so none showed a name or an avatar,
+    /// and the re-admitter's own messages showed as the receiver's.
+    func testAGapBundleRowShowsItsAuthorAndItsDirectionOnTheDeviceThatCameBack() throws {
+        let receiver = "history-gap-author-\(UUID().uuidString)"
+        let store = MessageLogStore()
+        defer { store.deleteLog(accountIdB64: receiver) }
+        let admitter = Data(repeating: 0x41, count: 32)
+        let member = Data(repeating: 0x42, count: 32)
+        let third = Data(repeating: 0x43, count: 32)
+        // The re-admitter's log: its own message, the returning member's, a
+        // third person's, and a system row.
+        let rows = [
+            authored(1, "outgoing", admitter),
+            authored(2, "incoming", member),
+            authored(3, "incoming", third),
+            authored(4, "system", nil),
+        ]
+        let sealed = try XCTUnwrap(HistoryBundleCodec.buildForGroup(
+            hex: groupHex, rows: rows, accountIdB64: "sender", secret: secret, ownKey: admitter))
+        let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealed)
+        XCTAssertEqual(
+            opened.groups.flatMap(\.messages).map { HistoryBundleCodec.decodeOpenedPlaceholder($0.payloadBytes)?.authorKey },
+            [admitter, member, third, nil])
+
+        _ = try HistoryBundleCodec.applyGapBundle(
+            accountIdB64: receiver, secret: secret, sealedBytes: sealed,
+            ownKey: member, route: "knock", store: store)
+
+        let back = try XCTUnwrap(store.getLog(accountIdB64: receiver)?.groups[groupHex]?.messages)
+        let byId = Dictionary(uniqueKeysWithValues: back.map { ($0.messageId, $0) })
+        XCTAssertEqual(byId[1]?.direction, "incoming")
+        XCTAssertEqual(byId[1]?.authorKeyB64, admitter.base64EncodedString())
+        XCTAssertEqual(byId[2]?.direction, "outgoing", "this person's own message is theirs here")
+        XCTAssertEqual(byId[2]?.authorKeyB64, member.base64EncodedString())
+        XCTAssertEqual(byId[3]?.direction, "incoming")
+        XCTAssertEqual(byId[3]?.authorKeyB64, third.base64EncodedString())
+        XCTAssertEqual(byId[4]?.direction, "system")
+        XCTAssertNil(byId[4]?.authorKeyB64)
+        // The row a chat draws names the author the way a live row does.
+        XCTAssertEqual(byId[3]?.toChatMessage()?.authorKeyB64, third.base64EncodedString())
+    }
+
+    /// The pairing bundle (the same account): incoming rows keep their
+    /// author; directions are as sent.
+    func testAPairingBundleRowKeepsItsAuthor() throws {
+        let sender = "history-pair-author-sender-\(UUID().uuidString)"
+        let joiner = "history-pair-author-joiner-\(UUID().uuidString)"
+        let store = MessageLogStore()
+        defer {
+            store.deleteLog(accountIdB64: sender)
+            store.deleteLog(accountIdB64: joiner)
+        }
+        let own = Data(repeating: 0x51, count: 32)
+        let them = Data(repeating: 0x52, count: 32)
+        store.putLog(accountIdB64: sender, payload: MessageLogPayload(groups: [
+            groupHex: PersistedGroup(cursor: 2, messages: [authored(1, "outgoing", own), authored(2, "incoming", them)]),
+        ]))
+        let sealed = try XCTUnwrap(HistoryBundleCodec.buildFromMessageLog(
+            accountIdB64: sender, secret: secret, store: store))
+        _ = try HistoryBundleCodec.applyToMessageLog(
+            accountIdB64: joiner, secret: secret, sealedBytes: sealed, store: store)
+        let back = try XCTUnwrap(store.getLog(accountIdB64: joiner)?.groups[groupHex]?.messages)
+        XCTAssertEqual(back.first { $0.messageId == 2 }?.authorKeyB64, them.base64EncodedString())
+        XCTAssertEqual(back.first { $0.messageId == 2 }?.direction, "incoming")
+        XCTAssertEqual(back.first { $0.messageId == 1 }?.direction, "outgoing")
+    }
 }

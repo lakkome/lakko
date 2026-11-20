@@ -136,7 +136,23 @@ public enum ChannelPublisherCommits {
         // epoch this commit moves to before it is sent: one attempt, and a
         // failure never stops the commit.
         await ChannelVaultHead.writeStaged(channelIdHex: context.channelIdHex, group: group, identity: identity)
-        let landed = try await runRecorded(entry, context: context, state: state)
+        let landed: Bool
+        do {
+            landed = try await runRecorded(entry, context: context, state: state)
+            PublisherCommitRetry.shared.noteSuccess(
+                accountIdB64: context.accountIdB64, channelIdHex: context.channelIdHex)
+        } catch {
+            // The entry stays. A failure after the journal step holds the
+            // channel (a refusal: until the next start); an unanswered
+            // journal step is sent again next pass.
+            let after = PublisherCommitStore.shared.entries(accountIdB64: context.accountIdB64)
+                .first { $0.id == entry.id } ?? entry
+            if !PublisherCommitRetry.owesJournal(after) {
+                PublisherCommitRetry.shared.noteFailure(
+                    accountIdB64: context.accountIdB64, channelIdHex: context.channelIdHex, error: error)
+            }
+            throw error
+        }
         if landed {
             refreshContentSeed(context, state: state, landedEpoch: serverTargetEpoch)
         }
@@ -232,6 +248,13 @@ public enum ChannelPublisherCommits {
                     throughSeq: ChannelReseal.resealThrough(
                         isPublic: extras?.isPublic, mark: extras?.admittedThroughSeq),
                     ownReaderKeyHex: extras?.readerKeyRegisteredHex)
+                // 2026-11-20 — the service now serves the group's current seed
+                // at `targetEpoch`: the mapping is anchored there, whatever
+                // commits before had no reseal of their own.
+                if let state, let mls = try? group.epoch(), let seed = try? group.channelSeed(identity: identity) {
+                    ChannelDeviceAdmission.anchor(
+                        channelId: context.channelIdHex, state: state, mls: mls, epoch: targetEpoch, seed: seed)
+                }
                 state?.setEpoch(channelId: context.channelIdHex, epoch: targetEpoch)
             },
             appoint: { joinerLeaf in
@@ -329,18 +352,26 @@ public enum ChannelPublisherCommits {
     /// Resume every recorded commit of the account whose steps had not all
     /// landed (a restart, a failed step). An entry whose group did not reach
     /// its target epoch is dropped (``PublisherCommitEntry/replayVerdict(_:restoredEpoch:)``).
-    /// Errors are logged; the entry stays for the next run.
+    /// A failed entry stays; its channel is then held by
+    /// ``PublisherCommitRetry`` (a refusal until the next start, any other
+    /// failure for a growing wait), and the channel's later entries wait with
+    /// it, so a pile of entries costs one request per channel, not one each.
     public static func replayAll(
         accountIdB64: String, currentSeed: Data, state: ChannelsUiState?,
         channelsClient: ChannelsClient = ChannelsClient(), ds: DsClient = DsClient()
     ) async {
-        for entry in PublisherCommitStore.shared.entries(accountIdB64: accountIdB64)
-        where !running.contains(entry.id) {
-            // Without the account's channel provider nothing is judged: an
-            // entry is dropped only against a provider that did restore.
-            guard accountIdB64 == AcceptedContactsStore.boundAccountIdB64,
-                  let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: currentSeed)
-            else { return }
+        // Without the account's channel provider nothing is judged: an
+        // entry is dropped only against a provider that did restore.
+        guard accountIdB64 == AcceptedContactsStore.boundAccountIdB64,
+              let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: currentSeed)
+        else { return }
+        let entries = PublisherCommitStore.shared.entries(accountIdB64: accountIdB64)
+            .filter { !running.contains($0.id) }
+        await PublisherCommitRetry.shared.replay(
+            entries, accountIdB64: accountIdB64,
+            reread: { id in PublisherCommitStore.shared.entries(accountIdB64: accountIdB64).first { $0.id == id } }
+        ) { entry in
+            guard accountIdB64 == AcceptedContactsStore.boundAccountIdB64, !running.contains(entry.id) else { return }
             let context = Context(
                 channelIdHex: entry.channelIdHex, currentSeed: currentSeed,
                 accountIdB64: accountIdB64, channelsClient: channelsClient, ds: ds)
@@ -364,13 +395,8 @@ public enum ChannelPublisherCommits {
                 }
                 running.insert(entry.id)
                 defer { running.remove(entry.id) }
-                do {
-                    try await PublisherCommitRunner.run(entry, ports: ports(context, state: state))
-                    refreshContentSeed(context, state: state, landedEpoch: entry.serverTargetEpoch)
-                } catch {
-                    NSLog("Channels: a recorded PublisherGroup commit did not finish; retried later: %@",
-                          String(describing: error))
-                }
+                try await PublisherCommitRunner.run(entry, ports: ports(context, state: state))
+                refreshContentSeed(context, state: state, landedEpoch: entry.serverTargetEpoch)
             }
         }
     }

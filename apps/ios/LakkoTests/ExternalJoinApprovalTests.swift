@@ -50,6 +50,21 @@ final class ScriptedDsURLProtocol: URLProtocol {
 
     private static let lock = NSLock()
     private static var journals: [String: Journal] = [:]
+    /// The epoch a `POST /knock` answer names per scope (ADR-0053); absent =
+    /// `null`. A knock is never a journal row.
+    private static var knockEpochs: [String: UInt64] = [:]
+    /// Every knock per scope, in order: the payload count (0 for a probe).
+    private static var knocks: [String: [Int]] = [:]
+
+    static func setKnockEpoch(_ epoch: UInt64?, scope: String) {
+        lock.lock(); defer { lock.unlock() }
+        knockEpochs[scope] = epoch
+    }
+
+    static func knockPayloadCounts(scope: String) -> [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return knocks[scope] ?? []
+    }
 
     /// A fresh, unique journal scope. Every fixture takes one.
     static func freshScope() -> String {
@@ -117,7 +132,17 @@ final class ScriptedDsURLProtocol: URLProtocol {
             return
         }
         let body: Data
-        if url.path.hasSuffix("/knocks") {
+        if url.path.hasSuffix("/knock"), request.httpMethod == "POST" {
+            let payload = Self.bodyData(of: request)
+            let count = ((try? JSONSerialization.jsonObject(with: payload)) as? [String: Any])
+                .flatMap { $0["payloads_b64"] as? [Any] }?.count ?? 0
+            let epoch: UInt64? = Self.lock.withLock {
+                Self.knocks[scope, default: []].append(count)
+                return Self.knockEpochs[scope]
+            }
+            let ids = (0..<count).map { String(1_000 + $0) }.joined(separator: ",")
+            body = Data(#"{"ids":[\#(ids)],"epoch":\#(epoch.map(String.init) ?? "null")}"#.utf8)
+        } else if url.path.hasSuffix("/knocks") {
             body = Data(#"{"messages":[],"has_more":false}"#.utf8)
         } else if request.httpMethod == "POST" {
             // `URLProtocol` strips `httpBody` for a body set on the request when

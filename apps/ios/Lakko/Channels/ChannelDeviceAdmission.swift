@@ -134,6 +134,44 @@ enum ChannelDeviceAdmission {
         UInt32(clamping: Int64(clamping: mls) &+ (offset ?? 0))
     }
 
+    /// 2026-11-20 — the offset that makes the mapping hold again, or `nil`
+    /// when it holds. Each owner commit is meant to move the service by one
+    /// epoch with its reseal, so the group is never more than one epoch ahead
+    /// of the service; a run of commits whose reseal never landed (seen live:
+    /// about 150 rotations refused `401`) leaves the group far ahead, and the
+    /// mapping then names service epochs that will never carry its seed.
+    /// The reseal that does land seals the group's CURRENT seed at
+    /// `serviceEpoch + 1`, so that is where the current MLS epoch maps.
+    nonisolated static func reanchoredOffset(mls: UInt64, offset: Int64?, serviceEpoch: UInt32) -> Int64? {
+        let next = Int64(serviceEpoch) &+ 1
+        guard Int64(clamping: mls) &+ (offset ?? 0) > next else { return nil }
+        return next &- Int64(clamping: mls)
+    }
+
+    /// The offset after this device's own reseal of the group's current seed
+    /// landed the service at `landedEpoch` (exact, whatever came before).
+    nonisolated static func landedOffset(mls: UInt64, landedEpoch: UInt32) -> Int64? {
+        let offset = Int64(landedEpoch) &- Int64(clamping: mls)
+        return offset == 0 ? nil : offset
+    }
+
+    /// Record that the service serves `seed` at `epoch` (a reseal of it
+    /// landed, or is the next one owed) and that the group's MLS epoch `mls`
+    /// maps there. The seed overwrites any kept for that epoch: one filed
+    /// earlier under a mapping that no longer holds is wrong.
+    static func anchor(channelId: String, state: ChannelsUiState, mls: UInt64, epoch: UInt32, seed: Data) {
+        let offset = landedOffset(mls: mls, landedEpoch: epoch)
+        if state.extras(channelId).epochOffset != offset {
+            state.updateExtras(channelId) { $0.epochOffset = offset }
+        }
+        if state.subscribedSeeds(channelId: channelId)[epoch] != seed {
+            state.setSubscribedSeed(channelId: channelId, epoch: epoch, seed: seed)
+        }
+        // Seeds filed above it under the broken mapping would stop the right
+        // ones from being kept when the service reaches those epochs.
+        state.dropSubscribedSeeds(channelId: channelId, above: epoch)
+    }
+
     /// The offset a device learns at landing: the service's epoch minus the
     /// group's MLS epoch (the reseal ran before the Welcome was sent).
     nonisolated static func learnedOffset(serverEpoch: UInt32, mls: UInt64) -> Int64 {

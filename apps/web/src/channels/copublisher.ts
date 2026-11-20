@@ -94,11 +94,13 @@ import { appointCoPublisher, rememberPublisherRole } from "./api";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { commitInFlight, publisherCommitPorts, runStagedPublisherCommit } from "./rotation-cron";
 import {
+  publisherCommitRetry,
   remainingSteps,
   replayVerdict,
   runPublisherCommit,
   withStepDone,
   type PublisherCommitEntry,
+  type PublisherCommitOutcome,
   type PublisherCommitPorts,
 } from "./publisher-commit-outbox";
 import { admitExtras, learnEpochOffset } from "./publisher-devices";
@@ -943,24 +945,28 @@ function approveExtras(
  * (`afterReplayedPublisherCommits`).
  */
 export async function replayPublisherCommits(identity: Identity, apiBase?: string): Promise<LandedPublisherCommit[]> {
-  const pending = channelsActions.pendingPublisherCommits();
+  // ADR-0090: an owed commit is re-sent; one a live run is driving is left
+  // to it. 2026-11-20: a failed entry holds its channel
+  // (`publisherCommitRetry`: a refusal until the next start, any other
+  // failure for a growing wait), and the channel's later entries wait with
+  // it, so a pile of entries costs one request per channel, not one each.
+  const pending = channelsActions.pendingPublisherCommits().filter((e) => !commitInFlight(e.id));
   const landed: LandedPublisherCommit[] = [];
   const ds = new DsClient();
-  for (const entry of pending) {
-    // ADR-0090: an owed commit is re-sent by every pass; one a live run is
-    // driving is left to it.
-    if (commitInFlight(entry.id)) continue;
+  await publisherCommitRetry.replay(pending, async (entry) => {
+    if (commitInFlight(entry.id)) return "skipped";
     if (remainingSteps(entry).length === 0) {
       // Every step landed before the reload; what follows a commit (the new
       // seed, the record) may not have.
       landed.push({ channelIdHex: entry.channelIdHex, kind: entry.kind, serverTargetEpoch: entry.serverTargetEpoch });
       await channelsActions.finishPublisherCommit(entry.id).catch(() => undefined);
-      continue;
+      return "landed";
     }
     let group: PublisherGroup | null = null;
     try {
       group = await openPublisherGroupIfPresent(identity, entry.channelIdHex);
       const device = publisherDevice();
+      let result: PublisherCommitOutcome | "skipped" = "skipped";
       await withGroupMlsLock(base64Encode(hexToBytes(entry.groupIdHex) ?? new Uint8Array(0)), async () => {
         const restored = group === null ? null : group.epoch();
         const verdict = replayVerdict(entry, restored, group?.hasStagedCommit() ?? false);
@@ -988,18 +994,16 @@ export async function replayPublisherCommits(identity: Identity, apiBase?: strin
               ? admitExtras(ds, entry.channelIdHex)
               : {},
         );
-        const outcome = await runPublisherCommit(resumed, ports);
-        if (outcome === "landed") {
+        result = await runPublisherCommit(resumed, ports);
+        if (result === "landed") {
           landed.push({ channelIdHex: entry.channelIdHex, kind: entry.kind, serverTargetEpoch: entry.serverTargetEpoch });
         }
       });
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("G-50: a recorded PublisherGroup commit did not finish; it is retried next time", err);
+      return result;
     } finally {
       group?.free();
     }
-  }
+  }, (id) => channelsActions.pendingPublisherCommits().find((e) => e.id === id));
   await abandonUnrecordedStages(identity);
   return landed;
 }

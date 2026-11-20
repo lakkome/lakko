@@ -13,7 +13,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { bindContactsAccount } from "../contacts/local-store";
 import { consumeKnockKeyRow, sendKnockKeyIfDue, KNOCK_KEY_ENVELOPE_LEN } from "./knock-key";
-import { heldKnockKey, knockKeySendDue } from "./reentry-store";
+import { heldKnockKey, knockKeySendDue, knockKeySentMarkOf } from "./reentry-store";
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 
 beforeAll(async () => {
@@ -84,28 +84,58 @@ describe("receipt", () => {
 });
 
 describe("the owner's send", () => {
-  it("is due on a new version and on growth, not on a shrink", () => {
-    expect(knockKeySendDue(undefined, 1, 3)).toBe(true);
-    expect(knockKeySendDue("1:3", 1, 3)).toBe(false);
-    expect(knockKeySendDue("1:3", 2, 3)).toBe(true);
-    expect(knockKeySendDue("1:3", 1, 4)).toBe(true);
-    expect(knockKeySendDue("1:3", 1, 2)).toBe(false);
+  it("is due on a new version and for a member the last delivery did not reach, not on a shrink", () => {
+    const a = b64(new Uint8Array(32).fill(1));
+    const b = b64(new Uint8Array(32).fill(2));
+    const c = b64(new Uint8Array(32).fill(3));
+    const d = b64(new Uint8Array(32).fill(4));
+    const mark = knockKeySentMarkOf(1, [a, b, c]);
+    expect(knockKeySendDue(undefined, 1, [a, b, c])).toBe(true);
+    expect(knockKeySendDue(mark, 1, [c, a, b])).toBe(false);
+    expect(knockKeySendDue(mark, 2, [a, b, c])).toBe(true);
+    expect(knockKeySendDue(mark, 1, [a, b, c, d])).toBe(true);
+    expect(knockKeySendDue(mark, 1, [a, b])).toBe(false);
+    // A remove and an add in one commit: the count is unchanged.
+    expect(knockKeySendDue(mark, 1, [a, b, d])).toBe(true);
   });
 
   it("sends once, then again after growth", async () => {
     const sent: Uint8Array[] = [];
-    let members = 3;
+    let members = [1, 2, 3].map((n) => b64(new Uint8Array(32).fill(n)));
     const ports = {
       ownerKnockKey: async () => ({ version: 1, publicKey: new Uint8Array(32).fill(7) }),
-      memberCount: () => members,
+      memberKeys: () => members,
       compose: (v: number, pk: Uint8Array) => wasm.composeKnockKeyEnvelope(v, pk),
       broadcast: async (_g: WasmGroup, e: Uint8Array) => void sent.push(e),
     };
     expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("sent");
     expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("not-due");
-    members = 4;
+    members = [...members, b64(new Uint8Array(32).fill(4))];
     expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("sent");
     expect(sent.length).toBe(2);
     expect(await sendKnockKeyIfDue(GROUP, { ...ports, ownerKnockKey: async () => null })).toBe("not-owner");
+  });
+
+  it("a growth seen while the send failed stays due until a delivery reaches the new member", async () => {
+    const sent: Uint8Array[] = [];
+    let fail = false;
+    let members = [1, 2].map((n) => b64(new Uint8Array(32).fill(n)));
+    const ports = {
+      ownerKnockKey: async () => ({ version: 3, publicKey: new Uint8Array(32).fill(9) }),
+      memberKeys: () => members,
+      compose: (v: number, pk: Uint8Array) => wasm.composeKnockKeyEnvelope(v, pk),
+      broadcast: async (_g: WasmGroup, e: Uint8Array) => {
+        if (fail) throw new Error("behind");
+        sent.push(e);
+      },
+    };
+    expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("sent");
+    members = [...members, b64(new Uint8Array(32).fill(5))];
+    fail = true;
+    expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("failed");
+    fail = false;
+    expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("sent");
+    expect(await sendKnockKeyIfDue(GROUP, ports)).toBe("not-due");
+    expect(sent.length).toBe(2);
   });
 });

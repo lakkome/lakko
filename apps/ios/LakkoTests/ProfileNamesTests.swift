@@ -767,6 +767,36 @@ final class ProfileDirectoryTests: XCTestCase {
         XCTAssertEqual(names, ["Contact", "Recent", "Other"])
     }
 
+    /// Walk 3, W3-R4 — seen on Android 2026-11-20: composing the received
+    /// names for a backup (one core call per person) ran on the main thread.
+    /// The reads stay on the main actor, the composing runs off it, and what
+    /// is backed up is the same as before.
+    func testBackupNamesAreComposedOffTheMainThreadAndUnchanged() async {
+        let contact = base64Encode(Data(repeating: 0x05, count: 32))
+        let other = base64Encode(Data(repeating: 0x06, count: 32))
+        let gathered = OwnBackupEnvelopes.Gathered(
+            ownProfile: Data([1]), visibility: Data([2]),
+            profiles: [
+                other: ProfileClaim(displayName: "Other", username: nil, updatedAtMs: 1),
+                contact: ProfileClaim(displayName: "Contact", username: nil, updatedAtMs: 1),
+            ],
+            contactKeysB64: [contact], recentPeopleB64: [], ownKeysB64: [])
+        let (assembled, onMain) = await Task.detached {
+            (OwnBackupEnvelopes.assemble(gathered), Thread.isMainThread)
+        }.value
+        XCTAssertFalse(onMain)
+        XCTAssertEqual(assembled, OwnBackupEnvelopes(
+            ownProfile: Data([1]), visibility: Data([2]),
+            receivedProfiles: OwnBackupEnvelopes.receivedProfileRecords(
+                profiles: gathered.profiles, contactKeysB64: [contact], recentPeopleB64: [], ownKeysB64: [])))
+        XCTAssertEqual(assembled.receivedProfiles.map { base64Encode($0.personKey) }, [contact, other])
+
+        // `current` is the gathered state, assembled.
+        let account = "backup-off-main-\(UUID().uuidString)"
+        let current = await OwnBackupEnvelopes.current(accountIdB64: account)
+        XCTAssertEqual(current, OwnBackupEnvelopes.assemble(OwnBackupEnvelopes.gather(accountIdB64: account)))
+    }
+
     /// Restore feeds each carried name through the receive gate: a key with
     /// nothing held takes it, a held newer stamp is kept, an own key is
     /// skipped.

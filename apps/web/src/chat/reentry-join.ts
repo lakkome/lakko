@@ -30,7 +30,7 @@ import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/la
 import { conversationBehind } from "./conversation-behind";
 import { registeredCommitHolds } from "./registered-commit-hold";
 import { gapChannelOf, type GapChannel } from "./reentry-history";
-import { addGapLine, deleteReentryRecord, setReentryReadFrom, type ReentryRecord } from "./reentry-store";
+import { addGapLine, deleteReentryRecord, setReentryReadFrom, type ReentryRecord, type ReentryRouteName } from "./reentry-store";
 
 /** What the bookkeeping needs from the app. */
 export interface ReentryJoinPorts {
@@ -43,6 +43,9 @@ export interface ReentryJoinPorts {
     readonly channel: GapChannel;
     readonly gapFromMs: number;
     readonly gapToMs: number;
+    /** The route the answered request took (decides the direction of a
+     *  bundled row that names no author). */
+    readonly route: ReentryRouteName;
   }): void;
 }
 
@@ -97,5 +100,5 @@ export async function noteReentryJoined(input: {
   }
   // eslint-disable-next-line no-console
   console.info(`chat re-entry joined: epoch=${epoch ?? "-"}`);
-  if (channel !== null && p !== null) p.fetchGapHistory({ groupIdB64: input.groupIdB64, channel, gapFromMs: input.record.gapFromMs, gapToMs: nowMs });
+  if (channel !== null && p !== null) p.fetchGapHistory({ groupIdB64: input.groupIdB64, channel, gapFromMs: input.record.gapFromMs, gapToMs: nowMs, route: input.record.route });
 }

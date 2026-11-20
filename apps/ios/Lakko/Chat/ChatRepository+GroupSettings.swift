@@ -137,7 +137,7 @@ extension ChatRepository {
         let bytes = try composeGroupReactionsEnvelope(
             value: FfiGroupReactions(reactions: value, updatedAtMs: stamp))
         let bound = binding.capture()
-        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)
         try await groupNameLock.run(groupIdHex: groupIdHex) { [self] in
             groupSettingsStore.setReactions(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
@@ -216,7 +216,7 @@ extension ChatRepository {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         let bytes = try composeGroupPhotoEnvelope(photo: photo.ffi)
         let bound = binding.capture()
-        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)
         try await groupNameLock.run(groupIdHex: groupIdHex) { [self] in
             let previous = groupSettingsStore.photo(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
             groupSettingsStore.setPhoto(accountIdB64: accountIdB64, groupIdHex: groupIdHex, photo)
@@ -380,8 +380,13 @@ extension ChatRepository {
             name: name, description: "", leaseUntilMs: leaseUntilMs), accountIdB64)
         groupSettingsRevision &+= 1
         if let bytes = try? composeConversationHandleEnvelope(value: value) {
-            try? await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
-            groupHandlePublisher.notePublished(groupIdHex: groupIdHex)
+            // Stored first by design (the name is already written at the
+            // directory); a send held while behind goes again with the
+            // back-in-step re-send (walk-3 rule W3-R5) and on growth.
+            if (try? await publishApplicationMessage(
+                groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)) != nil {
+                groupHandlePublisher.notePublished(groupIdHex: groupIdHex)
+            }
         }
     }
 

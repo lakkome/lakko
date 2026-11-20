@@ -1163,7 +1163,7 @@ public final class ContactsRepository: ObservableObject {
             recipientX25519Pub: bundle.x25519Pubkey, request: wire)
         do {
             try await chatRepository.publishApplicationMessage(
-                groupIdHex: groupIdHex, plaintextBytes: envelope)
+                groupIdHex: groupIdHex, plaintextBytes: envelope, personAction: true)
         } catch {
             // Never delivered: its reply grant goes with it.
             ReachCenter.shared.retireReplies(purpose: ReplyPurpose.contact(recipientAccountId))

@@ -98,6 +98,7 @@ function ports(
     sendOwnDevice: async (b) => void sent.push({ route: "own-device", bytes: b }),
     sendMailbox: async (to, b) => void sent.push({ route: "mailbox", bytes: b, to }),
     sendKnock: async (_g, b) => void sent.push({ route: "knock", bytes: b }),
+    probeEpoch: async () => 7n,
     ...over,
   };
   return { p, sent };
@@ -146,14 +147,14 @@ describe("the roster helpers", () => {
 describe("the request (section 3)", () => {
   it("is not sent while in step", async () => {
     const { p, sent } = ports();
-    expect(await requestReentryIfDue(group, { state: IN_STEP, epochLeft: 7n, gapFromMs: 1 }, p)).toBe("not-due");
+    expect(await requestReentryIfDue(group, { state: IN_STEP, gapFromMs: 1 }, p)).toBe("not-due");
     expect(sent).toEqual([]);
     expect(minted).toBe(0);
   });
 
   it("mints, makes durable and records BEFORE it sends; one-to-one goes to the other person's mailbox", async () => {
     const { p, sent } = ports();
-    expect(await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1234 }, p)).toBe("sent");
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1234 }, p)).toBe("sent");
     expect(events).toEqual(["mint", "persist", "compose:recorded"]);
     expect(sent.map((s) => s.route)).toEqual(["mailbox"]);
     expect(btoa(String.fromCharCode(...(sent[0]?.to ?? [])))).toBe(PEER);
@@ -173,13 +174,13 @@ describe("the request (section 3)", () => {
       ],
       kind: "group",
     });
-    await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p);
+    await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
     expect(sent.map((s) => s.route)).toEqual(["own-device"]);
   });
 
   it("in a group without a held knock key, mints nothing", async () => {
     const { p, sent } = ports({ kind: "group" });
-    expect(await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p)).toBe("no-route");
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("no-route");
     expect(minted).toBe(0);
     expect(sent).toEqual([]);
   });
@@ -192,7 +193,7 @@ describe("the request (section 3)", () => {
       knockKey: async () => ({ version: 1, publicKeyB64: btoa(String.fromCharCode(...pk)) }),
       composeEnvelope: (g, e, gap, kp) => wasm.composeConversationReentryEnvelope(g, e, gap, kp),
     });
-    await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 99 }, p);
+    await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 99 }, p);
     const row = sent[0]?.bytes ?? new Uint8Array();
     expect(() => wasm.openKnockRow(seed, row)).toThrow();
     const opened = wasm.openReentryKnockRow(seed, row);
@@ -204,15 +205,53 @@ describe("the request (section 3)", () => {
   it("repeats every 30 minutes, keeps the newest two KeyPackages and forgets older ones", async () => {
     const { p, sent } = ports();
     for (let i = 0; i < 3; i++) {
-      await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p);
+      await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
       // Not due again within the interval.
-      expect(await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p)).toBe("not-due");
+      expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("not-due");
       now += 30 * 60_000;
     }
     expect(sent.length).toBe(3);
     expect(REENTRY_KEY_PACKAGES_KEPT).toBe(wasm.reentryRequestsKept());
     expect(reentryRecordFor(GID)?.keyPackagesB64.length).toBe(2);
     expect(forgotten.length).toBe(1);
+  });
+
+  it("names the epoch the journal answers right before every request, never a stored one (live walk 3)", async () => {
+    // The walk: a stale epoch 1 stood in the behind record while the owner
+    // was at 67; the request must name what the probe answers, each time.
+    const answers = [67n, 70n];
+    const probed: number[] = [];
+    const { p, sent } = ports({
+      probeEpoch: async () => {
+        probed.push(now);
+        return answers.shift() ?? null;
+      },
+    });
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(reentryRecordFor(GID)?.epochLeft).toBe("67");
+    // A request that is not due probes nothing (a probe costs a token).
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("not-due");
+    expect(probed.length).toBe(1);
+    now += 30 * 60_000;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(reentryRecordFor(GID)?.epochLeft).toBe("70");
+    expect(probed.length).toBe(2);
+    // The envelope carries the probed epoch (the fake compose puts it second).
+    expect(sent.map((s) => s.bytes[1])).toEqual([67, 70]);
+  });
+
+  it("a probe that names no epoch mints, records and sends nothing, and is retried soon", async () => {
+    let answer: bigint | null = null;
+    const { p, sent } = ports({ probeEpoch: async () => answer });
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("no-epoch");
+    expect(minted).toBe(0);
+    expect(reentryRecordFor(GID)).toBeUndefined();
+    expect(sent.length).toBe(0);
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("retry-wait");
+    now += SEND_RETRY_MS;
+    answer = 12n;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(reentryRecordFor(GID)?.epochLeft).toBe("12");
   });
 
   it("a failed send is retried after a short delay, not 30 minutes", async () => {
@@ -222,13 +261,13 @@ describe("the request (section 3)", () => {
         if (fail) throw new Error("network");
       },
     });
-    expect(await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p)).toBe("failed");
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("failed");
     // The record holds the KeyPackage (a Welcome answering it can be joined)
     // and was never marked sent.
     expect(reentryRecordFor(GID)?.lastSentMs).toBe(0);
-    expect(await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p)).toBe("retry-wait");
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("retry-wait");
     now += SEND_RETRY_MS;
     fail = false;
-    expect(await requestReentryIfDue(group, { state: SUSPECTED, epochLeft: 7n, gapFromMs: 1 }, p)).toBe("sent");
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
   });
 });

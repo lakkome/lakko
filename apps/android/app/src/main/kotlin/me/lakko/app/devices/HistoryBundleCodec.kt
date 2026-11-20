@@ -76,6 +76,10 @@ public object HistoryBundleCodec {
         context: Context,
         accountIdB64: String,
         secret: ByteArray,
+        /** Walk 3, W3-R3 — this account's own person key in a conversation
+         *  (base64), by group id hex; `null` falls back to the key a sent
+         *  outgoing row was stamped with. */
+        ownAuthorKeyB64: (groupIdHex: String) -> String? = { null },
     ): ByteArray? {
         val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
         if (log.groups.isEmpty()) return null
@@ -97,6 +101,7 @@ public object HistoryBundleCodec {
             val trimmed = carried.takeLast(perGroupCap)
             val capped = trimmed.size < carried.size
             val messages = mutableListOf<StructuredHistoryMessage>()
+            val ownKey = ownAuthorKeyB64(hex)
             for (m in trimmed) {
                 // G-6 step 2: encode the canonical cross-platform
                 // placeholder via the shared Rust core. Web / iOS
@@ -104,7 +109,7 @@ public object HistoryBundleCodec {
                 // wire (replacing the Android-only kotlinx JSON
                 // shape that did not interoperate with web).
                 val placeholder = try {
-                    encodePlaceholder(m)
+                    encodePlaceholder(m, ownKey)
                 } catch (_: Throwable) {
                     continue
                 }
@@ -158,6 +163,9 @@ public object HistoryBundleCodec {
         secret: ByteArray,
         groupIdHex: String,
         fromMs: Long,
+        /** Walk 3, W3-R3 — this account's own person key in the conversation
+         *  (base64): the author an outgoing row carries. */
+        ownAuthorKeyB64: String? = null,
     ): ByteArray? {
         val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
         val slot = log.groups[groupIdHex] ?: log.groups[groupIdHex.lowercase()] ?: return null
@@ -174,7 +182,7 @@ public object HistoryBundleCodec {
         var maxHlc: ULong = 0u
         val messages = kept.mapNotNull { m ->
             val placeholder = try {
-                encodePlaceholder(m)
+                encodePlaceholder(m, ownAuthorKeyB64)
             } catch (_: Throwable) {
                 return@mapNotNull null
             }
@@ -209,10 +217,11 @@ public object HistoryBundleCodec {
 
     /**
      * ADR-0091 phase 2 section 7 — take in a gap bundle for [groupIdHex]
-     * only (any other group in it is ignored). A placeholder carries no
-     * author, so [direction] maps the SENDER's direction to this device's:
-     * the same account keeps it, a one-to-one's other person swaps it, a
-     * group's re-admitter reads everything as incoming.
+     * only (any other group in it is ignored). [adapt] makes each row this
+     * device's: given the decoded row (the SENDER's direction) and the
+     * author the placeholder names (walk 3, W3-R3; base64, `null` when it
+     * names none), it sets the author and the direction
+     * ([me.lakko.app.chat.reentryBundleRow]).
      */
     public fun applyReentryBundle(
         context: Context,
@@ -220,14 +229,15 @@ public object HistoryBundleCodec {
         secret: ByteArray,
         sealedBytes: ByteArray,
         groupIdHex: String,
-        direction: (String) -> String,
+        adapt: (row: PersistedMessage, authorKeyB64: String?) -> PersistedMessage,
     ): ReentryBundleApplied {
         val opened = openHistoryBundleStructured(secret = secret, sealedBytes = sealedBytes)
         val group = opened.groups.firstOrNull { bytesToHex(it.groupId).equals(groupIdHex, ignoreCase = true) }
             ?: return ReentryBundleApplied(0, emptyList(), false)
         val rows = group.messages.mapNotNull { m ->
             try {
-                decodePlaceholder(m.payloadBytes).let { it.copy(direction = direction(it.direction)) }
+                val placeholder = decodeHistoryPlaceholder(m.payloadBytes)
+                adapt(persistedOf(placeholder), authorKeyB64Of(placeholder))
             } catch (cause: Throwable) {
                 Log.v(LOG_TAG, "decode placeholder failed", cause)
                 null
@@ -386,7 +396,37 @@ public object HistoryBundleCodec {
 
     /** Encode a local-store message row into the canonical
      *  cross-platform placeholder bytes via the shared Rust core. */
-    private fun encodePlaceholder(m: PersistedMessage): ByteArray = encodeHistoryPlaceholder(placeholderOf(m))
+    private fun encodePlaceholder(m: PersistedMessage, ownAuthorKeyB64: String?): ByteArray =
+        encodeHistoryPlaceholder(placeholderOf(m, ownAuthorKeyB64))
+
+    /**
+     * Walk 3, W3-R3 — the author a bundled row carries (placeholder version
+     * 6): an incoming row its stored author key (the key the live row was
+     * attributed to), an outgoing row this account's own key in the
+     * conversation ([ownAuthorKeyB64], else the key a sent row was stamped
+     * with), a system row none. Anything that is not a 32-byte key is none.
+     */
+    internal fun bundleAuthorKey(m: PersistedMessage, ownAuthorKeyB64: String?): ByteArray? {
+        val b64 = when (m.direction) {
+            "incoming" -> m.authorKeyB64
+            "outgoing" -> ownAuthorKeyB64 ?: m.authorKeyB64
+            else -> null
+        } ?: return null
+        val bytes = try {
+            java.util.Base64.getDecoder().decode(b64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return bytes.takeIf { it.size == AUTHOR_KEY_LEN }
+    }
+
+    /** The author a decoded placeholder names, base64 (the form a live row
+     *  stores), or `null`. */
+    internal fun authorKeyB64Of(placeholder: HistoryPlaceholder): String? =
+        placeholder.authorKey?.takeIf { it.size == AUTHOR_KEY_LEN }
+            ?.let { java.util.Base64.getEncoder().encodeToString(it) }
+
+    private const val AUTHOR_KEY_LEN: Int = 32
 
     /**
      * A local-store message row as the placeholder record. Version 3 also
@@ -394,7 +434,7 @@ public object HistoryBundleCodec {
      * drew an invitation as its bare `/g/` link, seen live 2026-11-13) and
      * the ADR-0052 reply and forward. A deleted row carries no card.
      */
-    internal fun placeholderOf(m: PersistedMessage): HistoryPlaceholder {
+    internal fun placeholderOf(m: PersistedMessage, ownAuthorKeyB64: String? = null): HistoryPlaceholder {
         // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
         // voice message, video note or GIF restores as itself on the new
         // device. The core applies the envelope's bounds on encode and decode.
@@ -443,6 +483,7 @@ public object HistoryBundleCodec {
             // ADR-0092 section 3.11 — a content row carries its content and
             // folded state, so the new device draws the card, not a blank.
             content = me.lakko.app.chat.historyContentOf(m),
+            authorKey = bundleAuthorKey(m, ownAuthorKeyB64),
         )
     }
 
@@ -501,6 +542,14 @@ public object HistoryBundleCodec {
             },
             channelInviteB64 = placeholder.channelInvite?.takeIf { it.isNotEmpty() }
                 ?.let { java.util.Base64.getEncoder().encodeToString(it) },
+            // Walk 3, W3-R3 — an incoming row names its author, so it renders
+            // with the author's name and avatar like a live row. (A gap
+            // bundle's rows are re-attributed by [applyReentryBundle].)
+            authorKeyB64 = if (placeholder.direction == HistoryMessageDirection.INCOMING) {
+                authorKeyB64Of(placeholder)
+            } else {
+                null
+            },
         )
     }
 

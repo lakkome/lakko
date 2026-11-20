@@ -1156,6 +1156,15 @@ public class ChatRepository(
             // ADR-0091 phase 2 — this account's behind states (the waiting
             // note survives a restart).
             conversationBehind.bind(newAccountIdB64)
+            // Walk 2, R1 — an own publish the DS accepted is a row this
+            // device knows, in a conversation it holds (other journals are
+            // passed over).
+            me.lakko.app.ds.DsClient.groupRowAcceptedListener = { journalHex, createdAt ->
+                val hex = journalHex.lowercase()
+                if (groups.containsKey(hex) || groups.containsKey(journalHex)) {
+                    conversationBehind.noteRowKnown(hex, me.lakko.app.ui.chat.parseMessageTimeMs(createdAt))
+                }
+            }
             me.lakko.app.ui.chat.ArticleDrafts.bind(applicationContext, newAccountIdB64)
             UnseenReactions.bind(applicationContext, newAccountIdB64)
             feedRefresh.bind(newAccountIdB64)
@@ -5142,6 +5151,8 @@ public class ChatRepository(
         val record = groups[groupIdHex]
             ?: throw ChatError("no live Group handle for $groupIdHex", IllegalStateException("unknown group"))
         if (deadOneToOne(groupIdHex)) throw deadSessionError()
+        // Walk 3, W3-R5 — refused while behind, before anything is folded.
+        requirePersonActionAllowed(groupIdHex)
         groupLock(groupIdHex).sessionLock {
             val (prepared, ownKey) = providerLock.sessionLock {
                 val prepared = chatClient.prepareSend(
@@ -5152,7 +5163,7 @@ public class ChatRepository(
                 )
                 prepared to ownIdentity(record.group)
             }
-            val result = chatClient.publishPreparedSend(prepared, wake = null)
+            val result = withPublishEvidence(groupIdHex) { chatClient.publishPreparedSend(prepared, wake = null) }
             val sender = ownKey ?: return@sessionLock
             record.addContentOp(
                 target,
@@ -5301,7 +5312,11 @@ public class ChatRepository(
         targetMessageId: Long,
         newText: String,
     ): Unit =
-        forSession { editMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, newText = newText) }
+        forSession {
+            personAction(groupIdHex) {
+                editMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, newText = newText)
+            }
+        }
 
     private suspend fun editMessageOnMlsThread(
         groupIdHex: String,
@@ -5370,7 +5385,9 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
     ): Unit =
-        forSession { deleteMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId) }
+        forSession {
+            personAction(groupIdHex) { deleteMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId) }
+        }
 
     private suspend fun deleteMessageOnMlsThread(
         groupIdHex: String,
@@ -5451,7 +5468,9 @@ public class ChatRepository(
         add: Boolean = true,
     ): Unit =
         forSession {
-            reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji, add = add)
+            personAction(groupIdHex) {
+                reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji, add = add)
+            }
         }
 
     private suspend fun reactToMessageOnMlsThread(
@@ -5549,8 +5568,9 @@ public class ChatRepository(
     private suspend fun sendTypingOnMlsThread(groupIdHex: String, isTyping: Boolean): Unit {
         // ADR-0073 R.7 case 1 — not sent into a dead one-to-one.
         if (deadOneToOne(groupIdHex)) return
-        // ADR-0091 phase 2 section 2 — nor by a device behind there.
-        if (behindStopsActing(groupIdHex)) return
+        // ADR-0091 phase 2 section 2 — nor by a device behind there, nor
+        // while a read of the journal was refused (walk 3, W3-R2).
+        if (behindHoldsAutomaticSends(groupIdHex)) return
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         try {
@@ -5598,8 +5618,9 @@ public class ChatRepository(
     private suspend fun sendReadReceiptOnMlsThread(groupIdHex: String, upTo: Long): Unit {
         // ADR-0073 R.7 case 1 — not sent into a dead one-to-one.
         if (deadOneToOne(groupIdHex)) return
-        // ADR-0091 phase 2 section 2 — nor by a device behind there.
-        if (behindStopsActing(groupIdHex)) return
+        // ADR-0091 phase 2 section 2 — nor by a device behind there, nor
+        // while a read of the journal was refused (walk 3, W3-R2).
+        if (behindHoldsAutomaticSends(groupIdHex)) return
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         try {
@@ -5847,12 +5868,15 @@ public class ChatRepository(
             return nothing
         }
         return try {
+            // Walk 3, W3-R2 — a held send (behind, or a refused read with no
+            // answered read since) answers null: not sent, so the re-send
+            // stays owed. Quiet.
             broadcastControlToGroup(
                 identity = identity,
                 groupIdHex = groupIdHex,
                 group = record.group,
                 envelope = envelope,
-            )
+            ) ?: return failed
             me.lakko.app.reach.ProfileResend.SENT
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
@@ -6217,12 +6241,13 @@ public class ChatRepository(
                     maxBundleRecords = uniffi.lakko_ffi_uniffi.maxBundleRecords().toInt(),
                     send = { groupHex, envelope ->
                         val record = groups[groupHex] ?: throw IllegalStateException("conversation gone")
+                        // Walk 3, W3-R2 — `null` is a held send: not recorded.
                         broadcastControlToGroup(
                             identity = identity,
                             groupIdHex = groupHex,
                             group = record.group,
                             envelope = envelope,
-                        )
+                        ) != null
                     },
                     save = {
                         // After the lookups and the sends: the publication
@@ -6424,12 +6449,13 @@ public class ChatRepository(
             unnamedMembers = unnamed,
         ) ?: return
         try {
+            // Walk 3, W3-R2 — a held send is not recorded as sent. Quiet.
             broadcastControlToGroup(
                 identity = identity,
                 groupIdHex = groupIdHex,
                 group = record.group,
                 envelope = uniffi.lakko_ffi_uniffi.composeProfileRequest(),
-            )
+            ) ?: return
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (cause: Throwable) {
@@ -6745,12 +6771,13 @@ public class ChatRepository(
                 val identity = canonicalIdentity.get() ?: throw IllegalStateException("Sign in again.")
                 val record = groups[groupIdHex] ?: throw IllegalStateException("You are no longer in this group.")
                 forSession {
+                    // Walk 3, W3-R2 — `null` is a held send.
                     broadcastControlToGroup(
                         identity = identity,
                         groupIdHex = groupIdHex,
                         group = record.group,
                         envelope = envelope,
-                    )
+                    ) != null
                 }
             },
             isLive = { groupIdHex ->
@@ -6941,6 +6968,7 @@ public class ChatRepository(
                 groupIdHex = groupIdHex,
                 group = record.group,
                 envelope = envelope,
+                automatic = false,
             )
         }
         // The local apply, under the same per-group lock a receiver holds, so
@@ -6980,13 +7008,16 @@ public class ChatRepository(
                 continue
             }
             try {
-                broadcastControlToGroup(
-                    identity = identity,
-                    groupIdHex = groupIdHex,
-                    group = record.group,
-                    envelope = envelope,
-                )
-                sent = true
+                // Walk 3, W3-R2 — `null` is a held send: not sent.
+                if (broadcastControlToGroup(
+                        identity = identity,
+                        groupIdHex = groupIdHex,
+                        group = record.group,
+                        envelope = envelope,
+                    ) != null
+                ) {
+                    sent = true
+                }
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0052 pin not re-sent", cause)
             }
@@ -7178,6 +7209,7 @@ public class ChatRepository(
                 groupIdHex = groupIdHex,
                 group = record.group,
                 envelope = envelope,
+                automatic = false,
             )
         }
         if (!storeFirst) GroupNameStore.save(applicationContext, accountIdB64, groupIdHex, row)
@@ -7217,13 +7249,13 @@ public class ChatRepository(
             return false
         }
         return try {
+            // Walk 3, W3-R2 — `null` is a held send: not sent.
             broadcastControlToGroup(
                 identity = identity,
                 groupIdHex = groupIdHex,
                 group = record.group,
                 envelope = envelope,
-            )
-            true
+            ) != null
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0051 group name not re-sent", cause)
             false
@@ -7244,8 +7276,18 @@ public class ChatRepository(
             publish = { groupIdHex -> republishGroupSettingsIfHolder(groupIdHex) },
         )
 
-    /** Admin knock seeds this session already sent, `groupHex:adminHex`. */
-    private val knockSeedsSent: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /**
+     * Knock seeds this session already sent, by `groupHex:adminHex` (an
+     * admin) or `groupHex:self` (this account's other devices): the newest
+     * version sent and the recipient's devices then (walk 2, defect 6). Set
+     * only after every broadcast of a send went out. In memory: a restart
+     * sends every version once more, as before.
+     */
+    private val knockSeedsSent = java.util.concurrent.ConcurrentHashMap<String, KnockSeedSentMark>()
+
+    private fun forgetKnockSeedMarks(groupIdHex: String) {
+        knockSeedsSent.keys.removeAll { it.startsWith("$groupIdHex:") }
+    }
 
     /** The group's stored photo, or `null`. */
     public fun groupPhoto(groupIdHex: String): StoredGroupPhoto? =
@@ -7564,7 +7606,7 @@ public class ChatRepository(
             )
         }
         try {
-            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope) }
+            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope, automatic = false) }
         } catch (cause: Throwable) {
             if (cause is kotlinx.coroutines.CancellationException || !isNetworkFailure(cause)) throw cause
             // 4.5.2 — uploaded, the device went offline: kept owed and sent
@@ -7694,7 +7736,7 @@ public class ChatRepository(
                 uniffi.lakko_ffi_uniffi.FfiGroupReactions(reactions = ffi, updatedAtMs = stamp),
             )
         }
-        forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope) }
+        forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope, automatic = false) }
         GroupSettingsStore.saveReactions(applicationContext, accountIdB64, groupIdHex, StoredGroupReactions(reactions, stamp))
         publishThreadList()
     }
@@ -7746,8 +7788,8 @@ public class ChatRepository(
         var sent = false
         for (envelope in envelopes) {
             try {
-                broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
-                sent = true
+                // Walk 3, W3-R2 — `null` is a held send: not sent.
+                if (broadcastControlToGroup(identity, groupIdHex, record.group, envelope) != null) sent = true
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0087 group setting not re-sent", cause)
             }
@@ -7825,8 +7867,8 @@ public class ChatRepository(
         }
     }
 
-    /** Section 5 — the owner hands each admin the knock seed, once per session
-     *  per admin (the receiver keeps the newest; a repeat is harmless). */
+    /** Section 5 — the owner hands each admin the knock seeds it was not yet
+     *  sent this session (the receiver keeps them; a repeat is harmless). */
     private suspend fun deliverKnockSeedsBestEffort(
         identity: Identity,
         record: GroupRecord,
@@ -7843,7 +7885,8 @@ public class ChatRepository(
         val version = nextKnockVersion(GroupSettingsStore.knockAdmins(applicationContext, accountIdB64, groupIdHex), current, held)
         if (version != held) {
             GroupSettingsStore.saveKnockVersion(applicationContext, accountIdB64, groupIdHex, version)
-            knockSeedsSent.removeAll { it.startsWith("$groupIdHex:") }
+            // Walk 2 (defect 6) — the marks stay: each recipient is sent only
+            // the versions it was not sent ([knockSeedVersionsToSend]).
             // The account's other devices learn the bump from the seeds this
             // device addresses to its own account (owed until sent).
             GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, true)
@@ -7856,61 +7899,97 @@ public class ChatRepository(
             }
         }
         GroupSettingsStore.saveKnockAdmins(applicationContext, accountIdB64, groupIdHex, current)
-        // Every version up to the current one, so rows from older links (and
-        // from before a rotation) still open on an admin's device; a removed
-        // admin gets nothing new.
-        val versions = (0..version.toInt()).map { it.toUShort() }
+        // Every version up to the current one reaches each admin, so rows from
+        // older links (and from before a rotation) still open on its device;
+        // a removed admin gets nothing new. Walk 2 (defect 6): only the
+        // versions a recipient was not yet sent in this session, unless it
+        // has a device that was not there then. Before, every version went
+        // to every admin after each bump and again to this account, one
+        // in-group message each, so a role change cost one message per
+        // admin removal the group ever saw.
+        val devicesOf: Map<String, Set<String>> = try {
+            providerLock.sessionLock {
+                record.group.members().groupBy(
+                    { me.lakko.app.ds.hexOf(it.accountKey) },
+                    { me.lakko.app.ds.hexOf(it.signaturePublicKey) },
+                ).mapValues { it.value.toSet() }
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            return
+        }
+        val ownHex = me.lakko.app.ds.hexOf(own)
         // Section 5 — after a bump or a rotation on THIS device, the owner's
-        // other devices are told: the seeds of every version it holds, sealed
-        // to the own account key. A receiving device of the account keeps them
-        // as given seeds and raises its current version from them.
+        // other devices are told: the seeds it holds, sealed to the own
+        // account key. A receiving device of the account keeps them as given
+        // seeds and raises its current version from them.
         if (GroupSettingsStore.knockSelfOwed(applicationContext, accountIdB64, groupIdHex)) {
+            val tag = "$groupIdHex:self"
+            val ownDevices = devicesOf[ownHex].orEmpty()
             try {
                 val x25519 = accountIdentity.get()?.x25519PublicKey()
                 if (x25519 != null) {
+                    val versions = knockSeedVersionsToSend(knockSeedsSent[tag], version.toInt(), ownDevices)
+                    var allSent = true
                     for (v in versions) {
-                        val seed = knockSeedFor(record, groupIdHex, v) ?: continue
+                        val seed = knockSeedFor(record, groupIdHex, v.toUShort()) ?: continue
                         val envelope = try {
-                            uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(record.groupId, own, x25519, v, seed)
+                            uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(record.groupId, own, x25519, v.toUShort(), seed)
                         } finally {
                             seed.fill(0)
                         }
-                        broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                        // `null` is a skipped send (behind, a dead one-to-one):
+                        // never taken as sent.
+                        if (broadcastControlToGroup(identity, groupIdHex, record.group, envelope) == null) {
+                            allSent = false
+                            break
+                        }
                     }
-                    GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, false)
+                    if (allSent) {
+                        knockSeedsSent[tag] = KnockSeedSentMark(version.toInt(), ownDevices)
+                        GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, false)
+                    }
                 }
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0087 own knock seeds not delivered; still owed", cause)
+                android.util.Log.w("ChatRepository", "ADR-0087 own knock seeds not delivered; still owed (${errorLogTag(cause)})")
             }
         }
         for (admin in admins) {
             if (admin.contentEquals(own)) continue
-            val tag = groupIdHex + ":" + me.lakko.app.ds.hexOf(admin)
-            if (tag in knockSeedsSent) continue
+            val adminHex = me.lakko.app.ds.hexOf(admin)
+            val tag = "$groupIdHex:$adminHex"
+            val adminDevices = devicesOf[adminHex].orEmpty()
+            val versions = knockSeedVersionsToSend(knockSeedsSent[tag], version.toInt(), adminDevices)
+            if (versions.isEmpty()) continue
             try {
                 val x25519 = memberX25519KeyOrNull(admin) ?: continue
+                var allSent = true
                 for (v in versions) {
-                    val seed = knockSeedFor(record, groupIdHex, v) ?: continue
+                    val seed = knockSeedFor(record, groupIdHex, v.toUShort()) ?: continue
                     val envelope = try {
                         uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(
                             record.groupId,
                             admin,
                             x25519,
-                            v,
+                            v.toUShort(),
                             seed,
                         )
                     } finally {
                         seed.fill(0)
                     }
-                    broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                    if (broadcastControlToGroup(identity, groupIdHex, record.group, envelope) == null) {
+                        allSent = false
+                        break
+                    }
                 }
-                knockSeedsSent.add(tag)
+                if (allSent) knockSeedsSent[tag] = KnockSeedSentMark(version.toInt(), adminDevices)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0087 knock seed not delivered", cause)
+                android.util.Log.w("ChatRepository", "ADR-0087 knock seed not delivered (${errorLogTag(cause)})")
             }
         }
     }
@@ -8272,8 +8351,11 @@ public class ChatRepository(
         publishThreadList()
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
+        // Walk 3, W3-R5 — stored first by design: while this device is
+        // behind it is not sent now; the back-in-step re-send carries it.
+        if (behindStopsActing(groupIdHex)) return
         try {
-            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, signed.envelope) }
+            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, signed.envelope, automatic = false) }
         } catch (cause: Throwable) {
             // The growth re-send relays it later; the name is held either way.
             android.util.Log.w("ChatRepository", "ADR-0087 handle envelope not sent", cause)
@@ -10362,13 +10444,27 @@ public class ChatRepository(
         /** ADR-0073 R.6 — the successor claim: the one thing that may still be
          *  published into a dead one-to-one ([publishAllowed]). */
         publishKind: PublishKind = PublishKind.OTHER,
+        /** Walk 3, W3-R2 — `true` (the default) for an automatic send (a
+         *  repeat envelope, the knock key, the routing secret, the beacon);
+         *  `false` for an envelope the person sent by their own action. */
+        automatic: Boolean = true,
     ): SendMessageResult? {
         // ADR-0073 R.7 case 1 — no service envelope (profile, pin, routing
         // secret, beacon) is sent into a dead one-to-one either.
         if (!publishAllowed(deadOneToOne(groupIdHex), publishKind)) return null
         // ADR-0091 phase 2 section 2 — nor by a device behind there: sealed
-        // at a stale epoch, nobody could open it.
-        if (behindStopsActing(groupIdHex)) return null
+        // at a stale epoch, nobody could open it. Walk 3, W3-R2 — an automatic
+        // send is also held while a read of the journal was refused with no
+        // answered read since. Quiet: the caller sees `null` (a skipped send).
+        // W3-R5 — the person's own action is held only while the device is
+        // suspected or confirmed behind, and then it is REFUSED (a thrown
+        // error the action's own failure message shows), never a `null` its
+        // caller could take for "sent" and apply locally.
+        if (automatic) {
+            if (behindHoldsAutomaticSends(groupIdHex)) return null
+        } else {
+            requirePersonActionAllowed(groupIdHex)
+        }
         // ADR-0045 — the SEAL and the PUBLISH are both inside the per-group
         // lock, exactly as `sendMessage` / `sendTyping` / `sendReadReceipt`
         // already are. This is a CORRECTION of the previous "provider lock only"
@@ -10412,19 +10508,21 @@ public class ChatRepository(
         // call in `GroupPushRouting` runs under `bounded(...)`, so that wait is
         // capped and a timeout leaves the row PENDING for the existing
         // re-broadcast branch — the same degradation a DS error already produces.
-        return runGroupSend(
-            lock = groupLock(groupIdHex),
-            providerLock = providerLock,
-            seal = {
-                chatClient.prepareSend(
-                    identity = identity,
-                    group = group,
-                    plaintext = envelope,
-                    persistRatchet = { persistSnapshotDurableOrThrow() },
-                )
-            },
-            publish = { prepared -> chatClient.publishPreparedSend(prepared) },
-        )
+        return withPublishEvidence(groupIdHex) {
+            runGroupSend(
+                lock = groupLock(groupIdHex),
+                providerLock = providerLock,
+                seal = {
+                    chatClient.prepareSend(
+                        identity = identity,
+                        group = group,
+                        plaintext = envelope,
+                        persistRatchet = { persistSnapshotDurableOrThrow() },
+                    )
+                },
+                publish = { prepared -> chatClient.publishPreparedSend(prepared) },
+            )
+        }
     }
 
     /**
@@ -10868,7 +10966,6 @@ public class ChatRepository(
         // commit) reconciles its registrar appointments at the tail. Plain
         // members no longer "heal" a registration (obligation 6).
         var epochBeforeBatch: ULong? = null
-        var grewInBatch = false
         val bound = callBinding()
         val outcome = runSplitPoll(
             inFlight = record.pollInFlight,
@@ -11190,12 +11287,6 @@ public class ChatRepository(
                 currentMemberKeys = membersAfterPoll,
                 selfEvicted = evictedByBatch,
             )
-            // ADR-0091 phase 2 — a newcomer holds no knock key yet.
-            if (membersBeforePoll != null && membersAfterPoll != null &&
-                (membersAfterPoll.toSet() - membersBeforePoll.toSet()).isNotEmpty()
-            ) {
-                grewInBatch = true
-            }
             // ADR-0073 R.7 — a batch that changed the roster re-runs the
             // repair of every accepted reset this group still carries (the
             // next old leaf, the new devices, the admin restore).
@@ -11230,7 +11321,7 @@ public class ChatRepository(
         // Section 7 — a gap bundle this device owes as a re-admitter.
         sendOwedGapBundlesBestEffort(groupIdHex)
         // Section 3 route 3 — the owner hands every member the knock key.
-        distributeKnockKeyIfDueBestEffort(groupIdHex, grewInBatch)
+        distributeKnockKeyIfDueBestEffort(groupIdHex)
         // ADR-0057 obligation 3 — outside both locks; launched, best effort,
         // and only when the batch moved the epoch (a no-op for a non-owner).
         val epochAfterBatch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrNull() }
@@ -11258,6 +11349,9 @@ public class ChatRepository(
         // merged puts the group at the join epoch: the owed bundle goes now,
         // not at the next poll (by which a later commit may have moved on).
         sendOwedGapBundlesBestEffort(groupIdHex)
+        // Walk 2, R4 — a member the sweep just above added holds no knock
+        // key yet: sent now rather than at the next poll.
+        distributeKnockKeyIfDueBestEffort(groupIdHex)
         // ADR-0050 section 2.5a point 4 — a merged commit (a remote one this
         // batch applied, or the sweep just above) may have dropped a request
         // this device made. Re-request it from its intent. After the sweep, so
@@ -11890,9 +11984,10 @@ public class ChatRepository(
                 continue
             }
             // ADR-0091 phase 2 section 2 — a chat this device is behind in
-            // takes no proposal from it; skipped without a warning, since the
-            // refusal is the stop list working.
-            if (behindStopsActing(groupIdHex)) {
+            // takes no proposal from it, nor one whose read was refused with
+            // no answered read since (walk 3, W3-R2); skipped without a
+            // warning, since the refusal is the stop list working.
+            if (behindHoldsAutomaticSends(groupIdHex)) {
                 skipped += 1
                 continue
             }
@@ -12279,11 +12374,12 @@ public class ChatRepository(
         lastBeaconAtMs.clear()
         localUnread.clear()
         // ADR-0091 phase 2 — in-memory state of the session that left.
+        me.lakko.app.ds.DsClient.groupRowAcceptedListener = null
         conversationBehind.unbind()
         reentryLedger.clear()
         // The owed gap bundles and the gap looks are durable: they stay for
         // the next landing of this account and go on Forget device.
-        knockKeySentVersion.clear()
+        knockKeySentMarks.clear()
         mutableReentryGaps.value = emptyMap()
         keyPackageAccount.set(null)
         everyoneCheckedThisSession.set(false)
@@ -13287,7 +13383,9 @@ public class ChatRepository(
                             me.lakko.app.ds.FfiDsStatementSigning.toFfiRank(rank),
                             seed,
                         )
+                        // Walk 3, W3-R2 — a held send is not a delivery.
                         broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                            ?: throw AutomaticSendHeld()
                     },
                     devicesOf = devicesOf,
                 )
@@ -13688,7 +13786,11 @@ public class ChatRepository(
                     compose = { newOwner, x25519, rootSeed ->
                         uniffi.lakko_ffi_uniffi.composeRootHandoverEnvelope(record.groupId, newOwner, x25519, rootSeed)
                     },
-                    sendEnvelope = { envelope -> broadcastControlToGroup(identity, groupIdHex, record.group, envelope) },
+                    sendEnvelope = { envelope ->
+                        // Walk 3, W3-R2 — a held send is not a handover sent.
+                        broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                            ?: throw AutomaticSendHeld()
+                    },
                 )
             },
             log = { line -> android.util.Log.i("ChatRepository", "ADR-0057: $line") },
@@ -13854,7 +13956,8 @@ public class ChatRepository(
                 GroupSettingsStore.saveKnockVersion(ctx, accountIdB64, groupIdHex, (current + 1u).toUShort())
             }
             GroupSettingsStore.saveKnockSelfOwed(ctx, accountIdB64, groupIdHex, true)
-            knockSeedsSent.removeAll { it.startsWith("$groupIdHex:") }
+            // A rotation changes every seed: every recipient gets all of them.
+            forgetKnockSeedMarks(groupIdHex)
             val handle = GroupSettingsStore.handle(ctx, accountIdB64, groupIdHex)
             if (handle != null) {
                 val oldHandleSeed = uniffi.lakko_ffi_uniffi.handleWriteSeed(oldRoot)
@@ -14527,6 +14630,7 @@ public class ChatRepository(
                 groupIdHex = groupIdHex,
                 group = record.group,
                 envelope = envelope,
+                automatic = false,
             ) ?: throw IllegalStateException("the group takes no request")
         }
 
@@ -15297,7 +15401,11 @@ public class ChatRepository(
                     REENTRY_REFUSED_READS_DEFAULT
                 }
             },
-        )
+        ).also { tracker ->
+            // Walk 3, W3-R5 — back in step: this device re-sends its own
+            // growth-time state for the conversation, as on a growth.
+            tracker.onBackInStep = { hex -> pushScope.launchSession { resendOwnGrowthStateBestEffort(hex) } }
+        }
     }
 
     /** The requests this device sent, durably, before each send (section 3). */
@@ -15330,9 +15438,10 @@ public class ChatRepository(
     /** Requests being sent, by group: one at a time per group. */
     private val reentryRequestsInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
-    /** The knock-key version the owner last sent into each group. In memory:
-     *  a restart sends it once more, which a member drops as not newer. */
-    private val knockKeySentVersion = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** What the owner last sent its knock key with, per group, after a
+     *  successful broadcast only (walk 2, R4). In memory: a restart sends it
+     *  once more, which a member drops as not newer. */
+    private val knockKeySentMarks = java.util.concurrent.ConcurrentHashMap<String, KnockKeySentMark>()
 
     private val mutableReentryGaps = MutableStateFlow<Map<String, List<ReentryGap>>>(emptyMap())
 
@@ -15378,6 +15487,49 @@ public class ChatRepository(
         }
     }
 
+    /** Walk 3, W3-R2 — an automatic send was held ([broadcastControlToGroup]
+     *  answered `null`): for callers that count only a thrown send as not
+     *  done. Their catch blocks are silent, so a held send stays quiet. */
+    private class AutomaticSendHeld : Exception("automatic send held")
+
+    /**
+     * Walk 3, W3-R5 — a person's own action that is not a message (an edit,
+     * a deletion, a reaction, a poll or checklist or article op, a shared pin,
+     * a rename, a group photo, the reactions setting, a group handle, a
+     * contact request inside a group) is refused while this device is
+     * suspected or confirmed behind in [groupIdHex]. A refused read alone
+     * does not hold it. The error carries no text of its own, so the caller
+     * shows the action's ordinary failure message.
+     */
+    internal fun requirePersonActionAllowed(groupIdHex: String) {
+        if (behindStopsActing(groupIdHex)) throw personActionHeldError()
+    }
+
+    /** ADR-0091 section 1 — a `401` on a publish into [groupIdHex] (clock not
+     *  skewed) is evidence, whatever was being sent. Rethrows. */
+    private inline fun <T> withPublishEvidence(groupIdHex: String, block: () -> T): T =
+        try {
+            block()
+        } catch (cause: Throwable) {
+            if (proofRefusedWithClockOk(cause)) conversationBehind.notePublishRefused(groupIdHex)
+            throw cause
+        }
+
+    /** W3-R5 — a person's own op on a message: refused while behind (a dead
+     *  one-to-one keeps its local-only path), and a refused publish is evidence. */
+    private suspend fun <T> personAction(groupIdHex: String, block: suspend () -> T): T {
+        if (!deadOneToOne(groupIdHex)) requirePersonActionAllowed(groupIdHex)
+        return withPublishEvidence(groupIdHex) { block() }
+    }
+
+    /** Walk 3, W3-R2 — `true` while automatic sends into [groupIdHex] are held. */
+    private fun behindHoldsAutomaticSends(groupIdHex: String): Boolean =
+        try {
+            conversationBehind.holdsAutomaticSends(groupIdHex)
+        } catch (_: Throwable) {
+            false
+        }
+
     /** ADR-0091 — `true` while this device stops acting in [groupIdHex]. */
     private fun behindStopsActing(groupIdHex: String): Boolean =
         try {
@@ -15398,12 +15550,21 @@ public class ChatRepository(
         return false
     }
 
-    /** An ADR-0040 outbox entry or a staged sweep awaits a verdict. Provider lock. */
+    /**
+     * An UN-ACKED ADR-0040 outbox entry or a staged sweep awaits a verdict.
+     * Provider lock. An acked entry owes nothing (walk 2: an acked sweep entry
+     * left on disk kept a device "owing" forever, so refused reads never
+     * suspected it); the rule is [ownCommitOwedBy].
+     */
     private fun ownCommitOwedLocked(record: GroupRecord): Boolean {
-        if (runCatching { record.group.hasStagedSweep() }.getOrDefault(true)) return true
+        val staged = runCatching { record.group.hasStagedSweep() }.getOrDefault(true)
+        if (staged) return true
         val accountIdB64 = currentAccountIdB64.get() ?: return true
         return try {
-            CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, outboxB64(record.groupId)).isNotEmpty()
+            ownCommitOwedBy(
+                stagedSweep = false,
+                entries = CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, outboxB64(record.groupId)),
+            )
         } catch (_: Throwable) {
             true
         }
@@ -15429,6 +15590,9 @@ public class ChatRepository(
                 )
             }
             if (result.lastRowApplied) conversationBehind.noteApplied(groupIdHex)
+            // Walk 2, R1 — the newest row this device applied: where a gap
+            // would start, known before any request goes out.
+            conversationBehind.noteRowKnown(groupIdHex, result.lastAppliedAtMs)
             if (readIsActive { record.group.isActive() } == false) return
             val epoch = record.group.epoch()
             // Section 4 — the re-admitter's "the leaf is writing" fact: the
@@ -15463,14 +15627,24 @@ public class ChatRepository(
         }
     }
 
-    /** Section 1 — a signed read of [groupIdHex] was refused. Outside the locks. */
+    /**
+     * Section 1 — a signed read of [groupIdHex] was refused. Outside the locks.
+     * A device this suspects asks to be brought back from here too (walk 2):
+     * with every read refused no poll applies, so the poll tail that sends
+     * the request otherwise never runs. Launched, so the request (which takes
+     * the provider lock and goes to the network) never runs inside the
+     * poll's in-flight latch.
+     */
     private suspend fun noteReadRefusedBestEffort(groupIdHex: String, record: GroupRecord, error: Throwable) {
         if (!proofRefusedWithClockOk(error)) return
         try {
             val (epoch, owed) = providerLock.sessionLock {
                 (runCatching { record.group.epoch() }.getOrNull() ?: return@sessionLock null) to ownCommitOwedLocked(record)
             } ?: return
-            conversationBehind.noteReadRefused(groupIdHex, owed, epoch)
+            val state = conversationBehind.noteReadRefused(groupIdHex, owed, epoch)
+            if (reentryRequestAfterRefusedRead(state)) {
+                pushScope.launchSession { requestReentryIfDueBestEffort(groupIdHex) }
+            }
         } catch (ended: me.lakko.app.StaleBindingException) {
             throw ended
         } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -15535,25 +15709,6 @@ public class ChatRepository(
         val entry = conversationBehind.entry(groupIdHex)
         val now = System.currentTimeMillis()
         if (!reentryRequestDue.due(entry.state, entry.lastRequestSentMs, now)) return
-        // A device suspected through refused reads cannot read the journal's
-        // epoch: it learns it from an empty knock, which stores nothing (one
-        // `ds-knock` token).
-        val readsRefused = entry.refusedReads >= conversationBehindRefusedReads()
-        val probed: ULong? = if (readsRefused || entry.latestEpoch == null) {
-            try {
-                dsClient.knock(record.groupId, emptyList()).epoch
-            } catch (cause: kotlinx.coroutines.CancellationException) {
-                throw cause
-            } catch (_: Throwable) {
-                null
-            }
-        } else {
-            null
-        }
-        val epochLeft = probed ?: entry.latestEpoch?.takeIf { it >= 0 }?.toULong() ?: run {
-            android.util.Log.i(REENTRY_LOG_TAG, "re-entry request waits: no journal epoch known yet")
-            return
-        }
         val (route, otherAccount) = providerLock.sessionLock { reentryRouteLocked(record, identity) } ?: return
         // What the route needs, before anything is minted.
         val knock: HeldKnockKey? = if (route == ReentryRouteKind.KNOCK) {
@@ -15574,7 +15729,22 @@ public class ChatRepository(
         ) {
             return
         }
-        val gapFromMs = entry.gapFromMs ?: now
+        // Walk 3, W3-R1 — every request (the first and every resend) learns
+        // the journal's epoch from an empty knock made right here, after the
+        // route is resolved and right before minting (one `ds-knock` token;
+        // the knock stores nothing). Never a stored latest epoch: a value kept
+        // from an earlier read goes stale while reads are refused, and the
+        // re-admitter does not act on a request naming another epoch. A
+        // probe that fails or names none sends nothing; tried again shortly.
+        val epochLeft = probeReentryEpochLeft { dsClient.knock(record.groupId, emptyList()).epoch } ?: run {
+            android.util.Log.i(REENTRY_LOG_TAG, "re-entry request waits: the journal epoch probe failed")
+            conversationBehind.noteRequestSent(groupIdHex, now - reentryIntervalMs() + reentryRetryAfterFailureMs)
+            return
+        }
+        // Walk 2, R1 — the first skipped row, else the newest row known or
+        // the last good read, never the moment of suspicion when either is
+        // known (with every read refused no row is ever skipped).
+        val gapFromMs = conversationBehind.gapStartMs(groupIdHex)
         // Mint K under this device's own identity; its private keys are the
         // only thing that opens the Welcome, so they are durable first.
         val keyPackage = providerLock.sessionLock {
@@ -15644,13 +15814,6 @@ public class ChatRepository(
             conversationBehind.noteRequestSent(groupIdHex, now - reentryIntervalMs() + reentryRetryAfterFailureMs)
         }
     }
-
-    private fun conversationBehindRefusedReads(): Int =
-        try {
-            uniffi.lakko_ffi_uniffi.reentryRefusedReadsToSuspect().toInt()
-        } catch (_: Throwable) {
-            REENTRY_REFUSED_READS_DEFAULT
-        }
 
     private fun reentryIntervalMs(): Long =
         try {
@@ -15866,8 +16029,9 @@ public class ChatRepository(
                         // growth goes to the returning device at once (it keeps
                         // its signature key, so no growth is seen anywhere).
                         resendGrowthStateAfterReentry(groupIdHex)
-                        val secret = providerLock.sessionLock {
-                            record.group.exportSecret(identity, REENTRY_HISTORY_EXPORTER_LABEL, bundle.leafSignatureKey, 32u)
+                        val (secret, ownKey) = providerLock.sessionLock {
+                            record.group.exportSecret(identity, REENTRY_HISTORY_EXPORTER_LABEL, bundle.leafSignatureKey, 32u) to
+                                ownIdentity(record.group)
                         }
                         persistMessageLogBestEffort()
                         val rendezvous = reentryHistoryRendezvous(secret)
@@ -15878,6 +16042,9 @@ public class ChatRepository(
                                 secret,
                                 hex,
                                 bundle.gapFromMs,
+                                // Walk 3, W3-R3 — an outgoing row names this
+                                // account as its author.
+                                ownAuthorKeyB64 = ownKey,
                             )
                         } finally {
                             secret.fill(0)
@@ -15907,11 +16074,15 @@ public class ChatRepository(
 
     /**
      * Section 3 route 3 — the owner hands every member the group's knock key
-     * in-group, on a version it has not sent and on growth. Best effort.
+     * in-group, on a version it has not sent and while the group holds a
+     * member it was not sent to (walk 2, R4: the members are compared, not a
+     * "grew" flag of one poll, which the owner's own sweep never raised).
+     * Best effort; a skipped or failed broadcast leaves it due.
      */
-    private suspend fun distributeKnockKeyIfDueBestEffort(groupIdHex: String, grew: Boolean, afterReentry: Boolean = false) {
+    private suspend fun distributeKnockKeyIfDueBestEffort(groupIdHex: String, afterReentry: Boolean = false) {
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
+        val hex = groupIdHex.lowercase()
         try {
             val key = providerLock.sessionLock {
                 val own = ownAccountKey()
@@ -15919,13 +16090,17 @@ public class ChatRepository(
                 val isAdmin = own != null && table?.admins?.any { it.contentEquals(own) } == true
                 if (!knockKeySender(ownsGroupAsOwner(record.group), isAdmin, afterReentry)) return@sessionLock null
                 if (record.group.groupKind() == GroupKind.ONE_TO_ONE) return@sessionLock null
-                groupKnockKeyFor(record, groupIdHex)
+                val members = rosterOf(record.group).map { me.lakko.app.ds.hexOf(it.signaturePublicKey) }.toSet()
+                if (members.isEmpty()) return@sessionLock null
+                groupKnockKeyFor(record, groupIdHex)?.let { Triple(it.first, it.second, members) }
             } ?: return
-            val (pk, version) = key
-            if (!knockKeyResendDue(knockKeySentVersion[groupIdHex.lowercase()], version.toInt(), grew)) return
+            val (pk, version, members) = key
+            if (!knockKeyResendDue(knockKeySentMarks[hex], version.toInt(), members)) return
             val envelope = uniffi.lakko_ffi_uniffi.composeKnockKeyEnvelope(version, pk)
+            // A behind device's control send answers `null` (skipped): never
+            // taken as sent.
             if (broadcastControlToGroup(identity, groupIdHex, record.group, envelope) != null) {
-                knockKeySentVersion[groupIdHex.lowercase()] = version.toInt()
+                knockKeySentMarks[hex] = KnockKeySentMark(version.toInt(), members)
             }
         } catch (ended: me.lakko.app.StaleBindingException) {
             throw ended
@@ -15960,7 +16135,44 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w(REENTRY_LOG_TAG, "growth state not re-sent (${errorLogTag(cause)})")
         }
-        distributeKnockKeyIfDueBestEffort(groupIdHex, grew = true, afterReentry = true)
+        // Cleared at re-entry: the replacement re-sends it. A returning admin
+        // could open none of the seeds sent while it was behind: its marks go
+        // too, so the next delivery sends it every version.
+        knockKeySentMarks.remove(groupIdHex.lowercase())
+        forgetKnockSeedMarks(groupIdHex)
+        distributeKnockKeyIfDueBestEffort(groupIdHex, afterReentry = true)
+    }
+
+    /**
+     * Walk 3, W3-R5 — this device came back in step in [groupIdHex] (by a
+     * read, or the re-entry joined): what it sent while it was behind may
+     * have been unreadable, and what it held back was never sent. It re-sends
+     * its own growth-time state there, through the same re-sends a
+     * newcomer's growth triggers: the profile, the group name, the photo /
+     * reactions setting / handle (each only where this device holds it and
+     * may send it; an owner's handle stored first is carried here), the
+     * shared pins, the shared channel list, and the knock key as owner or
+     * admin.
+     */
+    private suspend fun resendOwnGrowthStateBestEffort(groupIdHex: String) {
+        if (groups[groupIdHex] == null) return
+        try {
+            profileRepublish.publishNow(groupIdHex)
+            groupNameRepublish.publishNow(groupIdHex)
+            groupSettingsRepublish.publishNow(groupIdHex)
+            pinRepublish.onGrowth(groupIdHex)
+            sharedChannels.groupGrew(groupIdHex)
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            throw ended
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w(REENTRY_LOG_TAG, "own state not re-sent (${errorLogTag(cause)})")
+        }
+        // The knock key: an owner always, an admin as after a re-entry; the
+        // sent marks go so it is sent whatever this device sent before.
+        knockKeySentMarks.remove(groupIdHex.lowercase())
+        distributeKnockKeyIfDueBestEffort(groupIdHex, afterReentry = true)
     }
 
     /** Whether this account is [groupIdHex]'s owner or one of its admins,
@@ -16047,14 +16259,16 @@ public class ChatRepository(
         val hex = groupIdHex.lowercase()
         val record = reentryRecords.get(accountIdB64, hex)
         val route = record?.requests?.lastOrNull()?.route ?: ReentryRouteKind.KNOCK
-        val gapFrom = conversationBehind.entry(hex).gapFromMs
-            ?: record?.requests?.minOfOrNull { it.gapFromMs }
-            ?: System.currentTimeMillis()
+        // Walk 2, R1 — the line starts where the request said the gap did
+        // (the earliest a recorded request carried), never later than the
+        // gap start known now.
+        val gapNow = conversationBehind.gapStartMs(hex)
+        val gapFrom = record?.requests?.minOfOrNull { it.gapFromMs }?.let { minOf(it, gapNow) } ?: gapNow
         val now = System.currentTimeMillis()
         val anchor = groups[groupIdHex]?.snapshot()?.maxOfOrNull { it.messageId }?.coerceAtLeast(0L) ?: 0L
         loadReentryGaps(hex)
         saveReentryGaps(hex, withGap(reentryGaps.value[hex].orEmpty(), ReentryGap(gapFrom, now, anchor)))
-        conversationBehind.cleared(hex)
+        conversationBehind.cameBack(hex, now)
         reentryRecords.remove(accountIdB64, hex)
         android.util.Log.i(REENTRY_LOG_TAG, "back in the conversation: route=${route.name.lowercase()}")
         // The secret is of the epoch the device joined at, which is the one
@@ -16107,6 +16321,19 @@ public class ChatRepository(
     private suspend fun lookForGapHistoryBestEffort(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val hex = groupIdHex.lowercase()
+        // Walk 3, W3-R3 — this account's own key in the conversation: a
+        // bundled row it authored is shown as this device's own.
+        val ownKey = groups[hex]?.let { record ->
+            try {
+                providerLock.sessionLock { ownIdentity(record.group) }
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                null
+            }
+        }
         val outcome = try {
             gapHistoryLooker.lookIfDue(
                 accountIdB64 = accountIdB64,
@@ -16123,7 +16350,7 @@ public class ChatRepository(
                         secret,
                         payload,
                         hex,
-                    ) { direction -> reentryBundleDirection(route, direction) }
+                    ) { row, author -> reentryBundleRow(row, author, ownKey, route) }
                 },
                 received = { record, applied ->
                     // From the store, not the in-memory flow: after a
@@ -16428,7 +16655,8 @@ public class ChatRepository(
         if (!foreground) return BeaconEmitVerdict.NOT_FOREGROUND.name
         // ADR-0091 phase 2 section 2 / C-64 — a device behind in this
         // conversation emits no beacon: it would claim a sweep it cannot make.
-        if (behindStopsActing(groupIdHex)) return BeaconEmitVerdict.NOT_A_CANDIDATE.name
+        // Walk 3, W3-R2 — nor while a read of the journal was refused.
+        if (behindHoldsAutomaticSends(groupIdHex)) return BeaconEmitVerdict.NOT_A_CANDIDATE.name
         val identity = canonicalIdentity.get() ?: return BeaconEmitVerdict.NOT_A_CANDIDATE.name
         val record = groups[groupIdHex] ?: return BeaconEmitVerdict.NOT_A_CANDIDATE.name
         var canRegister = false
@@ -16989,7 +17217,18 @@ public class ChatRepository(
                     commitMessageId: Long?,
                     welcomeMessageId: Long?,
                 ) {
-                    ackCommitBestEffort(id, commitMessageId, welcomeMessageId)
+                    // Walk 2 — an acked sweep entry owes nothing (its verdict
+                    // merged, its Welcomes are out) and nothing reads it, so
+                    // it is deleted rather than kept as an acked file. A
+                    // failed delete falls back to the ack mark, which the
+                    // next open collects.
+                    val deleted = try {
+                        outboxWrite { CommitOutboxStore.deleteEntry(applicationContext, id) }
+                        true
+                    } catch (_: Throwable) {
+                        false
+                    }
+                    if (!deleted) ackCommitBestEffort(id, commitMessageId, welcomeMessageId)
                 }
 
                 override suspend fun discard(id: String) {
@@ -17250,15 +17489,28 @@ public class ChatRepository(
                 android.util.Log.w("ChatRepository", "ADR-0045 owed Welcome unresolved", cause)
             }
         }
-        val entries = try {
-            CommitOutboxStore
-                .loadForGroup(applicationContext, accountIdB64, groupIdB64)
-                // ADR-0045 — a sweep entry belongs to `resolveOwedVerdict`
-                // above, never to the direct-path reconciler.
-                .filterNot { it.isSweep }
+        val all = try {
+            CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, groupIdB64)
         } catch (_: Throwable) {
             return
         }
+        // Walk 2 — an ACKED sweep entry owes nothing: every reader of a sweep
+        // entry ([resolveOwedVerdict]'s finder, the Welcome fan-out finders)
+        // asks for an un-acked one, and the legacy loop below never sees
+        // sweep entries. Such entries were never collected and piled up, one
+        // per sweep. Collected here (entries written before the sweep ack
+        // started deleting them).
+        for (entry in all) {
+            if (!collectableSweepEntry(entry)) continue
+            try {
+                outboxWrite { CommitOutboxStore.deleteEntry(applicationContext, entry.id) }
+            } catch (_: Throwable) {
+                // best-effort GC — the next open retries.
+            }
+        }
+        // ADR-0045 — a sweep entry belongs to `resolveOwedVerdict` above,
+        // never to the direct-path reconciler.
+        val entries = all.filterNot { it.isSweep }
         if (entries.isEmpty()) return
         // ADR-0060 §6 — the account each owed Welcome is addressed to, so the
         // re-publish picks that person's reach grant.

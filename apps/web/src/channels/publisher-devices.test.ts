@@ -218,9 +218,10 @@ describe("decision A and the returning device (2.5)", () => {
     expect(returningDeviceVerdict({ refusals: 3, groupEpoch: 7n, journalEpoch: null })).toBe(false);
   });
 
-  it("the epoch offset of a group founded again is what the service says, never below 0", () => {
+  it("the epoch offset of a group founded again is what the service says", () => {
     expect(epochOffsetAt(9, 1)).toBe(8);
-    expect(epochOffsetAt(1, 3)).toBe(0);
+    // A group that ran ahead of the service (reseals that never landed).
+    expect(epochOffsetAt(1, 3)).toBe(-2);
     expect(channelEpochOfGroup({ ...emptyAccessRecord(), epochOffset: 8 }, 2n)).toBe(10);
     expect(channelEpochOfGroup(emptyAccessRecord(), 2n)).toBe(2);
   });

@@ -961,9 +961,11 @@ export async function learnEpochOffset(idHex: string, groupEpoch: number): Promi
   return offset;
 }
 
-/** The offset a service epoch and a group epoch say, never below 0. Pure. */
+/** The offset a service epoch and a group epoch say. Below 0 when the group
+ *  ran ahead of the service (commits whose reseal never landed; 2026-11-20),
+ *  as iOS and Android learn it. Pure. */
 export function epochOffsetAt(serviceEpoch: number, groupEpoch: number): number {
-  return Math.max(0, serviceEpoch - groupEpoch);
+  return serviceEpoch - groupEpoch;
 }
 
 function withoutOffset<T extends { readonly epochOffset?: number }>(r: T): T {

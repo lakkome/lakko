@@ -70,6 +70,7 @@ import {
 import {
   emptyAccessRecord,
   foldVisibility,
+  landedEpochOffset,
   newestAdmissionSeed,
   removalSteps,
   subscriberVia,
@@ -1392,6 +1393,32 @@ export function notePublisherSeedAt(idHex: string, epoch: number, seed: Uint8Arr
     channelsActions.setKeys(idHex, { seed, signingKeySeed: prev.signingKeySeed, seedEpoch: epoch });
   }
   keepPublisherSeed(idHex, epoch, seed);
+  // 2026-11-20: moving DOWN means the old mapping did not hold (commits whose
+  // reseal never landed); what it filed above the new epoch is wrong.
+  if (prev?.seedEpoch !== undefined && prev.seedEpoch > epoch) channelsActions.dropSubscribedSeedsAbove(idHex, epoch);
+}
+
+/**
+ * 2026-11-20 — the service serves `seed` at `epoch` (this device's reseal of
+ * it landed, or it is the next one owed) and the group's MLS epoch
+ * `groupEpoch` maps there: the offset is set to say so, and the seed
+ * overwrites any kept for that epoch (one filed under a mapping that no
+ * longer holds is wrong).
+ */
+export function anchorChannelEpoch(idHex: string, groupEpoch: bigint | number, epoch: number, seed: Uint8Array): void {
+  const offset = landedEpochOffset(groupEpoch, epoch);
+  if (channelsActions.accessOf(idHex).epochOffset !== offset) {
+    channelsActions.updateAccess(idHex, (r) => {
+      const { epochOffset: _drop, ...rest } = r;
+      void _drop;
+      return offset === undefined ? rest : { ...rest, epochOffset: offset };
+    });
+  }
+  const held = channelsActions.currentSeed(idHex, epoch);
+  if (held === undefined || !sameSeed(held, seed)) channelsActions.setSubscribedSeedForEpoch(idHex, epoch, seed.slice());
+  // Seeds filed above it under the broken mapping would stop the right ones
+  // from being kept when the service reaches those epochs.
+  channelsActions.dropSubscribedSeedsAbove(idHex, epoch);
 }
 
 function sameSeed(a: Uint8Array, b: Uint8Array): boolean {

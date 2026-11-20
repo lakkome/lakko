@@ -700,6 +700,47 @@ MariaDB, the fuzz runs below. No client calls any of it yet (S4).
      with 0 failures (2 skipped), Android 5702 with 0 failures (1 skipped,
      older). Not walked after the changes.
 
+## Retry and epoch-mapping rules (2026-11-20)
+
+Seen on an iPhone during a live walk: the reseal of a recorded rotation was
+refused `401 owner-proof-required` (the owner key the service holds was not
+the one the device signed with; see ADR-0074, note of the same day). The
+entry was kept and "retried later", but every publisher pass also staged,
+merged and journalled one more rotation, so one entry piled up per pass
+(154 in three hours), and every replay walked all of them back to back.
+Built the same day on web (and the desktop app), iOS and Android,
+host-tested only, not walked:
+
+- **A refusal holds, a transient failure backs off.** A channels-service
+  answer of `401 owner-proof-required` or `410 channel-deleted` holds the
+  channel's recorded commits, the subscriber admission pass and the
+  account's reader-key registration until the next start (or account
+  binding). Any other failure waits 30 s, doubling to 10 minutes (the
+  schedule of the owed DS registrations). A replay stops a channel at its
+  first failure, so a pile of entries costs one request per channel. The
+  entries are kept: their commit merged, so the reseal (and an approve's
+  Welcome) are still owed.
+- **The journal step is never held.** An entry whose next step is the DS
+  journal is sent every pass, as section 3 says; only a failure after the
+  journal holds the channel.
+- **No new rotation while a commit is owed.** A scheduled or requested
+  rotation is not staged while a recorded commit of the channel still owes
+  its journal step or its reseal. That reseal, when it lands, seals a seed no
+  subscriber holds yet to the subscribers listed then, so a forced rotation
+  (a removed subscriber) is covered by it. An entry owing only a Welcome,
+  an appointment or a hand-over does not hold a rotation.
+- **The reseal anchors the epoch mapping.** "Channel epoch = MLS epoch +
+  offset" assumes one reseal per commit. A landed reseal now sets the offset
+  exactly (target epoch minus the group's MLS epoch), keeps the resealed seed
+  at that epoch (overwriting one kept there) and drops kept seeds above it.
+  A device whose group is more than one epoch ahead of the service re-maps
+  its current epoch to the service's next one (or to the service's epoch
+  when the seed it keeps there is already this one). Web stores and learns a
+  negative offset, as iOS and Android did.
+- Residual: a co-publisher or other owner device that applies a whole run of
+  unresealed commits only after the recovering reseal landed, and does not
+  hold that seed, maps one epoch too high until the next landed reseal.
+
 ## Plan
 
 No server changes. The DS commit route (ADR-0081), the same-root reset

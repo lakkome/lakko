@@ -534,6 +534,36 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         XCTAssertEqual(calls.publicCalls, [other], "a public channel: the plain subscribe")
     }
 
+    /// 2026-11-20 — a refused registration (`401 owner-proof-required`) is
+    /// not tried again before the next start, however long the app runs.
+    func testARefusedReaderKeyRegistrationWaitsForTheNextStart() async {
+        ChannelAccountReaderKey.reset()
+        let channels = ChannelsUiState()
+        let id = hex(idA)
+        let key = String(repeating: "ab", count: 32)
+        channels.addChannel(ChannelHandle(id: id, localName: "News", localDescription: "", addedAtMs: 1))
+        channels.setKeys(channelId: id, keys: ChannelPublisherKeys(
+            seed: Data(repeating: 1, count: 32), signingKeySeed: Data(repeating: 2, count: 32)))
+        channels.updateExtras(id) { $0.recordPublic = true }
+        var calls = 0
+        let refused = ChannelAccountReaderKey.Ports(
+            subscribePublic: { _, _ in
+                calls += 1
+                throw ChannelsApiError(status: 401, code: "owner-proof-required", detail: "")
+            },
+            subscribePrivate: { _, _ in calls += 1 },
+            handCurrentSeed: { _, _ in })
+        await ChannelAccountReaderKey.ensure(channelId: id, state: channels, keyHex: key, ports: refused, nowMs: 1_000)
+        XCTAssertTrue(ChannelAccountReaderKey.isRefused(channelId: id))
+        await ChannelAccountReaderKey.ensure(
+            channelId: id, state: channels, keyHex: key, ports: refused, nowMs: 1_000 + 86_400_000)
+        XCTAssertEqual(calls, 1)
+        ChannelAccountReaderKey.reset()
+        await ChannelAccountReaderKey.ensure(
+            channelId: id, state: channels, keyHex: key, ports: refused, nowMs: 2_000 + 86_400_000)
+        XCTAssertEqual(calls, 2)
+    }
+
     /// A channel whose flag is not known yet registers nothing this pass (a
     /// public subscribe of a private channel would only fail).
     func testAnUnknownFlagWaitsForTheNextPass() async {

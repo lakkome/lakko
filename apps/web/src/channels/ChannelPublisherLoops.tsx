@@ -39,7 +39,13 @@ import { DsClient, DsHttpError } from "../ds/client";
 import { loadWasm } from "../wasm";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { noteChannelIntent } from "./channel-subscription-register";
-import { ensureAccountReaderKey } from "./account-reader-key";
+import {
+  accountReaderKeyRefused,
+  clearAccountReaderKeyHold,
+  ensureAccountReaderKey,
+  resetAccountReaderKeyHolds,
+} from "./account-reader-key";
+import { repairChannelOwnerIfRefused, resetChannelOwnerRepairs } from "./channel-owner-repair";
 import { admitNewSubscribers } from "./subscriber-admission";
 import { runPublisherRemoval, runRotationOnce, type RotationContext } from "./rotation-cron";
 import { ensureEntryOwnerSource, enterOwnedChannelFromSaved, finishEntry } from "./channel-entry";
@@ -102,6 +108,16 @@ import { boundContactsAccount } from "../contacts/local-store";
 import { ownDeviceRoster } from "../devices/own-device-roster";
 import { isStatus } from "../ds/ownership";
 import { resealToSubscribers } from "./rotation-cron";
+import {
+  hasOwedPublisherCommit,
+  publisherCommitFailureLabel,
+  publisherCommitRetry,
+  PublisherCommitRetry,
+} from "./publisher-commit-outbox";
+
+/** The holds of the subscriber admission pass (2026-11-20), apart from the
+ *  recorded commits' so a transient failure here never delays those. */
+const subscriberAdmissionRetry = new PublisherCommitRetry();
 import { fetchEpoch } from "./api";
 import {
   catchUpChannel,
@@ -113,6 +129,7 @@ import {
   installChannelStop,
   notePublisherCommitLanded,
   notePublisherSeedAt,
+  anchorChannelEpoch,
   channelRotatesHere,
   channelSeedFor,
   runOwedChannelType,
@@ -134,6 +151,7 @@ import { b64ToBytes, bytesToB64 } from "../profile/avatar-model";
 import {
   admissionSeedId,
   channelEpochOfGroup,
+  reanchoredEpochOffset,
   seedsToSend,
   versionsToSend,
   type PublisherEntry,
@@ -251,6 +269,16 @@ export async function rotateChannel(
 ): Promise<void> {
   // Only an owner device rotates the channel key; a co-publisher's never.
   if (!channelRotatesHere(idHex)) return;
+  // 2026-11-20: no new rotation while a recorded commit of the channel still
+  // owes its reseal (seen live on iOS: one more epoch merged every pass, each
+  // reseal refused 401). That reseal, when it lands, seals a seed no
+  // subscriber holds yet to the subscribers listed then, so a forced rotation
+  // (a removed subscriber) is covered by it too.
+  if (hasOwedPublisherCommit(idHex, channelsActions.pendingPublisherCommits())) {
+    // eslint-disable-next-line no-console
+    console.info("[channels] rotation: a recorded commit still owes its reseal; none staged");
+    return;
+  }
   const wasm = await loadWasm();
   const policy = wasm.channelRotationPolicyDefault();
   if (!force || requestedAtEpoch !== undefined) {
@@ -361,6 +389,30 @@ export async function removePublisherNow(identity: WasmIdentity, idHex: string, 
 export async function refreshCoPublisherSeed(identity: WasmIdentity, idHex: string): Promise<void> {
   await withPublisherGroup(identity, idHex, async (g, device) => {
     if (!g.isActive()) return;
+    // 2026-11-20: a group more than one epoch ahead of the service (a run of
+    // commits whose reseal never landed) maps its current epoch to the
+    // service's next one, where the reseal that lands will seal it.
+    const svc = channelsState.epochByChannel().get(idHex);
+    if (
+      svc !== undefined &&
+      !g.hasStagedCommit() &&
+      reanchoredEpochOffset(g.epoch(), channelsActions.accessOf(idHex).epochOffset, svc) !== null
+    ) {
+      const seed = g.channelSeed(device);
+      // The service's epoch when it already serves this seed (a device that
+      // applied the whole run after the reseal landed), else the next one.
+      const atService = channelsActions.currentSeed(idHex, svc);
+      const target =
+        atService !== undefined && atService.length === seed.length && atService.every((v, i) => v === seed[i])
+          ? svc
+          : svc + 1;
+      notePublisherSeedAt(idHex, target, seed);
+      anchorChannelEpoch(idHex, g.epoch(), target, seed);
+      channelsActions.notePublisherGroupChanged();
+      // eslint-disable-next-line no-console
+      console.info("[channels] a publisher group was ahead of the channel by more than one epoch; re-mapped");
+      return;
+    }
     // ADR-0090: an owner device follows its siblings' commits the same way.
     const epoch = channelEpochOfGroup(channelsActions.accessOf(idHex), g.epoch());
     const held = channelsState.keysByChannel().get(idHex);
@@ -1182,6 +1234,9 @@ export const ChannelPublisherLoops: Component = () => {
       trailingSince.delete(idHex);
       return;
     }
+    // A reseal of this channel refused or failed waits out its hold
+    // (2026-11-20), instead of being tried again every pass.
+    if (!publisherCommitRetry.mayAttempt(idHex)) return;
     const svc = (await fetchEpoch(idHex)).epoch;
     await withPublisherGroup(lineage, idHex, async (g, device) => {
       if (!g.isActive() || !g.isOwnerDevice(device) || g.hasStagedCommit()) return;
@@ -1195,7 +1250,13 @@ export const ChannelPublisherLoops: Component = () => {
       if (Date.now() - since < RESEAL_TAKEOVER_MS) return;
       // eslint-disable-next-line no-console
       console.info("[channels] taking over an unfinished reseal");
-      await resealToSubscribers(g, device, lineage, idHex, groupAt);
+      try {
+        await resealToSubscribers(g, device, lineage, idHex, groupAt);
+      } catch (err) {
+        publisherCommitRetry.noteFailure(idHex, err);
+        throw err;
+      }
+      publisherCommitRetry.noteSuccess(idHex);
       notePublisherCommitLanded(idHex, groupAt, g.channelSeed(device));
       trailingSince.delete(idHex);
     });
@@ -1290,6 +1351,26 @@ export const ChannelPublisherLoops: Component = () => {
     // sent again (owed), a merged one finishes its steps.
     // ADR-0064 section 7: a recorded entry signs its commit with the root.
     ensureEntryOwnerSource();
+    // 2026-11-20: an owned channel whose owner proof was refused moves its
+    // owner key to the current identity's first (`channel-owner-repair.ts`).
+    const predecessor = chats.predecessorAccountIdentity();
+    for (const idHex of [...channelsState.keysByChannel().keys()].sort()) {
+      if (!channelRotatesHere(idHex)) continue;
+      await repairChannelOwnerIfRefused({
+        channelIdHex: idHex,
+        refused:
+          publisherCommitRetry.hold(idHex)?.refused === true ||
+          subscriberAdmissionRetry.hold(idHex)?.refused === true ||
+          accountReaderKeyRefused(idHex),
+        predecessors: predecessor === null ? [] : [predecessor],
+        current,
+        onOwned: () => {
+          publisherCommitRetry.noteSuccess(idHex);
+          subscriberAdmissionRetry.noteSuccess(idHex);
+          clearAccountReaderKeyHold(idHex);
+        },
+      }).catch(() => undefined);
+    }
     if (channelsActions.pendingPublisherCommits().length > 0) {
       const landed = await replayPublisherCommits(lineage).catch(() => []);
       for (const l of landed) {
@@ -1381,7 +1462,22 @@ export const ChannelPublisherLoops: Component = () => {
         // 2026-11-13: the account's reader key (the register's) is a real
         // subscriber of the channel, registered once by this device.
         await ensureAccountReaderKey(lineage, idHex);
-        await admitNewSubscribers(idHex, lineage);
+        // 2026-11-20: a refused or failing admission waits out its hold (a
+        // refusal: until the next start) instead of running every pass.
+        if (subscriberAdmissionRetry.mayAttempt(idHex)) {
+          try {
+            await admitNewSubscribers(idHex, lineage);
+            subscriberAdmissionRetry.noteSuccess(idHex);
+          } catch (err) {
+            const hold = subscriberAdmissionRetry.noteFailure(idHex, err);
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[channels] subscriber admission failed (${publisherCommitFailureLabel(err)}); ${
+                hold.refused ? "not tried again until the next start" : "tried again after a wait"
+              }`,
+            );
+          }
+        }
         // The owner's account key (ADR-0090: recorded beside the group).
         const memberKeys = await withPublisherGroup(lineage, idHex, async (g) => {
           notePublisherGroupMembers(idHex, g);
@@ -1558,6 +1654,15 @@ export const ChannelPublisherLoops: Component = () => {
   onMount(() => {
     const timer = setInterval(run, PASS_INTERVAL_MS);
     onCleanup(() => clearInterval(timer));
+    // A new session (another account, a sign-in) tries a held channel again.
+    const resetHolds = (): void => {
+      publisherCommitRetry.reset();
+      subscriberAdmissionRetry.reset();
+      resetAccountReaderKeyHolds();
+      resetChannelOwnerRepairs();
+    };
+    resetHolds();
+    onCleanup(resetHolds);
     // ADR-0064 section 1: account deletion deletes the vaults of the
     // channels the account owns (their saved copies, section 7).
     installOwnedChannelVaults({

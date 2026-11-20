@@ -20,6 +20,9 @@
 //! their structural bounds whenever a placeholder decodes. The content's
 //! typed decode lives in `lakko-attachments` (fuzz target
 //! `content_bundle_decode`).
+//!
+//! Version 6 (ADR-0091 live walk 3): the author key (fixed 32 bytes) is the
+//! last field and round-trips with the rest.
 
 #![no_main]
 

@@ -73,6 +73,9 @@ final class ChannelPublisherLoops {
         ChannelDeviceAdmission.reset()
         ChannelVaultHead.reset()
         ChannelEntry.reset()
+        PublisherCommitRetry.shared.reset()
+        SubscriberAdmission.retry.reset()
+        ChannelOwnerRepair.reset()
     }
 
     func runLoop(
@@ -92,6 +95,13 @@ final class ChannelPublisherLoops {
         channelsRef = channels
         running = true
         defer { running = false }
+        // 2026-11-20 — an owned channel whose owner proof was refused moves
+        // its owner key to the current key first (``ChannelOwnerRepair``).
+        for channelId in channels.keysByChannel.keys.sorted()
+        where Self.rotates(channelId: channelId, channels: channels) {
+            await ChannelOwnerRepair.repairIfRefused(
+                channelId: channelId, accountIdB64: accountIdB64, currentSeed: seed, client: client)
+        }
         // ADR-0090 — a recorded commit still staged (its DS verdict owed) is
         // sent again first; a group holding one refuses membership operations.
         await ChannelPublisherCommits.replayAll(
@@ -207,6 +217,12 @@ final class ChannelPublisherLoops {
         identity: Identity, group: PublisherGroup
     ) async {
         guard channels.extras(channelId).epochOffsetToLearn != true,
+              let accountIdB64 = AcceptedContactsStore.boundAccountIdB64,
+              // A recorded commit of the channel reseals it itself; a channel
+              // whose reseal was refused or failed waits out its hold.
+              !Self.hasOwedCommit(
+                channelId: channelId, entries: PublisherCommitStore.shared.entries(accountIdB64: accountIdB64)),
+              PublisherCommitRetry.shared.mayAttempt(accountIdB64: accountIdB64, channelIdHex: channelId),
               let mls = try? group.epoch(),
               let server = try? await client.fetchEpoch(channelIdHex: channelId) else { return }
         let groupEpoch = UInt64(ChannelDeviceAdmission.channelEpoch(
@@ -229,9 +245,18 @@ final class ChannelPublisherLoops {
                 throughSeq: ChannelReseal.resealThrough(isPublic: extras.isPublic, mark: extras.admittedThroughSeq),
                 ownReaderKeyHex: extras.readerKeyRegisteredHex)
             trailingSince[channelId] = nil
+            PublisherCommitRetry.shared.noteSuccess(accountIdB64: accountIdB64, channelIdHex: channelId)
+            if let seed = try? group.channelSeed(identity: identity) {
+                ChannelDeviceAdmission.anchor(
+                    channelId: channelId, state: channels, mls: mls, epoch: server &+ 1, seed: seed)
+            }
             await afterRotation(channelId: channelId, epoch: server &+ 1, channels: channels, client: client, seed: seed)
         } catch {
-            NSLog("[channels] the reseal takeover did not complete; tried again next pass")
+            let hold = PublisherCommitRetry.shared.noteFailure(
+                accountIdB64: accountIdB64, channelIdHex: channelId, error: error)
+            NSLog("[channels] the reseal takeover did not complete (%@); %@",
+                  PublisherCommitFailure.logLabel(error),
+                  hold.refused ? "not tried again until the next start" : "tried again after a wait")
         }
     }
 
@@ -272,10 +297,27 @@ final class ChannelPublisherLoops {
               let group = try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId),
               (try? group.isActive()) != false,
               channels.extras(channelId).epochOffsetToLearn != true,
-              let mls = try? group.epoch(),
-              case let epoch = ChannelDeviceAdmission.channelEpoch(
-                mls: mls, offset: channels.extras(channelId).epochOffset),
-              !owner || held.seedEpoch == nil || epoch > (held.seedEpoch ?? 0),
+              let mls = try? group.epoch() else { return }
+        // 2026-11-20 — a group more than one epoch ahead of the service (a
+        // run of commits whose reseal never landed) maps its current epoch to
+        // the service's next one, where the reseal that lands will seal it.
+        if let service = channels.epochByChannel[channelId],
+           (try? group.hasStagedCommit()) != true,
+           ChannelDeviceAdmission.reanchoredOffset(
+               mls: mls, offset: channels.extras(channelId).epochOffset, serviceEpoch: service) != nil,
+           let current = try? group.channelSeed(identity: identity) {
+            // The service's epoch when it already serves this seed (a device
+            // that applied the whole run after the reseal landed), else the
+            // next one.
+            let target = channels.subscribedSeeds(channelId: channelId)[service] == current ? service : service &+ 1
+            NSLog("[channels] a publisher group was ahead of the channel by more than one epoch; re-mapped")
+            channels.notePublisherSeedAt(channelId: channelId, epoch: target, seed: current)
+            ChannelDeviceAdmission.anchor(
+                channelId: channelId, state: channels, mls: mls, epoch: target, seed: current)
+            return
+        }
+        let epoch = ChannelDeviceAdmission.channelEpoch(mls: mls, offset: channels.extras(channelId).epochOffset)
+        guard !owner || held.seedEpoch == nil || epoch > (held.seedEpoch ?? 0),
               let groupSeed = try? group.channelSeed(identity: identity) else { return }
         channels.notePublisherSeedAt(channelId: channelId, epoch: epoch, seed: groupSeed)
     }
@@ -286,6 +328,13 @@ final class ChannelPublisherLoops {
         // ADR-0090 decision C: every OWNER device runs the rotation policy; a
         // co-publisher's device never does.
         guard opened.contains(channelId), Self.rotates(channelId: channelId, channels: channels) else { return }
+        // 2026-11-20 — no new rotation while a recorded commit of the channel
+        // still owes a step: each would merge one more epoch whose reseal
+        // waits behind the same failure (seen live: one entry per pass, all
+        // refused `401`). The owed entry runs first (``ChannelPublisherCommits/replayAll``).
+        guard !Self.hasOwedCommit(
+            channelId: channelId, entries: PublisherCommitStore.shared.entries(accountIdB64: accountIdB64))
+        else { return }
         var context = RotationCron.Context(
             commits: ChannelPublisherCommits.Context(
                 channelIdHex: channelId, currentSeed: seed, accountIdB64: accountIdB64, channelsClient: client),
@@ -467,11 +516,33 @@ final class ChannelPublisherLoops {
         ChannelRowRole.of(publishes: publishes, coPublished: coPublished) == .owner
     }
 
+    /// Whether `entries` (the account's recorded PublisherGroup commits)
+    /// hold one of `channelId` that still owes its journal step or its
+    /// reseal: no new rotation of the channel is staged then (2026-11-20).
+    /// An entry owing only a Welcome or an appointment does not hold it.
+    nonisolated static func hasOwedCommit(channelId: String, entries: [PublisherCommitEntry]) -> Bool {
+        let channel = channelId.lowercased()
+        return entries.contains { entry in
+            entry.channelIdHex.lowercased() == channel
+                && entry.journalLost != true
+                && entry.remainingSteps.contains { $0 == .journal || $0 == .reseal }
+        }
+    }
+
     /// Rotate now, outside the schedule: a subscriber of a private channel was
     /// removed (section 7.3), the only rotation a person ever causes.
     func rotateNow(channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data) async throws {
         guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64,
               Self.rotates(channelId: channelId, channels: channels) else { return }
+        // A recorded commit of the channel whose reseal is still owed
+        // reseals a seed no subscriber holds yet to the subscribers listed
+        // when it lands, so it already does what this rotation is for (a
+        // removed subscriber stops reading new posts once it lands); a second
+        // commit would only stack one more epoch behind the same failure.
+        if Self.hasOwedCommit(
+            channelId: channelId, entries: PublisherCommitStore.shared.entries(accountIdB64: accountIdB64)) {
+            return
+        }
         await openOnce(channelId: channelId, accountIdB64: accountIdB64, seed: seed)
         let cron = RotationCron(context: RotationCron.Context(
             commits: ChannelPublisherCommits.Context(
@@ -750,7 +821,11 @@ final class ChannelPublisherLoops {
               let channelBytes = ChannelsClient.hexToData(channelId),
               let groupId = try? group.groupId() else { return }
         do {
-            let binding = try composeChannelCopublisherBinding(accountIdentity: identity, channelId: channelBytes)
+            // 2026-11-20 — the account's (lineage) identity, as at the knock:
+            // `identity` here is this device's leaf, whose binding names a
+            // key the owner never appointed.
+            let binding = try composeChannelCopublisherBinding(
+                accountIdentity: try ChannelPublisherIdentity.ownerAccountIdentity(), channelId: channelBytes)
             let message = try group.createApplicationMessage(identity: identity, plaintext: binding)
             // The send ratchet moved: on disk before the message leaves, so a
             // crash never reuses a generation (the G-34 rule).

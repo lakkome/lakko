@@ -64,6 +64,13 @@ export interface ReentryRequestPorts {
   sendOwnDevice(envelope: Uint8Array): Promise<void>;
   sendMailbox(otherAccountKey: Uint8Array, envelope: Uint8Array, groupId: Uint8Array): Promise<void>;
   sendKnock(groupId: Uint8Array, row: Uint8Array): Promise<void>;
+  /**
+   * Live walk 3 (2026-11-20) - the journal's epoch as the DS names it now:
+   * an empty knock (one `ds-knock` token). `null` when the probe failed or
+   * named no epoch. Asked right before every request; a stored epoch from an
+   * earlier read is never used (it named epoch 1 to an owner at 67).
+   */
+  probeEpoch(groupId: Uint8Array): Promise<bigint | null>;
 }
 
 /** What one attempt came to. */
@@ -72,6 +79,7 @@ export type ReentryRequestOutcome =
   | "not-due"
   | "retry-wait"
   | "no-route"
+  | "no-epoch"
   | "failed";
 
 /** Failed sends per group, memory only. */
@@ -95,12 +103,12 @@ export function otherPerson(roster: readonly RosterLeaf[], ownPersonKeyB64: stri
 
 /**
  * Send the request when it is due. `state` is the group's behind state,
- * `epochLeft` the journal's latest epoch as last read, `gapFromMs` when the
- * device first failed to read a row. Never throws.
+ * `gapFromMs` where the gap starts. The epoch the request names is probed
+ * right before it ({@link ReentryRequestPorts.probeEpoch}). Never throws.
  */
 export async function requestReentryIfDue(
   group: WasmGroup,
-  input: { readonly state: BehindStateView; readonly epochLeft: bigint; readonly gapFromMs: number },
+  input: { readonly state: BehindStateView; readonly gapFromMs: number },
   ports: ReentryRequestPorts,
 ): Promise<ReentryRequestOutcome> {
   try {
@@ -119,7 +127,7 @@ export async function requestReentryIfDue(
 
 async function attempt(
   group: WasmGroup,
-  input: { readonly state: BehindStateView; readonly epochLeft: bigint; readonly gapFromMs: number },
+  input: { readonly state: BehindStateView; readonly gapFromMs: number },
   ports: ReentryRequestPorts,
 ): Promise<ReentryRequestOutcome> {
   if (!input.state.stopsActing) return "not-due";
@@ -153,14 +161,22 @@ async function attempt(
     if (knock === null) return "no-route";
   }
 
+  // The epoch the journal is at now, read right before the request: the
+  // marker must name the epoch the re-admitter holds (section 4).
+  const epochLeft = await ports.probeEpoch(groupId);
+  if (epochLeft === null) {
+    lastFailure.set(groupIdB64, nowMs);
+    return "no-epoch";
+  }
+
   // Mint, make durable, record - all before anything is sent.
-  const keyPackage = identity.createReentryKeyPackage(groupId, input.epochLeft);
+  const keyPackage = identity.createReentryKeyPackage(groupId, epochLeft);
   await ports.persistDurable();
   const gapFromMs = record?.gapFromMs ?? input.gapFromMs;
   const dropped = recordReentryRequest({
     groupIdB64,
     keyPackageB64: base64Encode(keyPackage),
-    epochLeft: input.epochLeft,
+    epochLeft,
     gapFromMs,
     sentAtMs: 0,
     route,
@@ -176,7 +192,7 @@ async function attempt(
     await ports.persistDurable().catch(() => undefined);
   }
 
-  const envelope = ports.composeEnvelope(groupId, input.epochLeft, BigInt(Math.max(0, Math.floor(gapFromMs))), keyPackage);
+  const envelope = ports.composeEnvelope(groupId, epochLeft, BigInt(Math.max(0, Math.floor(gapFromMs))), keyPackage);
   if (route === "own-device") {
     await ports.sendOwnDevice(envelope);
   } else if (route === "mailbox" && mailboxTo !== null) {

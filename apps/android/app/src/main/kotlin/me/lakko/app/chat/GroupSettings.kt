@@ -586,6 +586,26 @@ public fun nextKnockVersion(previous: Set<String>?, current: Set<String>, versio
         version
     }
 
+/** What a recipient (an admin, or this account's other devices) was last sent
+ *  of the knock seeds, after every broadcast of the send went out: the newest
+ *  version and the recipient's devices (leaf keys, hex) then. */
+internal data class KnockSeedSentMark(val version: Int, val devices: Set<String>)
+
+/**
+ * ADR-0091 walk 2, defect 6 — the knock-seed versions to send a recipient:
+ * every version up to [currentVersion] when it was never sent any in this
+ * session (or the mark names a newer version, a rotation having reset it),
+ * or when it has a device that was not there at the last send (that device
+ * holds none); else only the versions above the last one sent, nothing when
+ * it is current. Sending every version on every bump grew a role change by
+ * one in-group message per admin removal the group ever saw.
+ */
+internal fun knockSeedVersionsToSend(mark: KnockSeedSentMark?, currentVersion: Int, devices: Set<String>): IntRange =
+    when {
+        mark == null || mark.version > currentVersion || !mark.devices.containsAll(devices) -> 0..currentVersion
+        else -> (mark.version + 1)..currentVersion
+    }
+
 /** Where the handle write key sits in a handle certificate:
  *  `version(1) ‖ lookup_key(64) ‖ write_pk(32) ‖ issued_at(8) ‖ sig(64)`. */
 internal const val HANDLE_CERT_WRITE_KEY_START: Int = 65

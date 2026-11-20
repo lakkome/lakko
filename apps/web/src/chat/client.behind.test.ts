@@ -192,6 +192,44 @@ describe("ADR-0091 phase 2 in the poll", () => {
     refuse = false;
   });
 
+  it("one refused read holds a repeat envelope or typing until a read is answered (live walk 3)", async () => {
+    let refuse = true;
+    const d = device({ latestEpoch: 0, refuseReads: () => refuse });
+    await expect(d.chat.pollMessages(null, d.group, 0, 0, d.cursorRef)).rejects.toThrow();
+    expect(conversationBehind.state(d.gid).kind).toBe("in-step");
+    await expect(d.chat.broadcastControl(null, d.group, new Uint8Array([1, 2]))).rejects.toBeInstanceOf(ConversationBehindError);
+    expect(d.sealedCount()).toBe(0);
+    refuse = false;
+    await d.chat.pollMessages(null, d.group, 0, 0, d.cursorRef);
+    await expect(d.chat.broadcastControl(null, d.group, new Uint8Array([1, 2]))).resolves.toBeDefined();
+    expect(d.sealedCount()).toBe(1);
+  });
+
+  it("a person's own action is attempted after a refused read and held only while behind", async () => {
+    let refuse = true;
+    let latest = 0;
+    const d = device({
+      get latestEpoch() {
+        return latest;
+      },
+      refuseReads: () => refuse,
+    } as unknown as { latestEpoch: number; refuseReads: () => boolean });
+    await expect(d.chat.pollMessages(null, d.group, 0, 0, d.cursorRef)).rejects.toThrow();
+    // One refused read: an edit, reaction or rename is still attempted (its
+    // refusal would be evidence, and the person sees it fail).
+    await expect(d.chat.broadcastControl(null, d.group, new Uint8Array([1]), { personAction: true })).resolves.toBeDefined();
+    expect(d.sealedCount()).toBe(1);
+    // Suspected: held, refused before anything is sealed.
+    refuse = false;
+    latest = 3;
+    await d.chat.pollMessages(null, d.group, 0, 0, d.cursorRef);
+    expect(conversationBehind.stopsActing(d.gid)).toBe(true);
+    await expect(d.chat.broadcastControl(null, d.group, new Uint8Array([1]), { personAction: true })).rejects.toBeInstanceOf(
+      ConversationBehindError,
+    );
+    expect(d.sealedCount()).toBe(1);
+  });
+
   it("a journal back at the local epoch clears", async () => {
     let latest = 3;
     const d = device({

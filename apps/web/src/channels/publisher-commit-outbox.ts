@@ -44,6 +44,8 @@
  * entry is always written before the commit leaves, so nothing was sent.
  */
 
+import { nextSweepBackoffMs, SWEEP_BACKOFF_INITIAL_MS } from "../chat/sweep-backoff";
+
 /** Which commit an entry records. `removal` (ADR-0087 phase B): the owner
  *  removed a publisher. `admit` (ADR-0090 section 2): devices of an account
  *  that already publishes were added and/or retired. `entry` (ADR-0064
@@ -366,4 +368,201 @@ export async function runPublisherCommit(
   }
   await ports.finish(current);
   return "landed";
+}
+
+// ---------------------------------------------------------------------------
+// Retry of recorded commits (2026-11-20)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a failed step of a recorded PublisherGroup commit means for its next
+ * try (seen live 2026-11-20 on iOS: a reseal refused `401
+ * owner-proof-required` was "retried" once per entry, back to back, every
+ * pass, while every pass recorded one more rotation).
+ *
+ * - `"refused"`: the channels service answered `401 owner-proof-required`
+ *   (this device's publisher proof is not accepted for the channel) or `410
+ *   channel-deleted`; the same request gets the same answer.
+ * - `"transient"`: anything else (network, a 5xx, an unanswered journal
+ *   step); it may succeed later.
+ */
+export type PublisherCommitFailure = "refused" | "transient";
+
+/** The channels-service codes that are refusals: `PUBLISHER_REFUSED` and
+ *  `CHANNEL_DELETED` of `./api`, repeated here so this module stays free of
+ *  the client (a test pins them equal). */
+export const PUBLISHER_COMMIT_REFUSAL_CODES: readonly string[] = ["owner-proof-required", "channel-deleted"];
+
+/** The kind of a step failure. Looks through `cause` chains. Pure. */
+export function publisherCommitFailureOf(err: unknown): PublisherCommitFailure {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth += 1) {
+    const r = current as { code?: unknown; cause?: unknown };
+    if (typeof r.code === "string" && PUBLISHER_COMMIT_REFUSAL_CODES.includes(r.code)) return "refused";
+    current = r.cause;
+  }
+  return "transient";
+}
+
+/** A label for a log line: the service's status and code, or the error's
+ *  name. Never the message (a URL in it names the channel). Pure. */
+export function publisherCommitFailureLabel(err: unknown): string {
+  if (typeof err === "object" && err !== null) {
+    const r = err as { status?: unknown; code?: unknown; name?: unknown };
+    if (typeof r.status === "number" && typeof r.code === "string") return `${r.status} ${r.code}`;
+    if (typeof r.name === "string") return r.name;
+  }
+  return "error";
+}
+
+/** The wait after `failures` consecutive transient failures: the schedule
+ *  of the owed DS registrations (`../chat/sweep-backoff`), 30 s doubling to
+ *  10 minutes. Pure. */
+export function publisherCommitBackoffMs(failures: number): number {
+  if (failures <= 0) return 0;
+  let delay = SWEEP_BACKOFF_INITIAL_MS;
+  for (let i = 1; i < failures; i += 1) delay = nextSweepBackoffMs(delay);
+  return delay;
+}
+
+/** One channel's hold after a failure. */
+export interface PublisherCommitHold {
+  /** A refusal: no try before the holds are reset (the next start). */
+  readonly refused: boolean;
+  /** Consecutive failures, at least 1. */
+  readonly failures: number;
+  /** When the last failure happened (ms). */
+  readonly failedAtMs: number;
+}
+
+/** Whether a hold lets the channel be tried at `nowMs`. A clock that went
+ *  back past the failure allows it. Pure. */
+export function holdAllows(hold: PublisherCommitHold, nowMs: number): boolean {
+  if (hold.refused) return false;
+  return nowMs >= hold.failedAtMs + publisherCommitBackoffMs(hold.failures) || nowMs < hold.failedAtMs;
+}
+
+/**
+ * The per-channel holds of the recorded PublisherGroup commits, in memory
+ * (the tab's life). A refusal holds the channel until {@link reset} (a reload,
+ * a new account): the entries are KEPT, since their commit merged and is on
+ * the journal, so the reseal (and an approve's Welcome) are still owed for
+ * the channel to be consistent, and a refusal that clears (an owner handover
+ * that landed, a fixed clock) lets the next start finish them. A transient
+ * failure waits {@link publisherCommitBackoffMs}. While a channel holds an
+ * owed entry no new rotation of it is staged ({@link hasOwedPublisherCommit}).
+ */
+export class PublisherCommitRetry {
+  private readonly holds = new Map<string, PublisherCommitHold>();
+
+  constructor(private readonly clock: () => number = () => Date.now()) {}
+
+  hold(channelIdHex: string): PublisherCommitHold | undefined {
+    return this.holds.get(channelIdHex.toLowerCase());
+  }
+
+  mayAttempt(channelIdHex: string): boolean {
+    const hold = this.hold(channelIdHex);
+    return hold === undefined || holdAllows(hold, this.clock());
+  }
+
+  noteFailure(channelIdHex: string, err: unknown): PublisherCommitHold {
+    const key = channelIdHex.toLowerCase();
+    const previous = this.holds.get(key);
+    const next: PublisherCommitHold = {
+      refused: publisherCommitFailureOf(err) === "refused",
+      failures: (previous?.failures ?? 0) + 1,
+      failedAtMs: this.clock(),
+    };
+    this.holds.set(key, next);
+    return next;
+  }
+
+  noteSuccess(channelIdHex: string): void {
+    this.holds.delete(channelIdHex.toLowerCase());
+  }
+
+  reset(): void {
+    this.holds.clear();
+  }
+
+  /**
+   * Run `entries` in their recorded order through `run`. An entry that owes
+   * its journal step ({@link owesJournal}) always runs; any other is skipped
+   * while its channel's hold does not allow a try. A channel stops at its
+   * first failure in this call (a thrown error, or `run` resolving `"owed"`),
+   * so a pile of entries of one channel costs one request, not one per
+   * entry. A failure holds the channel only when it came from a step after
+   * the journal (`reread` gives the entry as recorded after the run). Logs
+   * once per failure, with no identifier.
+   */
+  async replay(
+    entries: readonly PublisherCommitEntry[],
+    run: (entry: PublisherCommitEntry) => Promise<PublisherCommitOutcome | "skipped">,
+    reread: (id: string) => PublisherCommitEntry | undefined = () => undefined,
+  ): Promise<void> {
+    const stopped = new Set<string>();
+    for (const entry of entries) {
+      const channel = entry.channelIdHex.toLowerCase();
+      if (stopped.has(channel)) continue;
+      const journal = owesJournal(entry);
+      if (!journal && !this.mayAttempt(channel)) {
+        stopped.add(channel);
+        continue;
+      }
+      let failure: unknown = null;
+      try {
+        const outcome = await run(entry);
+        if (outcome === "owed") failure = new Error("journal step unanswered");
+      } catch (err) {
+        failure = err;
+      }
+      if (failure === null) {
+        if (!journal) this.noteSuccess(channel);
+        continue;
+      }
+      stopped.add(channel);
+      if (owesJournal(reread(entry.id) ?? entry)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `G-50: a recorded PublisherGroup commit is still unanswered by the journal (${publisherCommitFailureLabel(failure)}); sent again next pass`,
+        );
+        continue;
+      }
+      const hold = this.noteFailure(channel, failure);
+      // eslint-disable-next-line no-console
+      console.warn(
+        hold.refused
+          ? `G-50: a recorded PublisherGroup commit was refused by the channels service (${publisherCommitFailureLabel(failure)}); kept, not tried again until the next start`
+          : `G-50: a recorded PublisherGroup commit did not finish (${publisherCommitFailureLabel(failure)}); tried again in ${publisherCommitBackoffMs(hold.failures) / 1000} s`,
+      );
+    }
+  }
+}
+
+/** Whether `entry` still owes its DS journal step (a staged commit whose
+ *  verdict the DS has not given). That step is never held: a staged commit
+ *  freezes the group's membership operations, so it is sent again every
+ *  pass (ADR-0090 / ADR-0081); the pass cadence bounds it. Pure. */
+export function owesJournal(entry: PublisherCommitEntry): boolean {
+  return !entry.journalLost && remainingSteps(entry)[0] === "journal";
+}
+
+/** The tab's holds. */
+export const publisherCommitRetry = new PublisherCommitRetry();
+
+/** Whether `entries` hold one of `channelIdHex` that still owes its journal
+ *  step or its reseal: no new rotation of the channel is staged then (its
+ *  reseal, when it lands, seals a seed no subscriber holds yet to the
+ *  subscribers listed at that moment, which is what a rotation is for). An
+ *  entry owing only a Welcome, an appointment or a hand-over does not hold
+ *  it. Pure. */
+export function hasOwedPublisherCommit(channelIdHex: string, entries: readonly PublisherCommitEntry[]): boolean {
+  const channel = channelIdHex.toLowerCase();
+  return entries.some(
+    (e) =>
+      e.channelIdHex.toLowerCase() === channel &&
+      !e.journalLost &&
+      remainingSteps(e).some((step) => step === "journal" || step === "reseal"),
+  );
 }

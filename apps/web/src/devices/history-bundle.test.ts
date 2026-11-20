@@ -24,7 +24,15 @@ import {
 } from "../chat/message-log-store";
 import { attachmentRefFromPersisted, b64UrlEncode } from "../chat/persisted-attachment";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
-import { applyHistoryBundleToLog, buildHistoryBundleFromLog, isBookkeepingSystemRow } from "./history-bundle";
+import {
+  applyGapHistoryBundle,
+  applyHistoryBundleToLog,
+  buildGapHistoryBundle,
+  buildHistoryBundleFromLog,
+  gapBundleRow,
+  isBookkeepingSystemRow,
+  placeholderAuthorKeyB64,
+} from "./history-bundle";
 
 const SENDER = "c2VuZGVyLWFjY291bnQtMDA=";
 const JOINER = "am9pbmVyLWFjY291bnQtMDA=";
@@ -334,5 +342,84 @@ describe("the micro thumbnail travels in the history bundle (ADR-0047 section 6)
     const log = await loadMessageLog(JOINER, joinerKey);
     const carried = log?.groups[GROUP_HEX]?.messages[0]?.attachments[0];
     expect(attachmentRefFromPersisted(carried as PersistedAttachment).ref.inlineThumb).toEqual(jpeg);
+  });
+});
+
+describe("a bundled message keeps its author (ADR-0091 live walk 3)", () => {
+  // Seen on Android 2026-11-20: the gap bundle's messages came with a "?"
+  // avatar and no name; the placeholder carried no author at all.
+  const key = (fill: number): string => btoa(String.fromCharCode(...new Uint8Array(32).fill(fill)));
+  const OWNER = key(0x0a);
+  const MEMBER = key(0x0b);
+  const THIRD = key(0x0c);
+
+  it("the sender names the author of each row: stored, own for sent, none for system", () => {
+    expect(placeholderAuthorKeyB64({ ...row(1, "incoming", "x"), authorKeyB64: THIRD }, OWNER)).toBe(THIRD);
+    expect(placeholderAuthorKeyB64(row(2, "outgoing", "x"), OWNER)).toBe(OWNER);
+    expect(placeholderAuthorKeyB64({ ...row(3, "outgoing", "x"), authorKeyB64: OWNER }, null)).toBe(OWNER);
+    expect(placeholderAuthorKeyB64({ ...row(4, "system", "x"), authorKeyB64: OWNER }, OWNER)).toBeUndefined();
+    expect(placeholderAuthorKeyB64({ ...row(5, "incoming", "x"), authorKeyB64: "c2hvcnQ=" }, OWNER)).toBeUndefined();
+  });
+
+  it("the device that came back files the owner's rows as the owner's and its own as its own", async () => {
+    const ownerKey = await deviceKey();
+    const rows: PersistedMessage[] = [
+      { ...row(1, "outgoing", "from the owner"), authorKeyB64: null },
+      { ...row(2, "incoming", "from a third"), authorKeyB64: THIRD },
+      { ...row(3, "incoming", "from the member, another device"), authorKeyB64: MEMBER },
+    ];
+    await saveMessageLog(SENDER, ownerKey, { version: 1, groups: { [GROUP_HEX]: { cursor: "3", messages: rows } } });
+    const sealed = await buildGapHistoryBundle({
+      accountIdB64: SENDER,
+      deviceKey: ownerKey,
+      secret: SECRET,
+      slotHex: GROUP_HEX,
+      fromMs: 0,
+      ownAuthorKeyB64: OWNER,
+    });
+    if (sealed === null) throw new Error("no bundle");
+    const memberKey = await deviceKey();
+    const filed = await applyGapHistoryBundle({
+      accountIdB64: JOINER,
+      deviceKey: memberKey,
+      secret: SECRET,
+      sealedBytes: sealed,
+      ownAuthorKeyB64: MEMBER,
+      route: "knock",
+    });
+    const byText = new Map(filed.rows.map((m) => [m.text, m]));
+    expect(byText.get("from the owner")).toMatchObject({ direction: "incoming", authorKeyB64: OWNER });
+    expect(byText.get("from a third")).toMatchObject({ direction: "incoming", authorKeyB64: THIRD });
+    expect(byText.get("from the member, another device")).toMatchObject({ direction: "outgoing", authorKeyB64: MEMBER });
+    // The log holds the same rows as the open chat was shown.
+    const logged = (await loadMessageLog(JOINER, memberKey))?.groups[GROUP_HEX]?.messages ?? [];
+    expect(logged.find((m) => m.messageId === "1")).toMatchObject({ direction: "incoming", authorKeyB64: OWNER });
+    expect(logged.find((m) => m.messageId === "3")?.direction).toBe("outgoing");
+  });
+
+  it("a row naming no author falls back to the route; a system row names nobody", () => {
+    const sent = row(1, "outgoing", "x");
+    expect(gapBundleRow(sent, MEMBER, "knock").direction).toBe("incoming");
+    expect(gapBundleRow(sent, MEMBER, undefined).direction).toBe("incoming");
+    expect(gapBundleRow(sent, MEMBER, "own-device").direction).toBe("outgoing");
+    expect(gapBundleRow(sent, MEMBER, "mailbox").direction).toBe("incoming");
+    expect(gapBundleRow(row(2, "incoming", "x"), MEMBER, "mailbox").direction).toBe("outgoing");
+    const system = gapBundleRow({ ...row(3, "system", "x"), authorKeyB64: OWNER }, MEMBER, "knock");
+    expect(system.direction).toBe("system");
+    expect(system.authorKeyB64).toBeUndefined();
+  });
+
+  it("a pairing bundle keeps the author of a received row", async () => {
+    const key1 = await deviceKey();
+    await saveMessageLog(SENDER, key1, {
+      version: 1,
+      groups: { [GROUP_HEX]: { cursor: "1", messages: [{ ...row(1, "incoming", "hi"), authorKeyB64: THIRD }] } },
+    });
+    const sealed = await buildHistoryBundleFromLog({ accountIdB64: SENDER, deviceKey: key1, secret: SECRET });
+    if (sealed === null) throw new Error("no bundle");
+    const key2 = await deviceKey();
+    await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: key2, secret: SECRET, sealedBytes: sealed });
+    const got = (await loadMessageLog(JOINER, key2))?.groups[GROUP_HEX]?.messages[0];
+    expect(got).toMatchObject({ direction: "incoming", authorKeyB64: THIRD });
   });
 });

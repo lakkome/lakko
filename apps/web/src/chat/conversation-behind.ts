@@ -162,6 +162,13 @@ interface GroupRecord {
   commits: [bigint, number][];
   /** The newest `latest_epoch` a read named. */
   latestEpoch?: bigint;
+  /** Live walk 2 (2026-11-19): the newest DS time of a row this device
+   *  applied here, or of an own publish the DS accepted. Read progress, not
+   *  gap bookkeeping: kept when the device is back in step. */
+  lastKnownRowMs?: number;
+  /** The local time of the last read of this journal that was not refused
+   *  (written at most once a minute). */
+  lastReadOkMs?: number;
 }
 
 function emptyRecord(): GroupRecord {
@@ -224,6 +231,8 @@ interface Durable {
   readonly commit?: boolean;
   readonly commits?: readonly (readonly [string, number])[];
   readonly latest?: string;
+  readonly known?: number;
+  readonly readOk?: number;
 }
 
 function encodeDurable(r: GroupRecord): string {
@@ -236,6 +245,8 @@ function encodeDurable(r: GroupRecord): string {
     ...(r.skippedCommit ? { commit: true } : {}),
     ...(r.commits.length === 0 ? {} : { commits: r.commits.map(([e, id]) => [e.toString(), id] as const) }),
     ...(r.latestEpoch === undefined ? {} : { latest: r.latestEpoch.toString() }),
+    ...(r.lastKnownRowMs === undefined ? {} : { known: r.lastKnownRowMs }),
+    ...(r.lastReadOkMs === undefined ? {} : { readOk: r.lastReadOkMs }),
   };
   return JSON.stringify(d);
 }
@@ -261,6 +272,8 @@ function decodeDurable(raw: string): GroupRecord | null {
   if (typeof d.highest === "string" && /^\d{1,20}$/.test(d.highest)) record.highestSkippedEpoch = BigInt(d.highest);
   record.skippedCommit = d.commit === true;
   if (typeof d.latest === "string" && /^\d{1,20}$/.test(d.latest)) record.latestEpoch = BigInt(d.latest);
+  if (typeof d.known === "number" && Number.isFinite(d.known)) record.lastKnownRowMs = d.known;
+  if (typeof d.readOk === "number" && Number.isFinite(d.readOk)) record.lastReadOkMs = d.readOk;
   if (Array.isArray(d.commits)) {
     for (const entry of d.commits) {
       if (
@@ -294,6 +307,31 @@ export interface GapFacts {
   readonly gapFromMs: number | undefined;
   readonly highestSkippedEpoch: bigint | undefined;
   readonly skippedCommit: boolean;
+}
+
+/** How often the last good read is written. */
+const READ_OK_WRITE_INTERVAL_MS = 60_000;
+
+/**
+ * Where the gap starts: the earlier of the first skipped row and the last
+ * moment the device knew the conversation (newest applied or published row,
+ * else last good read); else the start of the suspicion; `undefined` when
+ * nothing is known (the caller falls back to now).
+ */
+function gapStartOf(r: GroupRecord): number | undefined {
+  const known = r.lastKnownRowMs ?? r.lastReadOkMs;
+  const candidates = [r.gapFromMs, known].filter((v): v is number => v !== undefined && Number.isFinite(v));
+  if (candidates.length > 0) return Math.min(...candidates);
+  return r.state.sinceMs;
+}
+
+/**
+ * UX `conversation-rejoin.md` 2.2 (live walk 2, 2026-11-19): a waiting chat
+ * (suspected or confirmed behind) shows no error banner. Its reads are
+ * refused by design until the device is back; the waiting note says why.
+ */
+export function chatErrorsHidden(state: BehindStateView): boolean {
+  return state.kind !== "in-step";
 }
 
 /** The per-(account, group) state of section 1. */
@@ -345,7 +383,9 @@ export class ConversationBehindStore {
       r.gapFromMs === undefined &&
       r.highestSkippedEpoch === undefined &&
       !r.skippedCommit &&
-      r.commits.length === 0;
+      r.commits.length === 0 &&
+      r.lastKnownRowMs === undefined &&
+      r.lastReadOkMs === undefined;
     if (empty) this.backend.remove(key);
     else this.backend.save(key, encodeDurable(r));
   }
@@ -360,6 +400,21 @@ export class ConversationBehindStore {
   /** C-93: the device stops acting in this conversation. */
   stopsActing(group: string): boolean {
     return this.state(group).stopsActing;
+  }
+
+  /**
+   * Live walk 3 (2026-11-20): a send that is not the person's own content
+   * (a repeat envelope, typing, a read receipt, a beacon) is held while the
+   * device stops acting here, and also while a read of this journal was
+   * refused (an unskewed `401`) with no answered read since: two refused
+   * reads came before the third that suspects, and the profile republish and
+   * a typing signal went out between them and drew `401`s.
+   */
+  holdsAutomaticSends(group: string): boolean {
+    const r = this.record(group);
+    if (r === null) return false;
+    this.version();
+    return r.state.stopsActing || r.refusedReads > 0;
   }
 
   /** The waiting note is shown (UX 2.2). */
@@ -378,11 +433,17 @@ export class ConversationBehindStore {
     return [...out].filter((g) => this.state(g).kind !== "in-step");
   }
 
-  /** The gap bookkeeping of section 2. */
+  /**
+   * The gap bookkeeping of section 2. `gapFromMs` is where the gap starts
+   * (live walk 2, 2026-11-19): the earlier of the first skipped row and the
+   * last moment this device knew the conversation (its newest applied or
+   * published row, else its last good read). A device behind through refused
+   * reads skips no row, so the skipped row alone named nothing.
+   */
   gap(group: string): GapFacts {
     const r = this.record(group);
     return {
-      gapFromMs: r?.gapFromMs,
+      gapFromMs: r === null ? undefined : gapStartOf(r),
       highestSkippedEpoch: r?.highestSkippedEpoch,
       skippedCommit: r?.skippedCommit ?? false,
     };
@@ -403,7 +464,7 @@ export class ConversationBehindStore {
     const r = this.record(group);
     if (r === null) return;
     let changed = false;
-    if (r.gapFromMs === undefined && Number.isFinite(row.atMs)) {
+    if (Number.isFinite(row.atMs) && (r.gapFromMs === undefined || row.atMs < r.gapFromMs)) {
       r.gapFromMs = row.atMs;
       changed = true;
     }
@@ -419,10 +480,35 @@ export class ConversationBehindStore {
     if (changed) this.persist(group, r);
   }
 
-  /** A row applied: "since its last applied row" starts again. */
-  noteAppliedRow(group: string): void {
+  /** A row applied: "since its last applied row" starts again. `atMs` is
+   *  the row's DS time (`NaN` when unreadable). */
+  noteAppliedRow(group: string, atMs: number = Number.NaN): void {
     const r = this.record(group);
-    if (r !== null) r.failedAbove = false;
+    if (r === null) return;
+    r.failedAbove = false;
+    this.raiseKnown(group, r, atMs);
+  }
+
+  /** An own publish to this journal was accepted at the DS time `atMs`. */
+  noteOwnRowAccepted(group: string, atMs: number): void {
+    const r = this.record(group);
+    if (r !== null) this.raiseKnown(group, r, atMs);
+  }
+
+  private raiseKnown(group: string, r: GroupRecord, atMs: number): void {
+    if (!Number.isFinite(atMs) || atMs <= 0) return;
+    if (r.lastKnownRowMs !== undefined && r.lastKnownRowMs >= atMs) return;
+    r.lastKnownRowMs = atMs;
+    this.persist(group, r);
+  }
+
+  /** A read was not refused: the last good read, written at most once a
+   *  minute (an earlier value only starts the gap a little earlier). */
+  private noteReadOk(group: string, r: GroupRecord): void {
+    const now = this.now();
+    if (r.lastReadOkMs !== undefined && now >= r.lastReadOkMs && now - r.lastReadOkMs < READ_OK_WRITE_INTERVAL_MS) return;
+    r.lastReadOkMs = now;
+    this.persist(group, r);
   }
 
   /** A publish of this device to the journal was refused `401`, clock not
@@ -464,7 +550,11 @@ export class ConversationBehindStore {
   ): BehindStateView {
     const r = this.record(group);
     if (r === null || input.localEpoch === undefined) return r?.state ?? IN_STEP;
+    // Live walk 3 (W3-R6): a refused-read hold ends without the device ever
+    // having been behind. What it held is re-sent as on back-in-step.
+    const holdEnding = r.refusedReads > 0 && r.state.kind === "in-step";
     r.refusedReads = 0;
+    this.noteReadOk(group, r);
     if (input.latestEpoch !== undefined) r.latestEpoch = input.latestEpoch;
     if (input.registeredCommits !== undefined && input.registeredCommits.size > 0) {
       const merged = new Map(r.commits);
@@ -475,12 +565,14 @@ export class ConversationBehindStore {
         if (r.state.kind !== "in-step") this.persist(group, r);
       }
     }
-    return this.fold(group, r, {
+    const next = this.fold(group, r, {
       ownCommitOwed: input.ownCommitOwed,
       drained: input.drained,
       latestEpoch: input.latestEpoch,
       localEpoch: input.localEpoch,
     });
+    if (holdEnding && next.kind === "in-step") this.announceBackInStep(group);
+    return next;
   }
 
   private fold(
@@ -526,6 +618,7 @@ export class ConversationBehindStore {
           // eslint-disable-next-line no-console
           console.info("chat conversation back in step: state=in-step");
           this.bump();
+          this.announceBackInStep(group);
         }
       }
       return r.state;
@@ -541,16 +634,46 @@ export class ConversationBehindStore {
     return r.state;
   }
 
-  /** The device is back (the re-entry landed): in step, bookkeeping gone. */
+  /** The device is back (the re-entry landed): in step, bookkeeping gone.
+   *  It applied no row since joining, so the join is its last good read. */
   clear(group: string): void {
     const r = this.record(group);
     if (r === null) return;
     const was = r.state.kind;
     const key = this.keyOf(group);
     const fresh = emptyRecord();
+    fresh.lastReadOkMs = this.now();
     if (key !== null) this.records.set(key, fresh);
     this.persist(group, fresh);
-    if (was !== "in-step") this.bump();
+    if (was !== "in-step") {
+      this.bump();
+      this.announceBackInStep(group);
+    }
+  }
+
+  private readonly backInStepListeners = new Set<(group: string) => void>();
+
+  /**
+   * ADR-0091 live walk 3 — called when a conversation this device was behind
+   * in is back in step (a read cleared it, or the re-entry landed), and when
+   * a read is answered after refused reads that never made it behind
+   * (W3-R6). What was
+   * held meanwhile and is owed (a handle stored first, the growth-time state)
+   * is re-sent from here. Returns the unsubscribe.
+   */
+  onBackInStep(listener: (group: string) => void): () => void {
+    this.backInStepListeners.add(listener);
+    return () => this.backInStepListeners.delete(listener);
+  }
+
+  private announceBackInStep(group: string): void {
+    for (const l of this.backInStepListeners) {
+      try {
+        l(group);
+      } catch {
+        /* a listener's failure is its own */
+      }
+    }
   }
 
   /** The group left this device (`membership-wipe.ts`). */

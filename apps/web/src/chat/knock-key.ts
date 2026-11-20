@@ -21,7 +21,7 @@ import {
   knockKeyIsNewer as wasmKnockKeyIsNewer,
   type Group as WasmGroup,
 } from "../../wasm/lakko_ffi_wasm";
-import { heldKnockKey, knockKeySendDue, knockKeySentMark, setKnockKeySentMark, storeKnockKey } from "./reentry-store";
+import { heldKnockKey, knockKeySendDue, knockKeySentMark, knockKeySentMarkOf, setKnockKeySentMark, storeKnockKey } from "./reentry-store";
 
 /** The envelope's one length (`lakko-contacts::knock_key`). */
 export const KNOCK_KEY_ENVELOPE_LEN = 60;
@@ -119,7 +119,8 @@ export interface KnockKeySendPorts {
   /** The group's current knock key as the owner holds it; `null` when this
    *  device is not the owner or holds none. */
   ownerKnockKey(group: WasmGroup): Promise<{ readonly version: number; readonly publicKey: Uint8Array } | null>;
-  memberCount(group: WasmGroup): number;
+  /** The current members' leaf signature keys, standard base64. */
+  memberKeys(group: WasmGroup): readonly string[];
   compose(version: number, publicKey: Uint8Array): Uint8Array;
   broadcast(group: WasmGroup, envelope: Uint8Array): Promise<void>;
 }
@@ -138,10 +139,12 @@ export async function sendKnockKeyIfDue(group: WasmGroup, ports: KnockKeySendPor
   try {
     const key = await ports.ownerKnockKey(group);
     if (key === null) return "not-owner";
-    const members = ports.memberCount(group);
+    // The members are read before the send: a member added while it was in
+    // flight is not marked as reached.
+    const members = ports.memberKeys(group);
     if (!knockKeySendDue(knockKeySentMark(groupIdB64), key.version, members)) return "not-due";
     await ports.broadcast(group, ports.compose(key.version, key.publicKey));
-    setKnockKeySentMark(groupIdB64, `${key.version}:${members}`);
+    setKnockKeySentMark(groupIdB64, knockKeySentMarkOf(key.version, members));
     return "sent";
   } catch (err) {
     // eslint-disable-next-line no-console

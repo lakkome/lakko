@@ -1087,8 +1087,17 @@ public object CoPublisher {
         onlyChannel: String? = null,
     ): List<String> {
         val finished = ArrayList<String>()
-        for (entry in store.entries(accountIdB64)) {
-            if (onlyChannel != null && entry.channelIdHex != onlyChannel.lowercase()) continue
+        // 2026-11-20 — a failed entry holds its channel ([PublisherCommitRetry]:
+        // a refusal until the next start, any other failure for a growing
+        // wait), and the channel's later entries wait with it, so a pile of
+        // entries costs one request per channel, not one each.
+        val entries = store.entries(accountIdB64)
+            .filter { onlyChannel == null || it.channelIdHex == onlyChannel.lowercase() }
+        PublisherCommitRetry.shared.replay(
+            entries,
+            accountIdB64,
+            reread = { id -> store.entries(accountIdB64).firstOrNull { it.id == id } },
+        ) { entry ->
             val group = try {
                 loadPublisherGroup(ids, entry.channelIdHex, coPublished)
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
@@ -1104,7 +1113,7 @@ public object CoPublisher {
                         store.remove(accountIdB64, entry.id)
                     }
                     PublisherCommitReplay.REPLAY -> {
-                        val pg = group ?: continue
+                        val pg = group ?: return@replay
                         val outcome = runPublisherCommit(
                             entry,
                             commitPorts(
@@ -1121,10 +1130,6 @@ public object CoPublisher {
                         if (outcome == PublisherCommitOutcome.LANDED) finished += entry.channelIdHex
                     }
                 }
-            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                android.util.Log.w("CoPublisher", "G-50: a recorded commit did not finish; retried later", e)
             } finally {
                 group?.close()
             }

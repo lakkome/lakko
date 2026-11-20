@@ -79,12 +79,15 @@ import { isBackoffRefusal } from "../chat/sweep-backoff";
 import { channelsActions, channelsState } from "../state/channels-state";
 import {
   newEntryId,
+  owesJournal,
+  publisherCommitRetry,
   runPublisherCommit,
   type PublisherCommitEntry,
   type PublisherCommitOutcome,
   type PublisherCommitPorts,
 } from "./publisher-commit-outbox";
 import { writeStagedHead } from "./channel-vault-head";
+import { anchorChannelEpoch } from "./channel-access";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -292,7 +295,22 @@ export async function runRecordedPublisherCommit(
   }
   inFlightCommits.add(entry.id);
   try {
-    return await runPublisherCommit(entry, publisherCommitPorts(ctx, extras));
+    const outcome = await runPublisherCommit(entry, publisherCommitPorts(ctx, extras));
+    // 2026-11-20: an unanswered journal step ("owed") is sent again next
+    // pass, never held.
+    if (outcome !== "owed") publisherCommitRetry.noteSuccess(entry.channelIdHex);
+    return outcome;
+  } catch (err) {
+    // A step after the journal failed: the channel is held (a refusal: until
+    // the next start), and the replay waits that out.
+    let after: PublisherCommitEntry = entry;
+    try {
+      after = channelsActions.pendingPublisherCommits().find((e) => e.id === entry.id) ?? entry;
+    } catch {
+      /* the recorded entry is unreadable: judged as recorded at the start */
+    }
+    if (!owesJournal(after)) publisherCommitRetry.noteFailure(entry.channelIdHex, err);
+    throw err;
   } finally {
     inFlightCommits.delete(entry.id);
   }
@@ -504,6 +522,15 @@ export async function resealToSubscribers(
   }));
   const committed = await stageAndCommitRotation(channelIdHex, targetEpoch, batch, identity, apiBase);
   onProgress?.(batch.length, batch.length);
+  // 2026-11-20: the service now serves the group's current seed at
+  // `targetEpoch`; the epoch mapping is anchored there, whatever commits
+  // before had no reseal of their own. Best effort: the reseal landed
+  // whatever this bookkeeping does.
+  try {
+    anchorChannelEpoch(channelIdHex, publisherGroup.epoch(), targetEpoch, newSeed);
+  } catch {
+    /* re-anchored by a later landed reseal */
+  }
   return committed;
 }
 

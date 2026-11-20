@@ -351,6 +351,10 @@ final class SubscriberAdmission: ObservableObject {
         }
     }
 
+    /// The holds of the admission pass (2026-11-20), apart from the
+    /// recorded commits' so a transient failure here never delays those.
+    static let retry = PublisherCommitRetry()
+
     func runLoop(channels: ChannelsUiState, accountIdentitySeed: () -> Data?) async {
         while !Task.isCancelled {
             if UIApplication.shared.applicationState != .background,
@@ -360,12 +364,20 @@ final class SubscriberAdmission: ObservableObject {
                     // ADR-0087 section 6 — a public channel's subscribers read
                     // its public seed; nobody reads its subscriber list.
                     if channels.extras(id).isPublic == true { continue }
+                    // 2026-11-20 — a refused or failing channel waits out its
+                    // hold (a refusal: until the next start) instead of being
+                    // read again every pass.
+                    guard let account = AcceptedContactsStore.boundAccountIdB64,
+                          Self.retry.mayAttempt(accountIdB64: account, channelIdHex: id) else { continue }
                     do {
                         try await admitNewSubscribers(
                             channelId: id, state: channels, accountIdentitySeed: seed)
+                        Self.retry.noteSuccess(accountIdB64: account, channelIdHex: id)
                     } catch {
-                        // A channel the server does not answer for this time.
-                        NSLog("[channels] subscriber admission failed")
+                        let hold = Self.retry.noteFailure(accountIdB64: account, channelIdHex: id, error: error)
+                        NSLog("[channels] subscriber admission failed (%@); %@",
+                              PublisherCommitFailure.logLabel(error),
+                              hold.refused ? "not tried again until the next start" : "tried again after a wait")
                     }
                 }
             }
