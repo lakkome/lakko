@@ -125,6 +125,10 @@
       "text": "यह ब्राउज़र पासकी सपोर्ट नहीं करता।",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "यह डिवाइस पासकी सपोर्ट नहीं करता।",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "यह पासकी इस डिवाइस पर सेव अकाउंट की नहीं, किसी दूसरे अकाउंट की है। पहले अपने पासवर्ड से लॉग इन करें।",
       "status": "machine"
@@ -307,6 +311,42 @@
     },
     "auth.username.label": {
       "text": "यूज़रनेम",
+      "status": "machine"
+    },
+    "auth.username_prompt.continue": {
+      "text": "जारी रखें",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "यूज़रनेम जाँचा नहीं जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "यह इस खाते का यूज़रनेम नहीं है।",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "बहुत अधिक प्रयास। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "यूज़रनेम",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "मुझे याद नहीं",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "आप इसे अपने दूसरे डिवाइस पर सेटिंग में देख सकते हैं। तब तक यह डिवाइस उनके साथ सिंक नहीं होता।",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "यह डिवाइस अभी आपके खाते का यूज़रनेम नहीं जानता। अपने दूसरे डिवाइस के साथ सिंक करने के लिए इसे दर्ज करें।",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "आपका यूज़रनेम क्या है?",
       "status": "machine"
     },
     "backup.rollback_refused.body": {
@@ -783,6 +823,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "यह ब्राउज़र कॉल की आवाज़ और वीडियो एन्क्रिप्ट नहीं कर सकता, इसलिए कॉल शुरू नहीं हुई।",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "यह डिवाइस कॉल की आवाज़ और वीडियो एन्क्रिप्ट नहीं कर सकता, इसलिए कॉल शुरू नहीं हुई।",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -1990,7 +2034,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "यह चैनल नहीं बन सका। कुछ भी नहीं बना। फिर से कोशिश करें।",
+      "text": "यह चैनल नहीं बन सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -2151,6 +2195,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "चैनल में प्रतिक्रियाएँ गुमनाम होती हैं। कोई नहीं देख सकता कि किसने प्रतिक्रिया दी, चैनल का मालिक भी नहीं।",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "आपके दूसरे डिवाइस पर Lakko खुलते ही आप यहाँ पोस्ट कर सकेंगे।",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "आपके दूसरे डिवाइस पर और मालिक के डिवाइस पर Lakko खुलते ही आप यहाँ पोस्ट कर सकेंगे।",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -3465,12 +3517,20 @@
       "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए। अपने ब्राउज़र की साइट सेटिंग में कैमरे की अनुमति दें।",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए। अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें।",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "वॉइस मैसेज रिकॉर्ड करने के लिए Lakko को माइक्रोफ़ोन की अनुमति चाहिए। अपने ब्राउज़र की साइट सेटिंग में माइक्रोफ़ोन की अनुमति दें।",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "वॉइस मैसेज रिकॉर्ड करने के लिए Lakko को माइक्रोफ़ोन की अनुमति चाहिए। अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें।",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3583,6 +3643,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "इस ब्राउज़र में वॉइस मैसेज रिकॉर्ड नहीं किए जा सकते",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "इस डिवाइस पर वॉइस मैसेज रिकॉर्ड नहीं किए जा सकते",
       "status": "machine"
     },
     "chat.record.video": {
@@ -4095,10 +4159,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "आपके दूसरे डिवाइस इसे आपकी चैट में जोड़ रहे हैं।",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -5193,10 +5253,6 @@
       "text": "आपके पहले बनाए गए आमंत्रण लिंक और कॉल लिंक काम करना बंद कर देंगे। नए बनाएँ।",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "आपको नई रिकवरी फ़्रेज़ मिलती है। पुरानी काम करना बंद कर देती है।",
       "status": "machine"
@@ -5267,6 +5323,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko कैमरा इस्तेमाल नहीं कर सकता। अपने ब्राउज़र की साइट सेटिंग में कैमरा ऐक्सेस की अनुमति दें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko कैमरा इस्तेमाल नहीं कर पा रहा। अपने सिस्टम की निजता सेटिंग में कैमरा एक्सेस की अनुमति दें, फिर से कोशिश करें।",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5647,6 +5707,66 @@
     },
     "display_name.error.unknown": {
       "text": "यह नाम इस्तेमाल नहीं किया जा सकता",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "दान करें",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "कॉपी हो गया",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "कॉपी करें",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "पता कॉपी करें",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "नेटवर्क: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "इस पते पर केवल {network} नेटवर्क पर {coin} भेजें। बाकी कुछ भी खो जाएगा।",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "दान के तरीके लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "दान से सर्वरों का खर्च चलता है और काम जारी रहता है।",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "अभी आपके देश में दान करने का कोई तरीका उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "नंबर नहीं दिखाया जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "दिखाएँ",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "फ़ोन नंबर छिपा है",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "क्रिप्टो",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "बैंक और कार्ड",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Lakko का समर्थन करें",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6417,10 +6537,6 @@
       "text": "शामिल होने का अनुरोध करें",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "फिर से अनुरोध भेजें",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "आपका अनुरोध नहीं जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
@@ -6442,11 +6558,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "अनुरोध भेजा गया। कोई एडमिन इसे स्वीकार करेगा, फिर बदलाव ग्रुप पर लागू होगा।",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "अगर कुछ नहीं होता, तो आप अनुरोध दोबारा भेज सकते हैं।",
+      "text": "अनुरोध भेजा गया। एडमिन अगली बार Lakko खोलने पर इसे देखेंगे।",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6926,7 +7038,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "इनवाइट स्वीकार नहीं हुआ",
+      "text": "आमंत्रण नहीं खुल सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7410,7 +7522,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "यह समूह नहीं बन सका। कुछ भी नहीं बना। फिर से कोशिश करें।",
+      "text": "यह समूह नहीं बन सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7881,10 +7993,6 @@
       "text": "दूसरा डिवाइस",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "आपको लॉग इन कराती है। अगर आपने इस पासकी के लिए यह चालू किया था, तो आपकी चैट भी वापस लाती है।",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "पासकी",
       "status": "machine"
@@ -7959,6 +8067,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "यह डिवाइस या ब्राउज़र पासकी सपोर्ट नहीं करता। कोई दूसरा तरीका चुनें।",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "यह डिवाइस पासकी सपोर्ट नहीं करता। कोई दूसरा तरीका चुनें।",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8301,6 +8413,14 @@
       "text": "जो डिवाइस अभी भी लॉग इन है, वह छह अंकों का कोड दिखाता है; उसे यहाँ टाइप करें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "किसी ऐसे डिवाइस पर Lakko खोलें जिस पर अभी भी लॉग इन है।",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "आप {username} के रूप में लॉग इन हैं, लेकिन इस डिवाइस में अभी वे कुंजियाँ नहीं हैं जिनका आपकी चैट उपयोग करती हैं। उन्हें किसी ऐसे दूसरे डिवाइस से लाएँ जिस पर अभी भी लॉग इन है।",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "इस डिवाइस पर सेव अकाउंट में कुछ गड़बड़ है। लॉग आउट करके फिर से लॉग इन करें, या अपनी रिकवरी फ़्रेज़ इस्तेमाल करें।",
       "status": "machine"
@@ -8359,10 +8479,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "मेरे पास इनमें से कुछ नहीं है",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "अगर आपने किसी पासकी के लिए कुंजियाँ रिस्टोर करना चालू किया था।",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8585,6 +8701,10 @@
       "text": "समर्थक",
       "status": "machine"
     },
+    "settings.about.support": {
+      "text": "Lakko का समर्थन करें",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "अनुवाद अपडेट किए गए {date}",
       "status": "machine"
@@ -8647,6 +8767,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "इस ब्राउज़र से आपके खाते का डेटा हटा देता है। आपके मैसेज आपके दूसरे डिवाइस पर रहते हैं; यहाँ वापस आने के लिए आपको दूसरे डिवाइस, कुंजियाँ रिस्टोर करने वाली पासकी, या रिकवरी फ़्रेज़ की ज़रूरत होगी।",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "इस डिवाइस से आपके खाते का डेटा हटा देता है। आपके मैसेज आपके दूसरे डिवाइस पर रहते हैं; यहाँ वापस आने के लिए आपको दूसरे डिवाइस, कुंजियाँ रिस्टोर करने वाली पासकी, या रिकवरी फ़्रेज़ की ज़रूरत होगी।",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8833,6 +8957,10 @@
       "text": "यह ब्राउज़र आपके खाते के लिए सेट अप नहीं है। फिर से साइन इन करें।",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "यह डिवाइस आपके खाते के लिए सेट अप नहीं है। फिर से साइन इन करें।",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "डिवाइस हटाया नहीं जा सका। फिर से कोशिश करें।",
       "status": "machine"
@@ -8953,6 +9081,10 @@
       "text": "इस डिवाइस पर प्लेबैक।",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Lakko बंद होने पर चैनल पोस्ट देर से आ सकती हैं।",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "नोटिफ़िकेशन बंद हैं, इसलिए Lakko सिर्फ़ खुला होने पर ही रिंग कर सकता है। इन्हें चालू करें ताकि ऐप बंद होने पर भी कॉल और मैसेज आप तक पहुँचें।",
       "status": "machine"
@@ -9017,56 +9149,20 @@
       "text": "यह ब्राउज़र / डिवाइस अभी पासकी नहीं बना सकता।",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "कुंजियाँ रिस्टोर करना चालू करें",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "अगर आप इसे बंद रखते हैं, तो पासकी आपको सिर्फ़ लॉग इन कराती है। कुंजियाँ आप अपनी रिकवरी फ़्रेज़ या दूसरे डिवाइस से रिस्टोर करते हैं।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "अगर आप इसे चालू करते हैं, तो अकेली यह पासकी आपके खाते की कुंजियाँ नए डिवाइस पर ला सकती है। पासकी आम तौर पर Apple, Google या आपके पासवर्ड मैनेजर से सिंक होती हैं। जो भी आपके Apple, Google या पासवर्ड मैनेजर के खाते में घुस सकता है, वह फिर आपके आगे के मैसेज पढ़ सकता है और आपकी जगह काम कर सकता है।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "रद्द किया गया। यह पासकी अब भी आपको सिर्फ़ लॉग इन कराती है।",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "यह डिवाइस अभी पासकी नहीं बना सकता।",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "यह पासकी अब आपकी कुंजियाँ रिस्टोर करती है।",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "किसी दूसरी पासकी ने जवाब दिया। फिर से कोशिश करें और वही पासकी चुनें जिसके लिए आप इसे चालू कर रहे हैं।",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "यह रिकवरी फ़्रेज़ इस खाते की नहीं है। कुछ नहीं बदला।",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "आप इसे बाद में हर पासकी के लिए बदल सकते हैं।",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "यह पासकी आपको लॉग इन करा सकती है, पर इस डिवाइस और पासकी प्रोवाइडर पर यह आपकी कुंजियाँ नहीं रख सकती। अपनी रिकवरी फ़्रेज़ संभालकर रखें।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "इसे चालू करने के लिए अपनी रिकवरी फ़्रेज़ टाइप करें।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "सिर्फ़ लॉग इन",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "इस पासकी को आपकी कुंजियाँ रिस्टोर करने दें?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "चालू करें",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -9079,14 +9175,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "सिर्फ़ लॉग इन कराती है",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "पासवर्ड की जगह Touch ID, Face ID या सिक्योरिटी की से लॉग इन करें। अगर आप यह चालू करें, तो पासकी नए डिवाइस पर आपकी कुंजियाँ भी रिस्टोर कर सकती है। आपका रिकवरी फ़्रेज़ भी हमेशा काम करता है।",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "पासवर्ड की जगह अपने फ़िंगरप्रिंट, चेहरे या स्क्रीन लॉक से, या सिक्योरिटी की से लॉग इन करें। अगर आप यह चालू करें, तो पासकी नए डिवाइस पर आपकी कुंजियाँ भी रिस्टोर कर सकती है। आपका रिकवरी फ़्रेज़ भी हमेशा काम करता है।",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9129,22 +9217,6 @@
       "text": "अकाउंट की कुंजियाँ रीसेट होने पर आपकी पासकी मिटा दी गईं। Face ID, Touch ID या अपने फ़िंगरप्रिंट से फिर से लॉग इन करने के लिए पासकी जोड़ें।",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "कुंजियाँ रिस्टोर करना बंद करें",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "यह पासकी आपको सिर्फ़ लॉग इन कराएगी। दूसरे डिवाइस पर पहले से रिस्टोर की गई कुंजियाँ वहीं रहेंगी।",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "यह पासकी अब आपको सिर्फ़ लॉग इन कराती है।",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "इस पासकी से कुंजियाँ रिस्टोर करना बंद करें?",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "पासकी",
       "status": "machine"
@@ -9155,6 +9227,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "यह ब्राउज़र पासकी प्रबंधित नहीं कर सकता। Safari, Chrome, Firefox या Edge का नया वर्शन इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "यह डिवाइस पासकी प्रबंधित नहीं कर सकता।",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9461,6 +9537,10 @@
       "text": "आपका ब्राउज़र इसे मैनेज करता है",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "आपका सिस्टम इसे मैनेज करता है",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "हटाएँ",
       "status": "machine"
@@ -9645,10 +9725,6 @@
       "text": "फिर से कोशिश करें",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "सेंसरशिप से बचाव चालू होने पर भाषा पैक डाउनलोड नहीं किए जा सकते।",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "ट्रांसक्रिप्शन इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए। वॉइस मैसेज ट्रांसक्रिप्शन के लिए कभी कहीं नहीं भेजे जाते।",
       "status": "machine"
@@ -9663,6 +9739,10 @@
     },
     "translate.pack.body.translation_sized": {
       "text": "अनुवाद इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए ({size})। मैसेज अनुवाद के लिए कभी कहीं नहीं भेजे जाते।",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_system_settings": {
+      "text": "अनुवाद इसी डिवाइस पर होता है। macOS {language} पैक सिस्टम सेटिंग में डाउनलोड करता है: भाषा और क्षेत्र, फिर अनुवाद भाषाएँ। मैसेज अनुवाद के लिए कभी कहीं नहीं भेजे जाते।",
       "status": "machine"
     },
     "translate.pack.cancel": {
@@ -9693,6 +9773,10 @@
       "text": "अभी नहीं",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "सिस्टम सेटिंग खोलें",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "यह पैक Google से आता है।",
       "status": "machine"
@@ -9703,6 +9787,10 @@
     },
     "translate.pack.source.web": {
       "text": "यह पैक आपके ब्राउज़र बनाने वाली कंपनी से आता है।",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "यह पैक आपके सिस्टम बनाने वाली कंपनी से आता है।",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9951,6 +10039,14 @@
     },
     "who_can_find_me.title": {
       "text": "मुझे कौन ढूँढ सकता है",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "आपकी स्क्रीन शेयर नहीं हो सकी। अपने सिस्टम की निजता सेटिंग में Lakko को स्क्रीन रिकॉर्डिंग की अनुमति दें।",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "आपकी स्क्रीन शेयर नहीं हो सकी। सिस्टम सेटिंग्स में Lakko को स्क्रीन रिकॉर्डिंग की अनुमति दें।",
       "status": "machine"
     }
   },

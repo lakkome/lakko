@@ -32,9 +32,12 @@ class SubscriberAdmissionTest {
 
         override fun canPost(channelIdHex: String) = channelIdHex in owned
 
+        var listFailure: Throwable? = null
+
         override suspend fun listSubscribers(channelIdHex: String): List<String> {
             listCalls += 1
             listGate?.await()
+            listFailure?.let { throw it }
             return subscribers
         }
 
@@ -122,4 +125,38 @@ class SubscriberAdmissionTest {
         admission.clear()
         assertTrue(admission.state.value.isEmpty())
     }
+
+    /** 2026-11-20 — a refused list read (`401 owner-proof-required`) is not
+     *  tried again before [SubscriberAdmission.clear]; a transient one waits. */
+    @Test
+    fun a_refused_list_read_is_held_until_the_next_session() = runTest {
+        val port = FakePort()
+        port.listFailure = ChannelsApiException(401, "owner-proof-required", "")
+        val admission = SubscriberAdmission(port)
+        admission.admitNewSubscribers("c1")
+        admission.admitNewSubscribers("c1")
+        assertEquals(1, port.listCalls)
+        assertEquals(true, admission.isRefused("c1"))
+        admission.clear()
+        port.listFailure = null
+        admission.admitNewSubscribers("c1")
+        assertEquals(2, port.listCalls)
+    }
+
+    @Test
+    fun a_transient_list_failure_waits_before_the_next_read() = runTest {
+        var now = 1_000_000L
+        val port = FakePort()
+        port.listFailure = java.io.IOException("reset")
+        val admission = SubscriberAdmission(port, PublisherCommitRetry(clock = { now }, warn = {}))
+        admission.admitNewSubscribers("c1")
+        now += 29_999
+        admission.admitNewSubscribers("c1")
+        assertEquals(1, port.listCalls)
+        now += 1
+        port.listFailure = null
+        admission.admitNewSubscribers("c1")
+        assertEquals(2, port.listCalls)
+    }
 }
+

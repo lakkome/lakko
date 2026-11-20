@@ -182,6 +182,7 @@ public object AppCallHost {
         repository.oneToOneScreenShareInbound = instance::deliverScreenShare
         repository.oneToOneMovedSink = instance::conversationMoved
         instance.callTarget = repository::oneToOneCallTargetFor
+        instance.behindHeld = repository::callHeldWhileBehind
         // docs/ux/calls.md section 4.1.2 — the starter of the group call this
         // device is in ended it for everyone.
         repository.groupCallEndedForEveryone = group::onEndedForEveryone
@@ -446,6 +447,8 @@ internal class ChatRepositoryGroupCallPort(
     override fun sessionToken(): String? = sessionTokenProvider()
 
     override fun isGroupActive(groupIdHex: String): Boolean? = repository.isGroupActive(groupIdHex)
+
+    override fun behindHeld(groupIdHex: String): Boolean = repository.callHeldWhileBehind(groupIdHex)
 
     override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
         try {

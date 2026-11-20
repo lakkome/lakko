@@ -20,9 +20,13 @@ pub mod feedback;
 pub mod feedback_api;
 mod feedback_sql;
 pub mod internal;
+pub mod metrics;
 pub mod owner_auth;
 pub mod sql_store;
 pub mod storage;
+pub mod votes;
+pub mod votes_api;
+mod votes_sql;
 
 pub use api::{router, AppState};
 pub use config::{Config, ConfigError};

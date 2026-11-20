@@ -140,6 +140,8 @@ import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { conversationWithContact } from "./contact-conversation";
 import { duplicateOneToOneFolds, type HeldConversationGroup } from "./duplicate-one-to-one";
 import { landPendingPublisherWelcome } from "../channels/channel-publishers";
+import { landPublisherDeviceWelcome } from "../channels/publisher-devices";
+import { refusalReasonOf } from "../chat/membership-refusal";
 import { buildLineage } from "../chat/lineage";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
@@ -151,6 +153,10 @@ import {
 } from "./local-store";
 import { readIsActive } from "../chat/membership-ended";
 import { runHeldWelcomePass, type HeldWelcomeOutcome } from "../chat/held-welcomes";
+import { deliverReentryRequest } from "../chat/reentry-admit";
+import { errorLogTag } from "../chat/log-tag";
+import { reentryRecordFor } from "../chat/reentry-store";
+import { noteReentryJoined } from "../chat/reentry-join";
 import { useMembershipEnd } from "../chat/MembershipEndContext";
 import {
   handOverPendingContact,
@@ -381,7 +387,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   async function landPublisherWelcome(accountIdB64: string, welcome: Uint8Array): Promise<boolean> {
     const identity = chats.conversationAccountIdentity();
     if (identity === null) return false;
-    return landPendingPublisherWelcome(identity, accountIdB64, welcome);
+    if (await landPendingPublisherWelcome(identity, accountIdB64, welcome)) return true;
+    // ADR-0090 section 2.3: a sibling (or the owner) admitted this device to
+    // a channel the account owns or co-publishes.
+    return landPublisherDeviceWelcome(identity, welcome);
   }
 
   /** Whether this device holds a live one-to-one with the person. */
@@ -1049,6 +1058,48 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /**
+   * ADR-0091 section 5 - join `welcome` over the stale group `groupIdB64` when
+   * this device recorded a re-entry request for it. Keeps the conversation
+   * and its history (the registry entry is replaced in place, never wiped).
+   * `null` when there is no record or the core refuses the Welcome (nothing
+   * changed then; the Welcome stays held).
+   */
+  async function joinAsReentry(
+    welcome: Uint8Array,
+    groupIdB64: string,
+    current: () => boolean,
+  ): Promise<ActiveGroup | null> {
+    const record = reentryRecordFor(groupIdB64);
+    if (record === undefined) return null;
+    const prior = chats.get(groupIdB64);
+    let group;
+    try {
+      group = await client.joinReentry(
+        auth.identitySecrets(),
+        welcome,
+        record.keyPackagesB64.map((b) => base64Decode(b)),
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`chat re-entry Welcome not joined: ${errorLogTag(err)}`);
+      return null;
+    }
+    if (!current()) throw new StaleMailboxScope();
+    const entry = chats.add({
+      label: prior?.label ?? groupNames.nameOf(groupIdB64) ?? "",
+      group,
+      rejoined: true,
+    });
+    try {
+      await noteReentryJoined({ groupIdB64, group, record });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`chat re-entry bookkeeping failed: ${err instanceof Error ? err.name : "error"}`);
+    }
+    return entry;
+  }
+
   /** Open one Welcome and put the group in the registry. Throws only when the
    *  session it was opened for ended. */
   async function openWelcome(
@@ -1081,7 +1132,17 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     } catch (err) {
       if (err instanceof StaleMailboxScope) throw err;
       const stillActive = membershipEnd.stillActiveGroupOf(err);
-      if (stillActive !== null) return { kind: "still-active", groupIdB64: stillActive };
+      if (stillActive !== null) {
+        // ADR-0091 section 5 - a Welcome refused because this device still
+        // holds its group as active is first tried as the answer to a
+        // re-entry request this device recorded.
+        const reentered = await joinAsReentry(welcome, stillActive, current);
+        if (reentered !== null) {
+          joinedWelcomeIds.add(messageId);
+          return { kind: "joined", entry: reentered };
+        }
+        return { kind: "still-active", groupIdB64: stillActive };
+      }
       // eslint-disable-next-line no-console
       console.warn("joinGroupFromWelcome failed", messageId, err);
       // ADR-0060 — every device of the account reads the one account mailbox,
@@ -1089,7 +1150,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       // co-publisher's (opened by that flow under the account identity).
       // Neither holds a KeyPackage of this device, and that is not a failed
       // join the user needs to hear about.
-      return isWelcomeForAnotherLeaf(err) ? { kind: "not-ours" } : { kind: "failed" };
+      // A Welcome the core refuses as not a conversation (C-86, typed
+      // `noRoleTable`) is a channel PublisherGroup's or a DeviceGroup's, which
+      // their own flows open; not a failed join either (walk of 2026-11-14:
+      // a returning owner device showed the banner for its channel's Welcome).
+      return isWelcomeForAnotherLeaf(err) || isWelcomeNotAConversation(err) ? { kind: "not-ours" } : { kind: "failed" };
     }
   }
 
@@ -1133,6 +1198,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         readJournal: (groupIdB64) => membershipEnd.readJournal(groupIdB64),
         settle: () => membershipEnd.settle(),
         drop: (messageId) => membershipEnd.dropHeldWelcome(messageId),
+        // ADR-0091 section 5 - never dropped while a re-entry record names
+        // its group: it may be the answer, and the core decides that.
+        keepForReentry: (groupIdB64) => reentryRecordFor(groupIdB64) !== undefined,
         noteFailed: () => setJoinFailure(JOIN_FAILURE_MESSAGE),
         current,
       });
@@ -1314,6 +1382,29 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
               welcomeB64: base64Encode(ev.welcome.welcomeBytes),
               heldAtMs: Date.now(),
             });
+          }
+        } else if (ev.kind === "conversation-reentry") {
+          // ADR-0091 section 3, route 2 - the other person of a one-to-one
+          // asks to be brought back. Decoded here, judged by the re-admitter
+          // (`chat/reentry-admit.ts`), which checks the conversation, the
+          // epoch and the KeyPackage; anything that does not fit is dropped.
+          const wasm = await loadWasm();
+          let decoded;
+          try {
+            decoded = wasm.decodeConversationReentryEnvelope(ev.envelope);
+          } catch {
+            continue;
+          }
+          try {
+            deliverReentryRequest({
+              route: "mailbox",
+              groupId: decoded.groupId,
+              epochLeft: decoded.epochLeft,
+              gapFromMs: decoded.gapFromMs,
+              keyPackage: decoded.keyPackage,
+            });
+          } finally {
+            decoded.free();
           }
         } else if (ev.kind === "link-refusal") {
           // ADR-0079 amendment of 2026-10-19 - the inviter's app refused the
@@ -1695,6 +1786,23 @@ export function isWelcomeForAnotherLeaf(err: unknown): boolean {
       ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
       : String(err);
   return /NoMatchingKeyPackage|no matching key ?package/i.test(text);
+}
+
+/**
+ * Whether `joinFromWelcome` refused a Welcome because its group is not a
+ * conversation (no role table, C-86): a channel PublisherGroup's or a
+ * DeviceGroup's Welcome read from the shared account mailbox. The typed
+ * refusal (`refusalReason === "noRoleTable"`, followed through wrappers) is
+ * read first; the core's sentence only where no reason travelled.
+ */
+export function isWelcomeNotAConversation(err: unknown): boolean {
+  const reason = refusalReasonOf(err);
+  if (reason !== undefined) return reason === "noRoleTable";
+  const text =
+    err instanceof Error
+      ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
+      : String(err);
+  return /carries no role table, so it is not a conversation/i.test(text);
 }
 
 /** The founder of a conversation: the role table's owner (a one-to-one's

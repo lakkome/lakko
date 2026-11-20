@@ -145,7 +145,7 @@ class ChannelsPublisherProofTest {
         val call = proofs.calls.single()
         assertEquals("/v1/channels/$channelId/rotate/stage", call.path)
         assertEquals(
-            """{"target_epoch":3,"envelopes":[{"subscriber_pubkey_hex":"${"cd".repeat(32)}","envelope_b64":"ZW52"}]}""",
+            """{"target_epoch":3,"envelopes":[{"subscriber_id":"${"cd".repeat(32)}","envelope_b64":"ZW52"}]}""",
             call.body.toString(Charsets.UTF_8),
         )
         assertArrayEquals(call.body, seen.single().body)
@@ -242,5 +242,31 @@ class ChannelsPublisherProofTest {
     private companion object {
         const val OWNER_HEADER = "x-test-owner-proof"
         const val COPUB_HEADER = "x-test-copublisher-proof"
+    }
+
+    @Test
+    fun `a public seed already filed for the epoch is a success`() = runTest {
+        val seen = mutableListOf<Seen>()
+        client(
+            listOf(HttpStatusCode.Conflict to """{"code":"public-seed-exists","detail":"another public seed is stored for this epoch"}"""),
+            seen,
+            ChannelPublisherRoles(),
+        ).use { it.putPublicSeed(channelId, 0u, ByteArray(64), FakeProofs()) }
+        assertEquals("/native/channels/v1/channels/$channelId/public-seed/0", seen.single().encodedPath)
+    }
+
+    @Test
+    fun `another public seed refusal still throws`() = runTest {
+        val seen = mutableListOf<Seen>()
+        try {
+            client(
+                listOf(HttpStatusCode.Conflict to """{"code":"public-seed-epoch-in-future","detail":"x"}"""),
+                seen,
+                ChannelPublisherRoles(),
+            ).use { it.putPublicSeed(channelId, 5u, ByteArray(64), FakeProofs()) }
+            fail("expected a refusal")
+        } catch (e: ChannelsApiException) {
+            assertEquals("public-seed-epoch-in-future", e.code)
+        }
     }
 }

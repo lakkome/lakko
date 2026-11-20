@@ -2,35 +2,16 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import SwiftUI
+import UIKit
 
 /// UX spec §4 — "Tapping an emoji inserts it at the caret".
 ///
-/// SwiftUI exposes a text field's selection only from iOS 18
-/// (`TextField(text:selection:)`); the deployment floor is iOS 17. So the
-/// caret is tracked where it can be, and an insert on iOS 17 appends at the
-/// end of the draft — the one honest fallback without replacing the composer
-/// with a UIKit text view.
+/// The composer's text view records its selection here on every change, so
+/// an insert lands at the caret; an insert with no caret known appends.
 @MainActor
 final class ComposerCaret: ObservableObject {
-    /// The last selection as UTF-16 offsets, when the platform reports one.
+    /// The last selection as UTF-16 offsets, when the field reported one.
     var utf16Range: Range<Int>?
-
-    /// Record the field's current selection against the text it belongs to.
-    ///
-    /// SwiftUI can report a selection whose indices belong to an earlier value
-    /// of `text` (the chat screen opening with a restored draft, a draft
-    /// cleared after send), and `utf16Offset(in:)` traps on an index past the
-    /// end, so the indices are clamped to the current text rather than
-    /// trusted. A field with no selection leaves the last record in place;
-    /// ``insert(_:into:at:)`` re-checks it against the text at insert time.
-    @available(iOS 18.0, *)
-    func record(selection: TextSelection?, in text: String) {
-        guard let selection, case .selection(let range) = selection.indices else { return }
-        let end = text.endIndex
-        let lower = min(range.lowerBound, end)
-        let upper = min(max(range.upperBound, lower), end)
-        utf16Range = lower.utf16Offset(in: text)..<upper.utf16Offset(in: text)
-    }
 
     /// Insert `insertion` into `text` at the tracked caret (replacing a
     /// selection), or append when no caret is known or it no longer fits the
@@ -60,6 +41,11 @@ enum HardwareReturn {
     static func submits(_ modifiers: EventModifiers) -> Bool {
         !modifiers.contains(.shift) && !modifiers.contains(.option)
     }
+
+    /// The same rule for a UIKit key press (the composer's text view).
+    static func submits(uiKitFlags flags: UIKeyModifierFlags) -> Bool {
+        !flags.contains(.shift) && !flags.contains(.alternate)
+    }
 }
 
 extension View {
@@ -74,43 +60,257 @@ extension View {
     }
 }
 
+/// The chat composer's text field (UX spec section 5.2).
+///
+/// A UIKit text view under SwiftUI, because a SwiftUI text field pastes text
+/// only and its paste cannot be intercepted below iOS 27:
+/// `docs/ux/attachments.md` section 2.5 asks the composer's Paste (the edit
+/// menu's, and a hardware keyboard's Command-V) to attach a copied photo or
+/// video. The text view also reports its selection on every iOS version, so
+/// the emoji picker inserts at the caret on iOS 17 too.
 struct ComposerTextField: View {
     @Binding var text: String
     let caret: ComposerCaret
     var disabled: Bool
     /// A hardware Return sends (``HardwareReturn``).
     var onReturn: () -> Void = {}
-    /// The screen's focus for this field, so it can be given the keyboard
+    /// Whether the field holds the keyboard, so it can be given the keyboard
     /// programmatically (choosing Reply focuses the composer,
-    /// `docs/ux/message-actions.md` section 3.1). `nil` leaves focus to the
-    /// platform, which is what every other caller wants.
-    var focus: FocusState<Bool>.Binding? = nil
+    /// `docs/ux/message-actions.md` section 3.1) and taken away (leaving the
+    /// chat). `nil` leaves focus to the platform.
+    var focus: Binding<Bool>? = nil
+    /// Paste of a copied photo or video: the pasteboard's items, in order.
+    /// `nil` keeps Paste a text paste only.
+    var onPasteMedia: (([NSItemProvider]) -> Void)? = nil
+
+    @Environment(\.chatTextScale) private var scale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        if #available(iOS 18.0, *) {
-            SelectionTrackingField(text: $text, caret: caret, disabled: disabled, focus: focus)
-                .submitOnHardwareReturn(onReturn)
+        ComposerTextView(
+            text: $text, caret: caret, disabled: disabled,
+            placeholder: Localization.text("chat.composer.placeholder"),
+            // `docs/ux/text-size.md` — the composer follows the chat text size.
+            fontSize: ChatFontSize.points(style: .body, dynamicTypeSize: dynamicTypeSize, scale: scale),
+            onReturn: onReturn, focus: focus, onPasteMedia: onPasteMedia)
+            // The field takes every point the row leaves it. Without this the
+            // UIKit view's answer to an unspecified width (its current bounds)
+            // became its ideal width, and a field laid out narrow once (while
+            // the row above changed) stayed narrow, centred in the bar.
+            .frame(maxWidth: .infinity)
+            .composerFieldChrome()
+    }
+}
+
+/// The UIKit text view behind ``ComposerTextField``: grows to five lines,
+/// then scrolls.
+private struct ComposerTextView: UIViewRepresentable {
+    @Binding var text: String
+    let caret: ComposerCaret
+    var disabled: Bool
+    var placeholder: String
+    var fontSize: CGFloat
+    var onReturn: () -> Void
+    var focus: Binding<Bool>?
+    var onPasteMedia: (([NSItemProvider]) -> Void)?
+
+    static let maxLines: CGFloat = 5
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIView(context: Context) -> PastingComposerTextView {
+        let view = PastingComposerTextView()
+        view.delegate = context.coordinator
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.isScrollEnabled = false
+        view.textColor = UIColor(Color.lakkoText)
+        view.tintColor = UIColor(Color.lakkoAccent)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.text = text
+        apply(to: view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateUIView(_ view: PastingComposerTextView, context: Context) {
+        context.coordinator.parent = self
+        apply(to: view, coordinator: context.coordinator)
+        // The draft changed outside the field (an emoji inserted at the
+        // caret, the draft cleared after send, a restored draft). Text being
+        // composed (marked text) is never overwritten.
+        if view.text != text, view.markedTextRange == nil {
+            let wanted = caret.utf16Range
+            view.text = text
+            let length = (text as NSString).length
+            if let wanted, wanted.lowerBound >= 0, wanted.upperBound <= length {
+                view.selectedRange = NSRange(location: wanted.lowerBound, length: wanted.count)
+            } else {
+                view.selectedRange = NSRange(location: length, length: 0)
+            }
+            caret.utf16Range = view.selectedRange.location..<NSMaxRange(view.selectedRange)
+            view.refreshPlaceholder()
+            view.invalidateIntrinsicContentSize()
+        }
+        if let focus {
+            if focus.wrappedValue, !view.isFirstResponder {
+                DispatchQueue.main.async {
+                    if view.window != nil, !view.isFirstResponder { view.becomeFirstResponder() }
+                }
+            } else if !focus.wrappedValue, view.isFirstResponder {
+                DispatchQueue.main.async { view.resignFirstResponder() }
+            }
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView view: PastingComposerTextView, context: Context) -> CGSize? {
+        let width: CGFloat
+        if let proposed = proposal.width, proposed.isFinite, proposed > 0 {
+            width = proposed
         } else {
-            TextField(Localization.text("chat.composer.placeholder"), text: $text, axis: .vertical)
-                .lineLimit(1...5)
-                .disabled(disabled)
-                .composerFieldChrome()
-                .composerFocus(focus)
-                .submitOnHardwareReturn(onReturn)
+            width = max(view.bounds.width, 1)
+        }
+        let lineHeight = ceil(view.font?.lineHeight ?? 20)
+        let fitting = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        let cap = ceil(lineHeight * Self.maxLines)
+        let scrolls = fitting > cap + 0.5
+        if view.isScrollEnabled != scrolls {
+            DispatchQueue.main.async { view.isScrollEnabled = scrolls }
+        }
+        return CGSize(width: width, height: min(max(ceil(fitting), lineHeight), cap))
+    }
+
+    private func apply(to view: PastingComposerTextView, coordinator: Coordinator) {
+        if view.font?.pointSize != fontSize {
+            view.font = .systemFont(ofSize: fontSize)
+            view.placeholderLabel.font = view.font
+            view.invalidateIntrinsicContentSize()
+        }
+        view.placeholderLabel.text = placeholder
+        view.accessibilityLabel = placeholder
+        view.isComposerDisabled = disabled
+        view.onPasteMedia = onPasteMedia
+        view.onHardwareReturn = { [weak coordinator] in coordinator?.parent.onReturn() }
+        view.refreshPlaceholder()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: ComposerTextView
+
+        init(parent: ComposerTextView) { self.parent = parent }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText: String) -> Bool {
+            !parent.disabled
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            record(textView)
+            if parent.text != textView.text { parent.text = textView.text }
+            (textView as? PastingComposerTextView)?.refreshPlaceholder()
+            textView.invalidateIntrinsicContentSize()
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            record(textView)
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            if let focus = parent.focus, !focus.wrappedValue { focus.wrappedValue = true }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            if let focus = parent.focus, focus.wrappedValue { focus.wrappedValue = false }
+        }
+
+        private func record(_ textView: UITextView) {
+            let range = textView.selectedRange
+            guard range.location != NSNotFound else { return }
+            parent.caret.utf16Range = range.location..<NSMaxRange(range)
         }
     }
 }
 
-extension View {
-    /// `.focused(_:)` when the screen handed a focus binding in, the view
-    /// unchanged otherwise.
-    @ViewBuilder
-    func composerFocus(_ focus: FocusState<Bool>.Binding?) -> some View {
-        if let focus {
-            self.focused(focus)
-        } else {
-            self
+/// The composer's text view: Paste attaches a copied photo or video
+/// (``PastedMedia``), a hardware Return sends (``HardwareReturn``).
+final class PastingComposerTextView: UITextView {
+    var onPasteMedia: (([NSItemProvider]) -> Void)?
+    var onHardwareReturn: (() -> Void)?
+    /// While a send is in flight nothing is typed or pasted; the keyboard
+    /// stays.
+    var isComposerDisabled = false
+    let placeholderLabel = UILabel()
+    private var handledReturns: Set<UIPress> = []
+
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        placeholderLabel.textColor = .placeholderText
+        placeholderLabel.numberOfLines = 1
+        placeholderLabel.isAccessibilityElement = false
+        addSubview(placeholderLabel)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let inset = textContainerInset
+        let width = max(bounds.width - inset.left - inset.right, 0)
+        let height = placeholderLabel.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        placeholderLabel.frame = CGRect(x: inset.left, y: inset.top, width: width, height: height)
+    }
+
+    func refreshPlaceholder() {
+        placeholderLabel.isHidden = !text.isEmpty
+    }
+
+    private var pasteAttachesMedia: Bool {
+        onPasteMedia != nil && PastedMedia.attachesAsMedia(itemTypes: PastedMedia.itemTypes(of: .general))
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)) {
+            if isComposerDisabled { return false }
+            if pasteAttachesMedia { return true }
         }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        guard !isComposerDisabled else { return }
+        if pasteAttachesMedia, let onPasteMedia {
+            onPasteMedia(UIPasteboard.general.itemProviders)
+            return
+        }
+        super.paste(sender)
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var rest = presses
+        for press in presses {
+            guard let key = press.key,
+                  key.keyCode == .keyboardReturnOrEnter || key.keyCode == .keypadEnter,
+                  markedTextRange == nil,
+                  HardwareReturn.submits(uiKitFlags: key.modifierFlags) else { continue }
+            rest.remove(press)
+            handledReturns.insert(press)
+            onHardwareReturn?()
+        }
+        if !rest.isEmpty { super.pressesBegan(rest, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let rest = presses.subtracting(handledReturns)
+        handledReturns.subtract(presses)
+        if !rest.isEmpty { super.pressesEnded(rest, with: event) }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let rest = presses.subtracting(handledReturns)
+        handledReturns.subtract(presses)
+        if !rest.isEmpty { super.pressesCancelled(rest, with: event) }
     }
 }
 
@@ -126,37 +326,5 @@ extension View {
             .padding(.vertical, 9)
             .background(Color.lakkoSurfaceSunken)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
-}
-
-/// The iOS 18 field: `TextField(text:selection:)`, with the selection kept
-/// in this view's own state so the platform owns the caret and the parent
-/// never writes it.
-///
-/// The caret is recorded as part of `body`, NOT through `.onChange(of:)`.
-/// Injected typing (a UI test, the simulator's text action) can land more
-/// than one keystroke per frame, and an `onChange` observing the text or the
-/// selection then fires more than once per frame — SwiftUI reports that as
-/// `onChange(of: String) action tried to update multiple times per frame`
-/// (an "Invalid Configuration" fault in the unified log) and coalesces to the
-/// last value. The body already runs for every change of either input, so
-/// recording there gives the same freshest-value semantics with no per-frame
-/// fault. The write is to a plain, unpublished cache on a class the parent
-/// owns, so it invalidates nothing.
-@available(iOS 18.0, *)
-private struct SelectionTrackingField: View {
-    @Binding var text: String
-    let caret: ComposerCaret
-    var disabled: Bool
-    var focus: FocusState<Bool>.Binding?
-    @State private var selection: TextSelection?
-
-    var body: some View {
-        let _ = caret.record(selection: selection, in: text)
-        TextField(Localization.text("chat.composer.placeholder"), text: $text, selection: $selection, axis: .vertical)
-            .lineLimit(1...5)
-            .disabled(disabled)
-            .composerFieldChrome()
-            .composerFocus(focus)
     }
 }

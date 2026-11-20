@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 @testable import Lakko
 
@@ -323,4 +324,44 @@ final class HeldSendQueueTests: XCTestCase {
             shownMessageIds: [6], flushed: report.messages, messageId: { $0.messageId })
         XCTAssertEqual(toShow.map(\.localId), ["l2"])
     }
+
+    // MARK: - ADR-0092 — a held content message keeps its content
+
+    func testAHeldContentMessageKeepsItsContentAcrossARelaunchAndIsAMessageWithNoText() throws {
+        let card = SharedContactCard(name: "Anna", username: "anna", accountKey: Data(repeating: 3, count: 32))
+        let content = try composeContentEnvelope(
+            content: .contactCard(card: card), attachments: [], parts: ContentModel.emptyParts)
+        let forward = Data("{\"author\":\"Bob\"}".utf8)
+        let held = HeldSendQueue.Entry(
+            localId: "l1", queuedAtMs: 5, text: "", forward: forward, content: content)
+        XCTAssertTrue(held.isValid, "a content message with no text is a message")
+        XCTAssertTrue(queue().enqueue(conversationHex: conversation, entry: held))
+        let read = try XCTUnwrap(queue().list(conversationHex: conversation).first)
+        XCTAssertEqual(read.content, content)
+        XCTAssertEqual(read.forward, forward)
+        XCTAssertEqual(read.requeued(atMs: 9).content, content, "a requeue keeps the content")
+        guard case .contactCard(let back)? = parseBodyEnvelope(bytes: try XCTUnwrap(read.content)).content else {
+            return XCTFail("the held bytes still read as the card")
+        }
+        XCTAssertEqual(back, card)
+    }
+
+    func testARowStoredBeforeTheFieldHoldsNoContent() throws {
+        let old = Data(#"{"localId":"l1","queuedAtMs":1,"text":"hi","attachments":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(HeldSendQueue.Entry.self, from: old)
+        XCTAssertNil(decoded.content)
+        XCTAssertTrue(decoded.isValid)
+        XCTAssertFalse(HeldSendQueue.Entry(localId: "l2", queuedAtMs: 1, text: "", content: Data()).isValid,
+                       "empty content is no content")
+    }
+
+    func testOnlyUnsignedContentIsHeldForASuccessor() {
+        let location = SharedLocation(latE7: 1, lonE7: 2, accuracyM: 3, fixAtMs: 4, name: nil)
+        XCTAssertTrue(HeldSend.holdsContent(.location(location: location)))
+        XCTAssertTrue(HeldSend.holdsContent(.contactCard(card: SharedContactCard(
+            name: "A", username: "a", accountKey: Data(repeating: 1, count: 32)))))
+        let body = ChecklistBody(title: "T", othersAdd: false, othersMark: false, items: [ChecklistItem(id: 1, text: "a")])
+        XCTAssertFalse(HeldSend.holdsContent(.checklist(checklist: SignedChecklist(body: body, authorSig: nil))))
+    }
 }
+

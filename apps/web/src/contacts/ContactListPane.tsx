@@ -30,6 +30,7 @@ import {
   matchesContactQuery,
   sentRowLines,
   sortIncomingRequests,
+  subLineUsername,
   type SentRequestRecord,
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
@@ -99,7 +100,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const nameOf = (c: AcceptedContact): string =>
     memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the contact list");
   const usernameOf = (c: AcceptedContact): string | null =>
-    profiles.resolve(c.signaturePubkeyB64).username;
+    subLineUsername(nameOf(c), profiles.resolve(c.signaturePubkeyB64).username);
 
   /** One row of the alphabetical list: a contact, or an inviter added
    *  through their link (ADR-0079) who is shown exactly like one. */
@@ -117,7 +118,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         kind: "invited",
         p,
         name: invitedName(p),
-        username: p.username.length > 0 ? `@${p.username}` : null,
+        username: subLineUsername(invitedName(p), p.username.length > 0 ? `@${p.username}` : null),
       }),
     ),
   ];
@@ -155,7 +156,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             aria-expanded={menuOpen()}
             onClick={() => setMenuOpen(!menuOpen())}
           >
-            <Icon name="plus" size={18} />
+            <Icon name="person-plus" size={24} />
           </button>
           <Show when={menuOpen()}>
             <MenuBackdrop onClose={() => setMenuOpen(false)} />
@@ -170,7 +171,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       props.onAdd(item.mode);
                     }}
                   >
-                    <Icon name={item.icon} size={18} />
+                    <Icon name={item.icon} size={20} />
                     {t(item.labelKey)}
                   </button>
                 )}
@@ -180,7 +181,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         </div>
       </div>
       <div class="lk-search">
-        <Icon name="search" size={18} />
+        <Icon name="search" size={20} />
         <input
           ref={searchInput}
           type="search"
@@ -210,7 +211,9 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                   <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} playVideo="hover" />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r(), "a contact request row")}</span>
-                    <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
+                    <Show when={subLineUsername(memberNameOf(r(), "a contact request row"), r().username)}>
+                      {(u) => <span class="lk-row-sub">{u()}</span>}
+                    </Show>
                     <Show when={props.viaGroupName?.(req) ?? null}>
                       {(name) => <span class="lk-row-sub">{viaGroupLine(name())}</span>}
                     </Show>
@@ -253,7 +256,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               aria-expanded={sentOpen()}
               onClick={() => setSentOpen(!sentOpen())}
             >
-              <Icon name="chevron" size={14} class={sentOpen() ? "open" : ""} />
+              <Icon name="chevron-forward" size={14} class={sentOpen() ? "open" : ""} />
               {t("contacts.list.sent", { count: props.sent().length })}
             </button>
             <Show when={sentOpen()}>
@@ -292,7 +295,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           when={!nothingAtAll() || searching()}
           fallback={
             <div class="lk-empty">
-              <Icon name="contacts" size={40} strokeWidth={1.4} />
+              <Icon name="person-circle-plus" size={48} />
               <strong>{t("contacts.list.empty.title")}</strong>
               <span>{t("contacts.list.empty.body")}</span>
               {/* Finding someone is the search field above (UX who-can-find-me

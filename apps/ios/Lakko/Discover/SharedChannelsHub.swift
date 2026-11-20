@@ -197,7 +197,10 @@ public final class SharedChannelsHub: ObservableObject {
                     try await sendFresh(groupIdHex: groupIdHex, channels: channels)
                 }
             } catch {
-                NSLog("[shared-channels] re-send failed")
+                // ADR-0091 section 2 — refused while behind: not a failure.
+                if !ConversationReentryRules.isBehindRefusal(error) {
+                    NSLog("[shared-channels] re-send failed")
+                }
             }
         }
     }

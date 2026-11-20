@@ -45,6 +45,11 @@ export interface AutoBackupState {
    *  device last reported. `null` before the first report, which counts as a
    *  change: an older blob may carry neither. */
   readonly lastOwnStateKey: string | null;
+  /** A digest of the account's synced state (`SyncedState.toBytes()`: folders,
+   *  pins, saved messages, channel subscriptions and admission seeds, ...)
+   *  this device last reported. `null` before the first report, which counts
+   *  as a change for the same reason as the two keys above. */
+  readonly lastSyncedStateKey: string | null;
 }
 
 export const CLEAN_STATE: AutoBackupState = {
@@ -52,6 +57,7 @@ export const CLEAN_STATE: AutoBackupState = {
   dirtySinceMs: null,
   lastGroupsKey: null,
   lastOwnStateKey: null,
+  lastSyncedStateKey: null,
 };
 
 export type AutoBackupVerdict = "clean" | "throttled" | "due";
@@ -126,7 +132,14 @@ export function loadAutoBackupState(accountIdB64: string): AutoBackupState {
     const dirty = typeof p.dirtySinceMs === "number" ? p.dirtySinceMs : null;
     const groups = typeof p.lastGroupsKey === "string" ? p.lastGroupsKey : null;
     const own = typeof p.lastOwnStateKey === "string" ? p.lastOwnStateKey : null;
-    return { lastUploadAtMs: last, dirtySinceMs: dirty, lastGroupsKey: groups, lastOwnStateKey: own };
+    const synced = typeof p.lastSyncedStateKey === "string" ? p.lastSyncedStateKey : null;
+    return {
+      lastUploadAtMs: last,
+      dirtySinceMs: dirty,
+      lastGroupsKey: groups,
+      lastOwnStateKey: own,
+      lastSyncedStateKey: synced,
+    };
   } catch {
     return CLEAN_STATE;
   }
@@ -292,5 +305,43 @@ export function ownStateChanged(accountIdB64: string, key: string): boolean {
   const state = loadAutoBackupState(accountIdB64);
   if (state.lastOwnStateKey === key) return false;
   saveAutoBackupState(accountIdB64, { ...state, lastOwnStateKey: key });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Synced-state change detection
+// ---------------------------------------------------------------------------
+
+/**
+ * A short key for the bytes of the synced state, so a whole fold need not be
+ * kept in `localStorage` to be compared. Two independent 32-bit FNV-1a lanes
+ * plus the length: not a cryptographic digest and it need not be one. A
+ * collision only means a change is noticed at the next change instead of
+ * this one; nothing is trusted on the strength of it.
+ */
+export function syncedStateKeyOf(bytes: Uint8Array): string {
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ 0x5bd1e995;
+  for (let i = 0; i < bytes.length; i += 1) {
+    const v = bytes[i] ?? 0;
+    a = Math.imul(a ^ v, 0x01000193) >>> 0;
+    b = Math.imul(b ^ v ^ (i & 0xff), 0x01000193) >>> 0;
+  }
+  return `${bytes.length.toString(16)}.${a.toString(16)}.${b.toString(16)}`;
+}
+
+/**
+ * Whether the account's synced state moved since the last time this was
+ * asked, recording the new key as it goes. The backup carries the whole fold
+ * (folders, pins, saved messages, the channel-subscription register and the
+ * channel admission seeds among them), so any change to it is worth a
+ * backup; asking at the tick needs no hook at any of the places that write a
+ * register, here or adopted from another device.
+ */
+export function syncedStateChanged(accountIdB64: string, bytes: Uint8Array): boolean {
+  const key = syncedStateKeyOf(bytes);
+  const state = loadAutoBackupState(accountIdB64);
+  if (state.lastSyncedStateKey === key) return false;
+  saveAutoBackupState(accountIdB64, { ...state, lastSyncedStateKey: key });
   return true;
 }

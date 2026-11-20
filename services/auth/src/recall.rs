@@ -384,12 +384,15 @@ pub(crate) async fn open_window_until(
 
 /// Hourly pruner: expired anchors, and recall states past their lifetime.
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::RECALL_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
             let now = now_ms();
+            let mut all_ok = true;
             match sqlx::query("DELETE FROM recall_anchors WHERE expires_at_ms <= ?")
                 .bind(now)
                 .execute(&pool)
@@ -399,13 +402,17 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired recall anchors");
                 },
                 Ok(_) => {},
-                Err(e) => tracing::warn!(error = %e, "recall_anchors prune failed"),
+                Err(e) => {
+                    all_ok = false;
+                    tracing::warn!(error = %e, "recall_anchors prune failed");
+                },
             }
             if let Err(e) = sqlx::query("DELETE FROM recall_states WHERE created_at_ms < ?")
                 .bind(now.saturating_sub(RECALL_STATE_TTL_MS))
                 .execute(&pool)
                 .await
             {
+                all_ok = false;
                 tracing::warn!(error = %e, "recall_states prune failed");
             }
             if let Err(e) = sqlx::query("DELETE FROM recall_outcomes WHERE expires_at_ms <= ?")
@@ -413,8 +420,10 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                 .execute(&pool)
                 .await
             {
+                all_ok = false;
                 tracing::warn!(error = %e, "recall_outcomes prune failed");
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }

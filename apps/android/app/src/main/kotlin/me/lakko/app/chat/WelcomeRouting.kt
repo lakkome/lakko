@@ -46,6 +46,38 @@ public fun isWelcomeForAnotherDevice(error: Throwable): Boolean {
     return false
 }
 
+/**
+ * Whether [error] (or anything in its cause chain) is the core refusing a
+ * Welcome because its group carries no role table, so it is not a conversation
+ * (the typed `NoRoleTable` refusal of `Group.joinFromWelcome`, C-86): a
+ * PublisherGroup or DeviceGroup Welcome that shares the account mailbox. Not a
+ * failed conversation join: the channel and device sides take it, and the
+ * conversation intake raises no banner for it. Typed, never matched by message.
+ */
+public fun isWelcomeNotAConversation(error: Throwable): Boolean {
+    var cause: Throwable? = error
+    val seen = HashSet<Throwable>()
+    while (cause != null && seen.add(cause)) {
+        if (cause is uniffi.lakko_ffi_uniffi.FfiException.MembershipNoRoleTable) return true
+        cause = cause.cause
+    }
+    return false
+}
+
+/**
+ * Whether a conversation join from the account mailbox that threw [error]
+ * raises the "could not be opened on this device" banner: only a refusal of
+ * this device's own conversation Welcome does. A Welcome sealed to another
+ * device of the account, one kept for a group still held as active, one that
+ * is not a conversation ([isWelcomeNotAConversation]) and a co-publisher's
+ * Welcome while one is awaited ([awaitingCoPublishWelcome]) raise nothing.
+ */
+public fun welcomeFailureRaisesBanner(error: Throwable, awaitingCoPublishWelcome: Boolean): Boolean =
+    !isWelcomeForAnotherDevice(error) &&
+        groupStillActiveHex(error) == null &&
+        !isWelcomeNotAConversation(error) &&
+        !awaitingCoPublishWelcome
+
 /** The OpenMLS `WelcomeError` variant the core formats into its message. */
 internal const val NO_MATCHING_KEY_PACKAGE: String = "NoMatchingKeyPackage"
 
@@ -61,6 +93,10 @@ public enum class WelcomeOutcome {
     /** Refused for a group this device still holds as active: kept, tried again. */
     HELD_GROUP_STILL_ACTIVE,
 
+    /** Not a conversation (a PublisherGroup or DeviceGroup Welcome): not this
+     *  intake's, nothing to report. */
+    NOT_A_CONVERSATION,
+
     /** Refused for any other reason. */
     REFUSED,
 }
@@ -69,5 +105,6 @@ public enum class WelcomeOutcome {
 public fun welcomeOutcomeOf(error: Throwable): WelcomeOutcome = when {
     isWelcomeForAnotherDevice(error) -> WelcomeOutcome.FOR_ANOTHER_DEVICE
     groupStillActiveHex(error) != null -> WelcomeOutcome.HELD_GROUP_STILL_ACTIVE
+    isWelcomeNotAConversation(error) -> WelcomeOutcome.NOT_A_CONVERSATION
     else -> WelcomeOutcome.REFUSED
 }

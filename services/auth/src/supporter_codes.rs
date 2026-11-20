@@ -214,43 +214,30 @@ pub(crate) enum RedeemError {
 
 impl IntoResponse for RedeemError {
     fn into_response(self) -> Response {
-        let (status, body) = match self {
-            Self::Disabled => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({ "error": "supporter-codes-disabled" }),
-            ),
-            Self::BadBody => (StatusCode::BAD_REQUEST, json!({ "error": "bad-request" })),
-            Self::Malformed => (
-                StatusCode::BAD_REQUEST,
-                json!({ "error": "supporter-code-malformed" }),
-            ),
-            Self::BadBlindedElement => (
-                StatusCode::BAD_REQUEST,
-                json!({ "error": "bad-blinded-element" }),
-            ),
-            Self::EpochNotIssuable { current_epoch } => (
-                StatusCode::BAD_REQUEST,
-                json!({ "error": "epoch-not-issuable", "current_epoch": current_epoch }),
-            ),
+        let (status, code) = match self {
+            Self::Disabled => (StatusCode::SERVICE_UNAVAILABLE, "supporter-codes-disabled"),
+            Self::BadBody => (StatusCode::BAD_REQUEST, "bad-request"),
+            Self::Malformed => (StatusCode::BAD_REQUEST, "supporter-code-malformed"),
+            Self::BadBlindedElement => (StatusCode::BAD_REQUEST, "bad-blinded-element"),
+            Self::EpochNotIssuable { .. } => (StatusCode::BAD_REQUEST, "epoch-not-issuable"),
             Self::Limit(e) => return e.into_response(),
-            Self::Unknown => (
-                StatusCode::NOT_FOUND,
-                json!({ "error": "supporter-code-unknown" }),
-            ),
-            Self::Mismatch => (
-                StatusCode::CONFLICT,
-                json!({ "error": "supporter-code-mismatch" }),
-            ),
-            Self::Expired => (
-                StatusCode::GONE,
-                json!({ "error": "supporter-code-expired" }),
-            ),
-            Self::Internal => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": "internal" }),
-            ),
+            Self::Unknown => (StatusCode::NOT_FOUND, "supporter-code-unknown"),
+            Self::Mismatch => (StatusCode::CONFLICT, "supporter-code-mismatch"),
+            Self::Expired => (StatusCode::GONE, "supporter-code-expired"),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
-        (status, Json(body)).into_response()
+        let body = match self {
+            Self::EpochNotIssuable { current_epoch } => {
+                json!({ "error": code, "current_epoch": current_epoch })
+            },
+            _ => json!({ "error": code }),
+        };
+        let mut response = (status, Json(body)).into_response();
+        // The `code` label of the request counter (ADR-0096).
+        response
+            .extensions_mut()
+            .insert(lakko_metrics::ErrorCode(code));
+        response
     }
 }
 

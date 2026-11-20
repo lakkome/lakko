@@ -15,11 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,6 +51,9 @@ import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.languageNameKey
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.visibleLanguages
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Settings > Language (docs/ux/localization.md section 3): a search field,
@@ -80,7 +78,7 @@ public fun LanguageScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 title = { Text(t("settings.language.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -142,7 +140,7 @@ public fun AuthLanguageButton(modifier: Modifier = Modifier) {
         onClick = { open = true },
         modifier = modifier.semantics { contentDescription = label },
     ) {
-        Icon(Icons.Filled.Language, contentDescription = null)
+        LkIcon(R.drawable.ic_lk_globe, contentDescription = null, size = LkIconSize.Row)
         Spacer(Modifier.width(8.dp))
         Text(Localization.ownName(state.resolved))
     }
@@ -168,7 +166,7 @@ private fun LanguageList(modifier: Modifier = Modifier) {
             onValueChange = { query = it },
             singleLine = true,
             placeholder = { Text(t("settings.language.search")) },
-            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_search, contentDescription = null, size = LkIconSize.Row) },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -231,7 +229,7 @@ private fun LanguageRow(
         supportingContent = { Text(subtitle) },
         trailingContent = {
             if (selected) {
-                Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                LkIcon(R.drawable.ic_lk_checkmark, contentDescription = null, tint = MaterialTheme.colorScheme.primary, size = LkIconSize.Row)
             }
         },
         colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
@@ -249,7 +247,7 @@ internal fun LanguageSettingsRow(onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(t("settings.language.title")) },
         leadingContent = {
-            Icon(Icons.Filled.Language, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            LkIcon(R.drawable.ic_lk_globe, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
         },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {

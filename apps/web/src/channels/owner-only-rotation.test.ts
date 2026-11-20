@@ -18,7 +18,17 @@ vi.mock("./publisher-group-registry", async (importOriginal) => {
 // is used when the group step is stubbed.
 vi.mock("../wasm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../wasm")>();
-  return { ...actual, loadWasm: vi.fn(async () => ({})) };
+  return {
+    ...actual,
+    loadWasm: vi.fn(async () => ({
+      channelRotationPolicyDefault: () => ({}),
+      channelRotationStateNew: () => ({ lastRotationMs: 0n, postsSinceRotation: 0 }),
+      channelRotationStateAfterRotation: () => ({ lastRotationMs: 1n, postsSinceRotation: 0 }),
+      // Not due: a scheduled check takes no group (ADR-0090: it would wait
+      // and re-read the journal first).
+      channelShouldRotate: () => false,
+    })),
+  };
 });
 
 import { channelRotatesHere } from "./channel-access";
@@ -54,9 +64,43 @@ describe("rotateChannel", () => {
     expect(registry.withPublisherGroup).not.toHaveBeenCalled();
   });
 
-  it("runs on the owner's device", async () => {
+  it("runs on an owner device (a forced rotation: the person's own action, no wait)", async () => {
     registry.withPublisherGroup.mockResolvedValue(undefined);
-    await rotateChannel(identity, OWNED, false);
+    await rotateChannel(identity, OWNED, true);
     expect(registry.withPublisherGroup).toHaveBeenCalledTimes(1);
   });
+
+  it("ADR-0090: a scheduled check that is not due takes no group", async () => {
+    registry.withPublisherGroup.mockResolvedValue(undefined);
+    await rotateChannel(identity, OWNED, false);
+    expect(registry.withPublisherGroup).not.toHaveBeenCalled();
+  });
+
+  it("2026-11-20: no rotation is staged while a recorded commit of the channel owes its reseal", async () => {
+    registry.withPublisherGroup.mockResolvedValue(undefined);
+    const owed = {
+      id: "0b".repeat(16),
+      kind: "rotation" as const,
+      channelIdHex: OWNED,
+      groupIdHex: "22".repeat(32),
+      targetEpoch: "5",
+      serverTargetEpoch: 8,
+      commitB64: btoa("rotation"),
+      welcomeB64: null,
+      joinerKeyB64: null,
+      replyGrantB64: null,
+      proofEpoch: "4",
+      proofSeedB64: null,
+      journalLost: false,
+      done: ["journal" as const],
+    };
+    const spy = vi.spyOn(channelsActions, "pendingPublisherCommits").mockReturnValue([owed]);
+    try {
+      await rotateChannel(identity, OWNED, true);
+      expect(registry.withPublisherGroup).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
+

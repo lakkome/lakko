@@ -45,6 +45,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::prom::names;
+
 /// How long a room may stand empty before the call is over. Chosen, not
 /// measured: long enough for a socket to blip and come back, short enough
 /// that nobody joins a room the last person left a minute ago.
@@ -126,8 +128,15 @@ impl CallLifetimes {
                 guard.insert(room.to_owned(), Entry::Live { peers: peers + 1 });
                 Admission::Admitted
             },
-            Some(Entry::Closing { .. }) | None => {
+            Some(Entry::Closing { .. }) => {
                 guard.insert(room.to_owned(), Entry::Live { peers: 1 });
+                metrics::gauge!(names::ROOMS_ACTIVE).increment(1.0);
+                Admission::Admitted
+            },
+            None => {
+                guard.insert(room.to_owned(), Entry::Live { peers: 1 });
+                metrics::gauge!(names::ROOMS_ACTIVE).increment(1.0);
+                metrics::counter!(names::CALLS_TOTAL).increment(1);
                 Admission::Admitted
             },
         }
@@ -143,6 +152,7 @@ impl CallLifetimes {
             },
             Some(Entry::Live { .. }) => {
                 guard.insert(room.to_owned(), Entry::Closing { since: now });
+                metrics::gauge!(names::ROOMS_ACTIVE).decrement(1.0);
             },
             // A depart for a call that is already closing, ended or unknown
             // is a bookkeeping mismatch; nothing to move.
@@ -220,6 +230,25 @@ impl CallLifetimes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rooms_and_calls_are_counted_as_numbers() {
+        let text = lakko_metrics::exposition::record_locally(|| {
+            let t = CallLifetimes::new();
+            let now = Instant::now();
+            t.admit("a", now);
+            t.admit("a", now);
+            t.admit("b", now);
+            t.depart("b", now);
+            // Revived within the grace: one more active room, no new call.
+            t.admit("b", now);
+            t.depart("a", now);
+            t.depart("a", now);
+        });
+        lakko_metrics::exposition::assert_clean(&text, &[], &[]);
+        assert!(text.contains("lakko_sfu_rooms_active 1"), "{text}");
+        assert!(text.contains("lakko_sfu_calls_total 2"), "{text}");
+    }
 
     fn t0() -> Instant {
         Instant::now()

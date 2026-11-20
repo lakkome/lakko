@@ -7,6 +7,8 @@
 //! - `/api/<service>/...` for a known service: forwarded to the one configured
 //!   Lakko origin with the same method, headers and body;
 //! - `/__probe...`: the S1 measurement page (`probe.rs`);
+//! - `/__host/engines/...`: the system's translation and transcription
+//!   (`engines.rs`);
 //! - anything else: the bundled web build, with `index.html` for a path that
 //!   names no file (the web client's routes).
 //!
@@ -27,7 +29,7 @@ use tauri::Manager;
 
 use crate::save_file;
 use crate::tunnel::{self, Route, Tunnel};
-use crate::{app_shell, call_window, device_key, probe};
+use crate::{app_shell, call_window, device_key, engines, probe};
 
 /// The services the web client addresses as `/api/<service>/` (the dev
 /// proxy list in `apps/web/vite.config.ts`).
@@ -75,6 +77,8 @@ pub struct ProxyConfig {
     pub handles: Arc<device_key::Handles>,
     /// Anti-censorship (`tunnel.rs`).
     pub tunnel: Arc<Tunnel>,
+    /// The system's translation and transcription (`engines.rs`).
+    pub engines: Arc<engines::SystemEngines>,
 }
 
 impl ProxyConfig {
@@ -110,6 +114,7 @@ impl ProxyConfig {
             client,
             handles: Arc::new(device_key::Handles::default()),
             tunnel: Arc::new(tunnel),
+            engines: Arc::new(engines::SystemEngines::new()),
         })
     }
 }
@@ -149,6 +154,9 @@ pub async fn handle<R: Runtime>(
     }
     if path.starts_with(tunnel::PATH) {
         return tunnel::handle(&config.tunnel, request).await;
+    }
+    if path.starts_with(engines::PATH) {
+        return engines::handle(&config.engines, request).await;
     }
     if path == save_file::PATH {
         return save_file::handle(app, request).await;

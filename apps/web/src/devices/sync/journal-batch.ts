@@ -40,6 +40,14 @@
  *      that persist succeeds does the loop's position move and do the echo ids
  *      it matched get consumed; on failure both are held, so the rows come
  *      back and are skipped again rather than being handed to OpenMLS.
+ *   5. ADR-0091 open question 7 (aligned with iOS and Android, ADR-0081): a
+ *      row whose apply throws and that is the commit the DS registered as
+ *      leaving this handle's epoch (`failedRowHeld`) PINS the persisted
+ *      cursor before it for the rest of the run. The run itself moves on
+ *      (rule 1; a row that can never apply must not wedge the loop), but the
+ *      next start reads the commit again instead of skipping it for good.
+ *      Rows after it that this run applied fail on the re-read as consumed
+ *      and are passed.
  */
 
 /** One DeviceGroup journal row, as the DS returns it. */
@@ -61,8 +69,14 @@ export interface DeviceJournalBatchDeps {
    *  and its own commits move the journal's epoch). May throw; the batch
    *  continues. */
   readonly onOwnEcho?: (row: DeviceJournalRow) => Promise<void> | void;
-  /** Observes a row `apply` threw on. */
-  readonly onApplyError?: (row: DeviceJournalRow, err: unknown) => void;
+  /** Observes a row `apply` threw on, with whether it pinned the cursor. */
+  readonly onApplyError?: (row: DeviceJournalRow, err: unknown, held: boolean) => void;
+  /** The handle's epoch before a row is applied (rule 5); `undefined` when
+   *  unreadable. */
+  readonly localEpoch?: () => bigint | undefined;
+  /** Rule 5: whether a row whose apply threw, at `local`, pins the persisted
+   *  cursor before it. */
+  readonly failedRowHeld?: (row: DeviceJournalRow, local: bigint | undefined) => boolean;
   /** Observes a failed persist. */
   readonly onPersistError?: (err: unknown) => void;
 }
@@ -78,21 +92,39 @@ export interface DeviceJournalBatchResult {
   readonly skippedOwnEchoes: readonly number[];
   /** How many rows were handed to `apply`. */
   readonly applied: number;
+  /** Rule 5: the highest cursor this run may persist from now on (the
+   *  position before the first held row), `undefined` while nothing is held.
+   *  The caller hands it to the next batch of the same run. */
+  readonly pin: number | undefined;
+  /** The cursor written with the snapshot (`<= nextCursor`); equal to the
+   *  starting persisted position when nothing was persisted. */
+  readonly persistedCursor: number | undefined;
 }
 
-/** Run one batch under the rules in the module header. Never rejects. */
+/** Run one batch under the rules in the module header. Never rejects.
+ *  `pin`: the pin an earlier batch of this run returned (rule 5). */
 export async function applyDeviceJournalBatch(
   rows: readonly DeviceJournalRow[],
   startCursor: number,
   deps: DeviceJournalBatchDeps,
+  pin?: number,
 ): Promise<DeviceJournalBatchResult> {
   if (rows.length === 0) {
-    return { nextCursor: startCursor, persisted: false, skippedOwnEchoes: [], applied: 0 };
+    return {
+      nextCursor: startCursor,
+      persisted: false,
+      skippedOwnEchoes: [],
+      applied: 0,
+      pin,
+      persistedCursor: undefined,
+    };
   }
   let cursor = startCursor;
   let applied = 0;
+  let runPin = pin;
   const skippedOwnEchoes: number[] = [];
   for (const row of rows) {
+    const before = cursor;
     // A cursor never moves backward, even if a DS batch were out of order.
     if (row.id > cursor) cursor = row.id;
     if (deps.isOwnEcho(row.id)) {
@@ -100,24 +132,52 @@ export async function applyDeviceJournalBatch(
       try {
         await deps.onOwnEcho?.(row);
       } catch (err) {
-        deps.onApplyError?.(row, err);
+        deps.onApplyError?.(row, err, false);
       }
       continue;
     }
     applied += 1;
+    let local: bigint | undefined;
+    try {
+      local = deps.localEpoch?.();
+    } catch {
+      local = undefined;
+    }
     try {
       await deps.apply(row);
     } catch (err) {
-      deps.onApplyError?.(row, err);
+      let held = false;
+      try {
+        held = deps.failedRowHeld?.(row, local) ?? false;
+      } catch {
+        held = false;
+      }
+      if (held && runPin === undefined) runPin = before;
+      deps.onApplyError?.(row, err, held);
     }
   }
+  const persistTo = runPin === undefined ? cursor : Math.min(cursor, runPin);
   try {
-    await deps.persist(cursor);
+    await deps.persist(persistTo);
   } catch (err) {
     deps.onPersistError?.(err);
-    return { nextCursor: startCursor, persisted: false, skippedOwnEchoes, applied };
+    return {
+      nextCursor: startCursor,
+      persisted: false,
+      skippedOwnEchoes,
+      applied,
+      pin: runPin,
+      persistedCursor: undefined,
+    };
   }
-  return { nextCursor: cursor, persisted: true, skippedOwnEchoes, applied };
+  return {
+    nextCursor: cursor,
+    persisted: true,
+    skippedOwnEchoes,
+    applied,
+    pin: runPin,
+    persistedCursor: persistTo,
+  };
 }
 
 /**

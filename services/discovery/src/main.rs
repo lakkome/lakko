@@ -162,6 +162,7 @@
 mod account;
 pub(crate) mod auth;
 mod call_invite;
+mod donate;
 mod group_invite;
 mod handles;
 mod identity_bundle;
@@ -171,6 +172,7 @@ mod key_reset;
 mod keypackage;
 mod ledger_id;
 mod locate;
+mod metrics;
 mod oprf;
 mod rate_limit;
 mod registry;
@@ -254,6 +256,10 @@ pub(crate) struct AppState {
     /// ADR-0080 — the city database `GET /discovery/locate` reads. Knows
     /// nothing when `LAKKO_DISCOVERY_CITY_DB` is unset or unreadable.
     pub(crate) city_lookup: Arc<dyn locate::CityLookup>,
+    /// `docs/ux/donations.md` - the signed ways to donate, read once from the
+    /// `lakko-donations` credential or `LAKKO_DISCOVERY_DONATIONS_FILE`;
+    /// empty when absent or refused.
+    pub(crate) donations: Arc<donate::Donations>,
 }
 
 /// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
@@ -308,6 +314,13 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "discovery",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_DISCOVERY_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -328,6 +341,10 @@ async fn main() -> Result<()> {
         .context("connect to MariaDB")?;
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let pool_for_gauge = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (pool_for_gauge.size(), pool_for_gauge.num_idle()));
 
     let oprf_server = oprf::load_or_init_server_setup(&pool)
         .await
@@ -423,6 +440,7 @@ async fn main() -> Result<()> {
         username_cert_key: Arc::new(username_cert_key),
         key_reset_attest_key,
         city_lookup: locate::city_lookup_from_env(),
+        donations: donate::donations_from_env(),
     };
 
     let _spent_pruner = state.anon_tokens.spawn_pruner();
@@ -642,6 +660,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // ADR-0080 — the city of the request's own address, for a device
         // card. Anonymous, stores nothing, logs nothing; per-IP bucket only.
         .route("/discovery/locate", get(locate::locate))
+        // docs/ux/donations.md - the ways to donate for the request's
+        // country. Anonymous, stores nothing, logs nothing.
+        .route("/discovery/donate", get(donate::list))
+        .route("/discovery/donate/{id}/qr", get(donate::qr))
+        .route("/discovery/donate/{id}/phone", post(donate::phone))
         // The three invite ledgers' open fetch routes. Since the
         // short-link amendment of ADR-0028 (2026-09-27) a ledger id is a
         // random 6-byte handle (2^48), so guessing live ids is an
@@ -703,6 +726,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
     open.merge(rate_limited)
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("discovery"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
@@ -949,6 +974,7 @@ mod tests {
             username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
             key_reset_attest_key: None,
             city_lookup,
+            donations: Arc::new(donate::Donations::default()),
         }
     }
 
@@ -1010,6 +1036,134 @@ mod tests {
                 .find(|(a, _)| *a == ip)
                 .map(|(_, p)| p.clone())
         }
+    }
+
+    /// docs/ux/donations.md - the donate routes answer by the request's
+    /// country, never put the phone in the list, give it only to a POST
+    /// that asks for it, and sit behind the per-IP bucket.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn donate_routes_follow_the_country_rule() {
+        use base64::Engine as _;
+        let lookup = FakeCities(vec![
+            ("203.0.113.7".parse().unwrap(), almere()),
+            (
+                "203.0.113.8".parse().unwrap(),
+                locate::Place {
+                    city: None,
+                    country: Some("RU".to_string()),
+                },
+            ),
+        ]);
+        let mut state = lazy_state(
+            rate_limit::Limit {
+                per_minute: 60.0,
+                burst: 20.0,
+            },
+            Arc::new(lookup),
+        );
+        state.donations = donate::test_donations();
+        let app = build_app(state);
+        let send = |method: &str, uri: &str, ip: &str, body: &str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("x-real-ip", ip)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let text = |r: axum::response::Response| async move {
+            let status = r.status();
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            (status, String::from_utf8_lossy(&body).to_string())
+        };
+
+        let (status, body) = text(
+            app.clone()
+                .oneshot(send("GET", "/discovery/donate", "203.0.113.8", ""))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#""id":"sbp""#) && !body.contains("bmc"),
+            "{body}"
+        );
+        assert!(body.contains(r#""statement_b64":""#), "{body}");
+        assert!(!body.contains("phone"), "{body}");
+
+        let (_, body) = text(
+            app.clone()
+                .oneshot(send("GET", "/discovery/donate", "203.0.113.7", ""))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            body.contains(r#""id":"bmc""#) && !body.contains("sbp"),
+            "{body}"
+        );
+
+        let (status, body) = text(
+            app.clone()
+                .oneshot(send(
+                    "POST",
+                    "/discovery/donate/sbp/phone",
+                    "203.0.113.8",
+                    r#"{"action":"reveal"}"#,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The answer is the signed phone statement, which verifies under the
+        // fixture key for this method.
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let wire = base64::engine::general_purpose::STANDARD
+            .decode(answer["statement_b64"].as_str().unwrap())
+            .unwrap();
+        let key =
+            lakko_crypto::signing::SigningKey::from_seed(&donate::TEST_KEY_SEED).verifying_key();
+        assert_eq!(
+            lakko_attest::verify_donation_phone(&wire, &key, "sbp").unwrap(),
+            "+7 900"
+        );
+
+        for (ip, body, want) in [
+            (
+                "203.0.113.7",
+                r#"{"action":"reveal"}"#,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "203.0.113.8",
+                r#"{"action":"look"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let r = app
+                .clone()
+                .oneshot(send("POST", "/discovery/donate/sbp/phone", ip, body))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), want);
+        }
+        let r = app
+            .clone()
+            .oneshot(send("GET", "/discovery/donate/sbp/qr", "203.0.113.8", ""))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers().get("content-type").unwrap(), "image/png");
+        let r = app
+            .clone()
+            .oneshot(send("GET", "/discovery/donate/sbp/qr", "203.0.113.7", ""))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
     fn almere() -> locate::Place {

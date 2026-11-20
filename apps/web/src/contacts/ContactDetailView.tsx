@@ -264,7 +264,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 props.busy() && messageState() === "start"
                   ? t("common.creating")
                   : t("contacts.detail.message"),
-              icon: "chat" as IconName,
+              icon: "chat-fill" as IconName,
               disabled: props.busy() || messageState() === "unavailable",
               title: unavailableLine() ?? undefined,
               run: () => props.onMessage(),
@@ -280,14 +280,14 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
       : [
           {
             label: t("chat.call.voice"),
-            icon: "phone" as IconName,
+            icon: "phone-fill" as IconName,
             disabled: props.busy() || noChat,
             title: callTitle,
             run: () => props.onCall(false),
           },
           {
             label: t("chat.media.video"),
-            icon: "video" as IconName,
+            icon: "video-fill" as IconName,
             disabled: props.busy() || noChat,
             title: callTitle,
             run: () => props.onCall(true),
@@ -308,7 +308,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               style={{ "align-self": "flex-start" }}
               onClick={() => props.onBack()}
             >
-              <Icon name="back" size={16} />
+              <Icon name="chevron-back" size={20} />
               {t("nav.contacts")}
             </button>
           }
@@ -322,7 +322,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               title={t("common.back")}
               onClick={() => back()()}
             >
-              <Icon name="back" size={20} />
+              <Icon name="chevron-back" size={24} />
             </button>
           )}
         </Show>
@@ -355,7 +355,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                   title={a.title}
                   onClick={a.run}
                 >
-                  <Icon name={a.icon} size={22} />
+                  <Icon name={a.icon} size={24} />
                   <span>{a.label}</span>
                 </button>
               )}
@@ -375,7 +375,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         <section class="lk-card">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="shield" size={18} />
+              <Icon name="shield-check" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("contacts.safety.title")}</span>
@@ -425,7 +425,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="pencil" size={18} />
+                <Icon name="pencil" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{t("contacts.rename.title")}</span>
@@ -478,7 +478,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="plus" size={18} />
+                <Icon name="person-plus" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{t("contacts.add_back.control")}</span>
@@ -500,7 +500,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card danger">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="trash" size={18} />
+                <Icon name="person-minus" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{t("contacts.remove.control")}</span>
@@ -537,7 +537,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card danger">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="trash" size={18} />
+                <Icon name="trash" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{DELETE_CHAT_CONTROL()}</span>

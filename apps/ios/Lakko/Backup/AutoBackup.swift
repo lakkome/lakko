@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CryptoKit
 import Foundation
 
 /// Keep the encrypted backup current.
@@ -35,15 +36,21 @@ public enum AutoBackup {
         /// before the first report - which counts as a change, because nothing
         /// here can vouch for what the server already holds.
         public var lastGroupsKey: String?
+        /// The digest of the persisted synced state (ADR-0058) this device
+        /// last reported. `nil` before the first report, which counts as a
+        /// change for the same reason as ``lastGroupsKey``.
+        public var lastSyncedStateKey: String?
 
         public init(
             lastUploadAtMs: Int64 = 0,
             dirtySinceMs: Int64? = nil,
-            lastGroupsKey: String? = nil
+            lastGroupsKey: String? = nil,
+            lastSyncedStateKey: String? = nil
         ) {
             self.lastUploadAtMs = lastUploadAtMs
             self.dirtySinceMs = dirtySinceMs
             self.lastGroupsKey = lastGroupsKey
+            self.lastSyncedStateKey = lastSyncedStateKey
         }
 
         public static let clean = State()
@@ -101,6 +108,13 @@ public enum AutoBackup {
     /// whenever the list was merely reordered.
     public static func groupsKey(_ groupIds: [String]) -> String {
         groupIds.sorted().joined(separator: ",")
+    }
+
+    /// The canonical form of a persisted synced state: the SHA-256 of its
+    /// bytes, hex. The bytes themselves (drafts among them) never reach the
+    /// `UserDefaults` row.
+    public static func syncedStateKey(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -178,6 +192,31 @@ public enum AutoBackupStore {
         var state = load(accountIdB64: accountIdB64, defaults: defaults)
         if state.lastGroupsKey == key { return false }
         state.lastGroupsKey = key
+        save(accountIdB64: accountIdB64, state: state, defaults: defaults)
+        return true
+    }
+
+    /// Whether the persisted synced state (ADR-0058: folders, flags, saved
+    /// messages, the channel-subscription and admission-seed registers, and
+    /// every other register the backup carries) has changed since the last
+    /// time this was asked, recording the new digest as it goes.
+    ///
+    /// The one choke point for every synced-state change, whichever path
+    /// wrote it (a local write, a sibling's envelope, a restore merge): the
+    /// backup carries the whole state, so a change to any register is a
+    /// change worth backing up. Read cursors and drafts count too; the
+    /// minimum interval bounds how often that uploads.
+    public static func syncedStateChanged(
+        accountIdB64: String,
+        bytes: Data,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return false }
+        defer { gate.leave() }
+        let key = AutoBackup.syncedStateKey(bytes)
+        var state = load(accountIdB64: accountIdB64, defaults: defaults)
+        if state.lastSyncedStateKey == key { return false }
+        state.lastSyncedStateKey = key
         save(accountIdB64: accountIdB64, state: state, defaults: defaults)
         return true
     }

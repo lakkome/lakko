@@ -71,6 +71,7 @@
 
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { DsClient } from "../ds/client";
 import { commitWithNextEpoch, takeSigner, type ProofSigner } from "../ds/access";
 import { isCommitConflict } from "../ds/ownership";
@@ -78,10 +79,15 @@ import { isBackoffRefusal } from "../chat/sweep-backoff";
 import { channelsActions, channelsState } from "../state/channels-state";
 import {
   newEntryId,
+  owesJournal,
+  publisherCommitRetry,
   runPublisherCommit,
   type PublisherCommitEntry,
+  type PublisherCommitOutcome,
   type PublisherCommitPorts,
 } from "./publisher-commit-outbox";
+import { writeStagedHead } from "./channel-vault-head";
+import { anchorChannelEpoch } from "./channel-access";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -109,9 +115,12 @@ export interface RotationContext {
   /** Wasm PublisherGroup handle — the publisher's MLS group
    *  for this channel. */
   readonly publisherGroup: PublisherGroup;
-  /** Wasm Identity handle — the publisher's MLS identity
-   *  + signing key. Required by `rotate` and `channelSeed`. */
+  /** The account (lineage) identity: the channel proofs (owner or
+   *  co-publisher key), never a group call. */
   readonly identity: Identity;
+  /** ADR-0090: the bound DEVICE identity the PublisherGroup lives in; every
+   *  group call (stage, merge, seed) takes it. */
+  readonly device: Identity;
   /** Hex-encoded 16-byte channel id (used in URLs). */
   readonly channelIdHex: string;
   /** Optional API base override (defaults to the channels
@@ -164,104 +173,164 @@ export async function runRotationOnce(
     return { rotated: false, newState: state };
   }
 
-  // 1. The server epoch the envelopes will bind to, read BEFORE the local
-  //    rotation: after the eager merge nothing may fail before the commit's
-  //    record is durable (G-50), and this is a network read.
-  const current = await fetchEpoch(ctx.channelIdHex, ctx.apiBase);
-  const newServerEpoch = current.epoch + 1;
-  if (!Number.isInteger(newServerEpoch) || newServerEpoch < 0) {
-    throw new Error(`unexpected server epoch ${current.epoch}; cannot derive new epoch`);
-  }
-
-  // 2. Advance the local MLS epoch (the self-update commit eager-merges
-  //    N -> N+1 in the account identity's provider), then record the
-  //    rotation together with that provider snapshot, durably, before any
-  //    of its steps runs. A refused record runs nothing.
-  // ADR-0081 - the key of the epoch the rotation leaves proves its commit
-  // request; its seed is taken before the eager merge and recorded with the
-  // rotation, so a replay after a reload can still prove it.
-  const proofEpoch = ctx.publisherGroup.epoch();
-  const proofSeed = ctx.publisherGroup.dsAccessSeed(ctx.identity);
-  const rotationCommit = ctx.publisherGroup.rotate(ctx.identity);
-  const entry: PublisherCommitEntry = {
-    id: newEntryId(),
+  const run = await runStagedPublisherCommit(ctx, {
     kind: "rotation",
-    channelIdHex: ctx.channelIdHex,
-    groupIdHex: hexOf(ctx.publisherGroup.groupId()),
-    targetEpoch: ctx.publisherGroup.epoch().toString(),
-    serverTargetEpoch: newServerEpoch,
-    commitB64: b64Of(rotationCommit),
-    welcomeB64: null,
-    joinerKeyB64: null,
-    replyGrantB64: null,
-    proofEpoch: proofEpoch.toString(),
-    proofSeedB64: b64Of(proofSeed),
-    journalLost: false,
-    done: [],
-  };
-  proofSeed.fill(0);
-  await channelsActions.recordPublisherCommit(entry);
-
-  // 3. The steps: the N+1 epoch key and the rotation commit on the DS in
-  //    one request (ADR-0057, ADR-0081), reseal the N+1 seed to every
-  //    subscriber and commit the rotation on the channels service (ADR-0030
-  //    chunked fanout).
-  await runPublisherCommit(entry, publisherCommitPorts(ctx));
-
-  // 4. Stamp the new state + persist.
+    stage: () => ({ commit: ctx.publisherGroup.stageRotate(ctx.device), welcome: null }),
+  });
+  if (run.outcome !== "landed") return { rotated: false, newState: state };
   const newState = wasm.channelRotationStateAfterRotation(nowMsBig);
   await ctx.saveState(newState);
-  ctx.onRotated?.(newServerEpoch);
-
-  return { rotated: true, newState, newEpoch: newServerEpoch };
+  ctx.onRotated?.(run.serverTargetEpoch);
+  return { rotated: true, newState, newEpoch: run.serverTargetEpoch };
 }
 
 /**
- * ADR-0087 section 15 (phase B) — the owner removes a publisher: every leaf
- * of `accountKey` in one commit, merged at once by the core. The commit moves
- * the epoch, so it is recorded and run exactly like a rotation (the journal
- * step, then the reseal of the new seed to every subscriber); the removed
- * person cannot derive the new seed. The server epoch is read before the
- * merge, as for a rotation (G-50). Returns the new server epoch.
+ * ADR-0087 section 15 (phase B), ADR-0090 section 3 — the owner removes a
+ * publisher: every leaf of `accountKey` in one STAGED commit, merged when the
+ * journal takes it, then the reseal of the new seed to every subscriber; the
+ * removed person cannot derive it. Returns the new server epoch, or `null`
+ * when the commit did not land (lost to another owner device's commit, or
+ * owed: re-sent later).
  */
-export async function runPublisherRemoval(ctx: RotationContext, accountKey: Uint8Array): Promise<number> {
+export async function runPublisherRemoval(ctx: RotationContext, accountKey: Uint8Array): Promise<number | null> {
+  const run = await runStagedPublisherCommit(ctx, {
+    kind: "removal",
+    stage: () => ({ commit: ctx.publisherGroup.stageRemovePublisher(ctx.device, accountKey), welcome: null }),
+  });
+  if (run.outcome !== "landed") return null;
+  const wasm = await loadWasm();
+  await ctx.saveState(wasm.channelRotationStateAfterRotation(BigInt(Date.now())));
+  ctx.onRotated?.(run.serverTargetEpoch);
+  return run.serverTargetEpoch;
+}
+
+/** What {@link runStagedPublisherCommit} stages. */
+export interface StagedPublisherCommit {
+  readonly kind: PublisherCommitEntry["kind"];
+  /** Stage the commit on the group (throws a local refusal: nothing is
+   *  staged then). */
+  readonly stage: () => { readonly commit: Uint8Array; readonly welcome: Uint8Array | null };
+  readonly joinerKeyB64?: string | null;
+  readonly joinerAccountKeyB64?: string | null;
+  readonly replyGrantB64?: string | null;
+}
+
+/**
+ * ADR-0090 section 3 — one STAGED PublisherGroup commit, end to end, under
+ * the caller's per-group MLS lock: read the service epoch (a network read,
+ * before the stage), stage, record the entry and the provider carrying the
+ * stage durably (fail-closed: a refused record abandons the stage and sends
+ * nothing), then the steps (`runPublisherCommit`): the journal decides, the
+ * stage is merged on its acceptance and abandoned on a 409, and only a
+ * merged commit is resealed. A lost commit leaves the group at N; the caller
+ * reads the journal and applies the winner.
+ */
+export async function runStagedPublisherCommit(
+  ctx: PublisherCommitContext,
+  input: StagedPublisherCommit,
+  extras: Partial<Pick<PublisherCommitPorts, "deliverWelcome" | "appoint">> = {},
+): Promise<{ readonly outcome: PublisherCommitOutcome; readonly serverTargetEpoch: number }> {
   const current = await fetchEpoch(ctx.channelIdHex, ctx.apiBase);
-  const newServerEpoch = current.epoch + 1;
-  if (!Number.isInteger(newServerEpoch) || newServerEpoch < 0) {
+  const serverTargetEpoch = current.epoch + 1;
+  if (!Number.isInteger(serverTargetEpoch) || serverTargetEpoch < 0) {
     throw new Error(`unexpected server epoch ${current.epoch}; cannot derive new epoch`);
   }
+  if (ctx.publisherGroup.hasStagedCommit()) {
+    // A stage nothing settled yet (a replay is due): no second one.
+    throw new Error("a PublisherGroup commit is still staged; it is settled first");
+  }
   const proofEpoch = ctx.publisherGroup.epoch();
-  const proofSeed = ctx.publisherGroup.dsAccessSeed(ctx.identity);
-  const commit = ctx.publisherGroup.removePublisher(ctx.identity, accountKey);
+  const proofSeed = ctx.publisherGroup.dsAccessSeed(ctx.device);
+  let staged: { readonly commit: Uint8Array; readonly welcome: Uint8Array | null };
+  try {
+    staged = input.stage();
+  } catch (err) {
+    proofSeed.fill(0);
+    throw err;
+  }
   const entry: PublisherCommitEntry = {
     id: newEntryId(),
-    kind: "removal",
+    kind: input.kind,
     channelIdHex: ctx.channelIdHex,
     groupIdHex: hexOf(ctx.publisherGroup.groupId()),
-    targetEpoch: ctx.publisherGroup.epoch().toString(),
-    serverTargetEpoch: newServerEpoch,
-    commitB64: b64Of(commit),
-    welcomeB64: null,
-    joinerKeyB64: null,
-    replyGrantB64: null,
+    targetEpoch: (proofEpoch + 1n).toString(),
+    serverTargetEpoch,
+    commitB64: b64Of(staged.commit),
+    welcomeB64: staged.welcome === null ? null : b64Of(staged.welcome),
+    joinerKeyB64: input.joinerKeyB64 ?? null,
+    replyGrantB64: input.replyGrantB64 ?? null,
+    joinerAccountKeyB64: input.joinerAccountKeyB64 ?? null,
     proofEpoch: proofEpoch.toString(),
     proofSeedB64: b64Of(proofSeed),
     journalLost: false,
     done: [],
   };
   proofSeed.fill(0);
-  await channelsActions.recordPublisherCommit(entry);
-  await runPublisherCommit(entry, publisherCommitPorts(ctx));
-  const wasm = await loadWasm();
-  await ctx.saveState(wasm.channelRotationStateAfterRotation(BigInt(Date.now())));
-  ctx.onRotated?.(newServerEpoch);
-  return newServerEpoch;
+  const outcome = await runRecordedPublisherCommit(ctx, entry, extras);
+  return { outcome, serverTargetEpoch };
+}
+
+/**
+ * Record `entry` (a commit already staged on `ctx.publisherGroup`, or an
+ * entry it holds) and the provider carrying it durably, then run its steps.
+ * A refused record abandons the stage and throws: nothing left the device.
+ * The run is marked in flight, so a replay in the same session leaves it.
+ */
+export async function runRecordedPublisherCommit(
+  ctx: PublisherCommitContext,
+  entry: PublisherCommitEntry,
+  extras: Partial<Pick<PublisherCommitPorts, "deliverWelcome" | "appoint">> = {},
+): Promise<PublisherCommitOutcome> {
+  try {
+    await channelsActions.recordPublisherCommit(entry);
+  } catch (err) {
+    // Nothing left the device: the stage goes.
+    try {
+      ctx.publisherGroup.abandonStagedCommit(ctx.device);
+    } catch {
+      /* nothing staged any more */
+    }
+    channelsActions.notePublisherGroupChanged();
+    throw err;
+  }
+  inFlightCommits.add(entry.id);
+  try {
+    const outcome = await runPublisherCommit(entry, publisherCommitPorts(ctx, extras));
+    // 2026-11-20: an unanswered journal step ("owed") is sent again next
+    // pass, never held.
+    if (outcome !== "owed") publisherCommitRetry.noteSuccess(entry.channelIdHex);
+    return outcome;
+  } catch (err) {
+    // A step after the journal failed: the channel is held (a refusal: until
+    // the next start), and the replay waits that out.
+    let after: PublisherCommitEntry = entry;
+    try {
+      after = channelsActions.pendingPublisherCommits().find((e) => e.id === entry.id) ?? entry;
+    } catch {
+      /* the recorded entry is unreadable: judged as recorded at the start */
+    }
+    if (!owesJournal(after)) publisherCommitRetry.noteFailure(entry.channelIdHex, err);
+    throw err;
+  } finally {
+    inFlightCommits.delete(entry.id);
+  }
+}
+
+/** The recorded commits a live run is driving now; a replay leaves them. */
+const inFlightCommits = new Set<string>();
+
+/** Whether entry `id` is being run live right now. */
+export function commitInFlight(id: string): boolean {
+  return inFlightCommits.has(id);
 }
 
 /** What a PublisherGroup commit's steps run against. */
 export interface PublisherCommitContext {
   readonly publisherGroup: PublisherGroup;
+  /** The account (lineage) identity: channel proofs. */
   readonly identity: Identity;
+  /** ADR-0090: the device identity the group lives in. */
+  readonly device: Identity;
   readonly channelIdHex: string;
   readonly apiBase?: string;
   readonly ds?: DsClient;
@@ -280,7 +349,15 @@ export function publisherCommitPorts(
   const ds = ctx.ds ?? new DsClient();
   return {
     async commitToJournal(commit, proof) {
-      const next = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
+      // ADR-0090: the N+1 key is the STAGED commit's (`epochKey` of the
+      // commit statement). A replay after the merge already landed has no
+      // stage left: the group's current key is N+1 then.
+      const next =
+        takeSigner(() => {
+          const staged = ctx.publisherGroup.dsStagedAccessSigner(ctx.device);
+          if (staged === undefined) throw new Error("no staged commit");
+          return staged;
+        }) ?? takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.device));
       // ADR-0081 - proven under the recorded key of the epoch the commit
       // left, live and on a replay alike. An entry without one (none is
       // written any more) can complete only an identical re-send, which the
@@ -299,6 +376,20 @@ export function publisherCommitPorts(
       }
     },
     classifyCommitFailure: (err) => (isCommitConflict(err) || isBackoffRefusal(err) ? "lost" : "unknown"),
+    async merge() {
+      if (!ctx.publisherGroup.hasStagedCommit()) return false;
+      ctx.publisherGroup.mergeStagedCommit(ctx.device);
+      // The merged N+1 on disk before any of its effects leaves.
+      await channelsActions.persistPublisherGroupDurable();
+      return true;
+    },
+    async abandon() {
+      if (ctx.publisherGroup.hasStagedCommit()) ctx.publisherGroup.abandonStagedCommit(ctx.device);
+      await channelsActions.persistPublisherGroupDurable().catch(() => {
+        // The stage is gone in memory; the replay drops it from disk too.
+        channelsActions.notePublisherGroupChanged();
+      });
+    },
     deliverWelcome:
       extras.deliverWelcome ??
       (async () => {
@@ -308,12 +399,41 @@ export function publisherCommitPorts(
       return (await fetchEpoch(ctx.channelIdHex, ctx.apiBase)).epoch;
     },
     async reseal(targetEpoch) {
-      await resealToSubscribers(ctx.publisherGroup, ctx.identity, ctx.channelIdHex, targetEpoch, ctx.apiBase);
+      await resealToSubscribers(ctx.publisherGroup, ctx.device, ctx.identity, ctx.channelIdHex, targetEpoch, ctx.apiBase);
     },
     appoint: extras.appoint ?? (async () => undefined),
+    async handover(accountKey) {
+      await resetHandoverFor(ctx.channelIdHex, accountKey);
+    },
     save: (e) => channelsActions.savePublisherCommit(e),
     finish: (e) => channelsActions.finishPublisherCommit(e.id),
+    // ADR-0064 section 7 (amendment of 2026-11-14): an owner device saves the
+    // epoch the staged commit moves to before the commit leaves.
+    writeVaultHead: () => writeStagedHead(ctx.publisherGroup, ctx.device, ctx.identity),
   };
+}
+
+/**
+ * ADR-0090 section 6 — new devices of `accountKey` joined: the hand-over
+ * records of that account are cleared, so the owner's publisher pass sends
+ * the read key, the admission seeds and the newest epoch seeds again (a
+ * receiver keeps a seed or key only for what it lacks, so a repeat changes
+ * nothing for the devices that held them). The owner's own account is
+ * `ownHandover` of the access record.
+ */
+async function resetHandoverFor(channelIdHex: string, accountKey: Uint8Array): Promise<void> {
+  const keyB64 = base64Encode(accountKey);
+  await channelsActions.updateAccessDurable(channelIdHex, (r) => {
+    const own = r.ownHandover ?? null;
+    const isOwn = own !== null && own.accountKeyB64 === keyB64;
+    return {
+      ...r,
+      ownHandover: isOwn ? { ...own, sentVersions: [], sentSeedIds: [], sentEpochs: [], readKeySent: false } : own,
+      publisherKeys: r.publisherKeys.map((p) =>
+        p.accountKeyB64 === keyB64 ? { ...p, sentVersions: [], sentSeedIds: [], sentEpochs: [], readKeySent: false } : p,
+      ),
+    };
+  });
 }
 
 /**
@@ -337,6 +457,7 @@ export function publisherCommitPorts(
  */
 export async function resealToSubscribers(
   publisherGroup: PublisherGroup,
+  device: Identity,
   identity: Identity,
   channelIdHex: string,
   targetEpoch: number,
@@ -344,7 +465,7 @@ export async function resealToSubscribers(
   onProgress?: (done: number, total: number) => void,
 ): Promise<ChannelEpoch> {
   const wasm = await loadWasm();
-  const newSeed = publisherGroup.channelSeed(identity);
+  const newSeed = publisherGroup.channelSeed(device);
   const channelIdBytes = publisherGroup.channelId();
   const plan = resealPlan(channelIdHex);
   if (plan.readKey !== null) {
@@ -368,8 +489,12 @@ export async function resealToSubscribers(
       after = page.nextAfter;
     }
   }
+  // 2026-11-13: the account's own reader key (its other devices read with
+  // it) gets every new seed, above the mark too, like this device's own key
+  // is never removed.
+  const resealed = withOwnReaderKey(keys, plan.ownReaderKeyHex);
   const bytesByHex = new Map<string, Uint8Array>();
-  for (const subscriberHex of keys) {
+  for (const subscriberHex of resealed) {
     const subscriberBytes = hexToBytes(subscriberHex);
     if (subscriberBytes === null) {
       // Malformed subscriber hex from the server: refuse to post a partial
@@ -391,11 +516,21 @@ export async function resealToSubscribers(
     console.warn(`[channels] reseal skipped ${skipped.length} subscriber key(s) the core refused`);
   }
   const batch: RotateBatchEntry[] = sealed.map((s) => ({
-    subscriber_pubkey_hex: s.subscriberHex,
-    envelope_b64: base64Encode(s.value),
+    subscriber_id: s.subscriberHex,
+    // The service takes base64url without padding.
+    envelope_b64: base64UrlEncodeNoPad(s.value),
   }));
   const committed = await stageAndCommitRotation(channelIdHex, targetEpoch, batch, identity, apiBase);
   onProgress?.(batch.length, batch.length);
+  // 2026-11-20: the service now serves the group's current seed at
+  // `targetEpoch`; the epoch mapping is anchored there, whatever commits
+  // before had no reseal of their own. Best effort: the reseal landed
+  // whatever this bookkeeping does.
+  try {
+    anchorChannelEpoch(channelIdHex, publisherGroup.epoch(), targetEpoch, newSeed);
+  } catch {
+    /* re-anchored by a later landed reseal */
+  }
   return committed;
 }
 
@@ -404,21 +539,45 @@ export async function resealToSubscribers(
 export function resealPlan(channelIdHex: string): {
   readonly readKey: Uint8Array | null;
   readonly perKeyThroughSeq: number | "all";
+  /** The account's own reader key this device registered (2026-11-13), or
+   *  `null`: resealed to whatever the mark says. */
+  readonly ownReaderKeyHex: string | null;
+} {
+  const own = channelsActions.accessOf(channelIdHex).readerKeyRegisteredHex ?? null;
+  return { ...resealRows(channelIdHex), ownReaderKeyHex: own };
+}
+
+/** The per-key rows and the public read key of a reseal. */
+function resealRows(channelIdHex: string): {
+  readonly readKey: Uint8Array | null;
+  readonly perKeyThroughSeq: number | "all";
 } {
   const access = channelsActions.accessOf(channelIdHex);
   const meta = channelsState.metaByChannel().get(channelIdHex);
   const visibility =
     access.visibility ?? (meta?.listed === undefined ? null : meta.listed ? "public" : "private");
   // Only a device that set the flag and runs the ticket check knows which
-  // rows it let in; any other (a channel from before phase B, a co-publisher
-  // that holds no admission seed) reseals per key to every row, as before.
+  // rows it let in. A private channel never reseals to every row, even on a
+  // device holding no admission seed: that device let nobody in, so it
+  // reseals to the readers at or below its mark only, never to a row with
+  // no valid ticket a server could have added. Every row only for a channel
+  // of unknown type (from before phase B).
   const checks =
-    access.visibility !== null && (access.visibility === "public" || access.admissionSeeds.length > 0);
+    visibility === "private" ||
+    (access.visibility !== null && (access.visibility === "public" || access.admissionSeeds.length > 0));
   const perKeyThroughSeq: number | "all" = checks ? access.admittedThroughSeq : "all";
   if (visibility !== "public") return { readKey: null, perKeyThroughSeq };
   const readKey = access.readKeyB64 === null ? null : b64ToBytesStd(access.readKeyB64);
   if (readKey === null || readKey.length !== 32) return { readKey: null, perKeyThroughSeq: "all" };
   return { readKey, perKeyThroughSeq };
+}
+
+/** The per-key reseal set with the account's own reader key added once
+ *  (2026-11-13). Pure. */
+export function withOwnReaderKey(keys: readonly string[], ownReaderKeyHex: string | null): string[] {
+  if (ownReaderKeyHex === null) return [...keys];
+  const own = ownReaderKeyHex.toLowerCase();
+  return keys.some((k) => k.toLowerCase() === own) ? [...keys] : [...keys, own];
 }
 
 function b64ToBytesStd(b64: string): Uint8Array | null {

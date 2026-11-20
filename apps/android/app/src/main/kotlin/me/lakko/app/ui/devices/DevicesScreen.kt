@@ -28,17 +28,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.QrCode
-import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.TabletAndroid
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -100,6 +89,9 @@ import me.lakko.app.l10n.text
 import me.lakko.app.webauthn.WebauthnClient
 import me.lakko.app.webauthn.WebauthnHttpError
 import me.lakko.app.webauthn.actionHashForRemoveDevice
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Settings > Security > Devices — docs/ux/client-redesign.md section 5.5.
@@ -157,7 +149,7 @@ public fun DevicesScreen(
                 title = { Text(t("settings.devices.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -189,7 +181,7 @@ public fun DevicesScreen(
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(onClick = { authRepository.dismissResetNote() }) {
-                            Icon(Icons.Filled.Close, contentDescription = t("common.dismiss"))
+                            LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("common.dismiss"), size = LkIconSize.Row)
                         }
                     }
                 }
@@ -248,7 +240,7 @@ public fun DevicesScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
             ) {
-                Icon(Icons.Filled.Add, contentDescription = null)
+                LkIcon(R.drawable.ic_lk_plus, contentDescription = null, size = LkIconSize.Row)
                 Text("  " + t("devices.add.title"))
             }
             Text(
@@ -300,7 +292,7 @@ public fun AddDeviceScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = { if (mode == null) onBack() else mode = null }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -346,13 +338,13 @@ public fun AddDeviceScreen(
                     OptionRow(
                         title = t("devices.add.side.show"),
                         supporting = t("devices.add.side.show_detail"),
-                        icon = Icons.Filled.QrCode,
+                        icon = R.drawable.ic_lk_qrcode,
                         onClick = { mode = AddDeviceMode.Show },
                     )
                     OptionRow(
                         title = t("devices.add.side.scan"),
                         supporting = t("devices.add.side.scan_detail"),
-                        icon = Icons.Filled.QrCodeScanner,
+                        icon = R.drawable.ic_lk_qrcode_scan,
                         onClick = { mode = AddDeviceMode.Scan },
                     )
                 }
@@ -383,13 +375,13 @@ public fun AddDeviceScreen(
 private fun OptionRow(
     title: String,
     supporting: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     onClick: () -> Unit,
 ) {
     ListItem(
         headlineContent = { Text(title, fontWeight = FontWeight.Medium) },
         supportingContent = { Text(supporting) },
-        leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+        leadingContent = { LkIcon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, size = LkIconSize.Row) },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
@@ -1109,16 +1101,17 @@ private fun DevicesList(
                         }
                     },
                     leadingContent = {
-                        Icon(
+                        LkIcon(
                             when (view.icon) {
-                                me.lakko.app.devices.DeviceCards.IconKind.PHONE -> Icons.Filled.PhoneAndroid
-                                me.lakko.app.devices.DeviceCards.IconKind.TABLET -> Icons.Filled.TabletAndroid
-                                me.lakko.app.devices.DeviceCards.IconKind.COMPUTER -> Icons.Filled.Computer
-                                me.lakko.app.devices.DeviceCards.IconKind.BROWSER -> Icons.Filled.Language
-                                me.lakko.app.devices.DeviceCards.IconKind.UNKNOWN -> Icons.Filled.Devices
+                                me.lakko.app.devices.DeviceCards.IconKind.PHONE -> R.drawable.ic_lk_smartphone
+                                me.lakko.app.devices.DeviceCards.IconKind.TABLET -> R.drawable.ic_lk_tablet
+                                me.lakko.app.devices.DeviceCards.IconKind.COMPUTER -> R.drawable.ic_lk_laptop
+                                me.lakko.app.devices.DeviceCards.IconKind.BROWSER -> R.drawable.ic_lk_globe
+                                me.lakko.app.devices.DeviceCards.IconKind.UNKNOWN -> R.drawable.ic_lk_devices
                             },
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            size = LkIconSize.Row,
                         )
                     },
                     trailingContent = {

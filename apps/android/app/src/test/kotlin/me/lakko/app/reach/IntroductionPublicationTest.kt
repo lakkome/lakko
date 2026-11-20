@@ -33,6 +33,8 @@ class IntroductionPublicationTest {
         var composedPayload: FfiIntroductionPayload? = null
         var composedOutputs: List<String> = emptyList()
         var bundleRecords: List<String> = emptyList()
+        /** ADR-0091 walk 3, W3-R2 — every send answers "held". */
+        var held = false
     }
 
     private fun ops(r: Recorder, maxBundle: Int = 64) = IntroPublicationOps(
@@ -50,7 +52,10 @@ class IntroductionPublicationTest {
             "bundle".toByteArray()
         },
         maxBundleRecords = maxBundle,
-        send = { g, envelope -> r.sent += g to String(envelope) },
+        send = { g, envelope ->
+            r.sent += g to String(envelope)
+            !r.held
+        },
         save = {},
     )
 
@@ -89,6 +94,19 @@ class IntroductionPublicationTest {
         assertEquals("anna", r.composedPayload!!.username)
         assertEquals(listOf("g1" to "offer:record", "g2" to "offer:record"), r.sent)
         assertEquals(setOf("g1", "g2"), state.offerSentTo.keys)
+    }
+
+    @Test
+    fun `a held send is not recorded, so the next run sends it`() = runTest {
+        // ADR-0091 walk 3, W3-R2 — the device may be behind in the
+        // conversation (a refused read): the send is held, not done.
+        val held = Recorder().also { it.held = true }
+        val state = publishIntroductions(IntroPublicationState(), inputs(), ops(held))
+        assertTrue(state.offerSentTo.isEmpty())
+        val next = Recorder()
+        val after = publishIntroductions(state, inputs(), ops(next))
+        assertEquals(listOf("g1" to "offer:record", "g2" to "offer:record"), next.sent)
+        assertEquals(setOf("g1", "g2"), after.offerSentTo.keys)
     }
 
     @Test

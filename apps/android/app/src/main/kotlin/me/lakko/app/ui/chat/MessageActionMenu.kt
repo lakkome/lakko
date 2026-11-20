@@ -3,9 +3,6 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkBorder
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -30,15 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Forward
-import androidx.compose.material.icons.automirrored.filled.Reply
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -86,6 +74,9 @@ import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.Localization
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The per-message action menu — `docs/ux/message-actions.md` sections 2, 3
@@ -177,10 +168,16 @@ internal data class MessageActions(
     /** ADR-0087 section 13 — a publisher's `Ban from comments` on someone
      *  else's comment, in the destructive group under Delete. */
     val canBan: Boolean = false,
+    /** ADR-0092 — the rows a content message adds (Retract vote, Close poll,
+     *  Edit checklist, Close checklist, Copy coordinates), in order. */
+    val contentRows: List<ContentMenuRow> = emptyList(),
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan || contentRows.isNotEmpty()
 }
+
+/** One row a content message adds to its menu (ADR-0092). */
+internal data class ContentMenuRow(val label: String, val onClick: () -> Unit)
 
 /**
  * Section 3's actions for [msg] as seen by this device. [menuAvailable] is the
@@ -199,12 +196,17 @@ internal fun messageActionsFor(
     pinLabel: String = Localization.strings.value["chat.message.pin"],
     /** Saved section 2 — the message is in the account's saved list. */
     saved: Boolean = false,
+    /** ADR-0087 section 14 — the bubble is drawn as a channel invitation
+     *  card. Its text is the `/g/` link with its secret, so it is never
+     *  edited (Edit would put that link in the composer) and never forwarded
+     *  (maintainer, 2026-11-13). Delete stays. */
+    invitationCard: Boolean = false,
 ): MessageActions = MessageActions(
     // Copy reads a string this device already holds and sends nothing, so it is
     // the one action that does NOT die with the membership gate. It is still
     // gated on the menu being available because the menu is how it is reached.
     canCopy = menuAvailable && text.isNotEmpty(),
-    canEdit = menuAvailable && isOwn && !deleted,
+    canEdit = menuAvailable && isOwn && !deleted && !invitationCard,
     canDelete = menuAvailable && isOwn && !deleted,
     // Section 3.1 — "any message with an id". `menuAvailable` already carries
     // the id gate (a row with no DS id has nothing to point at), the deleted
@@ -214,7 +216,9 @@ internal fun messageActionsFor(
     // Section 5.1 — "A message that cannot be forwarded yet (its attachments
     // still uploading, or a failed send) does not offer Forward." The id gate
     // and the deleted gate ride in `menuAvailable`, as for Reply.
-    canForward = menuAvailable && sendComplete,
+    // Maintainer, 2026-11-13 — a message carrying a channel invitation card
+    // is never forwarded.
+    canForward = menuAvailable && sendComplete && !invitationCard,
     // Section 4.1 — "on any message whose send is complete and that is not
     // deleted": the same gates as Forward. A personal pin sends nothing, so
     // the membership gate inside `menuAvailable` is stricter than a pin
@@ -595,7 +599,7 @@ internal fun MessageActionCard(
             if (actions.canReply) {
                 ActionRow(
                     label = t("chat.message.reply"),
-                    icon = Icons.AutoMirrored.Filled.Reply,
+                    icon = R.drawable.ic_lk_reply,
                     onClick = onReply,
                 )
             }
@@ -604,14 +608,14 @@ internal fun MessageActionCard(
                 // another conversation.
                 ActionRow(
                     label = t("chat.message.forward"),
-                    icon = Icons.AutoMirrored.Filled.Forward,
+                    icon = R.drawable.ic_lk_forward,
                     onClick = onForward,
                 )
             }
             if (actions.canCopy) {
                 ActionRow(
                     label = t("common.copy"),
-                    icon = Icons.Filled.ContentCopy,
+                    icon = R.drawable.ic_lk_copy,
                     onClick = onCopy,
                 )
             }
@@ -620,7 +624,12 @@ internal fun MessageActionCard(
                 // after Copy. Nothing leaves the device.
                 ActionRow(
                     label = actions.translateLabel,
-                    icon = Icons.Filled.Translate,
+                    // Show original reads as its own glyph, as on iOS and web.
+                    icon = if (actions.translateLabel == t("chat.message.show_original")) {
+                        R.drawable.ic_lk_text_bubble
+                    } else {
+                        R.drawable.ic_lk_translate
+                    },
                     onClick = onTranslate,
                 )
             }
@@ -629,7 +638,7 @@ internal fun MessageActionCard(
                 // entering the mode changes nothing until an action fires.
                 ActionRow(
                     label = me.lakko.app.chat.SELECT_ACTION_LABEL.text(),
-                    icon = Icons.Filled.CheckCircle,
+                    icon = R.drawable.ic_lk_checkmark_circle,
                     onClick = onSelect,
                 )
             }
@@ -639,7 +648,12 @@ internal fun MessageActionCard(
                 // `pinMenuFor` and rendered here.
                 ActionRow(
                     label = actions.pinLabel,
-                    icon = Icons.Filled.PushPin,
+                    // Unpin draws the slashed pin, as on iOS and web.
+                    icon = if (actions.pinLabel == t("chat.message.unpin")) {
+                        R.drawable.ic_lk_pin_slash
+                    } else {
+                        R.drawable.ic_lk_pin
+                    },
                     onClick = onPin,
                 )
             }
@@ -647,14 +661,21 @@ internal fun MessageActionCard(
                 // Saved section 2 — directly under Pin.
                 ActionRow(
                     label = t(if (actions.saved) "chat.message.unsave" else "chat.message.save"),
-                    icon = if (actions.saved) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    icon = if (actions.saved) R.drawable.ic_lk_bookmark_slash else R.drawable.ic_lk_bookmark,
                     onClick = onSave,
+                )
+            }
+            for (row in actions.contentRows) {
+                ActionRow(
+                    label = row.label,
+                    icon = R.drawable.ic_lk_pencil,
+                    onClick = row.onClick,
                 )
             }
             if (actions.canEdit) {
                 ActionRow(
                     label = t("chat.message.edit"),
-                    icon = Icons.Filled.Edit,
+                    icon = R.drawable.ic_lk_pencil,
                     onClick = onEdit,
                 )
             }
@@ -681,7 +702,7 @@ internal fun MessageActionCard(
                     if (actions.canDelete) {
                         ActionRow(
                             label = t("common.delete"),
-                            icon = Icons.Filled.Delete,
+                            icon = R.drawable.ic_lk_trash,
                             onClick = onDelete,
                             tint = MaterialTheme.colorScheme.error,
                         )
@@ -689,7 +710,7 @@ internal fun MessageActionCard(
                     if (actions.canBan) {
                         ActionRow(
                             label = t("channels.moderation.ban"),
-                            icon = Icons.Filled.Block,
+                            icon = R.drawable.ic_lk_nosign,
                             onClick = onBan,
                             tint = MaterialTheme.colorScheme.error,
                         )
@@ -717,9 +738,9 @@ private val ROW_PADDING_HORIZONTAL: Dp = 8.dp
 private val ROW_RADIUS: Dp = 6.dp
 private val ROW_ICON_GAP: Dp = 8.dp
 
-/** Web's icons are 16 in a 14px label; the same pair here (`bodyMedium` is
- *  14sp). Section 2 does not fix either, so this follows the reference. */
-private val ROW_ICON_SIZE: Dp = 16.dp
+/** A menu row's icon box: the design system's band for settings and menu
+ *  rows (section "Icons"). */
+private val ROW_ICON_SIZE: Dp = LkIconSize.Row
 
 /**
  * Web's `--shadow-2` is `0 8px 24px` at 12 percent. Compose has no CSS
@@ -739,7 +760,7 @@ private fun menuSurfaceBorder(): BorderStroke =
 @Composable
 private fun ActionRow(
     label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     onClick: () -> Unit,
     tint: Color = Color.Unspecified,
 ) {
@@ -753,11 +774,11 @@ private fun ActionRow(
             .padding(horizontal = ROW_PADDING_HORIZONTAL, vertical = ROW_PADDING_VERTICAL),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
+        LkIcon(
+            icon = icon,
             contentDescription = null,
             tint = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurfaceVariant else tint,
-            modifier = Modifier.size(ROW_ICON_SIZE),
+            size = ROW_ICON_SIZE,
         )
         Box(Modifier.width(ROW_ICON_GAP))
         Text(

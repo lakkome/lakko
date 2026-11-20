@@ -25,12 +25,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.ViewDay
-import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -108,6 +102,9 @@ import me.lakko.app.ui.theme.LakkoDark
 import me.lakko.app.ui.theme.avatarTintFor
 import org.webrtc.RendererCommon
 import uniffi.lakko_ffi_uniffi.TileVideoQuality
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The tiles of a group call (`docs/ux/group-call-grid.md` sections 3 to 6).
@@ -446,11 +443,11 @@ internal fun GroupLayoutSwitch(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = if (kind == GroupLayoutKind.GRID) Icons.Filled.ViewDay else Icons.Filled.GridView,
+        LkIcon(
+            icon = if (kind == GroupLayoutKind.GRID) R.drawable.ic_lk_layout_focus else R.drawable.ic_lk_layout_grid,
             contentDescription = null,
             tint = LakkoDark.text,
-            modifier = Modifier.size(22.dp),
+            size = LkIconSize.Toolbar,
         )
     }
 }
@@ -761,11 +758,11 @@ private fun GroupTile(
             horizontalArrangement = Arrangement.spacedBy(if (short) 4.dp else 8.dp),
         ) {
             if (!participant.micOn) {
-                Icon(
-                    Icons.Filled.MicOff,
+                LkIcon(
+                    R.drawable.ic_lk_mic_slash_fill,
                     contentDescription = null,
                     tint = LakkoDark.danger,
-                    modifier = Modifier.size(12.dp),
+                    size = LkIconSize.Mark,
                 )
             }
             Text(
@@ -794,11 +791,11 @@ private fun GroupTile(
                 )
             }
             if (pinned) {
-                Icon(
-                    Icons.Filled.PushPin,
+                LkIcon(
+                    R.drawable.ic_lk_pin_fill,
                     contentDescription = null,
                     tint = LakkoDark.accent,
-                    modifier = Modifier.size(12.dp),
+                    size = LkIconSize.Mark,
                 )
             }
         }
@@ -925,11 +922,11 @@ private fun PinButton(actionLabel: String, onPin: () -> Unit, modifier: Modifier
                 .background(LakkoDark.background.copy(alpha = 0.6f)),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                Icons.Outlined.PushPin,
+            LkIcon(
+                R.drawable.ic_lk_pin,
                 contentDescription = null,
                 tint = LakkoDark.text,
-                modifier = Modifier.size(16.dp),
+                size = LkIconSize.Row,
             )
         }
     }
@@ -963,11 +960,11 @@ private fun PinnedChip(label: String, actionLabel: String, onUnpin: () -> Unit, 
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Icon(
-                Icons.Filled.PushPin,
+            LkIcon(
+                R.drawable.ic_lk_pin_fill,
                 contentDescription = null,
                 tint = LakkoDark.accent,
-                modifier = Modifier.size(14.dp),
+                size = LkIconSize.Mark,
             )
             Text(text = label, color = LakkoDark.text, fontSize = 12.sp, maxLines = 1)
         }

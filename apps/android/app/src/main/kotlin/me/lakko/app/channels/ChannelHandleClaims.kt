@@ -13,7 +13,8 @@ import android.content.SharedPreferences
  * Discovery binds a handle to a channel id for good, and the create that
  * follows can fail, so a retry that minted a new id would be told its own
  * handle is taken. A retry takes the id from here; discovery answers a repeated
- * claim of the same name with the same id as a success, and the owner's journal
+ * claim of the same name with the same id (the same handle write key) as the
+ * first claim, and the owner's journal
  * claim and the channel create are idempotent on it too.
  */
 internal interface HandleClaimRows {
@@ -33,6 +34,11 @@ internal class ChannelHandleClaims(private val rows: HandleClaimRows, private va
         // not cost the name.
         return fresh().also { rows.put(key, it) }
     }
+
+    /** Whether a create on this account claimed [handle] and has not
+     *  finished: the name is this account's to take back, not "taken". */
+    fun isClaimed(accountIdB64: String, handle: String): Boolean =
+        handle.isNotEmpty() && rows.get(rowKey(accountIdB64, handle)) != null
 
     /** The name is someone else's, or the channel exists: nothing to reuse. */
     fun forget(accountIdB64: String, handle: String) {

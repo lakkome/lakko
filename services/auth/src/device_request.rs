@@ -125,7 +125,11 @@ pub(crate) const CODE_NOT_READY: &str = "device-request-not-ready";
 pub(crate) const CODE_ALREADY_USED: &str = "device-request-already-used";
 
 fn refusal(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(serde_json::json!({ "error": code }))).into_response()
+    let mut response = (status, Json(serde_json::json!({ "error": code }))).into_response();
+    response
+        .extensions_mut()
+        .insert(lakko_metrics::ErrorCode(code));
+    response
 }
 
 /// `POST /device/request` body.
@@ -807,6 +811,7 @@ mod device_request_e2e_tests {
             room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(limits),

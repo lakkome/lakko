@@ -120,7 +120,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
         <h1 class="lk-incoming-call-name">{props.callerName}</h1>
         <p class="lk-incoming-call-kind">{kindLabel()}</p>
         <p class="lk-incoming-call-lock">
-          <Icon name="lock" size={14} />
+          <Icon name="lock-fill" size={14} />
           <span>{t("call.e2ee")}</span>
         </p>
       </div>
@@ -132,7 +132,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
           aria-label={t(props.video ? "call.incoming.decline_video_a11y" : "call.incoming.decline_voice_a11y", { name: props.callerName })}
           onClick={() => props.onDecline()}
         >
-          <Icon name="phone" size={18} />
+          <Icon name="phone-down-fill" size={20} />
           {t("call.incoming.decline")}
         </button>
         <Show when={props.video}>
@@ -154,7 +154,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
           }}
           onClick={() => props.onAccept(props.video)}
         >
-          <Icon name={props.video ? "video" : "phone"} size={18} />
+          <Icon name={props.video ? "video-fill" : "phone-fill"} size={20} />
           {t("call.incoming.accept")}
         </button>
       </div>

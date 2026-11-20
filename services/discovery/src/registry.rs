@@ -121,7 +121,10 @@ impl NamePolicy {
 
 /// A refusal that is a status and one JSON body code.
 fn coded(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(serde_json::json!({ "error": code }))).into_response()
+    crate::metrics::with_code(
+        (status, Json(serde_json::json!({ "error": code }))).into_response(),
+        code,
+    )
 }
 
 /// A plain-text refusal (malformed input, the session's account mismatch).
@@ -469,12 +472,16 @@ pub(crate) async fn prune_retired(pool: &MySqlPool, hold_secs: u64) -> Result<u6
 
 /// Hourly pruner: frees the names retired longer ago than the hold.
 pub(crate) fn spawn_retired_pruner(pool: MySqlPool, hold_secs: u64) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::{job_run, jobs};
+    lakko_metrics::job_registered(jobs::RETIRED_USERNAME_PRUNE);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
-            match prune_retired(&pool, hold_secs).await {
+            let result = prune_retired(&pool, hold_secs).await;
+            job_run(jobs::RETIRED_USERNAME_PRUNE, &result);
+            match result {
                 Ok(0) => {},
                 Ok(rows) => tracing::info!(rows, "freed retired usernames past their hold"),
                 Err(e) => tracing::warn!(error = %e, "retired usernames prune failed"),

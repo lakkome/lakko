@@ -25,10 +25,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
@@ -78,6 +75,9 @@ import me.lakko.app.media.voiceClockReservation
 import me.lakko.app.media.widestRateLabel
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 internal const val COULD_NOT_PLAY = "chat.media.play_failed"
 internal const val NOT_SENT_RETRY = "chat.media.not_sent_retry"
@@ -173,7 +173,106 @@ internal fun AttachmentView(
         MediaBubble.PHOTO -> PhotoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
         MediaBubble.VIDEO -> VideoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
         MediaBubble.FILE -> fileChip()
+        MediaBubble.AUDIO -> AudioBubble(ref, hub, isOwn, contentColor, bubbleColor, decision.inline != null, onLongPress, fileChip)
     }
+}
+
+/**
+ * ADR-0092 / attachments UX section 6 — a music or audio file: the play disc
+ * of the voice bubble, title (one line) and artist (muted), a progress bar
+ * that is also the scrubber, elapsed / total, and the cover as a 44dp tile.
+ * One audio or voice message plays at a time (the hub's one player). A file
+ * whose MIME is not on the inline list is a file chip with the same title and
+ * artist line.
+ */
+@Composable
+internal fun AudioBubble(
+    ref: AttachmentRef,
+    hub: ChatMediaHub,
+    isOwn: Boolean,
+    contentColor: Color,
+    bubbleColor: Color,
+    playable: Boolean,
+    onLongPress: (() -> Unit)?,
+    fileChip: @Composable () -> Unit,
+) {
+    val title = ref.title ?: ref.name ?: ""
+    val artist = ref.artist
+    if (!playable) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, color = contentColor, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            if (artist != null) Text(artist, color = contentColor.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1)
+            fileChip()
+        }
+        return
+    }
+    val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
+    val voice by hub.voice.collectAsStateWithLifecycle()
+    val knownDuration = ref.durationMs?.toLong() ?: 0L
+    val isCurrent = voice.key == key
+    val duration = if (isCurrent && voice.durationMs > 0) voice.durationMs else knownDuration
+    val position = if (isCurrent) voice.positionMs else 0L
+    val progress = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    var cover by remember(ref.thumb) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(ref.thumb) {
+        val t = ref.thumb ?: return@LaunchedEffect
+        cover = hub.loadThumb(t)?.let { android.graphics.BitmapFactory.decodeFile(it.absolutePath) }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.widthIn(min = 240.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            VoicePlayDisc(
+                playing = isCurrent && voice.playing,
+                loading = isCurrent && voice.loading,
+                discColor = contentColor,
+                glyphColor = bubbleColor,
+                label = if (isCurrent && voice.playing) {
+                    t("audio.pause", mapOf("title" to title))
+                } else {
+                    t("audio.play", mapOf("title" to title))
+                },
+                onClick = { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
+                onLongPress = onLongPress,
+            )
+            Column(Modifier.weight(1f)) {
+                Text(title, color = contentColor, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                if (artist != null) {
+                    Text(artist, color = contentColor.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                }
+            }
+            cover?.let {
+                androidx.compose.foundation.Image(
+                    it.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)),
+                )
+            }
+        }
+        androidx.compose.material3.Slider(
+            value = progress,
+            onValueChange = { f -> hub.seekVoice(ref, f, knownDuration, sentByMe = isOwn) },
+            colors = androidx.compose.material3.SliderDefaults.colors(
+                thumbColor = contentColor,
+                activeTrackColor = contentColor,
+                inactiveTrackColor = contentColor.copy(alpha = 0.3f),
+            ),
+        )
+        val failed = voice.failedKey == key
+        Text(
+            if (failed) t("audio.unplayable") else "${formatAudioClock(position)} / ${formatAudioClock(duration)}",
+            color = if (failed) MaterialTheme.colorScheme.error else contentColor.copy(alpha = 0.7f),
+            fontSize = 12.sp,
+        )
+    }
+}
+
+/** `m:ss`, or `h:mm:ss` from an hour. */
+internal fun formatAudioClock(ms: Long): String {
+    val total = (ms.coerceAtLeast(0) / 1000).toInt()
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
 /** §2 timeline bubble — the play button's DRAWN diameter. */
@@ -429,13 +528,13 @@ private fun VoicePlayDisc(
                         strokeWidth = 2.dp,
                     )
                 } else {
-                    Icon(
-                        imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    LkIcon(
+                        icon = if (playing) R.drawable.ic_lk_pause_fill else R.drawable.ic_lk_play_fill,
                         // The disc carries the label; a second one here would
                         // make TalkBack read the button twice.
                         contentDescription = null,
                         tint = glyphColor,
-                        modifier = Modifier.size(20.dp),
+                        size = LkIconSize.Row,
                     )
                 }
             }
@@ -685,8 +784,8 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
             }
             when {
                 loading -> CircularProgressIndicator(Modifier.size(40.dp), strokeWidth = 3.dp)
-                !playingWithSound -> Icon(
-                    imageVector = if (showVideo) Icons.AutoMirrored.Filled.VolumeOff else Icons.Filled.PlayArrow,
+                !playingWithSound -> LkIcon(
+                    icon = if (showVideo) R.drawable.ic_lk_speaker_slash_fill else R.drawable.ic_lk_play_fill,
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier
@@ -715,7 +814,14 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                 me.lakko.app.ui.translation.TranscriptSlot(ref, hub, MaterialTheme.colorScheme.onSurface, onLongPress)
             }
         }
-        Text(formatTotalClock(duration), style = MaterialTheme.typography.labelSmall)
+        // Outside any bubble colour: under the sender's own note the inherited
+        // content colour was the bubble's white, unreadable on the chat
+        // background (seen on a Pixel 7a, 2026-11-12).
+        Text(
+            formatTotalClock(duration),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         val failures by hub.failures.collectAsStateWithLifecycle()
         val failure = failures[key]
         if (failed || failure == me.lakko.app.media.MediaFailure.GONE) {

@@ -326,6 +326,7 @@ final class MembershipEndTests: XCTestCase {
         addAlso: Identity? = nil,
         endStore: MembershipEndStore? = nil,
         arrivals: GroupArrivalStore? = nil,
+        tokens: AnonTokenSource? = nil,
         before: (_ ownerGroup: Group, _ owner: Identity, _ personGroup: Group, _ person: Identity) throws -> Void = { _, _, _, _ in }
     ) throws -> Fixture {
         let owner = try Identity.fromSeed(seed: Data(repeating: 0x11, count: 32))
@@ -357,7 +358,9 @@ final class MembershipEndTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ScriptedDsURLProtocol.self]
         let scope = ScriptedDsURLProtocol.freshScope()
-        let ds = DsClient(baseURL: ScriptedDsURLProtocol.baseURL(scope), session: URLSession(configuration: config))
+        let ds = tokens.map {
+            DsClient(baseURL: ScriptedDsURLProtocol.baseURL(scope), session: URLSession(configuration: config), tokens: $0)
+        } ?? DsClient(baseURL: ScriptedDsURLProtocol.baseURL(scope), session: URLSession(configuration: config))
         let end = try endStore ?? MembershipEndStore(defaults: suite())
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
@@ -720,6 +723,521 @@ final class MembershipEndTests: XCTestCase {
         await f.repo.resolveHeldWelcomes()
         XCTAssertTrue(f.endStore.heldWelcomes(accountIdB64: f.accountIdB64).isEmpty)
         XCTAssertTrue(try XCTUnwrap(f.repo.groups[f.groupIdHex]).group.isActive())
+    }
+
+    // MARK: - ADR-0091 phase 2 — a device that fell behind comes back
+
+    func testADeviceThatFellBehindComesBackOnItsOwnReentryWelcome() async throws {
+        let third = try Identity.fromSeed(seed: Data(repeating: 0x66, count: 32))
+        let f = try fixture(addAlso: third)
+        let hex = f.groupIdHex
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        record.appendLocalRow(text: "before", messageId: 1, createdAt: "")
+        let leafKey = f.identity.signaturePublicKey()
+
+        // The owner commits a change this device never applies: it is behind.
+        let fourth = try Identity.fromSeed(seed: Data(repeating: 0x67, count: 32))
+        _ = try f.ownerGroup.addMemberFromWire(identity: f.owner, keyPackage: try fourth.createKeyPackage())
+        let epochLeft = try f.ownerGroup.epoch()
+        XCTAssertGreaterThan(epochLeft, try record.group.epoch())
+
+        // Its request, recorded the way the pipeline records it.
+        let keyPackage = try f.identity.createReentryKeyPackage(groupId: f.groupId, epochLeft: epochLeft)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        behind.gapFromMs = 1_000
+        behind.requests = [ReentrySentRequest(
+            keyPackage: keyPackage, epochLeft: epochLeft, sentAtMs: 1, route: "knock", cursorAtSend: 0)]
+        behind.lastRoute = "knock"
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        XCTAssertTrue(f.repo.reentryStopsActing(groupIdHex: hex))
+        XCTAssertTrue(f.repo.reentryBehind(groupIdHex: hex).isConfirmed)
+        XCTAssertTrue(f.repo.reentryBlocksRepair(groupIdHex: hex) == false, "no evidence recorded")
+
+        // Waiting, nothing is sent: a typing signal is refused before the network.
+        do {
+            try await f.repo.sendTyping(groupIdHex: hex, isTyping: true)
+            XCTFail("a waiting chat sends nothing")
+        } catch is ChatRepository.BehindInConversation {
+        }
+        if case .notCommitter = await f.repo.sweepIfCommitter(groupIdHex: hex) {} else {
+            XCTFail("a behind device never sweeps")
+        }
+
+        // The owner brings it back: the pair, then its own sweep.
+        _ = try f.ownerGroup.proposeReentryReplacement(identity: f.owner, keyPackage: keyPackage)
+        let swept = try XCTUnwrap(try f.ownerGroup.commitPendingProposals(identity: f.owner))
+        let welcome = try XCTUnwrap(swept.welcome)
+
+        // The ordinary join refuses it (still active here); the held pass
+        // takes it as this device's re-entry.
+        var refusal: Error?
+        do {
+            _ = try await f.repo.joinGroupFromWelcome(welcomeBytes: welcome)
+        } catch {
+            refusal = error
+        }
+        XCTAssertEqual(try MembershipEndRules.stillActiveGroupIdHex(XCTUnwrap(refusal)), hex)
+        XCTAssertTrue(f.repo.holdWelcomeForActiveGroup(groupIdHex: hex, welcome: welcome))
+        await f.repo.resolveHeldWelcomes()
+
+        let back = try XCTUnwrap(f.repo.groups[hex])
+        XCTAssertTrue(try back.group.isActive())
+        XCTAssertEqual(try back.group.epoch(), try f.ownerGroup.epoch())
+        XCTAssertTrue(back.messages.contains { $0.text == "before" }, "the history stays")
+        XCTAssertTrue(back.messages.contains { ConversationReentryRules.parseGap($0.text)?.fromMs == 1_000 },
+                      "the gap line is written")
+        XCTAssertEqual(f.repo.reentryBehind(groupIdHex: hex), .inStep)
+        XCTAssertFalse(f.repo.reentryBehind(groupIdHex: hex).isConfirmed)
+        XCTAssertTrue(f.endStore.heldWelcomes(accountIdB64: f.accountIdB64).isEmpty)
+        let ownLeaf = try back.group.ownLeafIndex()
+        XCTAssertEqual(
+            try back.group.members().first { $0.leafIndex == ownLeaf }?.signaturePublicKey, leafKey,
+            "the same signature key: the person and authorship are unchanged")
+
+        // It reads what is sent next.
+        let next = try f.ownerGroup.createApplicationMessage(identity: f.owner, plaintext: Data("hello".utf8))
+        guard case .application(let data, _, _) = try back.group.processIncomingVerifyingRoles(
+            identity: f.identity, bytes: next) else {
+            return XCTFail("an application message")
+        }
+        XCTAssertEqual(data, Data("hello".utf8))
+    }
+
+    func testAWelcomeForAnotherKeyPackageIsNotAReentryAndIsKeptWhileARequestIsOut() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        let epochLeft = try f.ownerGroup.epoch()
+        let keyPackage = try f.identity.createReentryKeyPackage(groupId: f.groupId, epochLeft: epochLeft)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        behind.requests = [ReentrySentRequest(
+            keyPackage: keyPackage, epochLeft: epochLeft, sentAtMs: 1, route: "knock", cursorAtSend: 0)]
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        let other = try f.ownerGroup.addMemberFromWire(
+            identity: f.owner, keyPackage: try Identity.fromSeed(
+                seed: Data(repeating: 0x78, count: 32)).createKeyPackage())
+        XCTAssertTrue(f.repo.holdWelcomeForActiveGroup(groupIdHex: hex, welcome: other.welcome))
+        await f.repo.resolveHeldWelcomes()
+        XCTAssertEqual(f.endStore.heldWelcomes(accountIdB64: f.accountIdB64).count, 1,
+                       "never dropped while a re-entry record exists")
+        XCTAssertTrue(f.repo.reentryStopsActing(groupIdHex: hex), "nothing changed")
+    }
+
+    /// An admin of the group: the owner's role commit, applied on the
+    /// person's handle before the repository starts.
+    private func adminFixture() throws -> Fixture {
+        try fixture { ownerGroup, owner, personGroup, person in
+            let commit = try ownerGroup.setGroupRoles(
+                identity: owner, owner: owner.signaturePublicKey(), admins: [person.signaturePublicKey()])
+            _ = try personGroup.processIncomingVerifyingRoles(identity: person, bytes: commit)
+        }
+    }
+
+    func testTheAdminWhoBringsADeviceBackHoldsTheKnockKeyToResend() throws {
+        let f = try adminFixture()
+        let hex = f.groupIdHex
+        XCTAssertEqual(f.repo.ownRole(groupIdHex: hex), .admin)
+        // No seed handed over yet: nothing to send.
+        XCTAssertNil(f.repo.knockKeyEnvelopeForResend(groupIdHex: hex))
+        let seed = Data(repeating: 0x5A, count: 32)
+        f.repo.groupSettingsStore.keepKnockSeed(
+            accountIdB64: f.accountIdB64, groupIdHex: hex, version: 2, seed: seed)
+        let envelope = try XCTUnwrap(f.repo.knockKeyEnvelopeForResend(groupIdHex: hex),
+                                     "an admin re-sends the knock key it holds")
+        let key = try decodeKnockKeyEnvelope(plaintext: envelope)
+        XCTAssertEqual(key.knockVersion, 2)
+        XCTAssertEqual(key.knockPk, try groupKnockPublicKey(knockSeed: seed))
+        f.repo.groupSettingsStore.removeGroup(accountIdB64: f.accountIdB64, groupIdHex: hex)
+    }
+
+    func testAPlainMemberResendsNoKnockKey() throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        f.repo.groupSettingsStore.keepKnockSeed(
+            accountIdB64: f.accountIdB64, groupIdHex: hex, version: 0, seed: Data(repeating: 1, count: 32))
+        XCTAssertEqual(f.repo.ownRole(groupIdHex: hex), .member)
+        XCTAssertNil(f.repo.knockKeyEnvelopeForResend(groupIdHex: hex))
+        f.repo.groupSettingsStore.removeGroup(accountIdB64: f.accountIdB64, groupIdHex: hex)
+    }
+
+    // MARK: ADR-0091 walk 2 (2026-11-20)
+
+    /// A plain member that can send its re-entry request by the knock: the
+    /// owner's knock key held, and tokens for the probe.
+    private func knockingFixture() throws -> Fixture {
+        let f = try fixture(tokens: FakeAnonTokens())
+        let knockPk = try groupKnockPublicKey(knockSeed: Data(repeating: 0x4B, count: 32))
+        XCTAssertTrue(f.repo.reentryKnockKeys.keepIfNewer(
+            ReentryKnockKeyStore.Held(version: 1, publicKey: knockPk),
+            accountIdB64: f.accountIdB64, groupIdHex: f.groupIdHex))
+        return f
+    }
+
+    private func clearReentry(_ f: Fixture) {
+        f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: f.groupIdHex)
+        f.repo.reentryRowClock.remove(accountIdB64: f.accountIdB64, groupIdHex: f.groupIdHex)
+        f.repo.reentryKnockKeys.remove(accountIdB64: f.accountIdB64, groupIdHex: f.groupIdHex)
+    }
+
+    /// R1 — a device behind through refused reads skipped no row; its request
+    /// names the newest row it applied, and the record keeps that start.
+    func testARequestNamesTheLastRowThisDeviceKnew() async throws {
+        let f = try knockingFixture()
+        let hex = f.groupIdHex
+        ScriptedDsURLProtocol.setKnockEpoch(try f.ownerGroup.epoch() + 1, scope: f.scope)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 9_000)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        f.repo.reentryRowClock.noteRowKnown(accountIdB64: f.accountIdB64, groupIdHex: hex, atMs: 5_000)
+        f.repo.reentryRowClock.noteReadOk(accountIdB64: f.accountIdB64, groupIdHex: hex, nowMs: 7_000)
+        defer { clearReentry(f) }
+
+        await f.repo.sendReentryRequestIfDue(groupIdHex: hex)
+
+        let after = f.repo.reentryRecord(groupIdHex: hex)
+        XCTAssertEqual(after.requests.count, 1, "the request is recorded before it is sent")
+        XCTAssertEqual(after.gapFromMs, 5_000, "the newest row applied, not the moment of suspicion")
+    }
+
+    /// Walk 3, W3-R1 — seen live 2026-11-20: a request named an epoch kept
+    /// from an earlier in-step read, the owner was many commits further and
+    /// never acted on it, and every resend named it again. Every request,
+    /// the first and each resend, asks the journal right before it is minted.
+    func testEveryRequestNamesTheEpochTheJournalNamesRightBeforeIt() async throws {
+        let f = try knockingFixture()
+        let hex = f.groupIdHex
+        defer { clearReentry(f) }
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 9_000)
+        behind.latestSeen = 1
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+
+        ScriptedDsURLProtocol.setKnockEpoch(67, scope: f.scope)
+        await f.repo.sendReentryRequestIfDue(groupIdHex: hex)
+        XCTAssertEqual(f.repo.reentryRecord(groupIdHex: hex).requests.map(\.epochLeft), [67],
+                       "the probe's epoch, not the stored one")
+        XCTAssertEqual(ScriptedDsURLProtocol.knockPayloadCounts(scope: f.scope), [0, 1],
+                       "the probe, then the request")
+
+        // The resend, 30 minutes on: the journal moved, so does the request.
+        var due = f.repo.reentryRecord(groupIdHex: hex)
+        due.lastSentMs = 1
+        XCTAssertTrue(f.repo.reentryStore.save(due, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        ScriptedDsURLProtocol.setKnockEpoch(70, scope: f.scope)
+        await f.repo.sendReentryRequestIfDue(groupIdHex: hex)
+        XCTAssertEqual(f.repo.reentryRecord(groupIdHex: hex).requests.map(\.epochLeft), [67, 70])
+        XCTAssertEqual(ScriptedDsURLProtocol.knockPayloadCounts(scope: f.scope), [0, 1, 0, 1])
+    }
+
+    /// W3-R1 — a probe that names no epoch: nothing is minted, recorded or
+    /// sent, and the request is tried again soon.
+    func testAProbeNamingNoEpochSendsNothing() async throws {
+        let f = try knockingFixture()
+        let hex = f.groupIdHex
+        defer { clearReentry(f) }
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 9_000)
+        behind.latestSeen = 5
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        ScriptedDsURLProtocol.setKnockEpoch(nil, scope: f.scope)
+
+        await f.repo.sendReentryRequestIfDue(groupIdHex: hex)
+
+        let after = f.repo.reentryRecord(groupIdHex: hex)
+        XCTAssertTrue(after.requests.isEmpty)
+        XCTAssertNil(after.lastRoute)
+        XCTAssertNotNil(after.lastSentMs, "tried again after the short retry")
+        XCTAssertEqual(ScriptedDsURLProtocol.knockPayloadCounts(scope: f.scope), [0], "the probe only")
+    }
+
+    /// W3-R1 — no destination yet (no knock key): nothing is minted, and no
+    /// probe token is spent.
+    func testARequestWithNoDestinationMintsNothing() async throws {
+        let f = try fixture(tokens: FakeAnonTokens())
+        let hex = f.groupIdHex
+        defer { clearReentry(f) }
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 9_000)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        ScriptedDsURLProtocol.setKnockEpoch(3, scope: f.scope)
+
+        await f.repo.sendReentryRequestIfDue(groupIdHex: hex)
+
+        XCTAssertTrue(f.repo.reentryRecord(groupIdHex: hex).requests.isEmpty)
+        XCTAssertEqual(ScriptedDsURLProtocol.knockPayloadCounts(scope: f.scope), [])
+    }
+
+    /// Walk 3, W3-R2 — seen live: after refused reads, a profile and a
+    /// typing signal still went out while the device was in step. A refused
+    /// read with no answered read since holds every send that is not the
+    /// person's own content; an answered read lets them out again.
+    func testAnAutomaticSendWaitsForAnAnsweredReadAfterARefusal() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        defer { f.repo.chatClient.reentryObservations.clear(groupIdHex: hex) }
+        f.repo.noteReentryReadRefused(
+            groupIdHex: hex, error: DsClientError.http(status: 401, endpoint: "/ds/group/x/messages", body: ""))
+        XCTAssertFalse(f.repo.reentryStopsActing(groupIdHex: hex), "one refusal suspects nothing")
+
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        do {
+            try await f.repo.publishApplicationMessage(groupIdHex: hex, plaintextBytes: try composeTypingEnvelope(isTyping: true))
+            XCTFail("held while the refusal stands")
+        } catch {
+            XCTAssertTrue(ConversationReentryRules.isBehindRefusal(error), "quiet: the stop list's own refusal")
+        }
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start)
+        XCTAssertNoThrow(try f.repo.requireSendAllowedWhileBehind(groupIdHex: hex, isPersonContent: true),
+                         "the person's own content still goes")
+
+        f.repo.chatClient.reentryObservations.noteReadAnswered(groupIdHex: hex)
+        try await f.repo.publishApplicationMessage(groupIdHex: hex, plaintextBytes: try composeTypingEnvelope(isTyping: true))
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 1)
+    }
+
+    /// Walk 3, W3-R5 — one refused read holds the automatic sends but not
+    /// the person's own act: it is attempted (its 401, if any, is evidence).
+    func testAPersonActionIsAttemptedAfterOneRefusedRead() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        defer { f.repo.chatClient.reentryObservations.clear(groupIdHex: hex) }
+        f.repo.noteReentryReadRefused(
+            groupIdHex: hex, error: DsClientError.http(status: 401, endpoint: "/ds/group/x/messages", body: ""))
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+
+        try await f.repo.setGroupName(groupIdHex: hex, name: "Team")
+
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 1)
+        XCTAssertEqual(f.repo.groupName(groupIdHex: hex), "Team")
+    }
+
+    /// W3-R5 — while the conversation is suspected behind, the person's own
+    /// act is refused before anything changes locally, and the refusal reads
+    /// as that action's own failure message.
+    func testAPersonActionIsHeldWhileSuspectedWithNothingAppliedLocally() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        var behind = ConversationReentryRecord()
+        behind.behind = .suspected(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+
+        do {
+            try await f.repo.setGroupName(groupIdHex: hex, name: "Team")
+            XCTFail("held while behind")
+        } catch {
+            XCTAssertTrue(ConversationReentryRules.isBehindRefusal(error))
+            XCTAssertEqual(ChatViewModel.errorText(for: error, fallbackKey: "chat.error.pin").text,
+                           UiText.key("chat.error.pin").text, "the action's own failure copy")
+        }
+        do {
+            try await f.repo.setSharedPin(groupIdHex: hex, messageId: 7, pinned: true)
+            XCTFail("held while behind")
+        } catch {
+            XCTAssertTrue(ConversationReentryRules.isBehindRefusal(error))
+        }
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start, "nothing sent")
+        XCTAssertNil(f.repo.groupName(groupIdHex: hex), "nothing applied locally")
+        XCTAssertTrue(f.repo.sharedPinStore.load(accountIdB64: f.accountIdB64, groupIdHex: hex).isEmpty)
+    }
+
+    /// W3-R5 — back in step by a read, this device re-sends its own
+    /// growth-time state: an owner's stored group name goes out again.
+    func testBackInStepReSendsThisDevicesOwnGroupState() async throws {
+        let f = try adminFixture()
+        let hex = f.groupIdHex
+        f.repo.groupNameStore.record(
+            accountIdB64: f.accountIdB64, groupIdHex: hex,
+            value: StoredGroupName(name: "Team", updatedAtMs: 5))
+        var behind = ConversationReentryRecord()
+        behind.behind = .suspected(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer {
+            f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+            f.repo.chatClient.reentryObservations.clear(groupIdHex: hex)
+        }
+        var fired: [String] = []
+        f.repo.reentryBackInStepObserver = { fired.append($0) }
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        let epoch = try XCTUnwrap(f.repo.groups[hex]).group.epoch()
+
+        f.repo.noteReentryAfterRead(
+            groupIdHex: hex, raw: FetchResult(messages: [], hasMore: false, latestEpoch: epoch))
+
+        XCTAssertFalse(f.repo.reentryStopsActing(groupIdHex: hex), "back in step")
+        XCTAssertEqual(fired, [hex])
+        for _ in 0..<200 where ScriptedDsURLProtocol.rowCount(scope: f.scope) == start {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertGreaterThan(ScriptedDsURLProtocol.rowCount(scope: f.scope), start, "the stored name went again")
+    }
+
+    /// Walk 3, W3-R6 — a refused-read hold that ends in step, the
+    /// conversation never behind, re-sends this device's own state; an
+    /// answer with no refusal before it, or one that suspects, does not.
+    func testARefusedReadHoldEndingInStepReSendsTheOwnState() throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        defer {
+            f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+            f.repo.chatClient.reentryObservations.clear(groupIdHex: hex)
+        }
+        var fired = 0
+        f.repo.reentryBackInStepObserver = { _ in fired += 1 }
+        let epoch = try XCTUnwrap(f.repo.groups[hex]).group.epoch()
+        let refused = DsClientError.http(status: 401, endpoint: "/ds/group/x/messages", body: "")
+        let inStep = FetchResult(messages: [], hasMore: false, latestEpoch: epoch)
+
+        // No refusal before the answer: nothing.
+        f.repo.noteReentryAfterRead(groupIdHex: hex, raw: inStep)
+        XCTAssertEqual(fired, 0)
+
+        // A refusal, then an answer that leaves the conversation in step.
+        f.repo.noteReentryReadRefused(groupIdHex: hex, error: refused)
+        f.repo.noteReentryReadRefused(groupIdHex: hex, error: refused)
+        XCTAssertFalse(f.repo.reentryStopsActing(groupIdHex: hex))
+        f.repo.noteReentryAfterRead(groupIdHex: hex, raw: inStep)
+        XCTAssertEqual(fired, 1)
+        // The hold is spent: the next answer re-sends nothing.
+        f.repo.noteReentryAfterRead(groupIdHex: hex, raw: inStep)
+        XCTAssertEqual(fired, 1)
+
+        // A refusal, then an answer that suspects: no in-step re-send.
+        f.repo.noteReentryReadRefused(groupIdHex: hex, error: refused)
+        f.repo.noteReentryAfterRead(
+            groupIdHex: hex, raw: FetchResult(messages: [], hasMore: false, latestEpoch: epoch + 2))
+        XCTAssertTrue(f.repo.reentryStopsActing(groupIdHex: hex), "suspected")
+        XCTAssertEqual(fired, 1)
+    }
+
+    /// R1 + R2 — coming back draws the line at the request's start, where the
+    /// gap was by time, and resets the clock to "applied none since joining".
+    func testComingBackPlacesTheGapLineByItsStartAndResetsTheClock() async throws {
+        let third = try Identity.fromSeed(seed: Data(repeating: 0x66, count: 32))
+        let f = try fixture(addAlso: third)
+        let hex = f.groupIdHex
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        record.appendLocalRow(text: "before", messageId: 1, createdAt: ChatRepository.isoTimestamp(ms: 4_000))
+        record.appendLocalRow(text: "after", messageId: 2, createdAt: ChatRepository.isoTimestamp(ms: 6_000))
+        let fourth = try Identity.fromSeed(seed: Data(repeating: 0x67, count: 32))
+        _ = try f.ownerGroup.addMemberFromWire(identity: f.owner, keyPackage: try fourth.createKeyPackage())
+        let epochLeft = try f.ownerGroup.epoch()
+        let keyPackage = try f.identity.createReentryKeyPackage(groupId: f.groupId, epochLeft: epochLeft)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        behind.gapFromMs = 5_000
+        behind.requests = [ReentrySentRequest(
+            keyPackage: keyPackage, epochLeft: epochLeft, sentAtMs: 1, route: "knock", cursorAtSend: 0)]
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        f.repo.reentryRowClock.noteRowKnown(accountIdB64: f.accountIdB64, groupIdHex: hex, atMs: 5_000)
+        defer {
+            f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+            f.repo.reentryRowClock.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+            f.repo.reentryGapLooks.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+        }
+        _ = try f.ownerGroup.proposeReentryReplacement(identity: f.owner, keyPackage: keyPackage)
+        let swept = try XCTUnwrap(try f.ownerGroup.commitPendingProposals(identity: f.owner))
+        let welcome = try XCTUnwrap(swept.welcome)
+        let before = UInt64(Date().timeIntervalSince1970 * 1000)
+        let joined = await f.repo.joinReentry(welcome: welcome, groupIdHex: hex)
+        XCTAssertTrue(joined)
+
+        let back = try XCTUnwrap(f.repo.groups[hex])
+        let texts = back.messages.map(\.text)
+        let ordered = texts.filter { $0 == "before" || $0 == "after" || ConversationReentryRules.parseGap($0) != nil }
+        XCTAssertEqual(ordered.count, 3)
+        XCTAssertEqual(ordered.first, "before")
+        XCTAssertEqual(ordered.dropFirst().first.flatMap { ConversationReentryRules.parseGap($0)?.fromMs }, 5_000)
+        XCTAssertEqual(ordered.last, "after", "a row stamped after the start sits below the line")
+        let clock = f.repo.reentryRowClock.load(accountIdB64: f.accountIdB64, groupIdHex: hex)
+        XCTAssertNil(clock.lastKnownRowMs, "no row of the new group applied yet")
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(clock.lastReadOkMs), before)
+    }
+
+    /// R4 — a knock key whose send was refused while behind stays owed and
+    /// goes once back; a newcomer makes it due again; delivered, it is not.
+    func testAKnockKeyStaysOwedUntilABroadcastReachedEveryMember() async throws {
+        let f = try adminFixture()
+        let hex = f.groupIdHex
+        f.repo.groupSettingsStore.keepKnockSeed(
+            accountIdB64: f.accountIdB64, groupIdHex: hex, version: 2, seed: Data(repeating: 0x5B, count: 32))
+        defer {
+            f.repo.groupSettingsStore.removeGroup(accountIdB64: f.accountIdB64, groupIdHex: hex)
+            f.repo.reentryKnockKeySent.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+        }
+        // Behind: skipped, nothing marked.
+        var behind = ConversationReentryRecord()
+        behind.behind = .suspected(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        await f.repo.publishKnockKeyIfOwed(groupIdHex: hex)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start)
+        XCTAssertNil(f.repo.reentryKnockKeySent.load(accountIdB64: f.accountIdB64, groupIdHex: hex))
+
+        // Back in step: it goes, once.
+        f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+        await f.repo.publishKnockKeyIfOwed(groupIdHex: hex)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 1)
+        let mark = try XCTUnwrap(f.repo.reentryKnockKeySent.load(accountIdB64: f.accountIdB64, groupIdHex: hex))
+        XCTAssertEqual(mark.version, 2)
+        await f.repo.publishKnockKeyIfOwed(groupIdHex: hex)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 1, "delivered: not due")
+
+        // A newcomer, seen by a poll that sent nothing: still due later.
+        let newcomer = try Identity.fromSeed(seed: Data(repeating: 0x68, count: 32))
+        let added = try f.ownerGroup.addMemberFromWire(identity: f.owner, keyPackage: try newcomer.createKeyPackage())
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: added.commit)
+        await f.repo.publishKnockKeyIfOwed(groupIdHex: hex)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 2)
+        let grown = try XCTUnwrap(f.repo.reentryKnockKeySent.load(accountIdB64: f.accountIdB64, groupIdHex: hex))
+        XCTAssertTrue(grown.members.contains(PushGroupRouting.hex(newcomer.signaturePublicKey())))
+    }
+
+    /// Maintainer 2026-11-20 — a chat this device is behind in looks as
+    /// always: the composer stays, a message sent meanwhile is kept in the
+    /// conversation in the ordinary "Not sent" state with the ordinary send
+    /// failure text, and nothing reaches the Delivery Service.
+    func testABehindChatKeepsItsComposerAndASendShowsNotSent() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        let model = ChatViewModel(repository: f.repo, groupIdHex: hex)
+        model.refreshMembers()
+        XCTAssertEqual(model.composerSlot, .composer, "the composer stays")
+        XCTAssertNotEqual(model.chatCallAction, .unavailable, "the call buttons stay")
+        let rowsBefore = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        var failure: Error?
+        do {
+            try await f.repo.sendMessage(groupIdHex: hex, plaintext: "while behind")
+        } catch {
+            failure = error
+        }
+        let error = try XCTUnwrap(failure, "the send is held")
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), rowsBefore, "nothing is published")
+        let row = try XCTUnwrap(f.repo.groups[hex]?.messages.last)
+        XCTAssertEqual(row.text, "while behind")
+        XCTAssertEqual(row.ack, .failed, "the ordinary not-sent state, with Retry")
+        XCTAssertEqual(
+            ChatViewModel.errorText(for: error, fallbackKey: "chat.send.failed").text,
+            Localization.text("chat.send.failed"), "the ordinary send failure text")
+    }
+
+    func testABehindChatStillOffersTheSharedPin() throws {
+        let f = try adminFixture()
+        let hex = f.groupIdHex
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        XCTAssertTrue(f.repo.maySetSharedPin(groupIdHex: hex), "the chat looks as always")
     }
 
     // MARK: - The handle

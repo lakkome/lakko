@@ -337,6 +337,7 @@ pub(crate) async fn backup_head(
     if check_mint_rate(&state.db, state.backup_head_mint_rate, &auth.0).await
         == MintRateDecision::Limited
     {
+        crate::metrics::backup_head_mint_limited();
         return Err(ApiError::RateLimited);
     }
 
@@ -532,7 +533,7 @@ mod tests {
     //     cargo test -p lakko-svc-auth backup_head
 
     /// A fresh account row (the backup-head tables reference `accounts` since
-    /// migration 0038).
+    /// migration 0039).
     async fn new_account(pool: &MySqlPool) -> [u8; 16] {
         let id: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
         sqlx::query("INSERT INTO accounts (id) VALUES (?)")
@@ -543,7 +544,7 @@ mod tests {
         id
     }
 
-    /// Migration 0038: deleting the account deletes its backup-head rows.
+    /// Migration 0039: deleting the account deletes its backup-head rows.
     #[tokio::test]
     async fn deleting_the_account_deletes_its_backup_head_rows() {
         let Some(pool) = test_pool("deleting_the_account_deletes_its_backup_head_rows").await

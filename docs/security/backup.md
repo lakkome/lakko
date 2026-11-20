@@ -32,7 +32,7 @@ migrated.
 | `ed25519_seed` | the identity signing seed |
 | `accepted_contacts[]` | public keys, display name, optional account id |
 | `known_group_ids[]` | the conversations the account's devices knew, so a restored device knows which conversations exist before any member has admitted it |
-| `synced_state` | the ADR-0058 folded DeviceGroup state (folders, pins, mutes, archive, read cursors, drafts, order) |
+| `synced_state` | the ADR-0058 folded DeviceGroup state (folders, pins, mutes, archive, read cursors, drafts, order); since 2026-11-15 a state whose version byte this build does not read decodes as empty and the rest of the payload restores, while a malformed state of the current version still refuses the whole payload |
 
 **The payload carries no MLS state** (v2-v5 carried a whole-provider snapshot).
 A snapshot belongs to the device that made it: its leaf, its signature key,

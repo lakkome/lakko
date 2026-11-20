@@ -165,7 +165,7 @@ export function DeviceRequestPrompt(): JSX.Element {
     if (deviceKey === null) {
       throw new KeyedError("device_link.request.error.no_device_key");
     }
-    // Recovery payload v2: a session grant and the recovery phrase this
+    // Recovery payload v3: a session grant and the recovery phrase this
     // device holds, as its entropy. A device without the phrase sends none.
     const recovery = await recoveryHalfFor({
       accountIdB64: s.account.accountId,

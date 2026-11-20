@@ -28,10 +28,50 @@ public object ChannelAdmissionSeedShare {
 
     private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
 
-    /** A request's carried account id, kept by the joiner key it came with. */
+    /**
+     * A request's carried account id, kept by the joiner key it came with. A
+     * request carries the id only in a profile, and a person with no display
+     * name has none (ADR-0048): such a request is kept too, with the id this
+     * account's contact row names, or `""` until [sendOwed] finds one.
+     */
     public fun rememberRequest(context: Context, account: String, channelId: String, joinerKey: ByteArray, accountId: ByteArray?) {
-        if (accountId == null || accountId.size != 16) return
-        prefs(context).edit().putString("req|$account|$channelId|${hex(joinerKey)}", hex(accountId)).apply()
+        val key = "req|$account|$channelId|${hex(joinerKey)}"
+        val carried = if (accountId != null && accountId.size == 16) hex(accountId) else ""
+        val resolved = resolvePublisherAccountIdHex(carried, joinerKey) { contactsOf(context, account) }
+        // A later sighting of the same request never forgets an id held.
+        if (resolved.isEmpty() && !prefs(context).getString(key, null).isNullOrEmpty()) return
+        prefs(context).edit().putString(key, resolved).apply()
+    }
+
+    private fun contactsOf(context: Context, account: String): List<me.lakko.app.contacts.AcceptedContact> =
+        try {
+            me.lakko.app.contacts.AcceptedContactsStore.load(context, account)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+    /**
+     * Fill in the account id of every publisher recorded without one, from
+     * this account's contact store, and keep it. Returns the publishers the
+     * owner can reach now: joiner key (hex) to account id (hex).
+     */
+    internal fun fillPublisherAccountIds(context: Context, account: String, channelId: String): Map<String, String> {
+        val out = HashMap<String, String>()
+        var contacts: List<me.lakko.app.contacts.AcceptedContact>? = null
+        for ((keyHex, accountIdHex) in publishers(context, account, channelId)) {
+            if (isAccountIdHex(accountIdHex)) {
+                out[keyHex] = accountIdHex
+                continue
+            }
+            val key = unhex(keyHex) ?: continue
+            val resolved = resolvePublisherAccountIdHex(accountIdHex, key) {
+                contacts ?: contactsOf(context, account).also { contacts = it }
+            }
+            if (resolved.isEmpty()) continue
+            prefs(context).edit().putString("pub|$account|$channelId|$keyHex", resolved).apply()
+            out[keyHex] = resolved
+        }
+        return out
     }
 
     /** After an approve: the joiner is a publisher to send seeds to. */
@@ -97,9 +137,10 @@ public object ChannelAdmissionSeedShare {
         return if (me.lakko.app.contacts.samePerson(requestB64, currentB64, links)) current else null
     }
 
-    /** Whether any publisher of [channelId] still lacks an admission seed
-     *  version, the read key, or one of the channel's earlier seeds
-     *  ([epochs], the owner's epoch map) (no network, no decryption). */
+    /** Whether any publisher of [channelId] this device can reach still
+     *  lacks an admission seed version, the read key, or one of the
+     *  channel's earlier seeds ([epochs], the owner's epoch map) (no network,
+     *  no decryption). */
     public fun anyOwed(
         context: Context,
         account: String,
@@ -109,12 +150,14 @@ public object ChannelAdmissionSeedShare {
     ): Boolean {
         val versions = ChannelAdmissionKeys.all(context, account, channelId).let { all ->
             try {
-                all.map { it.first.toString() }
+                all.map { (v, seed) -> admissionSeedMark(v, seed) }
             } finally {
                 all.forEach { it.second.fill(0) }
             }
         }
-        return publishers(context, account, channelId).any { (keyHex, _) ->
+        // A publisher no account id names yet is not owed anything this
+        // device can send (its contact row fills the id when there is one).
+        return fillPublisherAccountIds(context, account, channelId).keys.any { keyHex ->
             val already = sent(context, account, channelId, keyHex)
             READ_KEY_MARK !in already || versions.any { it !in already } ||
                 epochSeedEpochsToSend(epochs, already, maxSeeds).isNotEmpty()
@@ -127,14 +170,9 @@ public object ChannelAdmissionSeedShare {
         context: Context,
         account: String,
         channelId: String,
-        identity: Identity,
+        ids: ChannelIdentity,
         group: PublisherGroup,
         ds: me.lakko.app.ds.DsClient,
-        /** Snapshot the provider, throwing when it was not written. Called
-         *  after each message is sealed and before it is published, so a
-         *  crash between the two never reuses a ratchet generation (G-34
-         *  class); a failure publishes nothing. */
-        persistNow: () -> Unit,
         /** ADR-0087 section 15 (2026-11-08) — the owner's epoch map, every
          *  channel seed this device holds by epoch: the newest
          *  [EPOCH_SEEDS_MAX] a publisher lacks go to it in one envelope. */
@@ -147,13 +185,14 @@ public object ChannelAdmissionSeedShare {
             EPOCH_SEEDS_MAX
         }
         try {
-            for ((keyHex, accountIdHex) in publishers(context, account, channelId)) {
+            for ((keyHex, accountIdHex) in fillPublisherAccountIds(context, account, channelId)) {
                 val already = sent(context, account, channelId, keyHex)
-                val owed = seeds.filter { it.first.toString() !in already }
+                // ADR-0090 — EVERY seed of a version, not one per version.
+                val owed = seeds.filter { (v, seed) -> admissionSeedMark(v, seed) !in already }
                 val readKeyOwed = READ_KEY_MARK !in already
                 val epochsOwed = epochSeedEpochsToSend(epochSeeds.keys, already, maxSeeds)
                 if (owed.isEmpty() && !readKeyOwed && epochsOwed.isEmpty()) continue
-                val accountId = ByteArray(16) { i -> accountIdHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+                val accountId = unhex(accountIdHex)?.takeIf { it.size == 16 } ?: continue
                 val bundle = try {
                     me.lakko.app.discovery.DiscoveryClient().use { d ->
                         d.setSessionToken(me.lakko.app.auth.SessionTokens.provider?.current())
@@ -179,16 +218,14 @@ public object ChannelAdmissionSeedShare {
                         version,
                         seed,
                     )
-                    val message = group.createApplicationMessage(identity, envelope)
-                    persistNow()
-                    ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
-                    marks = marks + version.toString()
+                    CoPublisher.publishApplication(ds, ids, group, envelope)
+                    marks = marks + admissionSeedMark(version, seed)
                     prefs(context).edit().putStringSet("sent|$account|$channelId|$keyHex", marks).apply()
                 }
                 if (readKeyOwed) {
                     // ADR-0087 section 15 (phase B) — the channel's read key,
                     // so a publisher mints public links and files public seeds.
-                    val readKey = ChannelDiscovery.readKey(identity, channelId)
+                    val readKey = ChannelDiscovery.readKey(ids.account, channelId)
                     try {
                         val envelope = uniffi.lakko_ffi_uniffi.composeChannelReadKeyEnvelope(
                             group.channelId(),
@@ -196,9 +233,7 @@ public object ChannelAdmissionSeedShare {
                             x,
                             readKey,
                         )
-                        val message = group.createApplicationMessage(identity, envelope)
-                        persistNow()
-                        ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
+                        CoPublisher.publishApplication(ds, ids, group, envelope)
                     } finally {
                         readKey.fill(0)
                     }
@@ -214,9 +249,7 @@ public object ChannelAdmissionSeedShare {
                         x,
                         epochsOwed.map { e -> uniffi.lakko_ffi_uniffi.FfiChannelEpochSeed(e, epochSeeds.getValue(e)) },
                     )
-                    val message = group.createApplicationMessage(identity, envelope)
-                    persistNow()
-                    ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
+                    CoPublisher.publishApplication(ds, ids, group, envelope)
                     marks = marks + epochsOwed.map(::epochSeedMark)
                     prefs(context).edit().putStringSet("sent|$account|$channelId|$keyHex", marks).apply()
                 }
@@ -228,6 +261,30 @@ public object ChannelAdmissionSeedShare {
         } finally {
             seeds.forEach { it.second.fill(0) }
         }
+    }
+
+    /**
+     * ADR-0090 section 6 — a device of [accountKey]'s account was admitted:
+     * that account is owed the read key, every admission seed and the epoch
+     * seeds again (its new device holds none; a device that does drops the
+     * duplicates). For this account's own key the publisher record is made
+     * here, under this account's id. Best effort.
+     */
+    public fun owedAgain(account: String, channelId: String, accountKey: ByteArray, ownAccountKey: ByteArray) {
+        val context = SubscriberAdmission.appContext ?: return
+        val keyHex = hex(accountKey)
+        val editor = prefs(context).edit().remove("sent|$account|$channelId|$keyHex")
+        if (accountKey.contentEquals(ownAccountKey)) {
+            val accountId = try {
+                java.util.Base64.getDecoder().decode(account)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+            if (accountId != null && accountId.size == 16) {
+                editor.putString("pub|$account|$channelId|$keyHex", hex(accountId))
+            }
+        }
+        editor.apply()
     }
 
     /** A removed publisher gets nothing more: its record goes. */
@@ -315,6 +372,44 @@ public object ChannelAdmissionSeedShare {
         editor.apply()
     }
 }
+
+/** Lower-case hex of a 16-byte account id. */
+internal fun isAccountIdHex(s: String): Boolean = s.length == 32 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
+private fun unhex(s: String): ByteArray? {
+    if (s.length % 2 != 0) return null
+    return try {
+        ByteArray(s.length / 2) { i -> s.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    } catch (_: NumberFormatException) {
+        null
+    }
+}
+
+/**
+ * ADR-0087 section 7 — the 16-byte account id (lower-case hex) the owner
+ * fetches a publisher's identity bundle by: the one the request carried
+ * ([recordedHex]), else the one this account's contact row for
+ * [accountKey] names (the person added through "Add publisher" is a
+ * contact). The id only picks the bundle; nothing is sealed unless the
+ * bundle proves the same person ([ChannelAdmissionSeedShare.provenCurrentKey]).
+ * `""` when neither names one. [contacts] is read only when needed.
+ */
+internal fun resolvePublisherAccountIdHex(
+    recordedHex: String,
+    accountKey: ByteArray,
+    contacts: () -> List<me.lakko.app.contacts.AcceptedContact>,
+): String {
+    if (isAccountIdHex(recordedHex)) return recordedHex.lowercase()
+    val id = contacts().firstOrNull { it.request.fromPubkey.contentEquals(accountKey) }?.request?.fromAccountId
+        ?: return ""
+    if (id.size != 16) return ""
+    return id.joinToString("") { "%02x".format(it) }
+}
+
+/** ADR-0090 — the sent mark of one admission seed: its version and a short
+ *  tag of the seed, so every seed of a version is sent. */
+internal fun admissionSeedMark(version: UShort, seed: ByteArray): String =
+    "$version:" + java.security.MessageDigest.getInstance("SHA-256").digest(seed).take(6).joinToString("") { "%02x".format(it) }
 
 /** The most seeds one earlier-seeds envelope carries (`channelEpochSeedsMax`). */
 internal const val EPOCH_SEEDS_MAX: Int = 64

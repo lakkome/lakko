@@ -58,7 +58,8 @@ final class MessageSelectionTests: XCTestCase {
         selection.toggle(3)
         XCTAssertTrue(selection.isEmpty)
         XCTAssertEqual(selection.countLabel, "0 selected")
-        XCTAssertFalse(selection.forwardEnabled)
+        XCTAssertFalse(selection.forwardEnabled(holdsInvitation: false))
+        XCTAssertFalse(selection.saveEnabled)
         XCTAssertFalse(selection.deleteEnabled(allOwn: true))
     }
 
@@ -75,8 +76,18 @@ final class MessageSelectionTests: XCTestCase {
     /// Section 8 — Forward is enabled when the selection is not empty,
     /// whoever wrote the messages.
     func testForwardIsEnabledOnAnyNonEmptySelection() {
-        XCTAssertTrue(MessageSelection(initial: 1).forwardEnabled)
-        XCTAssertFalse(MessageSelection(remaining: []).forwardEnabled)
+        XCTAssertTrue(MessageSelection(initial: 1).forwardEnabled(holdsInvitation: false))
+        XCTAssertFalse(MessageSelection(remaining: []).forwardEnabled(holdsInvitation: false))
+    }
+
+    /// Maintainer, 2026-11-13 — a message carrying a channel invitation card
+    /// is never forwarded: a selection holding one does not offer Forward;
+    /// Save stays.
+    func testForwardIsDisabledWhileTheSelectionHoldsAnInvitationCard() {
+        let selection = MessageSelection(initial: 1)
+        XCTAssertFalse(selection.forwardEnabled(holdsInvitation: true))
+        XCTAssertTrue(selection.saveEnabled)
+        XCTAssertTrue(selection.deleteEnabled(allOwn: true))
     }
 
     /// Section 8 — Delete is enabled when the selection is not empty and every

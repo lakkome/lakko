@@ -41,3 +41,9 @@ infra/etc-lakko/lakko.env
 # macOS Finder metadata — never useful in git.
 .DS_Store
 **/.DS_Store
+
+# docs/ux/donations.md: the offline donations key and the signed file (it holds
+# the phone number) never enter the repository.
+.donations/
+donations-signing-key.seed
+donations.signed.json

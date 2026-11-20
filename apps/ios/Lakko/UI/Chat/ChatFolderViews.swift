@@ -108,23 +108,23 @@ struct FolderBar: View {
     private func menuItems(folder: FolderView?, count: Int) -> [LakkoMenuItem] {
         var items: [LakkoMenuItem] = []
         if let folder {
-            items.append(.action(l10n.t("folders.edit"), systemImage: "pencil") { onEdit(folder) })
+            items.append(.action(l10n.t("folders.edit"), icon: .pencil) { onEdit(folder) })
             if count > 0 {
-                items.append(.action(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message") {
+                items.append(.action(l10n.t("folders.mark_all_read"), icon: .checkmarkMessage) {
                     onMarkAllRead(folder)
                 })
             }
-            items.append(.action(l10n.t("folders.reorder"), systemImage: "arrow.up.arrow.down", perform: onReorder))
-            items.append(.action(l10n.t("folders.delete"), systemImage: "trash", destructive: true) {
+            items.append(.action(l10n.t("folders.reorder"), icon: .arrowUpDown, perform: onReorder))
+            items.append(.action(l10n.t("folders.delete"), icon: .trash, destructive: true) {
                 onDelete(folder)
             })
         } else {
             if anyUnread {
-                items.append(.action(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message") {
+                items.append(.action(l10n.t("folders.mark_all_read"), icon: .checkmarkMessage) {
                     onMarkAllRead(nil)
                 })
             }
-            items.append(.action(l10n.t("folders.edit_all"), systemImage: "folder", perform: onEditFolders))
+            items.append(.action(l10n.t("folders.edit_all"), icon: .folder, perform: onEditFolders))
         }
         return items
     }
@@ -320,7 +320,7 @@ struct FolderEditorScreen: View {
                 Text(title).foregroundStyle(Color.lakkoText)
                 Spacer()
                 if isOn {
-                    Image(systemName: "checkmark")
+                    LkIconView(.checkmark, size: 20)
                         .foregroundStyle(Color.lakkoAccent)
                 }
             }
@@ -347,7 +347,7 @@ struct FolderEditorScreen: View {
                     Button {
                         draft[keyPath: keyPath].removeAll { $0.id == ref.id }
                     } label: {
-                        Image(systemName: "minus.circle.fill")
+                        LkIconView(.minusCircleFill, size: 20)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .buttonStyle(.plain)
@@ -469,7 +469,7 @@ struct FolderChatPicker: View {
                         }
                     } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                            LkIconView(isChecked ? .checkmarkCircleFill : .circle, size: 20)
                                 .foregroundStyle(isChecked ? Color.lakkoAccent : Color.lakkoTextMuted)
                             ConversationRowView(row: row, timeLabel: nil)
                         }
@@ -581,7 +581,7 @@ struct ChatFoldersSettingsScreen: View {
                 Button {
                     editor = FolderEditorRequest(folder: nil, rows: all)
                 } label: {
-                    Label(l10n.t("folders.new"), systemImage: "folder.badge.plus")
+                    Label(l10n.t("folders.new"), icon: .folderPlus)
                 }
                 .disabled(atLimit)
             } footer: {

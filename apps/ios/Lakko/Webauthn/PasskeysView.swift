@@ -8,14 +8,15 @@ import SwiftUI
 /// Mirror of `apps/web/src/auth/PasskeysSection.tsx`. Surfaces, in this
 /// order:
 ///
-///   1. The registered passkeys: nickname, timestamps, a label saying
-///      whether the passkey also restores keys ("Signs in and restores
-///      keys" / "Signs in only"), the action that changes it ("Turn on
-///      restoring keys" / "Stop restoring keys"), and swipe to remove.
-///   2. Nickname input + "Add passkey" button driving
-///      ``WebauthnRegistration`` on tap.
-///   3. The opt-in keys choice (``PasskeyKeysChoiceView``) after an add on
-///      a platform that can protect keys with the passkey, or from a row.
+///   1. The registered passkeys: nickname, timestamps, a label that is a
+///      state and not a setting ("Logs in and restores keys" / "Logs in
+///      only"), on a passkey that holds no keys the repair "Restore keys
+///      with this passkey", and swipe to remove.
+///   2. The recovery phrase input of that repair, when this device does not
+///      hold the phrase.
+///   3. Nickname input + "Add passkey" button driving
+///      ``WebauthnRegistration`` on tap; the keys are then stored for the
+///      new passkey with nothing to choose (UX 10.2).
 ///   4. A single-line status banner that flips between success
 ///      and error.
 ///
@@ -26,8 +27,6 @@ public struct PasskeysView: View {
     @StateObject private var viewModel: PasskeysViewModel
     /// A3 — drives the delete-account confirmation dialog.
     @State private var confirmingDelete = false
-    /// The passkey "Stop restoring keys" is being confirmed for.
-    @State private var stoppingKeysFor: CredentialSummary?
     /// The data export the system's save picker is up for.
     @State private var exportingData: ExportedFile?
     @ObservedObject private var l10n = Localization.shared
@@ -58,46 +57,43 @@ public struct PasskeysView: View {
                             .padding(.vertical, 4)
                     }
                 } else {
-                    List {
+                    // A plain column, not a List: a List inside this
+                    // ScrollView with its own scrolling disabled took the
+                    // height of one row and cut every further passkey off
+                    // (seen on an iPhone 2026-11-11 with two passkeys).
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(viewModel.credentials) { cred in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(cred.nickname.isEmpty
-                                    ? l10n.t("settings.passkeys.unnamed")
-                                    : cred.nickname)
-                                    .font(.body)
-                                Text(metadataLine(for: cred))
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                keysLine(for: cred)
-                            }
-                            .swipeActions {
+                            HStack(alignment: .top, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(cred.nickname.isEmpty
+                                        ? l10n.t("settings.passkeys.unnamed")
+                                        : cred.nickname)
+                                        .font(.body)
+                                    Text(metadataLine(for: cred))
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                    keysLine(for: cred)
+                                }
+                                Spacer(minLength: 0)
                                 Button(role: .destructive) {
                                     Task { await viewModel.deleteCredential(cred) }
                                 } label: {
-                                    Label(l10n.t("common.remove"), systemImage: "trash")
+                                    Text(l10n.t("common.remove"))
                                 }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.isBusy)
+                            }
+                            .padding(.vertical, 10)
+                            if cred.id != viewModel.credentials.last?.id {
+                                Divider()
                             }
                         }
                     }
-                    .listStyle(.plain)
-                    .scrollDisabled(true)
-                    // Rebuilt on a layout-direction switch (a UIKit-backed
-                    // List keeps the mirroring it was built with).
-                    .id(l10n.layoutDirection)
-                    .frame(minHeight: 100, maxHeight: 360)
                 }
 
-                if let choice = viewModel.keysChoice {
-                    PasskeyKeysChoiceView(
-                        credentialIdB64: choice.credentialIdB64,
-                        nickname: choice.nickname,
-                        prfOutput: choice.prfOutput,
-                        enrollment: viewModel.keysEnrollment,
-                        onDone: { result in
-                            Task { await viewModel.finishKeysChoice(result) }
-                        }
-                    )
-                    .id(choice.credentialIdB64)
+                if let credentialIdB64 = viewModel.repairAskingPhrase {
+                    repairPhraseCard
+                        .id(credentialIdB64)
                 }
 
                 Divider()
@@ -159,7 +155,7 @@ public struct PasskeysView: View {
                     Button {
                         exportingData = ExportedFile(url: url)
                     } label: {
-                        Label(l10n.t("settings.data.share"), systemImage: "square.and.arrow.down")
+                        Label(l10n.t("settings.data.share"), icon: .download)
                     }
                 }
 
@@ -186,17 +182,6 @@ public struct PasskeysView: View {
         }
         .navigationTitle(l10n.t("settings.passkeys.title"))
         .navigationBarTitleDisplayMode(.inline)
-        .lakkoDialog(item: $stoppingKeysFor) { cred in
-            LakkoDialogContent(
-                title: l10n.t("settings.passkeys.stop_restoring.title"),
-                message: l10n.t("settings.passkeys.stop_restoring.body"),
-                actions: [
-                    .danger(l10n.t("settings.passkeys.stop_restoring.action")) {
-                        Task { await viewModel.stopRestoringKeys(cred) }
-                    },
-                    .cancel(),
-                ])
-        }
         // UX 17.3 — the app's own dialog: it carries the proof block.
         .sheet(isPresented: $confirmingDelete) {
             DeleteAccountDialog(viewModel: viewModel, onClose: { confirmingDelete = false })
@@ -209,9 +194,8 @@ public struct PasskeysView: View {
         .onDisappear { viewModel.addProof.closed() }
     }
 
-    /// The label saying what the passkey does, and the action that changes
-    /// it. "Turn on restoring keys" is offered only where the platform can
-    /// ask a passkey for the secret that protects keys.
+    /// The label saying what the passkey does (a state, not a setting) and,
+    /// on a passkey that holds no keys but may carry them, the repair.
     @ViewBuilder
     private func keysLine(for cred: CredentialSummary) -> some View {
         let label = viewModel.keysLabel(for: cred)
@@ -220,36 +204,57 @@ public struct PasskeysView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             Spacer()
-            switch label {
-            case .restoresKeys:
-                Button(l10n.t("settings.passkeys.stop_restoring.action")) {
-                    stoppingKeysFor = cred
+            if viewModel.offersRestoreKeys(for: cred) {
+                Button(l10n.t("settings.passkeys.keys.turn_on")) {
+                    Task { await viewModel.restoreKeys(for: cred) }
                 }
                 .font(.footnote)
                 .buttonStyle(.borderless)
                 .disabled(viewModel.isBusy)
-            case .signInOnly:
-                if PasskeysViewModel.prfApiAvailable {
-                    Button(l10n.t("settings.passkeys.keys.turn_on")) {
-                        viewModel.offerKeysChoice(for: cred)
-                    }
-                    .font(.footnote)
-                    .buttonStyle(.borderless)
-                    .disabled(viewModel.isBusy || viewModel.keysChoice != nil)
-                }
             }
         }
+    }
+
+    /// The twelve-slot phrase input of "Restore keys with this passkey",
+    /// shown when this device does not hold the recovery phrase.
+    private var repairPhraseCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(l10n.t("settings.passkeys.keys_choice.phrase_needed"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoText)
+            PhraseEntryGrid(phrase: $viewModel.repairPhrase, disabled: viewModel.isBusy)
+            HStack(spacing: 12) {
+                AuthSecondaryButton(
+                    title: l10n.t(viewModel.isBusy ? "common.checking" : "settings.passkeys.keys.turn_on"),
+                    disabled: viewModel.isBusy,
+                    action: { Task { await viewModel.submitRepairPhrase() } }
+                )
+                AuthSecondaryButton(
+                    title: l10n.t("common.cancel"),
+                    disabled: viewModel.isBusy,
+                    action: viewModel.cancelRepair
+                )
+            }
+        }
+        .padding(16)
+        .background(Color.lakkoSurface)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+        .overlay(
+            RoundedRectangle(cornerRadius: LakkoRadius.card)
+                .stroke(Color.lakkoBorder, lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
     private func statusBanner(for message: PasskeysViewModel.StatusMessage) -> some View {
         switch message {
         case .ok(let text):
-            Label(text.text, systemImage: "checkmark.circle.fill")
+            Label(text.text, icon: .checkmarkCircleFill)
                 .foregroundStyle(.green)
                 .font(.footnote)
         case .error(let text):
-            Label(text.text, systemImage: "exclamationmark.triangle.fill")
+            Label(text.text, icon: .warningFill)
                 .foregroundStyle(.red)
                 .font(.footnote)
         }

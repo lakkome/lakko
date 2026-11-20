@@ -618,6 +618,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         };
         for sibling in [
             wrap_call_welcome(&[0xAB; 256]),

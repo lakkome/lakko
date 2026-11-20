@@ -59,12 +59,9 @@ if [[ ! -f /etc/lakko/lakko.env ]]; then
   warn "/etc/lakko/lakko.env missing — author it from infra/etc-lakko/lakko.env.example"
   warn "(LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT} + LAKKO_SFU_MEDIA_ADVERTISE_IP=<public IP> at minimum)"
 fi
-# The mTLS CA for the /metrics scrape (shared with the other
-# services' monitoring setup).
-install -d -m 700 /etc/lakko/mtls
-if [[ ! -f /etc/lakko/mtls/monitoring-ca.crt ]]; then
-  warn "/etc/lakko/mtls/monitoring-ca.crt missing — the /metrics location will 400 until the monitoring CA cert is installed"
-fi
+# The SFU's metrics are scraped through the metrics server block
+# (metrics.lakko.me:9643/sfu/metrics, infra/scripts/setup-metrics.sh,
+# ADR-0096 P3); this vhost no longer serves /metrics.
 
 # ----------------------------------------------------------
 # 2. TLS cert for the SFU subdomain.

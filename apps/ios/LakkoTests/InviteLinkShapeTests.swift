@@ -206,6 +206,37 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(of: cap, secret: mint.linkSecret), .none)
     }
 
+    /// ADR-0087 section 15.2 — a co-publisher link (preview kind 2: a
+    /// channel id, no subscriber keys) opens as a publisher invitation, never
+    /// as a group's. Seen live 2026-11-12: "Icons QA invites you to a group,
+    /// 0 members".
+    func testACoPublisherLinkOpensAsAPublisherInvitation() throws {
+        let channelId = Data(repeating: 0x42, count: 16)
+        let mint = try composeCoPublisherInviteCapability(
+            issuerSigningSeed: issuerSeed, groupId: Data(repeating: 7, count: 32), expiryMs: 0,
+            channelId: channelId, channelName: "Walk 22 channel",
+            knockPublicKey: try groupKnockPublicKey(knockSeed: Data(repeating: 3, count: 32)),
+            knockVersion: 0, avatar: nil, inviterName: "Icons QA")
+        let cap = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+        guard case .publisher(_, let facts) = JoinGroupLandingViewModel.previewOutcome(
+            of: cap, secret: mint.linkSecret) else {
+            return XCTFail("a co-publisher link must open as a publisher invitation")
+        }
+        XCTAssertEqual(facts.channelIdHex, String(repeating: "42", count: 16))
+        XCTAssertEqual(facts.channelName, "Walk 22 channel")
+        XCTAssertEqual(facts.inviterName, "Icons QA")
+        let card = CoPublisherCardFacts(
+            channelIdHex: facts.channelIdHex, channelName: facts.channelName,
+            inviterName: facts.inviterName, link: URL(string: "https://lakko.me/g/AAAAAAAA")!)
+        // The formatter isolates each argument (FSI ... PDI); the words are what counts.
+        let plain = { (s: String) in s.replacingOccurrences(of: "\u{2068}", with: "").replacingOccurrences(of: "\u{2069}", with: "") }
+        XCTAssertEqual(plain(card.inviteLine), "Icons QA invites you to be a publisher of Walk 22 channel.")
+        let unnamed = CoPublisherCardFacts(
+            channelIdHex: facts.channelIdHex, channelName: "", inviterName: nil,
+            link: URL(string: "https://lakko.me/g/AAAAAAAA")!)
+        XCTAssertEqual(plain(unnamed.inviteLine), "You are invited to be a publisher of Channel.")
+    }
+
     // MARK: - The landing, end to end
 
     func testTheLandingRefusesAWrongSecret() async throws {

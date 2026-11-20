@@ -429,6 +429,11 @@ async function handlePush(wake) {
         ? { wake, tapGroupHex }
         : { wake }
       : {};
+  // ADR-0047 section 6 — the first photo's or video's micro thumbnail, a
+  // `data:` URL the decrypt core built from bytes inside the message, set
+  // only on a preview that shows the message's words. A browser that
+  // ignores `image` shows the same notification without it.
+  const image = typeof preview?.image === "string" && preview.image.startsWith("data:image/jpeg;base64,") ? preview.image : null;
   try {
     await self.registration.showNotification(title, {
       body,
@@ -439,6 +444,7 @@ async function handlePush(wake) {
       data,
       icon: "/icon-192.png",
       badge: "/badge-96.png",
+      ...(image === null ? {} : { image }),
     });
   } catch {
     // Some browsers + private modes don't allow showing notifications
@@ -1071,6 +1077,31 @@ self.addEventListener("notificationclick", (event) => {
           }
         }
         await self.clients.openWindow("/devices");
+      })(),
+    );
+    return;
+  }
+
+  // docs/ux/channel-notifications.md: a channel post the page noticed and
+  // could only show from here. An open tab is told to open the channel, else
+  // a new one opens on it. Only a channel path is followed.
+  const openPath = event.notification.data?.lakkoOpenPath;
+  if (typeof openPath === "string" && /^\/channel\/[0-9a-f]{32}$/.test(openPath)) {
+    event.waitUntil(
+      (async () => {
+        const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        for (const c of clients) {
+          if (c.url.startsWith(self.location.origin)) {
+            try {
+              c.postMessage({ type: "LAKKO_OPEN_PATH", path: openPath });
+            } catch {
+              // The client went away between `matchAll` and here.
+            }
+            await c.focus();
+            return;
+          }
+        }
+        await self.clients.openWindow(openPath);
       })(),
     );
     return;

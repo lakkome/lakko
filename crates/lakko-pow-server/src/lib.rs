@@ -319,6 +319,8 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
 /// dropped).
 #[must_use]
 pub fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = "pow_challenge_prune";
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         // The first tick fires immediately — skip it.
@@ -329,11 +331,16 @@ pub fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                 .execute(&pool)
                 .await;
             match result {
-                Ok(r) if r.rows_affected() > 0 => {
-                    tracing::debug!(rows = r.rows_affected(), "pruned expired pow_challenges");
+                Ok(r) => {
+                    lakko_metrics::job_succeeded(JOB);
+                    if r.rows_affected() > 0 {
+                        tracing::debug!(rows = r.rows_affected(), "pruned expired pow_challenges");
+                    }
                 },
-                Ok(_) => {},
-                Err(e) => tracing::warn!(error = %e, "pow_challenges prune failed"),
+                Err(e) => {
+                    lakko_metrics::job_failed(JOB);
+                    tracing::warn!(error = %e, "pow_challenges prune failed");
+                },
             }
         }
     })

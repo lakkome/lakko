@@ -111,6 +111,11 @@ extension ChannelsUiState {
         if subscribedSeeds(channelId: channelId)[epoch] == nil {
             setSubscribedSeed(channelId: channelId, epoch: epoch, seed: seed)
         }
+        // 2026-11-20 — moving DOWN means the old mapping did not hold
+        // (commits whose reseal never landed): what it filed above is wrong.
+        if let served = previous.seedEpoch, served > epoch {
+            dropSubscribedSeeds(channelId: channelId, above: epoch)
+        }
     }
 }
 

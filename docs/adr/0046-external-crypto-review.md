@@ -83,7 +83,7 @@ What is allowed while G-39 is open:
 1. **A public beta capped at 1000 accounts**, the cap enforced by the server, not by a
    promise. Guest accounts from call links (ADR-0032) that are swept within a day do not
    take a place. **Built 2026-11-19** (`services/auth/src/account_cap.rs`, migration
-   `0037`): an account takes a place when it binds its first username (a row in
+   `0038`): an account takes a place when it binds its first username (a row in
    `login_handles`, counted under a one-row lock); past `LAKKO_AUTH_MAX_ACCOUNTS` that
    bind is `403 registration-closed`, `GET /signup/open` answers before the proof of
    work, a rename is never refused, and a deleted account frees its place. UX spec

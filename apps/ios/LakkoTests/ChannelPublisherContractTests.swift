@@ -169,13 +169,13 @@ final class ChannelPublisherContractTests: XCTestCase {
     }
 
     @MainActor
-    func testTheCardWaitsThenOffersAskAgainAfterSevenDays() {
+    func testTheCardWaitsThenOffersAskAgainAfterADay() {
         XCTAssertEqual(state(), .accept)
         XCTAssertEqual(state(phase: .sending), .sending)
         XCTAssertEqual(state(phase: .waiting, sentAt: 0, now: 1), .waiting)
-        XCTAssertEqual(state(sentAt: 0, now: 7 * day - 1), .waiting, "after a restart")
-        XCTAssertEqual(state(sentAt: 0, now: 7 * day), .noAnswer)
-        XCTAssertEqual(state(phase: .waiting, sentAt: 0, now: 8 * day), .noAnswer)
+        XCTAssertEqual(state(sentAt: 0, now: day - 1), .waiting, "after a restart")
+        XCTAssertEqual(state(sentAt: 0, now: day), .noAnswer)
+        XCTAssertEqual(state(phase: .waiting, sentAt: 0, now: 2 * day), .noAnswer)
         XCTAssertEqual(state(publisher: true, sentAt: 0, now: 8 * day), .open, "approved")
     }
 
@@ -196,5 +196,109 @@ final class ChannelPublisherContractTests: XCTestCase {
             DsClientError.network(endpoint: "x", underlying: URLError(.timedOut))))
         struct Other: Error {}
         XCTAssertFalse(CoPublisherJoin.Failure.isOffline(Other()))
+    }
+
+    // MARK: - A publisher whose request carried no account id
+
+    /// Seen live 2026-11-13 (base scenario 28): a person with no display
+    /// name sends no profile, so the request carries no account id, and the
+    /// owner sealed nothing to them. The owner's contact row names the id.
+    @MainActor
+    func testAPublisherWithNoAccountIdInTheRequestIsReachedThroughTheContactRow() {
+        let run = UUID().uuidString
+        let account = "test-owner-\(run)"
+        let channelId = String(repeating: "ab", count: 16)
+        let suite = "pub-account-id-\(run)"
+        let savedDefaults = AcceptedContactsStore.defaults
+        AcceptedContactsStore.defaults = UserDefaults(suiteName: suite)!
+        AcceptedContactsStore.bind(accountIdB64: account)
+        defer {
+            AcceptedContactsStore.bind(accountIdB64: nil)
+            AcceptedContactsStore.defaults = savedDefaults
+            UserDefaults().removePersistentDomain(forName: suite)
+            UserDefaults.standard.removeObject(
+                forKey: "me.lakko.channel-seed-share.v1.\(account).\(channelId)")
+        }
+        let accountKey = Data(repeating: 0xB2, count: 32)
+        let accountId = Data(repeating: 0x0C, count: 16)
+        ChannelAdmissionSeedShare.rememberRequests(
+            [CoPublisher.JoinRequest(joinerKey: accountKey, accountKey: accountKey, accountId: nil)],
+            channelId: channelId)
+        ChannelAdmissionSeedShare.notePublisher(channelId: channelId, joinerKey: accountKey)
+        // Not a contact yet: nobody to seal to, and the publisher stays recorded.
+        XCTAssertTrue(ChannelAdmissionSeedShare.fillPublisherAccountIds(channelId: channelId).isEmpty)
+        AcceptedContactsStore.save([
+            AcceptedContact(
+                request: IncomingContactRequest(
+                    messageId: 1, fromPubkey: accountKey, fromAccountId: accountId,
+                    fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 1, intro: nil,
+                    createdAt: "2026-11-13T00:00:00Z"),
+                groupIdHex: nil)
+        ])
+        let reachable = ChannelAdmissionSeedShare.fillPublisherAccountIds(channelId: channelId)
+        XCTAssertEqual(reachable[String(repeating: "b2", count: 32)], String(repeating: "0c", count: 16))
+    }
+
+    func testAnAccountIdTheRequestCarriedIsKeptOverTheContactRow() {
+        let key = Data(repeating: 0xB2, count: 32)
+        let carried = String(repeating: "11", count: 16)
+        XCTAssertEqual(
+            ChannelAdmissionSeedShare.resolveAccountIdHex(recordedHex: carried, accountKey: key, contacts: []),
+            carried)
+        XCTAssertEqual(
+            ChannelAdmissionSeedShare.resolveAccountIdHex(recordedHex: "", accountKey: key, contacts: []), "")
+    }
+}
+
+/// Seen live 2026-11-13: a public channel's first metadata record did not
+/// post and was never sent again, and the header rules of the three clients
+/// read a record's flag differently. The first record is kept and owed
+/// before it is sent; the header goes by the signed name's flag, then the
+/// record's own flag, then a held read key (as web and Android).
+@MainActor
+final class ChannelFirstRecordTests: XCTestCase {
+
+    private let channelId = String(repeating: "0a", count: 16)
+
+    func testTheFirstRecordIsKeptAndOwedBeforeItIsSent() {
+        let state = ChannelsUiState()
+        state.addChannel(.init(
+            id: channelId, localName: "Walk 28 channel", localDescription: "",
+            addedAtMs: 1, handle: "walk_28_channel"))
+        let meta = SharedChannelMeta(
+            name: "Walk 28 channel", description: "", updatedAtMs: 10, topic: 3, language: "en", listed: true)
+        ChannelMetaRecord.keepFirst(state: state, channelId: channelId, meta: meta)
+        // What a later pass re-issues: this record, still owed.
+        XCTAssertEqual(state.sharedMeta(channelId: channelId)?.listed, true)
+        XCTAssertEqual(state.sharedMeta(channelId: channelId)?.updatedAtMs, 10)
+        XCTAssertEqual(state.extras(channelId).recordOwed, true)
+        XCTAssertEqual(state.extras(channelId).isPublic, true)
+        state.removeChannel(channelId)
+    }
+
+    func testTheRecordsOwnFlagComesBeforeAHeldReadKey() {
+        var extras = ChannelExtras()
+        extras.readKey = Data(repeating: 1, count: 32)
+        XCTAssertEqual(extras.isPublic, true, "a read key alone says public")
+        extras.recordPublic = false
+        XCTAssertEqual(extras.isPublic, false, "the newest record's flag says private")
+        extras.recordPublic = true
+        XCTAssertEqual(extras.isPublic, true)
+    }
+
+    func testAReaderFoldsTheRecordsFlag() {
+        let state = ChannelsUiState()
+        state.addChannel(.init(
+            id: channelId, localName: "Walk 28 channel", localDescription: "",
+            addedAtMs: 1, handle: "walk_28_channel"))
+        state.updateExtras(channelId) { $0.readKey = Data(repeating: 1, count: 32) }
+        _ = state.recordSharedMeta(
+            channelId: channelId, meta: SharedChannelMeta(name: "N", description: "", updatedAtMs: 5, listed: false))
+        XCTAssertEqual(state.extras(channelId).isPublic, false)
+        // A newer corrected record replaces it.
+        _ = state.recordSharedMeta(
+            channelId: channelId, meta: SharedChannelMeta(name: "N", description: "", updatedAtMs: 6, listed: true))
+        XCTAssertEqual(state.extras(channelId).isPublic, true)
+        state.removeChannel(channelId)
     }
 }

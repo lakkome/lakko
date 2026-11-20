@@ -57,6 +57,9 @@ public data class MessageSelection(
     val own: Set<Long> = emptySet(),
     /** Ids of selected messages somebody else sent. */
     val others: Set<Long> = emptySet(),
+    /** Ids of selected messages that carry a channel invitation card, which
+     *  is never forwarded (maintainer, 2026-11-13). */
+    val invitations: Set<Long> = emptySet(),
 ) {
     /** Every selected id, whoever sent it. */
     val ids: Set<Long> get() = own + others
@@ -77,12 +80,12 @@ public data class MessageSelection(
      * the limit, in which case nothing changes. [isOwn] is the row's own
      * gate, decided by the caller the way the single Delete decides it.
      */
-    public fun toggle(messageId: Long, isOwn: Boolean): MessageSelection = when {
-        messageId in own -> copy(own = own - messageId)
-        messageId in others -> copy(others = others - messageId)
+    public fun toggle(messageId: Long, isOwn: Boolean, isInvitation: Boolean = false): MessageSelection = when {
+        messageId in own -> copy(own = own - messageId, invitations = invitations - messageId)
+        messageId in others -> copy(others = others - messageId, invitations = invitations - messageId)
         atLimit -> this
-        isOwn -> copy(own = own + messageId)
-        else -> copy(others = others + messageId)
+        isOwn -> copy(own = own + messageId, invitations = if (isInvitation) invitations + messageId else invitations)
+        else -> copy(others = others + messageId, invitations = if (isInvitation) invitations + messageId else invitations)
     }
 
     /**
@@ -92,7 +95,7 @@ public data class MessageSelection(
      */
     public fun retain(messageIds: Collection<Long>): MessageSelection {
         val keep = messageIds.toSet()
-        return copy(own = own.intersect(keep), others = others.intersect(keep))
+        return copy(own = own.intersect(keep), others = others.intersect(keep), invitations = invitations.intersect(keep))
     }
 
     /** "N selected", or "100 selected, the limit" at the cap. */
@@ -113,13 +116,17 @@ public data class MessageSelection(
     public val deleteHelper: UiText?
         get() = if (others.isNotEmpty()) ONLY_OWN_DELETABLE_HELPER else null
 
-    /** Section 8's Forward gate: non-empty. */
-    public val forwardEnabled: Boolean get() = !isEmpty
+    /** Section 8's Forward gate: non-empty, and no selected message carries
+     *  a channel invitation card (never forwarded, maintainer 2026-11-13). */
+    public val forwardEnabled: Boolean get() = !isEmpty && invitations.isEmpty()
+
+    /** Save acts on the whole set: non-empty. */
+    public val saveEnabled: Boolean get() = !isEmpty
 
     public companion object {
         /** Entering the mode with the message the card was opened on. */
-        public fun starting(messageId: Long, isOwn: Boolean): MessageSelection =
-            MessageSelection().toggle(messageId, isOwn)
+        public fun starting(messageId: Long, isOwn: Boolean, isInvitation: Boolean = false): MessageSelection =
+            MessageSelection().toggle(messageId, isOwn, isInvitation)
     }
 }
 
@@ -231,3 +238,8 @@ public suspend fun <T> performInOrder(
     }
     return BulkResult(done = items.size, total = items.size, unsent = emptyList(), failure = null)
 }
+
+/** Whether [message] carries a channel invitation card: such a message is
+ *  never forwarded (maintainer, 2026-11-13). */
+public fun carriesInvitationCard(message: ChatMessage): Boolean =
+    !message.deleted && message.channelInvite?.isNotEmpty() == true

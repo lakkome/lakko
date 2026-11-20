@@ -229,13 +229,16 @@ pub(crate) fn spawn_unclaimed_pruner(
         return None;
     }
     tracing::info!(ttl_secs, "unclaimed-account pruner is on");
+    lakko_metrics::job_registered(crate::metrics::jobs::UNCLAIMED_ACCOUNT_PRUNE);
     Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(UNCLAIMED_PRUNE_INTERVAL);
         // The first tick fires at once; skip it so a restart is not a prune.
         interval.tick().await;
         loop {
             interval.tick().await;
-            match prune_unclaimed(&pool, ttl_secs).await {
+            let result = prune_unclaimed(&pool, ttl_secs).await;
+            crate::metrics::job_run(crate::metrics::jobs::UNCLAIMED_ACCOUNT_PRUNE, &result);
+            match result {
                 Ok(0) => {},
                 Ok(removed) => tracing::info!(removed, "pruned unclaimed accounts"),
                 Err(e) => tracing::warn!(error = %e, "unclaimed-account prune failed"),

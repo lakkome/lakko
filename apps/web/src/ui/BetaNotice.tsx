@@ -25,7 +25,7 @@ export function BetaNoticeBanner(): JSX.Element {
   return (
     <div class="lk-info-banner" role="note">
       <span class="lk-info-banner-icon">
-        <Icon name="info" size={20} />
+        <Icon name="info-circle" size={20} />
       </span>
       <p class="lk-info-banner-text">
         <strong class="lk-info-banner-title">{t("beta.notice.title")}</strong>
@@ -44,7 +44,7 @@ export function BetaNoticeRow(): JSX.Element {
   return (
     <div class="lk-card-row">
       <span class="lk-card-row-icon">
-        <Icon name="info" size={18} />
+        <Icon name="info-circle" size={18} />
       </span>
       <div class="lk-card-row-body">
         <span class="lk-card-row-title">{t("beta.notice.title")}</span>

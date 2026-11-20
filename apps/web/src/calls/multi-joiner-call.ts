@@ -1271,6 +1271,8 @@ export class MultiJoinerCall {
         usernameCertificate: decoded.usernameCertificate ?? null,
         // ADR-0084 - copied out of the handle (and freed) here.
         avatar: avatarFromWasm(decoded.avatar),
+        // ADR-0092 section 7 - the "my card may be shared" flag.
+        cardShareable: decoded.cardShareable,
       };
     } catch {
       return;

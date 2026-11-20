@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 import LakkoCore
 import UIKit
@@ -56,8 +57,10 @@ final class ChannelConversationModel: ObservableObject {
     @Published var draft: String = ""
     @Published private(set) var sending = false
     @Published private(set) var sendError: UiText?
-    @Published private(set) var pendingAttachments: [AttachmentRef] = []
-    @Published private(set) var uploading = false
+    /// `docs/ux/media-messages.md` section 11 — the composer tray of this
+    /// channel, kept while the app runs. Channel files live 45 days idle.
+    let tray: ComposerTrayStore
+    private var trayChanges: AnyCancellable?
 
     /// Section 13.1 — resolved reaction counts per post, as the service last
     /// answered them.
@@ -79,6 +82,8 @@ final class ChannelConversationModel: ObservableObject {
         self.client = client
         self.accountIdentitySeed = accountIdentitySeed
         self.access = Self.initialAccess(channelId: channelId, state: state)
+        self.tray = ComposerTrays.shared.store(for: "channel:\(channelId)", idleDays: Self.fileIdleDays)
+        trayChanges = tray.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     func attach(sync: DeviceGroupSyncRepository) { self.sync = sync }
@@ -92,6 +97,11 @@ final class ChannelConversationModel: ObservableObject {
     }
 
     var isPublisher: Bool { state.keysByChannel[channelId] != nil }
+
+    /// UX second-device 4a — the account owns or co-publishes this channel
+    /// and this device holds no PublisherGroup for it: the line in place of
+    /// the composer; `nil` otherwise.
+    var readerDeviceRole: ChannelReaderDeviceRole? { state.readerDeviceRole(channelId) }
 
     var channelIdBytes: Data? { ChannelsClient.hexToData(channelId) }
 
@@ -295,11 +305,9 @@ final class ChannelConversationModel: ObservableObject {
         ensureListed()
         state.onSubscribedHere?(channelId)
         access = .subscribing
-        let keys = state.subscriberKeysByChannel[channelId] ?? {
-            let fresh = ChannelsComposer.freshSubscriberKeys()
-            state.setSubscriberKeys(channelId: channelId, keys: fresh)
-            return fresh
-        }()
+        // One key per account and channel: a key another device of the
+        // account subscribed with is reused (the subscription register).
+        let keys = state.subscriberKeysForSubscribe(channelId)
         if let readKey = foundReadKey {
             state.updateExtras(channelId) { $0.readKey = readKey }
         }
@@ -329,11 +337,9 @@ final class ChannelConversationModel: ObservableObject {
         state.onSubscribedHere?(channelId)
         access = .subscribing
         guard let id = channelIdBytes else { return }
-        let keys = state.subscriberKeysByChannel[channelId] ?? {
-            let fresh = ChannelsComposer.freshSubscriberKeys()
-            state.setSubscriberKeys(channelId: channelId, keys: fresh)
-            return fresh
-        }()
+        // One key per account and channel: a key another device of the
+        // account subscribed with is reused (the subscription register).
+        let keys = state.subscriberKeysForSubscribe(channelId)
         do {
             let signer = try ChannelInviteSigner.fromInviteSeed(inviteSeed: inviteSeed)
             let ticket = try signer.sealTicket(
@@ -434,16 +440,16 @@ final class ChannelConversationModel: ObservableObject {
 
     // MARK: - Publishing (section 13)
 
-    /// Publish the draft and the staged attachments as one post.
+    /// Publish the draft and every item in the tray as one post (section 11).
     func sendDraft() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let attachments = pendingAttachments
-        guard !text.isEmpty || !attachments.isEmpty, !sending else { return }
+        guard tray.tray.canSend(hasText: !text.isEmpty), !sending else { return }
+        let attachments = tray.tray.refs
         do {
             let envelope = try composeEnvelope(text: text, attachments: attachments)
             if await publish(envelope) {
                 draft = ""
-                pendingAttachments = []
+                _ = tray.takeForSend()
             }
         } catch {
             sendError = .key("channels.publish.error.generic")
@@ -511,71 +517,6 @@ final class ChannelConversationModel: ObservableObject {
         }
     }
 
-    /// Encrypt and upload one picked file into the tray. Channel files live
-    /// 45 days idle (ADR-0087 section 13).
-    func stageAttachment(bytes: Data, mime: String?, name: String?, media: MediaAttachmentMeta? = nil) async {
-        uploading = true
-        sendError = nil
-        defer { uploading = false }
-        do {
-            let ref = try await AttachmentBridge.encryptAndUpload(
-                bytes: bytes, mime: mime, name: name, media: media, idleDays: Self.fileIdleDays)
-            MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
-            pendingAttachments.append(ref)
-        } catch let err as AttachmentBridgeError {
-            sendError = err.userText(fileName: name)
-        } catch {
-            sendError = .key("chat.attachment.error.upload", texts: ["name": name ?? ""])
-        }
-    }
-
-    /// A photo or video prepared by ``PhotoVideoPrep``: its pixel size and a
-    /// small preview go with it, as in a chat (media spec section 10).
-    func stagePrepared(_ prepared: PhotoVideoPrep.Prepared) async {
-        uploading = true
-        sendError = nil
-        defer {
-            uploading = false
-            if let file = prepared.fileURL {
-                try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-            }
-        }
-        var thumbRef: ThumbRef?
-        if let thumb = prepared.thumb {
-            thumbRef = try? await AttachmentBridge.encryptAndUploadThumb(
-                bytes: thumb, mime: "image/jpeg", width: prepared.thumbWidth, height: prepared.thumbHeight)
-        }
-        let meta = MediaAttachmentMeta(
-            kind: nil, width: prepared.width, height: prepared.height, thumb: thumbRef)
-        do {
-            let ref: AttachmentRef
-            if let bytes = prepared.bytes {
-                ref = try await AttachmentBridge.encryptAndUpload(
-                    bytes: bytes, mime: prepared.mime, name: prepared.name, media: meta,
-                    idleDays: Self.fileIdleDays)
-                MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
-            } else if let file = prepared.fileURL {
-                ref = try await AttachmentBridge.encryptAndUpload(
-                    fileURL: file, mime: prepared.mime, name: prepared.name, media: meta,
-                    idleDays: Self.fileIdleDays)
-            } else {
-                return
-            }
-            pendingAttachments.append(ref)
-        } catch let err as AttachmentBridgeError {
-            if let thumbRef { BlobLifecycle.shared.delete([thumbRef.blobId]) }
-            sendError = err.userText(fileName: prepared.name)
-        } catch {
-            sendError = .key("chat.attachment.error.upload", texts: ["name": prepared.name])
-        }
-    }
-
-    func removePendingAttachment(at index: Int) {
-        guard pendingAttachments.indices.contains(index) else { return }
-        let removed = pendingAttachments.remove(at: index)
-        BlobLifecycle.shared.delete(MessageBlobs.ids(of: [removed]))
-    }
-
     func clearSendError() { sendError = nil }
 
     /// ADR-0087 section 13 — a channel file's idle life (chosen there).
@@ -611,6 +552,10 @@ final class ChannelConversationModel: ObservableObject {
                 channelIdHex: channelId, posts: chunk.map(\.cursor)) else { return }
             for post in answer {
                 if let count = post.comments { comments[post.cursor] = count }
+                // ADR-0092 section 4.3 — a poll post's votes, per option.
+                if let item = chunk.first(where: { $0.cursor == post.cursor }), item.contentEnvelopeB64 != nil {
+                    pollCounts[post.cursor] = pollCountsOf(item, voters: post.voters ?? 0, labels: post.votes)
+                }
                 guard let item = chunk.first(where: { $0.cursor == post.cursor }),
                       let key = reactionKey(item) else { continue }
                 next[post.cursor] = key.resolveCounts(
@@ -618,6 +563,105 @@ final class ChannelConversationModel: ObservableObject {
             }
         }
         countsByPost = next
+    }
+
+    // MARK: - ADR-0092 section 4: polls in channels
+
+    /// Votes per option of each poll post, read with the reaction counts.
+    @Published private(set) var pollCounts: [UInt64: ChannelPollCounts] = [:]
+    /// A vote on its way, or one that did not go out.
+    @Published private(set) var pollSendState: [UInt64: BallotSendState] = [:]
+
+    private func pollOf(_ item: ChannelTimelineItem) -> SignedPoll? {
+        guard let b64 = item.contentEnvelopeB64,
+              case .poll(let poll)? = ContentModel.content(PersistedContent(envelopeB64: b64)) else { return nil }
+        return poll
+    }
+
+    private func pollCountsOf(_ item: ChannelTimelineItem, voters: UInt64, labels: [FfiReactionLabelCount])
+        -> ChannelPollCounts? {
+        guard let poll = pollOf(item), let key = reactionKey(item),
+              let options = try? channelPollOptionLabels(
+                key: key, postCursor: item.cursor, optionCount: UInt8(clamping: poll.body.options.count)),
+              let tally = try? channelPollTallyFromCounts(optionLabels: options, labelCounts: labels, voters: voters)
+        else { return nil }
+        return ChannelPollCounts(
+            counts: tally.counts.map { UInt32(clamping: $0) }, voters: UInt32(clamping: tally.voters), frozen: false)
+    }
+
+    private var pollConversation: FolderConversationRef? {
+        channelIdBytes.map { FolderConversationRef(kind: .channel, id: $0) }
+    }
+
+    /// What the poll card of `item` shows: the frozen tally of a close, else
+    /// the service's counts; the own choice from the synced register.
+    func pollView(_ item: ChannelTimelineItem) -> PollView? {
+        guard let poll = pollOf(item) else { return nil }
+        let own = pollConversation.flatMap {
+            sync?.pollChoice(conversation: $0, pollMessageId: Int64(clamping: item.cursor))
+        }.map { [UInt8]($0.choices) }
+        let counts = item.frozenTally.map {
+            ChannelPollCounts(counts: $0.counts.map { UInt32(clamping: $0) }, voters: UInt32(clamping: $0.voters), frozen: true)
+        } ?? pollCounts[item.cursor]
+        return PollView.channel(
+            poll: poll, counts: counts, closedByOp: item.closedByOp, own: own, nowMs: ChatRepository.nowMs())
+    }
+
+    /// Vote (or retract with no choices): the credential is fetched in the
+    /// background the first time in a period; the own choice is recorded in
+    /// the synced register once the service took the vote.
+    func votePoll(_ item: ChannelTimelineItem, choices: [UInt8]) async {
+        guard let poll = pollOf(item), let id = channelIdBytes, let key = reactionKey(item),
+              let writer = writerIdentity, let account = AcceptedContactsStore.boundAccountIdB64 else { return }
+        pollSendState[item.cursor] = .sending
+        do {
+            let options = try channelPollOptionLabels(
+                key: key, postCursor: item.cursor, optionCount: UInt8(clamping: poll.body.options.count))
+            let labels = choices.compactMap { Int($0) < options.count ? options[Int($0)] : nil }
+            let credential = try await ChannelPollCredentials.shared.current(writer: writer, accountIdB64: account)
+            try await client.sendPollVote(
+                channelIdHex: channelId, channelId: id, postCursor: item.cursor, labels: labels, credential: credential)
+            if let ref = pollConversation {
+                _ = await sync?.setPollChoice(
+                    conversation: ref, pollMessageId: Int64(clamping: item.cursor), choices: choices, setVersion: 0)
+            }
+            pollSendState[item.cursor] = nil
+            await refreshCounts()
+        } catch {
+            NSLog("ADR-0092: channel vote not sent")
+            pollSendState[item.cursor] = .failed
+        }
+    }
+
+    /// A publisher's `Close poll`: freeze the tally this app reads now into
+    /// the post (ADR-0092 section 4.3).
+    func closePoll(_ item: ChannelTimelineItem) async {
+        await refreshCounts()
+        let counts = pollCounts[item.cursor]
+        let tally = counts.flatMap {
+            try? encodeChannelPollTally(tally: ChannelPollTally(
+                voters: UInt64($0.voters), counts: $0.counts.map { UInt64($0) }))
+        }
+        guard let bytes = try? ContentFFI.composeClose(target: Int64(clamping: item.cursor), tally: tally) else { return }
+        _ = await publish(bytes)
+    }
+
+    /// A publisher's tick, added item or edit on a checklist post (ADR-0092
+    /// section 5: signed post ops, publishers only).
+    func publishContentOp(_ bytes: Data) async {
+        guard isPublisher else { return }
+        _ = await publish(bytes)
+    }
+
+    /// A publisher's poll, checklist, location, contact card or article post.
+    func publishContent(_ draft: ContentDraft, attachments: [AttachmentRef] = []) async {
+        guard let content = draft.unsigned(),
+              let bytes = try? composeContentEnvelope(
+                content: content, attachments: attachments, parts: ContentModel.emptyParts) else {
+            sendError = .key("channels.publish.error.generic")
+            return
+        }
+        _ = await publish(bytes)
     }
 
     private func reactionKey(_ item: ChannelTimelineItem) -> ChannelReactionKey? {
@@ -851,6 +895,55 @@ final class ChannelConversationModel: ObservableObject {
         /// Comments that arrived while the thread was open (section 13.2).
         var newSinceOpen = 0
         var failedSends: [Comment] = []
+        /// Rows the service returned so far, opened or not: a row that did
+        /// not open and a banned author's row are still rows read.
+        var rowsRead = 0
+        /// The first page was read.
+        var firstRead = false
+    }
+
+    /// Section 13.2 — what follows the first two comments of a collapsed
+    /// thread.
+    enum CollapsedMore: Equatable {
+        /// Nothing (yet): the first page is not read, or every comment shows.
+        case none
+        /// `Show {n} more comments`.
+        case count(Int)
+        /// `Show more comments`: rows remain and the service gave no count.
+        case unknown
+        /// The quiet `Comment`: there are none.
+        case comment
+    }
+
+    /// The rule behind ``CollapsedMore``: the shared one in
+    /// `crates/lakko-ui-rules` (`comments`), so the three clients cannot
+    /// disagree. The service's count (ADR-0087 phase B) counts every stored
+    /// comment, including those this reader hides (a banned author's, one
+    /// that does not open), so it never stands alone: nothing is said before
+    /// the first page is read, the rows read are judged by themselves, and
+    /// only the rows not read yet are taken from the service.
+    nonisolated static func collapsedMore(
+        visible: Int, rowsRead: Int, firstRead: Bool, mayHaveMore: Bool, serverCount: UInt64?
+    ) -> CollapsedMore {
+        switch collapsedComments(
+            visible: UInt32(clamping: visible), rowsRead: UInt32(clamping: rowsRead),
+            firstPageRead: firstRead, moreRows: mayHaveMore, serverCount: serverCount)
+        {
+        case .nothing: return .none
+        case .count(let n): return .count(Int(n))
+        case .unknown: return .unknown
+        case .comment: return .comment
+        }
+    }
+
+    /// ``collapsedMore(visible:rowsRead:firstRead:mayHaveMore:serverCount:)``
+    /// for the post at `cursor`.
+    func collapsedMore(_ cursor: UInt64) -> CollapsedMore {
+        let thread = threads[cursor]
+        return Self.collapsedMore(
+            visible: visibleComments(cursor).count, rowsRead: thread?.rowsRead ?? 0,
+            firstRead: thread?.firstRead ?? false, mayHaveMore: thread?.mayHaveMore ?? false,
+            serverCount: commentCountByPost[cursor])
     }
 
     /// The comments of a post, the banned authors' hidden.
@@ -875,6 +968,8 @@ final class ChannelConversationModel: ObservableObject {
                 if let comment = open(row, item: item) { opened.append(comment) }
             }
             thread.comments = opened
+            thread.rowsRead = (more ? thread.rowsRead : 0) + page.rows.count
+            thread.firstRead = true
             thread.nextAfter = page.nextAfter
             thread.mayHaveMore = page.rows.count >= 20
             if more { thread.expanded = true }

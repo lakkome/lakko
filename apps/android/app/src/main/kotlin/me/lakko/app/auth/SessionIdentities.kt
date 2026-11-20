@@ -26,10 +26,18 @@ public object SessionIdentities {
      * Reuses the persisted binding so its `issued_at` stays stable; mints and
      * persists a new one under [account] (the conversation identity: the
      * OLDEST own predecessor after a rotation) when none is stored, the stored
-     * one no longer verifies, or [bindingVerdict] says so. Returns `null` when
-     * the device seed cannot be read or created, in which case the caller
-     * falls back to an unbound account-key identity (the pre-ADR-0050
+     * one no longer verifies, or the core's `ownBindingVerdict` says so. Returns
+     * `null` when the device seed cannot be read or created, in which case the
+     * caller falls back to an unbound account-key identity (the pre-ADR-0050
      * behaviour).
+     *
+     * G-56: the verdict's link is what this device last read of the account's
+     * own conversation link ([link], from [OwnConversationKeyStore]). A
+     * `wait` mints, stores and publishes nothing: [EarlierKeysMissing] is
+     * thrown (the auth gate parked the device before it got here; this is
+     * defence in depth). A `mint` names the key to bind under; [seedOfKey]
+     * hands the seed of the account's own identity with that key (a fresh
+     * copy, zeroed here).
      *
      * @param currentKey the key the account publishes now.
      * @param predecessorKeys the own predecessor keys, oldest first.
@@ -42,6 +50,8 @@ public object SessionIdentities {
         currentKey: ByteArray,
         predecessorKeys: List<ByteArray>,
         holdsConversations: Boolean,
+        link: uniffi.lakko_ffi_uniffi.FfiOwnLink = uniffi.lakko_ffi_uniffi.FfiOwnLink.Absent,
+        seedOfKey: (ByteArray) -> ByteArray? = { null },
         nowUnixSecs: Long = System.currentTimeMillis() / 1_000L,
     ): Identity? {
         val seed = try {
@@ -56,50 +66,67 @@ public object SessionIdentities {
             } catch (_: Throwable) {
                 null
             }
-            if (stored != null) {
+            val rebuilt = stored?.let {
                 try {
-                    val rebuilt = Identity.fromSeedWithBinding(seed, stored)
-                    // ADR-0073 section 2.3 step 5 — a binding is signed by the
-                    // account key, so after a reset of the account keys the
-                    // stored one still verifies (the old key signed it) but
-                    // names an account key that is no longer the account's.
-                    // Re-mint rather than publish a KeyPackage bound to the
-                    // old generation. ADR-0074 part 3 — a rotation is not a
-                    // reset: a binding under the account's own earlier key
-                    // stays, and one under the current key is minted again
-                    // only while this device holds no conversation.
-                    val verdict = bindingVerdict(
-                        boundKey = rebuilt.accountPublicKey(),
-                        currentKey = currentKey,
-                        predecessorKeys = predecessorKeys,
-                        holdsConversations = holdsConversations,
-                    )
-                    when (verdict) {
-                        BindingVerdict.Keep -> return rebuilt
-                        BindingVerdict.KeepUnderCurrentKey -> {
-                            android.util.Log.i(
-                                "SessionIdentities",
-                                "device binding names the current account key and this device holds conversations; kept",
-                            )
-                            return rebuilt
-                        }
-                        BindingVerdict.Remint, BindingVerdict.Mint -> {
-                            rebuilt.close()
-                            android.util.Log.w(
-                                "SessionIdentities",
-                                "stored device binding is not under the conversation key ($verdict), re-minting",
-                            )
-                        }
-                    }
+                    Identity.fromSeedWithBinding(seed, it)
                 } catch (cause: Throwable) {
-                    android.util.Log.w(
-                        "SessionIdentities",
-                        "stored device binding rejected, re-minting",
-                        cause,
-                    )
+                    android.util.Log.w("SessionIdentities", "stored device binding rejected", cause)
+                    null
                 }
             }
-            val accountSeed = account.ed25519Seed()
+            // ADR-0073 section 2.3 step 5 / ADR-0074 part 3 / G-56: the core
+            // decides whether the stored binding stays, a new one is minted,
+            // and under which of the account's own keys; or that this device
+            // must wait for the account's earlier keys.
+            val verdict = try {
+                uniffi.lakko_ffi_uniffi.ownBindingVerdict(
+                    rebuilt?.accountPublicKey(),
+                    currentKey,
+                    predecessorKeys,
+                    link,
+                    holdsConversations,
+                )
+            } catch (cause: Throwable) {
+                rebuilt?.close()
+                android.util.Log.w("SessionIdentities", "binding verdict unavailable; minting nothing")
+                throw EarlierKeysMissing()
+            }
+            val mintKey: ByteArray = when (verdict) {
+                uniffi.lakko_ffi_uniffi.FfiBindingVerdict.Keep ->
+                    rebuilt?.let { return it } ?: throw EarlierKeysMissing()
+                uniffi.lakko_ffi_uniffi.FfiBindingVerdict.KeepUnderCurrentKey -> {
+                    android.util.Log.i(
+                        "SessionIdentities",
+                        "device binding names the current account key and this device holds conversations; kept",
+                    )
+                    rebuilt?.let { return it } ?: throw EarlierKeysMissing()
+                }
+                uniffi.lakko_ffi_uniffi.FfiBindingVerdict.Wait -> {
+                    rebuilt?.close()
+                    android.util.Log.w("SessionIdentities", "G-56: the account's earlier keys are missing; nothing minted")
+                    throw EarlierKeysMissing()
+                }
+                is uniffi.lakko_ffi_uniffi.FfiBindingVerdict.Mint -> {
+                    rebuilt?.close()
+                    if (stored != null) {
+                        android.util.Log.w("SessionIdentities", "stored device binding is not the one to keep, re-minting")
+                    }
+                    verdict.key
+                }
+            }
+            // The identity to sign the binding with: [account] when it is the
+            // key the core named, else the account's own identity with that key.
+            val signer: Identity = if (account.signaturePublicKey().contentEquals(mintKey)) {
+                account
+            } else {
+                val named = seedOfKey(mintKey) ?: throw EarlierKeysMissing()
+                try {
+                    Identity.fromSeed(named)
+                } finally {
+                    named.fill(0)
+                }
+            }
+            val accountSeed = signer.ed25519Seed()
             val bound = try {
                 Identity.fromSeedBound(seed, accountSeed, nowUnixSecs.toULong())
             } catch (cause: Throwable) {
@@ -107,6 +134,7 @@ public object SessionIdentities {
                 return null
             } finally {
                 accountSeed.fill(0)
+                if (signer !== account) signer.close()
             }
             bound.deviceBinding()?.let { binding ->
                 try {

@@ -231,6 +231,10 @@ private data class StoredChannel(
     val sharedListed: Boolean = false,
     /** ADR-0087 section 18.2 — the newest record's plaintext; absent on older rows. */
     val sharedRecordB64: String = "",
+    /** docs/ux/second-device.md section 4a — the account's role from the
+     *  channel subscription register: "" (subscriber), "owner",
+     *  "co-publisher"; absent on older rows. */
+    val role: String = "",
 )
 
 @Serializable
@@ -267,9 +271,24 @@ internal fun encodeChannels(channels: List<ChannelHandle>): String =
                 sharedLanguage = it.sharedLanguage,
                 sharedListed = it.sharedListed,
                 sharedRecordB64 = it.sharedRecordB64,
+                role = storedRoleOf(it.role),
             )
         },
     )
+
+/** The stored text of [role]. */
+internal fun storedRoleOf(role: ChannelAccountRole): String = when (role) {
+    ChannelAccountRole.SUBSCRIBER -> ""
+    ChannelAccountRole.OWNER -> "owner"
+    ChannelAccountRole.CO_PUBLISHER -> "co-publisher"
+}
+
+/** Inverse of [storedRoleOf]; anything else reads as a subscriber. */
+internal fun roleOfStored(text: String): ChannelAccountRole = when (text) {
+    "owner" -> ChannelAccountRole.OWNER
+    "co-publisher" -> ChannelAccountRole.CO_PUBLISHER
+    else -> ChannelAccountRole.SUBSCRIBER
+}
 
 /** Inverse of [encodeChannels]; `null` when [raw] does not decode. A row
  *  with an empty id or an unparseable timestamp is skipped, not fatal. */
@@ -293,6 +312,7 @@ internal fun decodeChannels(raw: String): List<ChannelHandle>? =
                 sharedLanguage = s.sharedLanguage.takeIf { LANGUAGE_OR_EMPTY.matches(it) } ?: "",
                 sharedListed = s.sharedListed,
                 sharedRecordB64 = s.sharedRecordB64,
+                role = roleOfStored(s.role),
             )
         }
     } catch (_: Exception) {

@@ -77,6 +77,10 @@ entry's status line, not a mechanical fact.
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 | [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Closed in code (2026-10-19) | a self-removal proof (C-85); host-tested, not walked |
 | [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Open | needs a decision on the key rotation or a grant channel; see the entry |
+| [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Closed in code (2026-11-14) | per-device PublisherGroup leaves (ADR-0090) on web, iOS and Android; walked on web only; an owner's channels from before the flag day stay read-only on its own device and show no line; see the entry |
+| [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
+| [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Closed in code (2026-11-15; ADR-0074 amendment), host-tested only | join routes, pairing recovery row, DeviceGroup lineage on web, iOS, Android |
+| [G-58](./known-gaps.md#g-58) | A device behind a conversation: what recovery cannot reach | Open | a fake epoch from a member registrar; a removed single-device account; a group whose only owner or admin is the behind device; no push routing secret after a plain member brought the device back |
 
 ## MLS state machine
 
@@ -3215,3 +3219,274 @@ were walked.
 
 **Closing:** not a client fix. Either the rotation changes, or a grant reaches
 the adder some other way. Maintainer's decision.
+
+<a id="g-54"></a>
+### G-54: A channel has one publishing device per owner or publisher
+
+**CLOSED in code 2026-11-14 by [ADR-0090](../adr/0090-publisher-group-device-leaves.md)
+(S1 to S4: `lakko-mls`, `lakko-contacts`, `lakko-sync`, both FFI surfaces,
+web, iOS, Android; C-90, C-91).** Every PublisherGroup leaf is now a bound
+device; an owner device admits the account's other devices by itself, a
+co-publisher's devices are admitted by an owner device on the co-publisher's
+request, every PublisherGroup commit is staged and merged only on the DS
+commit route's answer, and any owner device rotates. Unit suites green on the
+three clients (web vitest 8301, iOS `LakkoTests` 5303, Android 5695) and the DS
+(98 of 98). **Walked on web only, 2026-11-14, `test.lakko.me`:** an owner
+created a private channel on one device and added a second web device; the
+first admitted it by itself (one staged commit through the DS commit route,
+the reseal, the Welcome); the second got a composer and posted; the first
+received the post.
+
+What remains:
+
+- **Not walked:** a native second device; decision A (a device that restored
+  the account alone re-founds each owned channel); a co-publisher's device
+  request; a rotation by a second owner device; a returning old device
+  dropping to reader and being admitted. `lakko-security` ran on
+  2026-11-14; its three requested changes (owner-only admission mark clamped
+  to rows read, no PublisherGroup deleted on an unauthenticated DS signal,
+  Android's decision A reseal) are made on all three clients, see ADR-0090
+  "As built and walked" item 7.
+- **The flag day, as seen on the walk:** a PublisherGroup that lived in the
+  old account provider is not carried to the device provider, so an owner's
+  channels created before 2026-11-14 are read-only on its own device (three
+  channels of the test owner). Nothing on such a channel tells the person:
+  it shows neither a composer nor the waiting line of ADR-0090 section 8,
+  because the device is neither admitted nor waiting for a sibling. No
+  migration is planned (no production deployment); the UI gap is open.
+- The gate does not compare a committer's update-path leaf node with its old
+  leaf (ADR-0090 "As built (S1 to S3)" item 1).
+
+**As recorded on 2026-11-13** (kept for the record):
+
+**Recorded 2026-11-13 with the maintainer's decision that a second device of
+a channel's owner or co-publisher is a reader for now.** A channel's
+PublisherGroup leaf is the account key (web: the session account identity;
+iOS and Android: an identity from the account's lineage or phrase seed), so
+two devices of one account cannot both be leaves, and copying the MLS state
+to a second device is ADR-0050 section 2.9a reason 3. The channels now reach
+every device of the account through the synced channel-subscription register
+(`lakko_sync::synced::channel_subscription`), with the one subscriber key per
+account and channel, so every device reads; only the device holding the
+PublisherGroup posts, approves, rotates and admits (UX
+`second-device.md` section 4a). Consequences:
+
+- The owner (or a publisher) must use that one device to post.
+- If that device is lost, forgotten or wiped, nobody can post in the channel
+  again, approve a publisher, admit a private-channel subscriber or rotate
+  its keys; the channel stays readable for its subscribers until its posts age
+  out. A restore from the phrase does not bring publishing back (the
+  PublisherGroup state is not in the backup).
+- A naive client fix makes it worse: a device that founds a PublisherGroup
+  for an owned channel it lacks state for re-founds it at the same
+  deterministic id and resets the live journal (iOS, Android, and web from any
+  action that opens the group, found by the 2026-11-13 recon). No client may
+  found a PublisherGroup or reset a channel journal except in create-channel.
+
+**Closing:** per-device PublisherGroup leaves (the ADR-0050 pattern applied to
+PublisherGroup: device leaves bound to the account key, an add-own-device
+path, one rule for the single rotator among owner devices). A `lakko-mls`
+change under invariant #3; not designed yet.
+
+### G-55: An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service
+
+**Status:** Closed in code on 2026-11-14 (`lakko-mls`, both FFI surfaces, web,
+iOS and Android); host-tested only, not walked live, not deployed. See "As
+built" below.
+
+**Corrected the same day.** The first text of this entry said every knock
+shows the joiner's account key. That was wrong: group and channel knocks are
+sealed to the group's knock key since ADR-0087 section 5 (`lakko-contacts`
+`knock.rs`, used on all three clients). What stays in the clear:
+
+- the owner-device channel entry (ADR-0064 section 7 amendment of 2026-11-14):
+  an external commit is a PublicMessage (RFC 9420), so the entering leaf's
+  ADR-0050 binding names the owner's account key next to the PublisherGroup
+  journal id that ADR-0078 phase 6 derives to hide;
+- the DeviceGroup rejoin knock (ADR-0081 amendment of 2026-10-19), which posts
+  the ADR-0056 pairing payload (login handle, KeyPackage with its binding)
+  unsealed to the account's own DeviceGroup journal.
+
+**Closing (ADR-0078 section 4, last bullet):** the journal row is wrapped under
+a key every member already holds, so the leaf never reaches the DS in the
+clear: the entry row under a key derived from the epoch-N Delivery Service
+access seed (the entering device has it from the vault head, every member
+derives it from the exporter); the rejoin knock under a key derived from the
+account's lineage seed, which every device of the account holds.
+
+**As built (2026-11-14).**
+
+- *Channel entry* (`crates/lakko-mls/src/entry_wrap.rs`). The row is
+  `"lakko/wrapped-entry/v1\0" ‖ version 0x01 ‖ epoch(8 BE) ‖ nonce(12) ‖
+  ChaCha20-Poly1305(commit)` under
+  `BLAKE3-derive-key("lakko/ds/entry-wrap/v1", ds_access_seed_N)`, AAD = the
+  magic, the version, the group id and N. `ds_access_seed_N` is the
+  ADR-0053 access seed of the epoch the commit leaves
+  (`export_secret("lakko/ds/access/v1", group_id, 32)`, now also
+  `Group::ds_access_seed` / `staged_ds_access_seed` in `lakko-mls`; the FFI
+  crates pin the label equal to `lakko_ds_proof::ACCESS_KEY_LABEL` and the
+  value equal to `dsAccessSeed`). `PublisherGroup::enter` takes the saved seed
+  and returns the wrapped row; `PublisherGroup::process_incoming` opens a
+  wrapped row under its current epoch's seed, requires the content to be a
+  `PublicMessage` commit from a `NewMemberCommit` sender framed for this group
+  and epoch (checked on the framing before OpenMLS decrypts anything), and
+  runs the unchanged `check_publisher_commit` gate. A wrapped row that does
+  not open is an error, never processed raw; an external commit that arrives
+  unwrapped is refused (`UnsupportedProposal`). The epoch stays in the clear
+  (every other journal row shows it in its MLS framing), so
+  `epoch_of_message` / `epoch_after_message` answer for a wrapped row and the
+  clients' journal-head and unaccounted-row reads keep working. A wrong seed
+  is not detected by `enter`: the DS refuses the proof signed with it.
+- *Rejoin knock* (`crates/lakko-mls/src/pairing.rs`). `encode_rejoin_knock`
+  takes the lineage seed and returns `"lakko/rejoin-knock/v1\0" ‖ version
+  0x01 ‖ nonce(12) ‖ ChaCha20-Poly1305(len(4 BE) ‖ pairing payload ‖ zeros)`
+  under `BLAKE3-derive-key("lakko/device-group/knock-wrap/v1",
+  lineage_account_seed)`, AAD = the magic, the version and the DeviceGroup id
+  the same seed derives. The plaintext is padded to a multiple of 1024 bytes
+  (chosen; measured: a bound device KeyPackage was 417 bytes and the whole
+  payload with a self-removal proof 631, so a knock is one size, 1075 bytes).
+  The proof is optional, so the knock to an unclaimed journal, which went out
+  as a plain pairing payload, is sealed too. `open_rejoin_knock` opens and
+  then runs the existing `decode`; flag day, no plain-row fallback.
+- FFI: `publisherGroupEnter(..., dsAccessSeed)` / `PublisherGroup.enter(...,
+  dsAccessSeed)`; `buildRejoinKnock(accountIdentity, ...)` /
+  `encodeRejoinKnock(accountIdentity, ...)` and new `openRejoinKnock` on both
+  surfaces (`accountIdentity` is the identity `deviceGroupIdFor` takes).
+  Clients: web `channel-entry.ts`, `devices/pairing.ts`,
+  `DeviceGroupSyncContext.tsx`; iOS `ChannelEntry.swift`, `PairingCodec.swift`,
+  `DeviceGroupSyncRepository.swift`; Android `CoPublisher.kt`,
+  `PairingCodec.kt`, `DeviceGroupSyncRepository.kt` (both knock readers).
+- Tests: `entry_wrap` unit and proptests, the gate proptest extended (raw
+  external commits refused, wrapped forgeries refused by the gate),
+  `a_wrapped_member_commit_is_refused`,
+  `a_wrapped_entry_opens_only_under_this_groups_epoch_key`,
+  `a_wrapped_row_that_holds_no_entry_is_refused`, the entry row checked for
+  the account key, binding and device key; knock round trip, wrong seed,
+  tampering, version, padding and the handle / account key / binding absent
+  from the row. Fuzz targets `rejoin_knock_open` and `wrapped_entry_open`
+  (compile-checked; not run, no cargo-fuzz here).
+- Residual: the DS still sees that a row of entry or knock shape arrived and
+  when, and the epoch of an entry.
+
+### G-56: A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it
+
+- Status: closed in code (2026-11-15), host-tested only, not walked on a
+  device. Found by the lakko-security pass on the ADR-0090 follow-ups (F6).
+  The maintainer decided the same day to prevent the state rather than
+  handle it: ADR-0074, "Joining after a rotation: the device waits for the
+  earlier keys". Built in the core (recovery row v3, the binding verdict,
+  the own conversation key), both FFI surfaces and web, iOS and Android.
+- A PublisherGroup id is derived from the owner account seed (ADR-0078
+  phase 6) and must stay the same on every device of the account,
+  including across an ADR-0074 rotation (the lineage seed).
+- Web (`AuthContext.tsx` ~2380-2409, `conversationAccountIdentity`) and
+  iOS (`ChannelPublisherIdentity.ownerSeed`) use the CURRENT seed when the
+  device binding names the current key (the keep-under-current-key
+  state), because the core refuses a PublisherGroup for a device bound to
+  another account than the seed's; such a device opens a group under a
+  different id than its siblings that kept the lineage binding, a split.
+- Android (`conversationAccountSeedOf`, `KeyRotationKept.kt` ~602) always
+  uses the lineage seed; on such a device the core refuses the
+  PublisherGroup, so it cannot publish rather than splitting.
+- The divergence comes from the binding state itself, not from one
+  client. Re-binding a device that already holds conversations is not
+  possible without ADR-0074 Stage B (fact 14; a one-to-one cannot gain a
+  third account key, C-70), so the state is prevented instead.
+- How the state arises (read 2026-11-15): the earlier keys reach a joining
+  device by the pairing state bundle (published after the Welcome, best
+  effort, a 20 s poll) or the backup (fetched before the binding on the
+  phrase routes, but a failed fetch lands anyway); a device that is in a
+  conversation before they arrive keeps the current-key binding. The same
+  late arrival lets the DeviceGroup lineage fall back to the current seed,
+  so such a device can also open, found or knock another DeviceGroup.
+- Decision (2026-11-15): a device does not bind, publish a KeyPackage,
+  join a conversation or channel, or open, found or knock the DeviceGroup
+  while the account's own conversation link (ADR-0074 3.7, verified against
+  the device's own current key) names a key it does not hold; it waits in a
+  parked "earlier keys missing" state (UX `identity-recovery.md` 8a),
+  fetching the backup itself and offering pairing. Pairing carries the
+  earlier keys inside the recovery row (payload v3), so they arrive exactly
+  when the account keys do. No fallback to the current key and no time
+  bound (chosen; the reset stays the last resort).
+- Closes when built and walked on web, iOS and Android: a device added or
+  restored after a rotation binds under the conversation key and opens the
+  same DeviceGroup and PublisherGroups as its siblings.
+
+
+### G-57: Signed donation methods: what the signature does not stop
+
+- Status: open, by design for the parts below; the signing itself is
+  built (2026-11-16) in `lakko-attest` (`donation` module), the wasm and
+  UniFFI surfaces (`verifyDonationMethod`, `verifyDonationPhone`),
+  `tools/donations`,
+  `services/discovery` (`donate.rs`) and the systemd units, host-tested
+  only, not deployed. UX `docs/ux/donations.md` section 3.
+- What changed: every donation method (payment link, SHA-256 of the QR
+  image, crypto coin / network / address) and every phone number is an
+  Ed25519 statement signed offline by a dedicated donations key that is
+  never on a server. The web client shows only statements that verify
+  against the key pinned into its build, so a server operator (or an
+  attacker holding the server) can no longer show their own address or
+  link on the donations page. Discovery reads the signed file as a
+  systemd credential (root 0600 at rest; plain, since Ubuntu 22.04's
+  systemd 249 has no `LoadCredentialEncrypted=`).
+- Residual 1, the main one: the web client and its pinned key are served
+  by the same server. A takeover that also replaces the web bundle ships a
+  bundle with another key, or none, and the check passes in a browser.
+  The desktop app serves the web build bundled in the app, so there the
+  check holds. On iOS and Android the Settings row opens a native screen
+  (2026-11-16) that verifies against a key built into the app
+  (Info.plist `LakkoDonationsKey` / `BuildConfig.LAKKO_DONATIONS_KEY`,
+  UX `docs/ux/donations.md` section 4; unit-tested only), so the residual
+  is closed there in code; it stays for a visitor who opens
+  `/donations` in a browser.
+- Residual 2: the server chooses which methods a country sees (the
+  `countries` rule is unsigned), so it can hide any method, and it can
+  serve an older statement signed for the same id (a retired address,
+  link or phone number). A statement carries `signed_at_unix_millis` but
+  no expiry, and no client compares it against anything. Retiring an
+  address safely means signing nothing more for that id is not enough:
+  the maintainer must treat every address ever signed as one that may be
+  shown again, or rotate the donations key (which invalidates every
+  earlier statement once the web build pins the new key).
+- Residual 3: anyone holding the offline seed file can sign methods. The
+  seed is written mode 0600 by `just gen-donations-key` and is never on a
+  server or in the repository (`.gitignore`), but its custody is the
+  maintainer's.
+- Closes for residual 1 on iOS and Android when the native screens ship
+  and verify statements against the key built into the app (the desktop
+  app's bundled build already holds); a browser visit to
+  `lakko.me/donations` keeps the residual.
+
+
+<a id="g-58"></a>
+### G-58: A device behind a conversation: what recovery cannot reach
+
+- Status: open (proposed with [ADR-0091](../adr/0091-conversation-rejoin.md),
+  2026-11-18). Phase 1 and 1b (prevention, C-92) built 2026-11-18 on
+  `services/ds` and the three clients; phase 2 core and both FFI surfaces
+  (recovery, C-93) built 2026-11-19; nothing walked, nothing deployed.
+- A member registrar (ADR-0057) can append an epoch with a garbage commit
+  row. Every honest device then reads a `latest_epoch` above its own and is
+  suspected: it stops acting in that conversation and asks to come back, and
+  nobody can answer (no re-admitter is at the fake epoch). Nothing is
+  deleted; the suspicion is shown only after 10 minutes without other
+  evidence; the owner's or an admin's journal repair removes the fake epoch
+  (it is allowed exactly when there is no evidence of real progress), and
+  the suspicion clears everywhere.
+- A single-device account removed from a group while its device was behind
+  waits with no end: its removal is the commit it cannot apply, no
+  re-admitter acts (its leaf is gone from their roster), and the maintainer
+  chose no time limit (ADR-0091 decision 2).
+- A group whose only owner or admin is the behind device recovers on route 3
+  only once the owner opens another device there (an ADR-0050 admission by
+  any member brings that device in, then route 1 applies).
+- Closed in phase 1b: a commit-shaped garbage row a member posted through the
+  plain publish route used to hold devices until their attempts were spent;
+  the DS now names the registered commit row, so it holds nobody.
+- A device brought back by a plain member holds no push routing secret until
+  the owner's next rotation or redistribution (live walk 2026-11-19). The
+  re-admitter re-sends the secret only as the owner or an admin, since the
+  ADR-0042 receive gate keeps a plain member's secret only when it is the
+  bytes already held; the gate is unchanged. Until then the device receives
+  no push wake for that group and reads it when it polls.

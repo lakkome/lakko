@@ -91,6 +91,12 @@
 //!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` / `_EMAIL_VAULT_STORE` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
 //!   the recovery email's limits, each `N/SECS` (defaults chosen, not
 //!   measured; see `src/limits.rs`).
+//! - `LAKKO_ANON_CRED_MASTER_SECRET` — 64 hex characters shared with
+//!   `lakko-svc-channels` only (ADR-0092 section 4.4; a master of its own,
+//!   not the anonymous-token one). Optional; unset = `/auth/anon-credential*`
+//!   return 503 `anon-credential-disabled`.
+//! - `LAKKO_AUTH_LIMIT_ANON_CREDENTIAL` — per-account window of the two
+//!   credential routes, `N/SECS` (default 30/86400; chosen, not measured).
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
 //!   86400; must match every verifier).
 //! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` — tokens per account per epoch for one
@@ -123,6 +129,11 @@
 //! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
 //! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
 //! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
+//! - `PUT  /auth/anon-credential/commitment` — register the channel-poll credential commitment
+//!   (ADR-0092 section 4.2, bearer-auth; `409 commitment-already-registered` for another one)
+//! - `POST /auth/anon-credential`    — issue the current period's channel-poll credential
+//!   (ADR-0092 section 4.2, bearer-auth)
+//! - `GET  /auth/anon-credential/key/{period}` — that credential's public key (anonymous)
 //! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth;
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
 //!   between handle changes)
@@ -200,6 +211,7 @@
 
 mod account_cap;
 mod account_notices;
+mod anon_credential;
 mod anon_tokens;
 mod backup_head;
 mod call_jwt;
@@ -214,6 +226,7 @@ mod key_rotate;
 mod limits;
 mod login_handle;
 mod mail;
+mod metrics;
 mod opaque;
 mod passkey_vault;
 mod phrase_saved;
@@ -359,6 +372,10 @@ pub(crate) struct AppState {
     /// secret + epoch window + per-context quotas). `None` when
     /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset: `/auth/tokens*` return 503.
     pub(crate) anon_tokens: Option<Arc<anon_tokens::AnonTokenIssuer>>,
+    /// ADR-0092 section 4.2 — anonymous-credential issuance for channel
+    /// polls. `None` when `LAKKO_ANON_CRED_MASTER_SECRET` is unset:
+    /// `/auth/anon-credential*` return 503.
+    pub(crate) anon_cred: Option<Arc<anon_credential::AnonCredIssuer>>,
     /// ADR-0054 S5 — pepper keying the stored login handles
     /// (`LAKKO_AUTH_HANDLE_PEPPER`, 64 hex). `None` disables every route that
     /// names an account by login handle (503 `login-by-name-disabled`).
@@ -397,6 +414,9 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env("auth", env!("CARGO_PKG_VERSION"), "LAKKO_AUTH_METRICS_BIND")
+        .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -420,6 +440,10 @@ async fn main() -> Result<()> {
 
     // Apply embedded migrations on startup. Idempotent.
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let gauge_pool = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (gauge_pool.size(), gauge_pool.num_idle()));
 
     // Load (or initialize on first run) the server-static OPAQUE setup.
     // Runs AFTER migrations so opaque_server_setup table exists.
@@ -556,6 +580,10 @@ async fn main() -> Result<()> {
         supporter_codes::load_pepper().context("load LAKKO_AUTH_SUPPORTER_CODE_PEPPER")?;
     let anon_tokens = anon_tokens.map(|i| i.with_supporter_pepper(supporter_pepper));
     supporter_codes::log_startup(anon_tokens.as_ref());
+    // ADR-0092 section 4.2 — the channel-poll credential master.
+    let anon_cred =
+        anon_credential::load_anon_credential().context("load anonymous-credential config")?;
+    anon_credential::log_startup(anon_cred.as_ref());
 
     // ADR-0054 S5 — the login-handle pepper. Loud-fail on a malformed value;
     // dormant (with a warning) when unset.
@@ -598,6 +626,7 @@ async fn main() -> Result<()> {
         room_cap: Arc::new(room_cap),
         backup_head_mint_rate,
         anon_tokens: anon_tokens.clone().map(Arc::new),
+        anon_cred: anon_cred.map(Arc::new),
         handle_pepper: handle_pepper.map(Arc::new),
         recovery_email: recovery_email.map(Arc::new),
         limits: limits.clone(),
@@ -632,6 +661,8 @@ async fn main() -> Result<()> {
             .spawn_pruner()
     });
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.
+    // ADR-0092 — drop credential issuance rows older than the previous period.
+    let _anon_cred_pruner = anon_credential::spawn_pruner(pool.clone());
     let _anon_token_pruner = anon_tokens.as_ref().map(|i| {
         lakko_anon_token_server::spawn_issuance_pruner(pool.clone(), i.server.window_secs)
     });
@@ -862,6 +893,23 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
+    // ADR-0092 section 4.2 — the channel-poll credential: register the
+    // account's commitment once, then one credential per period. Bearer-auth;
+    // the per-period public key is anonymous (public router below).
+    let anon_cred_routes = Router::new()
+        .route(
+            "/auth/anon-credential/commitment",
+            put(anon_credential::register_commitment),
+        )
+        .route(
+            "/auth/anon-credential",
+            post(anon_credential::issue_credential),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -1023,6 +1071,15 @@ fn build_app(state: AppState) -> Router {
             "/auth/supporter-code/redeem",
             post(supporter_codes::redeem),
         )
+        // ADR-0092 — the channel-poll credential key of a period. ANONYMOUS:
+        // a client checks the issuance proof against this key.
+        .route(
+            "/auth/anon-credential/key/{period}",
+            get(anon_credential::public_key),
+        )
+        .merge(anon_cred_routes)
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("auth"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

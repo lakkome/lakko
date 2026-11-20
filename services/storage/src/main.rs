@@ -63,6 +63,11 @@
 //!   `LAKKO_STORAGE_READ_PASS_KEEPS` (5000) - chosen, not measured
 //! - `LAKKO_STORAGE_BLOB_LIFETIME_DAYS` (365; 0 disables the sweep),
 //!   `LAKKO_STORAGE_SWEEP_INTERVAL_SECS` (86400)
+//! - `LAKKO_STORAGE_VAULT_MAX_BYTES` (67108864),
+//!   `LAKKO_STORAGE_VAULT_MAX_CHUNKS` (256),
+//!   `LAKKO_STORAGE_VAULT_WRITES_PER_HOUR` (240) - per-vault limits, chosen,
+//!   not measured; the vault index lives beside the blob index (same
+//!   database, or the same index file)
 //! - `RUST_LOG` - `tracing-subscriber` env-filter spec
 //!
 //! # Endpoints
@@ -72,6 +77,9 @@
 //! - `PUT` / `GET` / `HEAD` / `DELETE /blob/{sha256_hex}`, `POST /blob/keep`
 //! - `PUT` / `GET` / `DELETE /backup` - the per-account backup blob, session
 //!   token (unchanged; not indexed, never swept)
+//! - `PUT` / `DELETE /vault/{id}`, `PUT` / `GET /vault/{id}/head`,
+//!   `PUT` / `GET /vault/{id}/chunk/{n}` - the conversation vaults of
+//!   ADR-0064 section 1 ([`vault`] lists the credentials and codes)
 
 #![forbid(unsafe_code)]
 
@@ -81,10 +89,12 @@ mod blob;
 mod disk;
 mod index;
 mod internal;
+mod metrics;
 mod pass;
 mod store;
 mod stream;
 mod sweep;
+mod vault;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -102,7 +112,7 @@ use lakko_auth_token::TokenSecret;
 use serde_json::json;
 use tokio::signal;
 
-use crate::index::BlobIndex;
+use crate::index::{BlobIndex, VaultIndex, VaultLimits};
 use crate::pass::{BudgetLedger, PassLimits, PassSecret, PASS_SECRET_VAR};
 use crate::store::{BlobStore, FsStore};
 
@@ -146,8 +156,13 @@ pub(crate) struct AppState {
     pub(crate) limits: PassLimits,
     /// What each live pass has spent.
     pub(crate) ledger: Arc<BudgetLedger>,
-    /// The anonymous-token spend gate for the two pass routes.
+    /// The anonymous-token spend gate for the two pass routes and the vault
+    /// claim.
     pub(crate) tokens: TokenVerifier,
+    /// The vault index (the same store as `index`).
+    pub(crate) vaults: Arc<dyn VaultIndex>,
+    /// Per-vault limits.
+    pub(crate) vault_limits: VaultLimits,
 }
 
 fn env_u64(name: &str, default: u64) -> Result<u64> {
@@ -184,6 +199,28 @@ fn pass_limits_from_env() -> Result<PassLimits> {
     Ok(limits)
 }
 
+fn vault_limits_from_env() -> Result<VaultLimits> {
+    let d = vault::DEFAULT_LIMITS;
+    let limits = VaultLimits {
+        max_bytes: env_u64("LAKKO_STORAGE_VAULT_MAX_BYTES", d.max_bytes)?,
+        max_chunks: u32::try_from(env_u64(
+            "LAKKO_STORAGE_VAULT_MAX_CHUNKS",
+            u64::from(d.max_chunks),
+        )?)
+        .context("LAKKO_STORAGE_VAULT_MAX_CHUNKS out of range")?,
+        max_writes_per_hour: u32::try_from(env_u64(
+            "LAKKO_STORAGE_VAULT_WRITES_PER_HOUR",
+            u64::from(d.max_writes_per_hour),
+        )?)
+        .context("LAKKO_STORAGE_VAULT_WRITES_PER_HOUR out of range")?,
+        reservation_ms: d.reservation_ms,
+    };
+    if limits.max_bytes == 0 || limits.max_writes_per_hour == 0 {
+        bail!("LAKKO_STORAGE_VAULT_MAX_BYTES and LAKKO_STORAGE_VAULT_WRITES_PER_HOUR must be positive");
+    }
+    Ok(limits)
+}
+
 fn pass_secret_from_env() -> Result<Option<Arc<PassSecret>>> {
     match std::env::var(PASS_SECRET_VAR) {
         Ok(v) if !v.trim().is_empty() => Ok(Some(Arc::new(
@@ -199,10 +236,12 @@ fn pass_secret_from_env() -> Result<Option<Arc<PassSecret>>> {
     }
 }
 
-/// The index, the token verifier over the same store, and the file index
-/// when that is the one in use (it is compacted after a sweep).
+/// The blob index, the vault index over the same store, the token verifier
+/// over the same store, and the file index when that is the one in use (it
+/// is compacted after a sweep).
 type OpenedIndex = (
     Arc<dyn BlobIndex>,
+    Arc<dyn VaultIndex>,
     TokenVerifier,
     Option<Arc<index::file::FileIndex>>,
 );
@@ -226,9 +265,15 @@ async fn open_index(
             .run(&pool)
             .await
             .context("run storage migrations")?;
-        tracing::info!("blob index: MariaDB");
+        // Connections in use and idle (ADR-0096); only with a database.
+        let sampled = pool.clone();
+        let _pool_gauge =
+            lakko_metrics::spawn_pool_gauge(move || (sampled.size(), sampled.num_idle()));
+        tracing::info!("blob and vault index: MariaDB");
+        let sql = Arc::new(index::sql::SqlIndex::new(pool.clone()));
         return Ok((
-            Arc::new(index::sql::SqlIndex::new(pool.clone())),
+            sql.clone(),
+            sql,
             TokenVerifier::new(pool, token_config),
             None,
         ));
@@ -238,9 +283,14 @@ async fn open_index(
             .context("open the blob index file")?,
     );
     tracing::info!(
-        "blob index: file (single instance; set LAKKO_STORAGE_DATABASE_URL for MariaDB)"
+        "blob and vault index: file (single instance; set LAKKO_STORAGE_DATABASE_URL for MariaDB)"
     );
-    Ok((f.clone(), TokenVerifier::in_memory(token_config), Some(f)))
+    Ok((
+        f.clone(),
+        f.clone(),
+        TokenVerifier::in_memory(token_config),
+        Some(f),
+    ))
 }
 
 /// The S3 store, checked, or `None` when no bucket is configured.
@@ -308,6 +358,13 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "storage",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_STORAGE_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -348,6 +405,7 @@ async fn main() -> Result<()> {
 
     let pass_secret = pass_secret_from_env()?;
     let limits = pass_limits_from_env()?;
+    let vault_limits = vault_limits_from_env()?;
     let lifetime_days = u32::try_from(env_u64("LAKKO_STORAGE_BLOB_LIFETIME_DAYS", 365)?)
         .context("LAKKO_STORAGE_BLOB_LIFETIME_DAYS out of range")?;
     let sweep_interval = env_u64("LAKKO_STORAGE_SWEEP_INTERVAL_SECS", 86_400)?;
@@ -356,7 +414,7 @@ async fn main() -> Result<()> {
     }
 
     let token_config = AnonTokenServerConfig::from_env().context("anonymous-token config")?;
-    let (index, tokens, file_index) = open_index(&blob_root, token_config).await?;
+    let (index, vaults, tokens, file_index) = open_index(&blob_root, token_config).await?;
     tokens.log_startup("storage");
     let _spent_pruner = tokens.spawn_pruner();
 
@@ -399,6 +457,8 @@ async fn main() -> Result<()> {
         limits,
         ledger: Arc::new(BudgetLedger::default()),
         tokens,
+        vaults,
+        vault_limits,
     };
 
     // The internal listener auth removes a deleted account's backup through.
@@ -462,12 +522,38 @@ pub(crate) fn build_app(state: AppState) -> Router {
                 .delete(blob::delete_blob),
         )
         .layer(DefaultBodyLimit::max(MAX_BLOB_BYTES))
+        .merge(vault_routes())
         .merge(backup_routes)
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("storage"))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(lakko_log_hygiene::request_span),
         )
         .with_state(state)
+}
+
+/// The vault routes (ADR-0064 section 1), each with its own body ceiling.
+fn vault_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/vault/{hex}",
+            put(vault::claim_vault)
+                .delete(vault::delete_vault)
+                .route_layer(DefaultBodyLimit::max(vault::MAX_CLAIM_BODY)),
+        )
+        .route(
+            "/vault/{hex}/head",
+            put(vault::put_head)
+                .get(vault::get_head)
+                .route_layer(DefaultBodyLimit::max(vault::MAX_OBJECT_BODY)),
+        )
+        .route(
+            "/vault/{hex}/chunk/{n}",
+            put(vault::put_chunk)
+                .get(vault::get_chunk)
+                .route_layer(DefaultBodyLimit::max(vault::MAX_OBJECT_BODY)),
+        )
 }
 
 /// Liveness probe - process is alive, no I/O.
@@ -550,19 +636,22 @@ pub(crate) mod test_support {
     pub(crate) fn state_with(limits: PassLimits, passes: bool) -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let secret = TokenSecret::new(vec![0x42u8; 32]).expect("32 bytes is over MIN_SECRET_LEN");
-        let index = index::file::FileIndex::open(tmp.path().join(INDEX_FILE)).expect("index");
+        let index =
+            Arc::new(index::file::FileIndex::open(tmp.path().join(INDEX_FILE)).expect("index"));
         let token_config =
             AnonTokenServerConfig::from_values(Some(&master_hex()), None).expect("config");
         let state = AppState {
             blob_root: Arc::new(tmp.path().to_path_buf()),
             store: Arc::new(FsStore::new(tmp.path().to_path_buf())),
             session_token_secret: Arc::new(secret),
-            index: Arc::new(index),
+            index: index.clone(),
             node: Arc::from("local"),
             pass_secret: passes.then(|| Arc::new(PassSecret::from_bytes([0x33; 32]))),
             limits,
             ledger: Arc::new(BudgetLedger::default()),
             tokens: TokenVerifier::in_memory(token_config),
+            vaults: index,
+            vault_limits: vault::DEFAULT_LIMITS,
         };
         (state, tmp)
     }

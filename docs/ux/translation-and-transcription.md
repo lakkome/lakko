@@ -65,10 +65,68 @@ read (after Copy). It is offered when all of these hold:
   language (section 7).
 
 When the device could not tell the language, the row is still offered if it can
-translate at all, and the translation opens with the language picker of 3.4.
+translate at all. Choosing it translates at once from the detector's best
+guess, even an unsure one, and the quiet line carries `Not Dutch?` (3.4) to
+correct it. The source, in this order: a language chosen for this message in
+the picker; a confident detection; the conversation's language when the
+detection is unsure and lists it among its close candidates (below); the
+detector's best guess, even an unsure one, when it is usable; its next close
+candidate this device can translate from; the language the person chose for
+this conversation (3.4); otherwise the picker. A guess is not usable when it is the language
+translated into or one this device cannot translate from: neither line could
+be corrected from there, so the conversation's language is used instead, and
+without one the picker opens with the guess marked. The picker also opens
+first when there is no guess at all (no letters) and no language chosen for
+the conversation. The conversation's language comes after an unsure guess
+because one pick in a chat must not decide every later message the detector is
+unsure about: found live on 2026-11-15, a chat where Dutch was once picked had
+a Ukrainian message (`uk` at 0.67, under the confident line) translated from
+Dutch. Built on web, iOS and Android (2026-11-15), host-tested only.
+
+Every client detects the language on the device: iOS with the system detector,
+Android and a browser without its own detector model with Lakko's own (ADR-0082
+note of 2026-11-15; until then Android always opened the picker). On Android
+and the web about half of one-sentence messages get a sure answer (more for
+Polish or German, fewer for Dutch or Italian, as measured in the ADR); the
+rest, and short ones ("ok", "hola"), stay unsure and are translated from the
+guess as above. Chinese stays unsure there too: Lakko's detector cannot tell
+Simplified from Traditional.
 
 Choosing it replaces the text in the bubble with the translation (3.2). On a
 message already showing a translation the row reads `Show original`.
+
+The language is also named up front: an incoming message whose detected
+language is not one of the person's reading languages shows the quiet line
+`Spanish · Translate` under its text before anything is translated (3.2). The
+same rule as the row decides it (not own, has text, the setting on, not a
+reading language, and an unsure guess that is a reading language gets no line
+either, so a short "ok" stays clean). The language named is always the one
+`Translate` would start from, decided once for both by the order above, so
+the line and the tap never disagree: for "hola, qué tal?", an unsure Catalan
+with Spanish, French and Italian close (below) on a device that cannot
+translate from Catalan, the line reads `Spanish · Translate` and the tap
+translates from Spanish, which `Not Spanish?` corrects (seen on a Pixel with
+no line at all before 2026-11-15). When the detection is sure and this device
+cannot translate from its language, the line shows the name alone, with no
+`Translate` (`Turkmen`; never relabelled). The only message with no line is
+one whose detection is unsure and none of whose close candidates this device
+can translate from (seen on a Pixel: "goedendag" named Turkmen).
+
+A short message is often a near tie: "hola, qué tal?" scores Catalan, Spanish,
+French and Italian within a few hundredths of each other. So an unsure
+detection carries up to three close candidates beside its best guess (ADR-0082
+note of 2026-11-15). The conversation's languages decide among those
+candidates: a language the person picked here (`Not X?` or the picker) wins,
+the most recently picked first; otherwise the candidate with the most
+messages in this conversation the detector was sure of; a tie, or none, goes
+in the detector's order. The result is used on the line, as the `Translate`
+source and as the `X` of `Not X?`, and it is the same however the messages
+were loaded or scrolled: "hola, qué tal?" in a chat with one sure Spanish and
+one sure Italian message reads Spanish on every launch. It never replaces a
+sure detection and never names a language outside the candidates, so one
+Spanish chat does not turn a Ukrainian message Spanish. Built on web, iOS and Android
+(2026-11-15), unit-tested only.
+`Translate` on the line does exactly what the row does, in the order above.
 
 ### 3.2 A translated bubble
 
@@ -78,7 +136,9 @@ one quiet line in the bubble's secondary text colour:
 `Translated from Spanish · Show original`
 
 `Show original` is a button; it puts the original back and the line becomes
-`Spanish · Translate`. The language name is in the interface language. Nothing
+`Spanish · Translate`. The same line is shown before any translation on a
+message in a language the person does not read (3.1), and a translation,
+chosen or automatic (3.7), replaces it with the line above. The language name is in the interface language. Nothing
 else in the bubble changes: author, time, reactions, reply quote, attachments
 stay where they were.
 
@@ -112,8 +172,10 @@ exception:
 When detection is unsure or wrong, the quiet line under a translation and the
 translating state carry `Not Spanish?`, which opens a short list of the
 languages this device can translate from, own names as titles (the rule of
-[`localization.md`](localization.md) section 2). The choice applies to this
-message and is remembered for the conversation.
+[`localization.md`](localization.md) section 2). The detector's other close
+candidates for this message (3.1) come first, then every other language in the
+usual order. The choice applies to this message and is kept for the
+conversation, where it decides later near ties (3.1).
 
 ### 3.5 Language packs
 
@@ -131,15 +193,42 @@ itself can reveal which language was asked for, and what the dialog then says,
 is decided in the ADR (decision 4); the dialog must not claim more privacy than
 the download has.
 
-While anti-censorship is on, no pack is downloaded (the download would leave
-the device outside the protected connection): the dialog is replaced by one
-line, `Language packs can't be downloaded while anti-censorship is on`, and
-packs already on the device keep working.
+Anti-censorship does not change any of this (amended 2026-11-19,
+maintainer; ADR-0082 note of that date): the dialog is offered and the pack
+downloaded whether it is on or off. A pack download is ordinary traffic to
+Apple or Google and tells a censor nothing about Lakko. A download that fails,
+for example because the network blocks Apple or Google too, shows the ordinary
+download-failure line. (Until that date the dialog was replaced by the line
+`Language packs can't be downloaded while anti-censorship is on`; that line is
+removed.)
 
 While downloading, the quiet line reads `Downloading Spanish… 40%` and the
 action can be cancelled from it. A pack is downloaded only on Wi-Fi unless the
 person allows mobile data in settings (section 6); on mobile data without that
 permission the dialog's button reads `Download on Wi-Fi` and the download waits.
+
+A line never stays on `Downloading Spanish…` with nothing watching it. When
+the device only accepts the request and fetches the pack later, the line goes
+back to `Spanish · Translate` (the transcript closes); the next `Translate`
+asks the device again and translates once the pack is there (ADR-0082 note of
+2026-11-15). On Android the pack of a pair the system service cannot supply
+comes from ML Kit, so the dialog there says `The pack comes from Google.`
+
+In the desktop app on macOS a translation pack is downloaded by macOS in its
+own settings, never by Lakko (ADR-0082 note of 2026-11-18). The dialog keeps
+its title and says where:
+
+> **Download Spanish for translation?**
+> Translation happens on this device. macOS downloads the Spanish pack in
+> System Settings: Language & Region, then Translation Languages. Messages
+> are never sent anywhere to be translated.
+> `Not now` · `Open System Settings`
+
+`Open System Settings` opens Language & Region. Nothing waits on it: the line
+goes back to `Spanish · Translate`, and the next `Translate` asks macOS again.
+The names are the ones macOS shows in the interface language. A transcription
+pack on macOS downloads in the app, as on iOS. As on every client, packs are
+offered with anti-censorship on (amended 2026-11-19).
 
 ### 3.6 The conversation bar
 
@@ -249,11 +338,20 @@ A sub-screen of Settings > Language (the IA of the design system, section 4):
   Never offered for translation, never trigger the bar.
 - **Translate into**: the interface language by default.
 - **Show transcript button** (on by default).
-- **Download packs on mobile data** (off by default).
+- **Download packs on mobile data** (off by default). Shown only where Lakko
+  itself starts a pack download and the device can tell a mobile connection
+  from another: iOS, Android, and a browser that reports its connection type
+  (Chrome on Android). Not shown in the desktop app (macOS fetches a
+  translation pack in System Settings, and the app cannot tell a mobile
+  connection) nor in a browser that reports no connection type: there the
+  switch would govern nothing (amended 2026-11-18).
 - **Language packs on this device**: each pack with its size, for translation,
   transcription or both, with `Remove`. Only packs Lakko itself downloaded are
   listed; packs the operating system manages are listed with `Managed by
-  iOS` / `Managed by Android` and no Remove.
+  iOS` / `Managed by Android` and no Remove. In the desktop app on macOS the
+  list also holds the languages macOS reports ready on this Mac (translation
+  into the target, and the installed speech models), each `Managed by your
+  system` with no Remove, as iOS lists Apple's packs (amended 2026-11-18).
 - **Delete all translations and transcripts**: removes every one stored on this
   device. A confirmation dialog says how many.
 - One paragraph at the bottom: "Translation and transcription happen on this
@@ -261,8 +359,13 @@ A sub-screen of Settings > Language (the IA of the design system, section 4):
   translated or transcribed."
 
 When this device cannot do one of the two at all, its rows are replaced by one
-line, e.g. `Transcription isn't available on this device` (web: `in this
-browser`), with no action.
+line, e.g. `Transcription isn't available on this device` (web in a
+browser: `in this browser`; the desktop app uses the device wording), with no
+action. A pack the system manages reads `Managed by your browser` in a browser
+and `Managed by your system` in the desktop app. The desktop app on macOS 26.4 and
+later translates and transcribes with Apple's on-device engines (section 7,
+case 1 or 2); on Windows and Linux, and on older macOS, it shows the
+`isn't available on this device` lines until Lakko's own engine exists.
 
 These settings are per device and never reach a server, like the interface
 language ([`localization.md`](localization.md) section 4).

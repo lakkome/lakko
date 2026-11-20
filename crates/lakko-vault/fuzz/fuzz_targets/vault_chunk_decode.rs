@@ -10,6 +10,8 @@
 //! 2. A decoded chunk is within the size bound and validates.
 //! 3. It re-encodes to the identical bytes (the encoding is canonical).
 //! 4. Merging its messages with themselves is sorted and holds each id once.
+//! 5. Record version 2 (ADR-0092): every content block (kind, payload,
+//!    state) and every audio title and artist is within its bound.
 
 #![no_main]
 

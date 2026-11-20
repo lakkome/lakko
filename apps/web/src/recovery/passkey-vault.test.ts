@@ -69,16 +69,23 @@ describe("passkeyKeysOutcome", () => {
 });
 
 describe("passkeyAddOutcome", () => {
-  it("offers the choice when the registration yielded the secret", () => {
-    expect(passkeyAddOutcome({ prfOutput: true, prfEnabled: null })).toBe("offer-keys-choice");
+  it("stores the keys when the registration yielded the secret", () => {
+    expect(passkeyAddOutcome({ prfOutput: true, prfEnabled: null })).toBe("store-keys");
   });
 
-  it("offers the choice when the secret comes at the next use", () => {
-    expect(passkeyAddOutcome({ prfOutput: false, prfEnabled: true })).toBe("offer-keys-choice");
+  it("stores the keys when the secret comes at the next use", () => {
+    expect(passkeyAddOutcome({ prfOutput: false, prfEnabled: true })).toBe("store-keys");
   });
 
-  it("is sign-in only when the platform cannot protect keys with the passkey", () => {
+  it("asks the passkey once more when the browser said nothing about PRF", () => {
+    expect(passkeyAddOutcome({ prfOutput: false, prfEnabled: null })).toBe("store-keys");
+  });
+
+  it("is sign-in only only when the browser said the passkey cannot carry keys", () => {
     expect(passkeyAddOutcome({ prfOutput: false, prfEnabled: false })).toBe("signin-only");
-    expect(passkeyAddOutcome({ prfOutput: false, prfEnabled: null })).toBe("signin-only");
+  });
+
+  it("stores the keys when the registration yielded them, whatever the flag said", () => {
+    expect(passkeyAddOutcome({ prfOutput: true, prfEnabled: false })).toBe("store-keys");
   });
 });

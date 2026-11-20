@@ -205,8 +205,8 @@ public fun FeedImportScreen(
                 TextButton(onClick = onDone) { Text(t("common.cancel")) }
             } else {
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    androidx.compose.material3.Icon(
-                        me.lakko.app.feed.FeedIcon.of(d.icon).vector(),
+                    me.lakko.app.ui.components.LkIcon(
+                        me.lakko.app.feed.FeedIcon.of(d.icon).drawable(),
                         contentDescription = null,
                     )
                     androidx.compose.foundation.layout.Spacer(Modifier.padding(start = 8.dp))

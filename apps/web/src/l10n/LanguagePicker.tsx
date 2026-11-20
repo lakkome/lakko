@@ -75,7 +75,7 @@ export function LanguagePicker(props: { onChosen?: () => void }): JSX.Element {
           when={pending() === p.key && spinning()}
           fallback={
             <Show when={isSelected(p.key)}>
-              <Icon name="check" size={20} />
+              <Icon name="checkmark" size={20} />
             </Show>
           }
         >
@@ -98,7 +98,7 @@ export function LanguagePicker(props: { onChosen?: () => void }): JSX.Element {
   return (
     <div class="lk-lang">
       <label class="lk-lang-search">
-        <Icon name="search" size={18} />
+        <Icon name="search" size={20} />
         <input
           type="search"
           dir="auto"

@@ -156,7 +156,9 @@ class Adr0087PhaseATest {
     }
 
     @Test
-    fun `a sent request waits 7 days before Ask again`() {
+    fun `a sent request waits a day before Ask again`() {
+        // Amended 2026-11-12 (UX 6.2): one day, was seven.
+        assertEquals(24L * 60 * 60 * 1000, ASK_AGAIN_AFTER_MS)
         val r = SentRequest(idHex = "ab", name = "Hike", handle = "hike", sentAtMs = 0, knockKeyB64 = "")
         assertTrue(sentRequestWaiting(r, ASK_AGAIN_AFTER_MS - 1))
         assertFalse(sentRequestWaiting(r, ASK_AGAIN_AFTER_MS))
@@ -164,6 +166,32 @@ class Adr0087PhaseATest {
         assertTrue(mayAskAgain(null, 1))
         assertEquals(listOf(r), decodeSentRequests(encodeSentRequests(listOf(r))))
         assertTrue(decodeSentRequests("not json").isEmpty())
+    }
+
+    @Test
+    fun `a link request round-trips with what Ask again needs and no knock key`() {
+        val r = SentRequest(
+            idHex = "cd",
+            name = "",
+            handle = "",
+            sentAtMs = 5,
+            capabilityB64 = "Y2Fw",
+            blobIdB64 = "YmxvYg==",
+        )
+        assertTrue(r.fromLink)
+        assertFalse(SentRequest(idHex = "ab", name = "Hike", handle = "hike", sentAtMs = 0, knockKeyB64 = "a2V5").fromLink)
+        assertEquals(listOf(r), decodeSentRequests(encodeSentRequests(listOf(r))))
+        // A row written before the link fields existed still reads.
+        val old = decodeSentRequests("""{"r":[{"idHex":"ab","name":"Hike","handle":"hike","sentAtMs":3,"knockKeyB64":"a2V5"}]}""")
+        assertEquals(1, old.size)
+        assertFalse(old[0].fromLink)
+    }
+
+    @Test
+    fun `one rule decides the wait for the list, the invite page and the publisher card`() {
+        assertTrue(requestStillWaiting(sentAtMs = 100, nowMs = 100 + ASK_AGAIN_AFTER_MS - 1))
+        assertFalse(requestStillWaiting(sentAtMs = 100, nowMs = 100 + ASK_AGAIN_AFTER_MS))
+        assertEquals(ASK_AGAIN_AFTER_MS, me.lakko.app.ui.channels.PUBLISHER_ASK_AGAIN_AFTER_MS)
     }
 
     @Test

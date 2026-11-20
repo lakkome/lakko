@@ -54,10 +54,10 @@ public data class ConversationListRow(
      */
     val lastActivityMs: Long?,
     /**
-     * Unread, pinned, muted and archived are keyed on a conversation id a
-     * channel does not carry (`docs/ux/navigation.md` section 6.1), so a
-     * channel row reports none of them. That is honest; inventing a badge that
-     * can never be non-zero is not.
+     * A chat's or group's unread count, or a channel's count of new posts.
+     * Pinned, muted and archived are the synced flags: a chat's or group's
+     * under its conversation id, a channel's under its channel id
+     * (`channels/ChannelFlags.kt`).
      */
     val unread: Int = 0,
     val pinned: Boolean = false,
@@ -81,7 +81,88 @@ public data class ConversationListRow(
     /** ADR-0087 — the group's or channel's `@name` (no `@`), "" when none:
      *  the local search matches it too. */
     val handle: String = "",
+    /** docs/ux/media-messages.md section 11 — the thumbnail at the start of
+     *  the line when the last message carries photos or videos. */
+    val previewThumb: PreviewThumb? = null,
 )
+
+/**
+ * docs/ux/media-messages.md section 11 — the 20-dp thumbnail a row's line
+ * starts with: the micro thumbnail carried inside the message ([inline],
+ * ADR-0047 section 6, drawn with no fetch), else the first photo or video's
+ * own sent thumb ([thumb], `null` when it was sent without one), how many
+ * photos and videos the message holds (two or more draw a stack), and whether
+ * the first is a video.
+ */
+public class PreviewThumb(
+    public val thumb: uniffi.lakko_ffi_uniffi.ThumbRef?,
+    public val count: Int,
+    public val video: Boolean,
+    /** ADR-0047 section 6 — the micro thumbnail, already bound-checked. */
+    inline: ByteArray? = null,
+) {
+    public val inline: ByteArray? = me.lakko.app.media.inlineThumbOrNull(inline)
+
+    /** The cache key of the thumb blob, `null` without one. */
+    public val key: String? = thumb?.blobId?.let { java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(it) }
+
+    /** Where the row's picture comes from: the micro thumbnail first, the
+     *  sent thumb blob only when there is none. */
+    public val source: RowThumbSource
+        get() = when {
+            inline != null -> RowThumbSource.Inline(inline)
+            thumb != null && key != null -> RowThumbSource.Blob(key, thumb)
+            else -> RowThumbSource.None
+        }
+
+    /** Edges drawn behind the thumbnail: none for one item, one for two, two for more. */
+    public val stackEdges: Int get() = when {
+        count >= 3 -> 2
+        count == 2 -> 1
+        else -> 0
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is PreviewThumb && other.key == key && other.count == count && other.video == video &&
+            (other.inline === inline || (other.inline != null && inline != null && other.inline.contentEquals(inline)))
+
+    override fun hashCode(): Int =
+        ((key?.hashCode() ?: 0) * 31 + (inline?.contentHashCode() ?: 0)) * 31 + count * 2 + if (video) 1 else 0
+}
+
+/** Where a list row's thumbnail comes from (section 11, ADR-0047 section 6). */
+public sealed interface RowThumbSource {
+    /** The micro thumbnail inside the message: decoded in memory, no fetch. */
+    public class Inline(public val bytes: ByteArray) : RowThumbSource
+
+    /** The sent thumb blob, fetched and opened when the row is drawn. */
+    public class Blob(public val key: String, public val thumb: uniffi.lakko_ffi_uniffi.ThumbRef) : RowThumbSource
+
+    /** Nothing to draw: the neutral placeholder. */
+    public data object None : RowThumbSource
+}
+
+/**
+ * The [PreviewThumb] of a message's attachments, or `null` when it carries no
+ * plain photo or video. A message with a voice message, video note, GIF or
+ * audio file keeps its own words and no thumbnail.
+ */
+public fun previewThumbOf(attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>): PreviewThumb? {
+    if (attachments.any { it.kind != null }) return null
+    val media = attachments.filter { ref ->
+        val mime = ref.mime?.lowercase(java.util.Locale.ROOT)
+        mime?.startsWith("image/") == true || mime?.startsWith("video/") == true
+    }
+    val first = media.firstOrNull() ?: return null
+    return PreviewThumb(
+        thumb = first.thumb,
+        count = media.size,
+        video = first.mime?.lowercase(java.util.Locale.ROOT)?.startsWith("video/") == true,
+        // The core keeps it on one ref only, the first allowlisted photo or
+        // video; read it wherever it is among the media.
+        inline = media.firstNotNullOfOrNull { me.lakko.app.media.inlineThumbOrNull(it.inlineThumb) },
+    )
+}
 
 /** The shared kind a chat-or-group row opens under. */
 public fun ConversationKind.toRowKind(): ConversationRowKind = when (this) {

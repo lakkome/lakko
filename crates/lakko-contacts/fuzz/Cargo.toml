@@ -355,3 +355,45 @@ path = "fuzz_targets/channel_read_key_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "publisher_device_request_decode"
+path = "fuzz_targets/publisher_device_request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_items_decode"
+path = "fuzz_targets/open_items_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_admission_mark_decode"
+path = "fuzz_targets/channel_admission_mark_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "poll_ballots_decode"
+path = "fuzz_targets/poll_ballots_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "conversation_reentry_decode"
+path = "fuzz_targets/conversation_reentry_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "knock_key_decode"
+path = "fuzz_targets/knock_key_decode.rs"
+test = false
+doc = false
+bench = false

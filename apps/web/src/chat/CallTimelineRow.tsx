@@ -63,7 +63,7 @@ export function CallTimelineRow(props: CallTimelineRowProps): JSX.Element {
         aria-label={props.canCallBack ? callRowAccessibleLabel(props.entry) : label()}
         onClick={() => props.onCallBack(props.entry)}
       >
-        <Icon name={props.entry.video ? "video" : "phone"} size={16} />
+        <Icon name={props.entry.video ? "video" : "phone"} size={20} />
         <span>{label()}</span>
       </button>
     </li>

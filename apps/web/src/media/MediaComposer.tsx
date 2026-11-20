@@ -84,7 +84,7 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
           if (e.detail === 0) r.onKeyboardActivate();
         }}
       >
-        <Icon name={isVideo() ? "video" : "mic"} size={20} />
+        <Icon name={isVideo() ? "video-fill" : "mic-fill"} size={20} />
       </button>
       {/* §3.1 — the second action on the same control, for the people who
           have no hold gesture. Visually hidden so the composer reads as one
@@ -167,8 +167,8 @@ function LockTarget(props: { recorder: Recorder }): JSX.Element {
         data-near={climb() <= -LOCK_SLIDE_PX / 2}
         aria-hidden="true"
       >
-        <Icon name="lock" size={16} />
-        <Icon name="chevron" size={16} class="lakko-lock-up" />
+        <Icon name="lock-fill" size={20} />
+        <Icon name="chevron-up" size={20} />
       </span>
     </Show>
   );

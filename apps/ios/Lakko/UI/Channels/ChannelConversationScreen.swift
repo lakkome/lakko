@@ -46,10 +46,15 @@ struct ChannelConversationScreen: View {
     @State private var photoPickerOpen = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var fileImporterOpen = false
+    /// ADR-0092 — the menu row picked, the editor on screen, the audio picker.
+    @State private var pendingMenuItem: AttachmentMenuItem?
+    @State private var contentScreen: ContentScreenRequest?
+    @State private var audioOpen = false
+    @State private var closeConfirm: ChannelTimelineItem?
     @State private var previewImageData: Data?
     @State private var width: CGFloat = 360
     @State private var onScreen: Set<UInt64> = []
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     private func onEnded() {
         if let onEndedHere { onEndedHere() } else { dismiss() }
@@ -207,33 +212,63 @@ struct ChannelConversationScreen: View {
             .lakkoDialog(
                 isPresented: $anonymousNote, title: l10n.t("channels.reactions.anonymous")
             ) { [.primary(l10n.t("common.ok")) {}] }
-            .lakkoActionSheet(isPresented: $attachSheet, title: l10n.t("chat.composer.attach")) {[
-                .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
-                    photoPickerOpen = true
-                },
-                .action(l10n.t("chat.media.file"), systemImage: "doc") { fileImporterOpen = true },
-            ]}
+            // ADR-0092 / UX section 2 — the same menu as a conversation; in
+            // a channel only the owner and publishers have a paperclip.
+            .sheet(isPresented: $attachSheet, onDismiss: runPendingMenuItem) {
+                AttachmentMenuSheet(rows: attachmentMenu(
+                    kind: .channel, role: model.isPublisher ? .owner : .member,
+                    hasCamera: ContentDevice.hasCamera, hasLocation: ContentDevice.hasLocation,
+                    callHoldsCamera: false)
+                ) { item in
+                    pendingMenuItem = item
+                    attachSheet = false
+                }
+            }
+            .fullScreenCover(item: $contentScreen) { request in channelContentScreen(request) }
+            .background(Color.clear.fileImporter(
+                isPresented: $audioOpen, allowedContentTypes: [.audio], allowsMultipleSelection: true
+            ) { result in
+                guard case .success(let urls) = result else { return }
+                // UX section 6 — the same audio upload as in a chat: kind
+                // audio, duration, cover as the thumb, title and artist from
+                // the file's own tags, through the composer tray.
+                model.tray.add(urls.map { .audio($0) })
+            })
+            .lakkoDialog(
+                isPresented: Binding(get: { closeConfirm != nil }, set: { if !$0 { closeConfirm = nil } }),
+                title: l10n.t("poll.close_confirm")
+            ) {
+                [.danger(l10n.t("poll.close")) {
+                    if let item = closeConfirm { Task { await model.closePoll(item) } }
+                 },
+                 .cancel()]
+            }
             .photosPicker(
                 isPresented: $photoPickerOpen, selection: $photoItems, maxSelectionCount: 10,
                 matching: .any(of: [.images, .videos]))
             .onChange(of: photoItems) { _, items in
                 photoItems = []
-                for item in items { Task { await stagePicked(item) } }
+                guard !items.isEmpty else { return }
+                Task { await addPicked(items, to: model.tray) }
             }
             .fileImporter(
                 isPresented: $fileImporterOpen, allowedContentTypes: [UTType.data],
                 allowsMultipleSelection: true
             ) { result in
                 guard case .success(let urls) = result else { return }
+                var sources: [ComposerTraySource] = []
                 for url in urls {
-                    Task {
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        guard let bytes = try? Data(contentsOf: url) else { return }
-                        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
-                        await model.stageAttachment(bytes: bytes, mime: mime, name: url.lastPathComponent)
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    guard let bytes = try? Data(contentsOf: url) else { continue }
+                    guard bytes.count <= AttachmentBridge.maxAttachmentBytes else {
+                        model.tray.report(.key("attach.preview.file_too_big"))
+                        continue
                     }
+                    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+                    sources.append(.file(bytes, name: url.lastPathComponent, mime: mime))
                 }
+                model.tray.add(sources)
             }
     }
 
@@ -349,6 +384,23 @@ struct ChannelConversationScreen: View {
                     editing = item
                 },
                 onDelete: { Task { await model.delete(item) } },
+                contentContext: item.contentEnvelopeB64 == nil ? nil : channelContentContext(item),
+                contentActions: channelContentActions(item),
+                onContentAction: { action in
+                    switch action {
+                    case .editChecklist: contentScreen = .checklist(editing: ChannelTimeline.message(item))
+                    case .closeChecklist:
+                        if let bytes = try? ContentFFI.composeClose(target: Int64(clamping: item.cursor), tally: nil) {
+                            Task { await model.publishContentOp(bytes) }
+                        }
+                    case .copyCoordinates:
+                        if case .location(let l)? = item.contentEnvelopeB64.flatMap({
+                            ContentModel.content(PersistedContent(envelopeB64: $0)) }) {
+                            MessageClipboard.copy(LocationText.coordinates(latE7: l.latE7, lonE7: l.lonE7))
+                        }
+                    default: closeConfirm = item
+                    }
+                },
                 onReact: { emoji in Task { await model.react(item, emoji: emoji) } },
                 onMoreReactions: { picker = PickerRequest(mode: .reaction, item: item) },
                 reactionRow: model.reactionRow(item),
@@ -369,6 +421,137 @@ struct ChannelConversationScreen: View {
                 })
                 .padding(.leading, 4)
         }
+    }
+
+    // MARK: - ADR-0092: the content kinds in a channel
+
+    private func runPendingMenuItem() {
+        guard let item = pendingMenuItem else { return }
+        pendingMenuItem = nil
+        switch item {
+        case .photoOrVideo: photoPickerOpen = true
+        case .camera: contentScreen = .camera
+        case .file: fileImporterOpen = true
+        case .audio: audioOpen = true
+        case .poll: contentScreen = .poll
+        case .checklist: contentScreen = .checklist(editing: nil)
+        case .location: contentScreen = .location
+        case .contact: contentScreen = .contact
+        case .article: contentScreen = .article(editing: nil)
+        }
+    }
+
+    @ViewBuilder
+    private func channelContentScreen(_ request: ContentScreenRequest) -> some View {
+        let publish: (ContentDraft, [AttachmentRef]) -> Void = { draft, refs in
+            contentScreen = nil
+            Task { await model.publishContent(draft, attachments: refs) }
+        }
+        switch request {
+        case .poll:
+            PollEditorScreen(
+                anonymity: pollAnonymity(kind: .channel, accounts: 0),
+                onCreate: { publish($0, []) }, onCancel: { contentScreen = nil })
+        case .checklist(let editing):
+            ChecklistEditorScreen(
+                initial: editing.flatMap { ChecklistView.make(message: $0) }.map { view in
+                    ChecklistBody(
+                        title: view.state.title, othersAdd: false, othersMark: false,
+                        items: view.state.items.compactMap { item in
+                            if case .author(let id) = item.item { return ChecklistItem(id: id, text: item.text) }
+                            return nil
+                        })
+                },
+                showsSwitches: false,
+                onDone: { body in
+                    if let editing {
+                        contentScreen = nil
+                        let signed = SignedChecklist(body: body, authorSig: nil)
+                        if let bytes = try? composeChecklistEditEnvelope(target: editing.messageId, checklist: signed) {
+                            Task { await model.publishContentOp(bytes) }
+                        }
+                    } else {
+                        publish(.checklist(body), [])
+                    }
+                },
+                onCancel: { contentScreen = nil })
+        case .location:
+            LocationScreen(onSend: { publish(.location($0), []) }, onCancel: { contentScreen = nil })
+        case .contact:
+            ContactCardPickerScreen(
+                candidates: ContactCardCandidates.load(), onSend: { publish(.contactCard($0), []) },
+                onCancel: { contentScreen = nil })
+        case .article:
+            ArticleEditorScreen(
+                groupIdHex: "channel-" + channelId, editing: nil,
+                upload: { bytes in
+                    let stamp = String(UUID().uuidString.prefix(8))
+                    guard let prepared = PhotoVideoPrep.preparePhoto(bytes, stamp: stamp), let payload = prepared.bytes
+                    else { return nil }
+                    return try? await AttachmentBridge.encryptAndUpload(
+                        bytes: payload, mime: prepared.mime, name: prepared.name,
+                        media: MediaAttachmentMeta(kind: nil, width: prepared.width, height: prepared.height),
+                        idleDays: ChannelConversationModel.fileIdleDays)
+                },
+                onPublish: { publish(.article($0), $1) }, onCancel: { contentScreen = nil })
+        case .reader(let message):
+            if let stored = message.content, case .article(let article)? = ContentModel.content(stored) {
+                ArticleReaderScreen(
+                    article: article, attachments: message.attachments, author: title, date: message.createdAt,
+                    onClose: { contentScreen = nil },
+                    menu: {
+                        [.action(l10n.t("common.copy"), icon: .copy) {
+                            MessageClipboard.copy(ArticleReaderScreen.plainText(article))
+                        }]
+                    })
+            }
+        case .camera:
+            CameraCaptureScreen(onSend: { media in
+                contentScreen = nil
+                model.tray.add([ComposerTraySource.captured(media)])
+            }, onClose: { contentScreen = nil })
+        case .results:
+            EmptyView()
+        }
+    }
+
+    /// The message-menu rows a content post adds (publishers close a poll,
+    /// edit or close a checklist; anyone copies a location).
+    private func channelContentActions(_ item: ChannelTimelineItem) -> [MessageMenuAction] {
+        guard let b64 = item.contentEnvelopeB64,
+              let content = ContentModel.content(PersistedContent(envelopeB64: b64)) else { return [] }
+        switch content {
+        case .poll: return model.isPublisher && !item.closedByOp ? [.closePoll] : []
+        case .checklist: return model.isPublisher && !item.closedByOp ? [.editChecklist, .closeChecklist] : []
+        case .location: return [.copyCoordinates]
+        default: return []
+        }
+    }
+
+    /// A channel post's card: a poll votes through the credential.
+    private func channelContentContext(_ item: ChannelTimelineItem) -> ContentBubbleContext {
+        ContentBubbleContext(
+            groupIdHex: "channel-" + channelId,
+            // Publishers tick and add as the channel (ADR-0092 section 5).
+            ownAccountKey: model.isPublisher ? Data(base64Encoded: ChannelTimeline.channelKeyB64) : nil,
+            nameOf: { _ in nil },
+            isOwnerOrAdmin: { _ in false },
+            vote: { _, choices in Task { await model.votePoll(item, choices: choices) } },
+            tick: { target, ref, done in
+                guard let bytes = try? composeChecklistTickEnvelope(target: target, item: ref, done: done) else { return }
+                Task { await model.publishContentOp(bytes) }
+            },
+            addItem: { target, text in
+                guard let bytes = try? composeChecklistAddEnvelope(target: target, text: text) else { return }
+                Task { await model.publishContentOp(bytes) }
+            },
+            openArticle: { contentScreen = .reader($0) },
+            openResults: { _ in },
+            contactCardState: { _ in .notice("") },
+            contactCardAction: { _, _ in },
+            pollOverride: { _ in model.pollView(item) },
+            pollSendState: model.pollSendState[item.cursor],
+            pollRetry: { Task { await model.votePoll(item, choices: model.pollView(item)?.ownChoices ?? []) } })
     }
 
     private func markNewestRead() {
@@ -400,10 +583,29 @@ struct ChannelConversationScreen: View {
         case .failed(let copy):
             statusBar(copy.text, danger: true, retry: true)
         case .reading:
-            // Section 12 — a subscriber has no composer: the timeline runs to
-            // the bottom of the pane.
-            EmptyView()
+            if let reader = model.readerDeviceRole {
+                // UX second-device 4a — the owner's or a publisher's device
+                // that cannot post: one line in place of the composer.
+                readerDeviceLine(reader)
+            } else {
+                // Section 12 — a subscriber has no composer: the timeline runs
+                // to the bottom of the pane.
+                EmptyView()
+            }
         }
+    }
+
+    /// No button, no link: secondary text where the composer would be.
+    private func readerDeviceLine(_ reader: ChannelReaderDeviceRole) -> some View {
+        Text(l10n.t(reader.lineKey))
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
+            .padding(12)
+            .background(Color.lakkoSurface)
+            .overlay(alignment: .top) { Rectangle().fill(Color.lakkoBorder).frame(height: 1) }
     }
 
     private var subscribeBar: some View {
@@ -444,34 +646,18 @@ struct ChannelConversationScreen: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if let err = model.sendError {
+            if let err = model.sendError ?? model.tray.problem {
                 Text(err.text)
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if !model.pendingAttachments.isEmpty || model.uploading {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(model.pendingAttachments.enumerated()), id: \.offset) { index, ref in
-                            HStack(spacing: 6) {
-                                Text(ref.name ?? ChannelTimeline.attachmentWord(ref))
-                                    .font(.footnote)
-                                    .lineLimit(1)
-                                Button { model.removePendingAttachment(at: index) } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundStyle(Color.lakkoTextMuted)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(l10n.t("chat.composer.remove_attachment"))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(Color.lakkoSurfaceSunken))
-                        }
-                        if model.uploading { ProgressView().controlSize(.small) }
-                    }
-                }
+            // `docs/ux/media-messages.md` section 11 — the tray, directly
+            // above the message field; hidden when empty.
+            if !model.tray.tray.isEmpty || model.tray.limitNotice != nil {
+                ComposerTrayView(
+                    store: model.tray, callActive: media.callActive,
+                    fetchVideo: { [media] ref in try await media.mediaFile(for: ref) })
             }
             if let denied = media.denied {
                 MediaDeniedCard(resource: denied) { media.dismissDenied() }
@@ -480,16 +666,19 @@ struct ChannelConversationScreen: View {
                 if showsRecordingBar {
                     RecordingBar(media: media).frame(maxWidth: .infinity, minHeight: 44)
                 } else {
-                    Button { attachSheet = true } label: { composerIcon("paperclip") }
+                    Button { attachSheet = true } label: { composerIcon(.paperclip) }
                         .buttonStyle(.plain)
-                        .disabled(model.uploading || model.sending)
+                        .disabled(model.sending)
                         .accessibilityLabel(l10n.t("chat.composer.attach"))
                     ComposerTextField(
                         text: $model.draft, caret: caret, disabled: model.sending,
                         onReturn: { Task { await model.sendDraft() } },
-                        focus: $composerFocused)
+                        focus: $composerFocused,
+                        onPasteMedia: { providers in
+                            Task { await stagePasted(providers) }
+                        })
                     Button { picker = PickerRequest(mode: .compose, item: nil) } label: {
-                        composerIcon("face.smiling")
+                        composerIcon(.faceSmiling)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(l10n.t("chat.composer.emoji_gifs"))
@@ -508,9 +697,12 @@ struct ChannelConversationScreen: View {
         }
     }
 
-    private var hasContent: Bool {
+    private var draftHasText: Bool {
         !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !model.pendingAttachments.isEmpty
+    }
+
+    private var hasContent: Bool {
+        draftHasText || !model.tray.tray.isEmpty
     }
 
     @ViewBuilder
@@ -520,7 +712,7 @@ struct ChannelConversationScreen: View {
             Button { media.stopLocked() } label: {
                 ZStack {
                     Circle().fill(Color.lakkoDanger)
-                    Image(systemName: "stop.fill").foregroundStyle(Color.white)
+                    LkIconView(.stopFill, size: 20).foregroundStyle(Color.white)
                 }
                 .frame(width: 40, height: 40)
                 .padding(2)
@@ -537,7 +729,7 @@ struct ChannelConversationScreen: View {
             if hasContent, !media.recState.isCapturing {
                 Button { Task { await model.sendDraft() } } label: { sendFace }
                     .buttonStyle(.plain)
-                    .disabled(model.sending || model.uploading)
+                    .disabled(model.sending || !model.tray.tray.canSend(hasText: draftHasText))
                     .accessibilityLabel(l10n.t("channels.compose.publish"))
             } else {
                 RecordButton(media: media)
@@ -551,16 +743,15 @@ struct ChannelConversationScreen: View {
             if model.sending {
                 ProgressView().controlSize(.small).tint(Color.lakkoAccentForeground)
             } else {
-                Image(systemName: "paperplane.fill").foregroundStyle(Color.lakkoAccentForeground)
+                LkIconView(.sendFill, size: 20).foregroundStyle(Color.lakkoAccentForeground)
             }
         }
         .frame(width: 40, height: 40)
         .padding(2)
     }
 
-    private func composerIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 22))
+    private func composerIcon(_ icon: LkIcon) -> some View {
+        LkIconView(icon, size: 20, relativeTo: nil)
             .foregroundStyle(Color.lakkoTextMuted)
             .frame(width: 40, height: 40)
             .contentShape(Rectangle())
@@ -608,25 +799,17 @@ struct ChannelConversationScreen: View {
         .presentationDetents([.medium, .large])
     }
 
-    private func stagePicked(_ item: PhotosPickerItem) async {
-        let stamp = String(UUID().uuidString.prefix(8)).lowercased()
-        let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
-        if isVideo {
-            guard let movie = try? await item.loadTransferable(type: PickedMovie.self),
-                  let prepared = await PhotoVideoPrep.prepareVideo(movie.url, stamp: stamp) else { return }
-            try? FileManager.default.removeItem(at: movie.url.deletingLastPathComponent())
-            await model.stagePrepared(prepared)
-            return
-        }
-        guard let bytes = try? await item.loadTransferable(type: Data.self), !bytes.isEmpty else { return }
-        let prepared = await Task.detached(priority: .userInitiated) {
-            PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
-        }.value
-        if let prepared {
-            await model.stagePrepared(prepared)
-        } else {
-            await model.stageAttachment(
-                bytes: bytes, mime: PhotoVideoPrep.sniffInlineImageMime(bytes), name: "file-\(stamp)")
+    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video joins
+    /// the composer tray, as a picked one does.
+    private func stagePasted(_ providers: [NSItemProvider]) async {
+        for loaded in await PastedMedia.load(providers) {
+            switch loaded {
+            case .photo(let bytes): model.tray.add([.photo(bytes)])
+            case .video(let url): model.tray.add([.video(url)])
+            case .failed(let isVideo):
+                model.tray.report(
+                    .key(isVideo ? "chat.attachment.error.open_video" : "chat.attachment.error.open_photo"))
+            }
         }
     }
 }
@@ -642,7 +825,7 @@ struct ChannelTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: channelId, size: 32,
-                placeholderSymbol: "megaphone.fill", photo: .group(channelId),
+                placeholderIcon: .megaphoneFill, photo: .group(channelId),
                 // UX profile-screen section 7: the chat header plays the
                 // video always on a touch platform.
                 playsVideo: true)
@@ -699,7 +882,7 @@ struct ChannelOrphanedView: View {
                 HStack(spacing: 12) {
                     InitialsAvatar(
                         name: state.channels.first(where: { $0.id == channelId })?.title ?? "",
-                        identity: channelId, size: 48, placeholderSymbol: "megaphone.fill",
+                        identity: channelId, size: 48, placeholderIcon: .megaphoneFill,
                         photo: .group(channelId))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(state.channels.first(where: { $0.id == channelId })?.title ?? "")
@@ -711,7 +894,7 @@ struct ChannelOrphanedView: View {
                     }
                 }
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.shield")
+                    LkIconView(.shieldExclamation, size: 20)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .accessibilityHidden(true)
                     Text(l10n.t("channels.keys_reset.notice"))

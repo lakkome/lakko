@@ -83,7 +83,7 @@ public struct InviteLandingScreen: View {
                 name: invite.statedName ?? "",
                 identity: base64Encode(invite.ownerSignaturePubkey),
                 size: 72,
-                placeholderSymbol: "person.fill",
+                placeholderIcon: .personFill,
                 photo: .person(invite.ownerSignaturePubkey))
             Text(l10n.t("invite.contact.page.title", texts: ["name": name(invite.statedName)]))
                 .font(.title2.weight(.semibold))
@@ -174,7 +174,7 @@ public struct InviteLandingScreen: View {
 
         case .openFailed:
             Text(l10n.t("invite.contact.result.failed_title"))
-                .font(.title2.weight(.semibold))
+                .font(.body)
                 .multilineTextAlignment(.center)
             Button(l10n.t("common.try_again")) {
                 Task { await viewModel.retryOpen() }
@@ -259,7 +259,7 @@ public struct SignedOutInviteScreen: View {
                 name: preview.statedName ?? "",
                 identity: base64Encode(preview.ownerSignaturePubkey),
                 size: 72,
-                placeholderSymbol: "person.fill")
+                placeholderIcon: .personFill)
             Text(l10n.t("invite.contact.page.signed_out_title",
                         texts: ["name": preview.statedName ?? l10n.t("invite.contact.page.unnamed")]))
                 .font(.title2.weight(.semibold))
@@ -303,7 +303,7 @@ public struct SignedOutInviteScreen: View {
 
         case .openFailed:
             Text(l10n.t("invite.contact.result.failed_title"))
-                .font(.title2.weight(.semibold))
+                .font(.body)
                 .multilineTextAlignment(.center)
             Button(l10n.t("common.try_again")) {
                 Task { await viewModel.retry() }

@@ -21,6 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio.workspace = true
+lakko-metrics.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
@@ -83,6 +84,10 @@ lakko-crypto.workspace = true
 # spends `directory-search`, through the shared spend gate.
 lakko-anon-token.workspace = true
 lakko-anon-token-server.workspace = true
+# ADR-0092 section 4.4 — verify the anonymous-credential presentation a
+# channel poll vote carries, under a key derived from the master shared with
+# auth.
+lakko-anon-cred.workspace = true
 
 # Constant-time comparison of the internal moderation listener's shared
 # secret (the push-gw pattern). Already in the workspace graph.

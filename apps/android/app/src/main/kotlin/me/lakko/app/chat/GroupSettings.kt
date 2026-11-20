@@ -279,6 +279,7 @@ public object GroupSettingsStore {
     private const val OWED_CHANNEL_RECORD = "owed-channel-record:"
     private const val KNOCK_CURSOR = "knock-cursor:"
     private const val KNOCK_REPLY = "knock-reply:"
+    private const val CURSOR_EPOCH = "cursor-epoch:"
 
     private val mutableVersion = MutableStateFlow(0L)
 
@@ -335,6 +336,18 @@ public object GroupSettingsStore {
     public fun saveKnockCursor(context: Context, accountIdB64: String, groupIdHex: String, cursor: Long) {
         val next = knockCursorToSave(knockCursor(context, accountIdB64, groupIdHex), cursor) ?: return
         write(context, accountIdB64, key(KNOCK_CURSOR, accountIdB64, groupIdHex), next.toString())
+    }
+
+    /** ADR-0091 phase 1b — the highest MLS epoch the group's snapshot was at
+     *  when its journal cursor advanced ([snapshotRewindFrom]); `null` when
+     *  none is saved. */
+    public fun cursorEpoch(context: Context, accountIdB64: String?, groupIdHex: String): ULong? =
+        accountIdB64?.let { read(context, key(CURSOR_EPOCH, it, groupIdHex))?.toULongOrNull() }
+
+    /** Save [epoch] when it is above the saved one (never backwards). */
+    public fun saveCursorEpoch(context: Context, accountIdB64: String, groupIdHex: String, epoch: ULong) {
+        val next = cursorEpochToSave(cursorEpoch(context, accountIdB64, groupIdHex), epoch) ?: return
+        write(context, accountIdB64, key(CURSOR_EPOCH, accountIdB64, groupIdHex), next.toString())
     }
 
     /** Section 5 / ADR-0060 §6 — the reply grant (wire hex) a request to join
@@ -571,6 +584,26 @@ public fun nextKnockVersion(previous: Set<String>?, current: Set<String>, versio
         (version + 1u).toUShort()
     } else {
         version
+    }
+
+/** What a recipient (an admin, or this account's other devices) was last sent
+ *  of the knock seeds, after every broadcast of the send went out: the newest
+ *  version and the recipient's devices (leaf keys, hex) then. */
+internal data class KnockSeedSentMark(val version: Int, val devices: Set<String>)
+
+/**
+ * ADR-0091 walk 2, defect 6 — the knock-seed versions to send a recipient:
+ * every version up to [currentVersion] when it was never sent any in this
+ * session (or the mark names a newer version, a rotation having reset it),
+ * or when it has a device that was not there at the last send (that device
+ * holds none); else only the versions above the last one sent, nothing when
+ * it is current. Sending every version on every bump grew a role change by
+ * one in-group message per admin removal the group ever saw.
+ */
+internal fun knockSeedVersionsToSend(mark: KnockSeedSentMark?, currentVersion: Int, devices: Set<String>): IntRange =
+    when {
+        mark == null || mark.version > currentVersion || !mark.devices.containsAll(devices) -> 0..currentVersion
+        else -> (mark.version + 1)..currentVersion
     }
 
 /** Where the handle write key sits in a handle certificate:

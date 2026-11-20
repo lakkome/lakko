@@ -75,7 +75,7 @@ struct AddMembersScreen: View {
         List {
             Section {
                 HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
+                    LkIconView(.search, size: 20)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .accessibilityHidden(true)
                     TextField(l10n.t("chat.members.add.search_placeholder"), text: $query)
@@ -152,8 +152,7 @@ struct AddMembersScreen: View {
                         HStack(spacing: 4) {
                             Text(pick.name)
                                 .lineLimit(1)
-                            Image(systemName: "xmark")
-                                .font(.caption2.weight(.semibold))
+                            LkIconView(.xmark, size: 14, relativeTo: .caption2)
                         }
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoText)
@@ -232,7 +231,7 @@ struct AddMembersScreen: View {
                 }
             }
             Spacer()
-            Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+            LkIconView(isOn ? .checkmarkCircleFill : .circle, size: 20)
                 .foregroundStyle(isOn ? Color.lakkoAccent : Color.lakkoTextMuted)
                 .opacity(pickable ? 1 : 0.4)
                 .accessibilityHidden(true)

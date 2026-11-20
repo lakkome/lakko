@@ -498,6 +498,18 @@ async fn accept_code(
         == 1)
 }
 
+/// `POST /totp/recover`, counted as a TOTP login (ADR-0096); the flow is
+/// [`recover_answer`].
+pub(crate) async fn recover(
+    state: State<AppState>,
+    req: Json<RecoverReq>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::Totp,
+        recover_answer(state, req).await,
+    )
+}
+
 /// `POST /totp/recover` — recover ACCESS with an authenticator code.
 ///
 /// Anonymous; names the account by login handle (ADR-0054 S5). The named
@@ -507,7 +519,7 @@ async fn accept_code(
 /// unknown-account / unconfirmed paths run a dummy HMAC verify and return the
 /// SAME generic shapes (no enumeration).
 #[axum::debug_handler]
-pub(crate) async fn recover(
+async fn recover_answer(
     State(state): State<AppState>,
     Json(req): Json<RecoverReq>,
 ) -> Result<Json<RecoverRes>, ApiError> {
@@ -787,6 +799,7 @@ mod totp_e2e_tests {
             room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),

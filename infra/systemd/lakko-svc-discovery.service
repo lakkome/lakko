@@ -20,6 +20,26 @@ Environment=LAKKO_BIND=127.0.0.1:8084
 # `LAKKO_DISCOVERY_DATABASE_URL` is read from /etc/lakko/lakko.env above.
 # Each service has its own DB — sqlx migration tracking does not collide.
 
+# docs/ux/donations.md section 3: the signed donation methods file, made by
+# the offline `lakko-donations sign` tool. systemd copies it into the
+# service's private credentials directory ($CREDENTIALS_DIRECTORY, readable
+# only by this service), so the source stays root:root 0600 and the service
+# user never reads /etc/lakko/credstore directly.
+#
+# A missing source makes systemd fail the unit, and LoadCredential= has no
+# "-" form that ignores it, so the source must always exist: the setup step
+# writes a placeholder {"methods":[]} (infra/README.md, "Donation methods";
+# the test stack's setup-server.sh and deploy.sh do it themselves). With the
+# placeholder the donations page shows no method.
+#
+# Ubuntu 22.04 ships systemd 249, which has no LoadCredentialEncrypted= (it
+# arrived in 250), so the file is plain at rest, protected by its mode. After
+# an upgrade to systemd >= 250: `systemd-creds encrypt --name=lakko-donations
+# <in> /etc/lakko/credstore.encrypted/lakko-donations.cred` and replace the
+# line below with
+#   LoadCredentialEncrypted=lakko-donations:/etc/lakko/credstore.encrypted/lakko-donations.cred
+LoadCredential=lakko-donations:/etc/lakko/credstore/lakko-donations.json
+
 ExecStart=/usr/local/bin/lakko-svc-discovery
 Restart=on-failure
 RestartSec=5s

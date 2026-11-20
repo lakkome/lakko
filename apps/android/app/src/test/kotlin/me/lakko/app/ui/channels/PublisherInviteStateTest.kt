@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * UX section 15.2 / 15.2.2 — a publisher invitation on the card and the
- * `/g/` page: Accept once, the waiting line, `Ask again` after seven days,
+ * `/g/` page: Accept once, the waiting line, `Ask again` after a day,
  * the invalid line when the link stopped working, `Open` once a publisher.
  */
 class PublisherInviteStateTest {
@@ -34,13 +34,14 @@ class PublisherInviteStateTest {
     }
 
     @Test
-    fun a_request_under_seven_days_waits_with_no_button() {
+    fun a_request_under_a_day_waits_with_no_button() {
         assertEquals(PublisherInviteControl.WAITING, control(sentAt = now))
         assertEquals(PublisherInviteControl.WAITING, control(sentAt = now - PUBLISHER_ASK_AGAIN_AFTER_MS + 1))
     }
 
     @Test
-    fun seven_days_or_more_offers_ask_again() {
+    fun a_day_or_more_offers_ask_again() {
+        assertEquals(24L * 60L * 60L * 1000L, PUBLISHER_ASK_AGAIN_AFTER_MS)
         assertEquals(PublisherInviteControl.ASK_AGAIN, control(sentAt = now - PUBLISHER_ASK_AGAIN_AFTER_MS))
         assertEquals(PublisherInviteControl.ASK_AGAIN, control(sentAt = now - 30L * PUBLISHER_ASK_AGAIN_AFTER_MS))
     }

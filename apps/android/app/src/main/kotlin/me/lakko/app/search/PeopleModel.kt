@@ -394,6 +394,29 @@ public fun searchShowsNothingFound(
 public fun channelResultLabel(name: String?, handle: String): String =
     name?.trim()?.takeIf { it.isNotEmpty() } ?: "@$handle"
 
+/**
+ * ADR-0087 section 5 — one row per channel in search: the channel a handle
+ * names ([channelIdHex]) gets its own row only when the public groups and
+ * channels found ([foundIdsHex]) do not already show it as a card, and not
+ * while those are still being asked (so the row does not stand for half a
+ * second and then turn into a second copy of the card). As iOS.
+ */
+public fun handleChannelRowShown(
+    channelIdHex: String,
+    foundIdsHex: Collection<String>,
+    foundPending: Boolean,
+    listedIdsHex: Collection<String> = emptyList(),
+): Boolean = !foundPending && foundIdsHex.none { it.equals(channelIdHex, ignoreCase = true) } &&
+    foundConversationShown(channelIdHex, listedIdsHex)
+
+/**
+ * ADR-0087 section 5 — a group or channel found on the network is not drawn
+ * again under the search's own results when the conversation already stands
+ * there as a row of the list ([listedIdsHex], the matching rows' ids). As iOS.
+ */
+public fun foundConversationShown(idHex: String, listedIdsHex: Collection<String>): Boolean =
+    listedIdsHex.none { it.equals(idHex, ignoreCase = true) }
+
 /** Lower-case hex of a byte string. */
 public fun searchHex(bytes: ByteArray): String {
     val sb = StringBuilder(bytes.size * 2)

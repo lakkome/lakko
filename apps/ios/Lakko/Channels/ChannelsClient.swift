@@ -11,13 +11,13 @@ import LakkoCore
 /// the default JSONEncoder produces the right body bytes.
 public struct RotateBatchEntry: Encodable {
     /// Hex-encoded subscriber public key.
-    public let subscriber_pubkey_hex: String
+    public let subscriber_id: String
     /// Base64-encoded sealed HPKE envelope carrying the
     /// new content seed.
     public let envelope_b64: String
 
     public init(subscriberPubkeyHex: String, envelopeB64: String) {
-        self.subscriber_pubkey_hex = subscriberPubkeyHex
+        self.subscriber_id = subscriberPubkeyHex
         self.envelope_b64 = envelopeB64
     }
 }
@@ -97,7 +97,25 @@ public final class ChannelsClient {
     /// The owner signer of `channelIdHex` for the account identity
     /// (ADR-0059 section 1). Only the account that created the channel
     /// derives the key the server registered for it.
+    ///
+    /// 2026-11-20 (ADR-0074) — the ONE mapping of owner requests: once the
+    /// account has a predecessor, an identity of this account is signed for
+    /// by the CURRENT seed's identity (``ChannelPublisherIdentity/proofIdentity(role:passed:)``),
+    /// whichever of its identities the caller passed. Only the handover,
+    /// which must sign by one exact key and name another, uses
+    /// ``ownerSignerExact(accountIdentity:channelIdHex:)``.
     public static func ownerSigner(
+        accountIdentity: Identity,
+        channelIdHex: String
+    ) throws -> ChannelOwnerSigner {
+        try ownerSignerExact(
+            accountIdentity: ChannelPublisherIdentity.proofIdentity(role: .owner, passed: accountIdentity),
+            channelIdHex: channelIdHex)
+    }
+
+    /// The owner signer `accountIdentity` ITSELF derives, with no mapping:
+    /// what the owner handover signs and names with.
+    public static func ownerSignerExact(
         accountIdentity: Identity,
         channelIdHex: String
     ) throws -> ChannelOwnerSigner {
@@ -373,8 +391,9 @@ public final class ChannelsClient {
             throw ChannelsApiError(status: -1, code: "bad-channel-id", detail: "channel id is not 32 hex chars")
         }
         let path = "/v1/channels/\(channelIdHex)/owner"
-        let signer = try Self.ownerSigner(accountIdentity: signingIdentity, channelIdHex: channelIdHex)
-        let body = try Self.ownerSigner(accountIdentity: newOwnerIdentity, channelIdHex: channelIdHex)
+        // Exact keys: the handover signs by the OLD key and names the new one.
+        let signer = try Self.ownerSignerExact(accountIdentity: signingIdentity, channelIdHex: channelIdHex)
+        let body = try Self.ownerSignerExact(accountIdentity: newOwnerIdentity, channelIdHex: channelIdHex)
             .verifyingKey()
         var request = URLRequest(url: try buildURL(endpoint: path))
         request.httpMethod = "PUT"
@@ -1040,24 +1059,29 @@ struct IdentityPublisherSigning: ChannelPublisherSigning {
     let channelIdHex: String
 
     func roleKey() throws -> String {
-        let signer = try ChannelsClient.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        let signer = try ChannelsClient.ownerSigner(
+            accountIdentity: ChannelPublisherIdentity.proofIdentity(role: .owner, passed: accountIdentity),
+            channelIdHex: channelIdHex)
         return signer.verifyingKey().map { String(format: "%02x", $0) }.joined()
     }
 
     func proof(
         role: ChannelPublisherRole, method: String, path: String, query: String, body: Data
     ) throws -> (name: String, value: String) {
+        // 2026-11-20 — owner proofs by the current key, co-publisher proofs
+        // by the key the appointed binding names (web and Android agree).
+        let signing = ChannelPublisherIdentity.proofIdentity(role: role, passed: accountIdentity)
         switch role {
         case .owner:
             let signer = try ChannelsClient.ownerSigner(
-                accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+                accountIdentity: signing, channelIdHex: channelIdHex)
             return (channelOwnerProofHeaderName(),
                     signer.sign(method: method, path: path, query: query, body: body))
         case .copublisher:
             guard let id = ChannelsClient.hexToData(channelIdHex), id.count == 16 else {
                 throw ChannelsApiError(status: -1, code: "bad-channel-id", detail: "channel id is not 32 hex chars")
             }
-            let signer = try channelCopublisherSigner(accountIdentity: accountIdentity, channelId: id)
+            let signer = try channelCopublisherSigner(accountIdentity: signing, channelId: id)
             return (channelCopublisherProofHeaderName(),
                     signer.sign(method: method, path: path, query: query, body: body))
         }

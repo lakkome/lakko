@@ -257,6 +257,29 @@ explicit at enrollment**: storing the blob is opt-in per passkey, behind a
 screen that says what it means (UX spec 10.2). Adding a passkey stores
 nothing by itself. The earlier automatic enrollment on web is removed.
 
+**Amended 2026-11-11 (maintainer): every passkey restores keys, with no
+choice.** The opt-in screen above asked a question a person cannot weigh
+("log in only, or restore keys too?") at the moment they add a passkey, and
+the answer that kept the most people safe was the one it made them reach
+for. Now every passkey added on a device that holds the phrase stores the
+blob, in the same flow as its creation (from the creation result when the
+provider returns a PRF output there, else with one more passkey prompt); a
+passkey that cannot carry keys (no PRF output) logs in only and says so,
+and a passkey that holds no keys (made before this amendment, refused the
+second prompt, or the account keys changed) offers one action on its row,
+"Restore keys with this passkey". There is no "Stop restoring keys": a
+person who does not want a passkey to hold keys removes the passkey. The
+cost is unchanged in kind and now applies to everyone with a passkey: key
+safety also rests on the person's credential sync (Apple, Google, a password
+manager). UX spec 10.2 as amended.
+
+At the same time the server registers every passkey as a **discoverable
+credential** (`residentKey: required`, `services/auth/src/webauthn.rs`
+`require_discoverable`). webauthn-rs's passkey builder asked for a
+non-discoverable one, and Chrome's built-in authenticator then made a
+credential that only a sign-in naming the account could use, so a new
+device, which names no account (decision 10), could not sign in with it.
+
 A passkey is not a replacement for the phrase: the phrase is still generated,
 shown and confirmed at signup, and is the only route that depends on no
 device and no third party.

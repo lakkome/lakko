@@ -87,6 +87,19 @@ above every other program's windows ([`calls.md`](calls.md) section 4.5.4a,
 added 2026-11-10); the web's in-app floating window is not drawn in the desktop
 app.
 
+### 2.2 Copy never names a browser
+
+The desktop app is the web client in a system webview, but the person never
+opened a browser, so no sentence in it says "browser". Every web string that
+names the browser ("isn't available in this browser", "your browser's site
+settings", "your browser's maker") has a desktop wording that names the device
+or the system instead: "on this device", "your system's privacy settings",
+"your system's maker", and for screen recording on macOS "System Settings".
+Where the native clients already have the right sentence, the desktop app uses
+it. The web client keeps the pairs in one table
+(`apps/web/src/l10n/desktop-copy.ts`), and a test fails when a catalog string
+that says "browser" has no desktop wording.
+
 ## 3. Closing is not quitting
 
 - Closing the window (the red button, the X, `Ctrl+W` / `Cmd+W`) hides it.
@@ -215,8 +228,11 @@ app.
   attaches it, as the attach button would. While dragging over a conversation
   the pane shows "Drop files to attach"; over any other screen the drop is
   refused (no drop target is shown).
-- Pasting an image from the clipboard into the composer attaches it. A copy
-  from a document, which holds text beside a picture of it, pastes as text.
+- Pasting files from the clipboard (`Cmd+V` / `Ctrl+V`) anywhere in an open
+  conversation attaches them, as a drop would: a screenshot, a copied picture,
+  a video, a file copied in the file manager. A paste into another field is
+  that field's text. A copy from a document, which holds text beside a
+  picture of it, pastes as text.
 - "Save" on an attachment opens the system save dialog (allowed: it is the
   file picker); the default folder is the system Downloads folder.
 - Opening an attachment with another app (the system's "open with") is not in

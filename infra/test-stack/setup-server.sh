@@ -32,6 +32,13 @@ install -d -m 750 -o root -g lakkotest $ENV_DIR
 install -d -m 750 -o lakkotest -g lakkotest /var/lib/lakko-test
 install -d -m 700 -o lakkotest -g lakkotest /var/lib/lakko-test/blobs
 install -d -m 755 -o root -g root /var/www/lakko-test-web
+# docs/ux/donations.md: the signed donations file discovery loads as a systemd
+# credential. The unit fails when the source is missing, so an empty list
+# stands in until a signed file is installed (README.md, "Donation methods").
+install -d -m 700 -o root -g root $ENV_DIR/credstore
+if [[ ! -f $ENV_DIR/credstore/lakko-donations.json ]]; then
+  (umask 077; printf '{"methods":[]}\n' > $ENV_DIR/credstore/lakko-donations.json)
+fi
 
 if [[ ! -f $ENV_FILE ]]; then
   umask 027
@@ -57,6 +64,7 @@ LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)
+LAKKO_ANON_CRED_MASTER_SECRET=$(openssl rand -hex 32)
 LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)
 
 LAKKO_WEBAUTHN_RP_ID=${DOMAIN}
@@ -141,6 +149,14 @@ fi
 if ! grep -q '^LAKKO_ANON_TOKEN_MASTER_SECRET=' $ENV_FILE; then
   echo "LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
   echo "anonymous-token master secret added to the env file"
+fi
+
+# Channel-poll credentials (ADR-0092 section 4) arrived later: an older env
+# file gains their master secret here, generated once and then kept
+# (regenerating it invalidates every credential issued on this stack).
+if ! grep -q '^LAKKO_ANON_CRED_MASTER_SECRET=' $ENV_FILE; then
+  echo "LAKKO_ANON_CRED_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "anonymous-credential master secret added to the env file"
 fi
 
 # Sign-in by name (ADR-0054 S5) arrived later: an older env file gains the

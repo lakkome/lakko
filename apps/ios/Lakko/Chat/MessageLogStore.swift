@@ -345,19 +345,25 @@ public struct PersistedGroup: Codable, Equatable {
     /// person saw. Absent when no bundle brought this group. Every writer of
     /// the log carries it through.
     public let syncedThroughMessageId: Int64?
+    /// ADR-0091 phase 1b — the MLS epoch the durable snapshot was at when the
+    /// poll last advanced ``cursor`` (the highest such, never backward); see
+    /// `Chat/CursorEpoch.swift`. Absent when the poll never recorded one.
+    public let cursorEpoch: UInt64?
 
     public init(
         cursor: Int64,
         messages: [PersistedMessage],
         lastViewedMessageId: Int64? = nil,
         feedSeen: [Int64]? = nil,
-        syncedThroughMessageId: Int64? = nil
+        syncedThroughMessageId: Int64? = nil,
+        cursorEpoch: UInt64? = nil
     ) {
         self.cursor = cursor
         self.messages = messages
         self.lastViewedMessageId = lastViewedMessageId
         self.feedSeen = feedSeen
         self.syncedThroughMessageId = syncedThroughMessageId
+        self.cursorEpoch = cursorEpoch
     }
 }
 
@@ -408,6 +414,9 @@ public struct PersistedMessage: Codable, Equatable {
     /// ADR-0082 section 5 — the DS id of the newest edit or delete op folded
     /// into the message; absent when never edited.
     public var lastOpId: Int64?
+    /// ADR-0092 — a poll, checklist, location, contact card or article, with
+    /// the ops folded into it. Absent on every other row.
+    public var content: PersistedContent?
 
     public init(
         messageId: Int64,
@@ -422,9 +431,11 @@ public struct PersistedMessage: Codable, Equatable {
         reply: PersistedReply? = nil,
         forward: PersistedForward? = nil,
         unsupportedVersion: UInt64? = nil,
-        lastOpId: Int64? = nil
+        lastOpId: Int64? = nil,
+        content: PersistedContent? = nil
     ) {
         self.lastOpId = lastOpId
+        self.content = content
         self.messageId = messageId
         self.direction = direction
         self.text = text
@@ -445,7 +456,7 @@ public struct PersistedMessage: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case messageId, direction, text, attachments, createdAt
         case authorKeyB64, edited, deleted, reactions, reply, forward
-        case unsupportedVersion, lastOpId
+        case unsupportedVersion, lastOpId, content
     }
 
     public init(from decoder: Decoder) throws {
@@ -469,6 +480,173 @@ public struct PersistedMessage: Codable, Equatable {
         self.forward = try c.decodeIfPresent(PersistedForward.self, forKey: .forward)
         self.unsupportedVersion = try c.decodeIfPresent(UInt64.self, forKey: .unsupportedVersion)
         self.lastOpId = try c.decodeIfPresent(Int64.self, forKey: .lastOpId)
+        // A content row that no longer decodes keeps the message (empty).
+        self.content = (try? c.decodeIfPresent(PersistedContent.self, forKey: .content)) ?? nil
+    }
+}
+
+// MARK: - ADR-0092 content persistence (FFI-free)
+
+/// ADR-0092 — a content message as stored: the envelope bytes it can be read
+/// back from (the core's own decoder, so the store never re-implements the
+/// format), the folded snapshot a history bundle brought, and the ops folded
+/// into it since.
+public struct PersistedContent: Codable, Equatable {
+    /// Standard base64 of a chat envelope carrying the content (composed by
+    /// the core, or received verbatim).
+    public var envelopeB64: String
+    /// ADR-0092 section 3.11 — the snapshot a history bundle or vault row
+    /// carried for a poll or checklist.
+    public var state: PersistedContentState?
+    /// The ops folded into the item since.
+    public var ops: PersistedContentOps
+
+    public init(envelopeB64: String, state: PersistedContentState? = nil, ops: PersistedContentOps = .init()) {
+        self.envelopeB64 = envelopeB64
+        self.state = state
+        self.ops = ops
+    }
+}
+
+/// ADR-0092 section 3.11 — `ContentState` as stored.
+public struct PersistedContentState: Codable, Equatable {
+    /// `poll` or `checklist`.
+    public var kind: String
+    public var counts: [UInt32]?
+    public var voters: UInt32?
+    /// `open`, `time` or `op`.
+    public var closed: String?
+    public var closedBy: Int64?
+    public var added: [PersistedAddedItem]?
+    public var done: [PersistedDoneItem]?
+
+    public init(
+        kind: String, counts: [UInt32]? = nil, voters: UInt32? = nil, closed: String? = nil,
+        closedBy: Int64? = nil, added: [PersistedAddedItem]? = nil, done: [PersistedDoneItem]? = nil
+    ) {
+        self.kind = kind
+        self.counts = counts
+        self.voters = voters
+        self.closed = closed
+        self.closedBy = closedBy
+        self.added = added
+        self.done = done
+    }
+}
+
+public struct PersistedAddedItem: Codable, Equatable {
+    public var messageId: Int64
+    public var text: String
+    public init(messageId: Int64, text: String) {
+        self.messageId = messageId
+        self.text = text
+    }
+}
+
+public struct PersistedDoneItem: Codable, Equatable {
+    public var item: PersistedItemRef
+    public var byB64: String
+    public init(item: PersistedItemRef, byB64: String) {
+        self.item = item
+        self.byB64 = byB64
+    }
+}
+
+/// A checklist item: an author item by id, or an added item by the DS id of
+/// its add row.
+public struct PersistedItemRef: Codable, Equatable, Hashable {
+    public var authorId: UInt32?
+    public var addedMessageId: Int64?
+    public init(authorId: UInt32? = nil, addedMessageId: Int64? = nil) {
+        self.authorId = authorId
+        self.addedMessageId = addedMessageId
+    }
+}
+
+/// ADR-0092 — the ops on a content message, as the fold takes them.
+public struct PersistedContentOps: Codable, Equatable {
+    public struct Vote: Codable, Equatable {
+        public var messageId: Int64
+        public var createdAtMs: Int64
+        public var voterB64: String
+        public var choices: [UInt8]
+    }
+    public struct Close: Codable, Equatable {
+        public var messageId: Int64
+        public var closerB64: String
+        public var closerIsAdmin: Bool
+    }
+    public struct Edit: Codable, Equatable {
+        public var messageId: Int64
+        public var editorB64: String
+        /// The edit envelope as received (the core re-reads it).
+        public var envelopeB64: String
+    }
+    public struct Add: Codable, Equatable {
+        public var messageId: Int64
+        public var adderB64: String
+        public var privileged: Bool
+        public var text: String
+    }
+    public struct Tick: Codable, Equatable {
+        public var messageId: Int64
+        public var tickerB64: String
+        public var privileged: Bool
+        public var item: PersistedItemRef
+        public var done: Bool
+    }
+    /// An anonymous ballot row (sealed bytes), with where the DS put it.
+    public struct Ballot: Codable, Equatable {
+        public var messageId: Int64
+        public var createdAtMs: Int64
+        public var rowB64: String
+        /// What the core's verify returned: the ballot's tag (one per account
+        /// per poll), its choices and the ring version it was proven against.
+        public var tagB64: String?
+        public var choices: [UInt8]?
+        public var version: UInt32?
+
+        public init(
+            messageId: Int64, createdAtMs: Int64, rowB64: String, tagB64: String? = nil,
+            choices: [UInt8]? = nil, version: UInt32? = nil
+        ) {
+            self.messageId = messageId
+            self.createdAtMs = createdAtMs
+            self.rowB64 = rowB64
+            self.tagB64 = tagB64
+            self.choices = choices
+            self.version = version
+        }
+    }
+
+    public var votes: [Vote] = []
+    public var closes: [Close] = []
+    public var edits: [Edit] = []
+    public var adds: [Add] = []
+    public var ticks: [Tick] = []
+    public var ballots: [Ballot] = []
+    /// ADR-0092 section 3.4 — the encoded ring of an anonymous poll
+    /// (`PollRing.encode()`), versions included.
+    public var ringB64: String?
+    /// A poll whose ring did not check at receipt: no totals, no voting.
+    public var unverifiable: Bool = false
+
+    public init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case votes, closes, edits, adds, ticks, ballots, ringB64, unverifiable
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        votes = (try? c.decodeIfPresent([Vote].self, forKey: .votes)) ?? []
+        closes = (try? c.decodeIfPresent([Close].self, forKey: .closes)) ?? []
+        edits = (try? c.decodeIfPresent([Edit].self, forKey: .edits)) ?? []
+        adds = (try? c.decodeIfPresent([Add].self, forKey: .adds)) ?? []
+        ticks = (try? c.decodeIfPresent([Tick].self, forKey: .ticks)) ?? []
+        ballots = (try? c.decodeIfPresent([Ballot].self, forKey: .ballots)) ?? []
+        ringB64 = (try? c.decodeIfPresent(String.self, forKey: .ringB64)) ?? nil
+        unverifiable = (try? c.decodeIfPresent(Bool.self, forKey: .unverifiable)) ?? false
     }
 }
 
@@ -546,6 +724,14 @@ public struct PersistedAttachment: Codable, Equatable {
     public let height: UInt32?
     /// The video-note poster blob.
     public let thumb: PersistedThumb?
+    /// ADR-0092 section 2 — an audio file's title and artist tags.
+    public var title: String?
+    public var artist: String?
+    /// ADR-0047 section 6 — base64 of the micro thumbnail (a JPEG of at most
+    /// 4096 bytes) the first photo or video of a message carries inside the
+    /// envelope; what the chat list row and the first mosaic tile draw
+    /// without a fetch.
+    public var inlineThumbB64: String?
 
     public init(
         blobIdB64: String,
@@ -559,8 +745,14 @@ public struct PersistedAttachment: Codable, Equatable {
         waveformB64: String? = nil,
         width: UInt32? = nil,
         height: UInt32? = nil,
-        thumb: PersistedThumb? = nil
+        thumb: PersistedThumb? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        inlineThumbB64: String? = nil
     ) {
+        self.title = title
+        self.artist = artist
+        self.inlineThumbB64 = inlineThumbB64
         self.blobIdB64 = blobIdB64
         self.keyB64 = keyB64
         self.nonceB64 = nonceB64
@@ -578,6 +770,8 @@ public struct PersistedAttachment: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case blobIdB64, keyB64, nonceB64, mime, size, name
         case kind, durationMs, waveformB64, width, height, thumb
+        case title, artist
+        case inlineThumbB64
     }
 
     // ADR-0047 — every media field is optional and read with `try?`: a row
@@ -598,6 +792,9 @@ public struct PersistedAttachment: Codable, Equatable {
         self.width = (try? c.decodeIfPresent(UInt32.self, forKey: .width)) ?? nil
         self.height = (try? c.decodeIfPresent(UInt32.self, forKey: .height)) ?? nil
         self.thumb = (try? c.decodeIfPresent(PersistedThumb.self, forKey: .thumb)) ?? nil
+        self.title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil
+        self.artist = (try? c.decodeIfPresent(String.self, forKey: .artist)) ?? nil
+        self.inlineThumbB64 = (try? c.decodeIfPresent(String.self, forKey: .inlineThumbB64)) ?? nil
     }
 }
 

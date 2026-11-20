@@ -19,13 +19,14 @@ import { t } from "../l10n";
 import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import { channelHandleOf, channelRoleOf } from "../channels/channel-access";
-import { channelRowModel, channelRowPreview } from "../channels/channel-row";
+import { channelFlagsOf } from "../channels/channel-flags";
+import { channelRowModel, channelRowPostedAtMs, channelRowPreview } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { createChannelRowFeed } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
 import { groupTitle } from "./group-title";
-import { previewLine } from "./list-preview";
+import { emptyPreviewLine, previewLine, type PreviewMedia } from "./list-preview";
 import { channelInviteRowPreview } from "./channel-invite-preview";
 import { publicOrigin } from "../platform";
 import { memberNameOf } from "../profile/member-label";
@@ -139,6 +140,12 @@ export function createConversationRows() {
     {},
   );
 
+  // The account whose log has been read at least once on this mount. Until
+  // then a row's last message is not known, and the row must not say there
+  // is none: on a cold start every row read `No messages yet` for a second
+  // or two before the previews arrived (seen on the desktop app, 2026-11-18).
+  const [logReadFor, setLogReadFor] = createSignal<string | null>(null);
+
   async function reloadLog(): Promise<void> {
     const s = auth.state();
     if (s.kind !== "session") return;
@@ -146,9 +153,18 @@ export function createConversationRows() {
     const deviceKey = await getDeviceKey(accountIdB64);
     if (deviceKey === null) return;
     const log = await loadMessageLog(accountIdB64, deviceKey);
-    if (log === null) return;
-    setLogSlots(log.groups);
+    // No log stored is an answer too: nothing was said in any conversation
+    // (and nothing of another account's log may stay on the rows).
+    setLogSlots(log?.groups ?? {});
+    setLogReadFor(accountIdB64);
   }
+
+  /** Whether the message log of the signed-in account has been read, so an
+   *  empty slot means "no messages" rather than "not read yet". */
+  const logKnown = (): boolean => {
+    const account = accountId();
+    return account !== null && logReadFor() === account;
+  };
 
   // Read again when the account lands and when the groups arrive: on a cold
   // load the list mounts before either, the read then finds nothing, and with
@@ -190,7 +206,8 @@ export function createConversationRows() {
     );
     const syncedReadUpTo =
       upTo === null ? null : upTo === "all" ? BigInt(Number.MAX_SAFE_INTEGER) : BigInt(upTo);
-    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
+    const own = ownPersonKeyB64(chats.identity());
+    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo, own);
     if (summary.preview !== null || summary.lastAt !== null) return summary;
     // A successor nothing was said in yet: the row keeps the last line and
     // the place of the conversation's earlier part, so it neither goes blank
@@ -203,6 +220,7 @@ export function createConversationRows() {
     const earlier = summarizeGroupSlot(
       logSlots()[syncGroupIdHex(previous.group.groupId)],
       BigInt(Number.MAX_SAFE_INTEGER),
+      own,
     );
     return { ...earlier, unread: summary.unread };
   }
@@ -248,7 +266,7 @@ export function createConversationRows() {
     // never as the `/g/` link the message's text is.
     let invitation: string | null = null;
     try {
-      invitation = channelInviteRowPreview(s.preview, publicOrigin());
+      invitation = channelInviteRowPreview(s.preview, publicOrigin(), s.previewChannelInviteB64);
     } catch {
       invitation = null;
     }
@@ -261,8 +279,23 @@ export function createConversationRows() {
     });
     if (line.length > 0) return line;
     // Nothing said yet (as Android shows): never the @name, which read as a
-    // contact rather than a conversation.
-    return t("chats.row.no_messages");
+    // contact rather than a conversation; and nothing at all while the log
+    // is still being read (the row keeps its height, `ChatList.tsx`).
+    return emptyPreviewLine(logKnown());
+  };
+
+  /** `docs/ux/media-messages.md` section 11 — the thumbnail at the start of
+   *  the row's line, when that line is the last message and it carries a
+   *  photo or video; `null` otherwise (an ended chat, a request to leave, a
+   *  channel invitation, a message with none). */
+  const previewMediaFor = (g: ActiveGroup): PreviewMedia | null => {
+    if (endedLine(g) !== null) return null;
+    membershipEnd.leaveVersion();
+    const account = accountId();
+    if (account !== null && loadLeaveRequestedAt(account, g.groupIdB64) !== undefined) return null;
+    const s = summaryFor(g.group.groupId);
+    if (s.previewChannelInviteB64 !== undefined) return null;
+    return s.previewMedia ?? null;
   };
 
   /**
@@ -282,14 +315,13 @@ export function createConversationRows() {
   const channelUnread = channelFeed.unread;
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
-    const posts = channelsState.postsByChannel();
     const held = channelsState.channels().filter((c) => !membershipEnd.isChannelEnding(c.id));
     const lastRead = channelFeed.lastPost();
     return held.map((c) => {
       const readable = lastRead(c.id);
-      const heldMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
-      const lastPostMs =
-        heldMs === null ? (readable?.serverTsMs ?? null) : Math.max(heldMs, readable?.serverTsMs ?? 0);
+      // The newest real post's time, the post the preview shows; a raw
+      // server row (a ban list, a metadata record) is not a post.
+      const lastPostMs = channelRowPostedAtMs(readable);
       // The @name from the channel's own record when this device read one
       // (a publisher that joined by a link holds no local one), else the
       // name it was found under.
@@ -311,17 +343,19 @@ export function createConversationRows() {
         kind: "channel" as const,
         title: model.title,
         // UX navigation 2.1: the second line is the last post this device can
-        // read; a channel has no sender to name. The @name (the model's
-        // subtitle) only when there is no readable post.
-        preview: channelRowPreview(readable?.text ?? null, model.subtitle),
+        // read (its text, else its attachment's kind, as a group's row); a
+        // channel has no sender to name. The @name (the model's subtitle)
+        // only when there is no readable post.
+        preview: channelRowPreview(readable, model.subtitle),
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
+        postedAtMs: lastPostMs,
         ...(handle !== undefined && handle.length > 0 ? { handle } : {}),
         unread: channelUnread()(c.id),
-        pinned: false,
-        muted: false,
-        archived: false,
+        // UX group-and-channel-privacy 12: a channel's row is pinned, muted
+        // and archived like a group's, through the same synced flags.
+        ...channelFlagsOf(sync.flags(), c.id),
       };
     });
   };
@@ -403,6 +437,7 @@ export function createConversationRows() {
     summaryFor,
     endedLine,
     subOf,
+    previewMediaFor,
     clock,
     orderedRows,
     groupById,

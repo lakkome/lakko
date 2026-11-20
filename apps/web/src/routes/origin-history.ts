@@ -18,6 +18,9 @@
  * - **Navigation.** A push or replace writes `{ path, state }` into
  *   `history.state` at the URL `/`, so back and forward keep working and the
  *   router's navigation state survives them and a reload.
+ * - **Public pages.** A page that carries nothing private and is meant to
+ *   be shared shows its own path (`/donations`, docs/ux/donations.md), only
+ *   when its value is exactly that path: no query, no fragment.
  * - **Readers of the entry URL** (`WakeNavigator`, `CallActionListener`) read
  *   `currentInternalPath()` rather than `window.location`, which is `/` by the
  *   time they run.
@@ -46,6 +49,14 @@ function readEntry(): Entry {
   return { value: entryPath, state: undefined };
 }
 
+/** Pages whose address is shown as-is: public, no secret, made to share. */
+const PUBLIC_PATHS: ReadonlySet<string> = new Set(["/donations"]);
+
+/** The URL the address bar shows for an internal path. */
+export function addressFor(value: string): string {
+  return PUBLIC_PATHS.has(value) ? value : "/";
+}
+
 function write(value: string, state: unknown, replace: boolean): void {
   const prev: unknown = window.history.state;
   const base = typeof prev === "object" && prev !== null ? (prev as Record<string, unknown>) : {};
@@ -54,8 +65,9 @@ function write(value: string, state: unknown, replace: boolean): void {
   const next = replace
     ? { ...base, [PATH_KEY]: value, [STATE_KEY]: state }
     : { [PATH_KEY]: value, [STATE_KEY]: state };
-  if (replace) window.history.replaceState(next, "", "/");
-  else window.history.pushState(next, "", "/");
+  const url = addressFor(value);
+  if (replace) window.history.replaceState(next, "", url);
+  else window.history.pushState(next, "", url);
 }
 
 /**
@@ -67,9 +79,10 @@ export function installOriginHistory(): void {
   const s: unknown = window.history.state;
   if (isEntryState(s)) {
     entryPath = s[PATH_KEY] as string;
-    if (window.location.pathname !== "/" || window.location.search !== "" || window.location.hash !== "") {
+    const shown = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (shown !== addressFor(entryPath)) {
       // A reload of an address someone typed over ours: the typed one wins.
-      entryPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      entryPath = shown;
       write(entryPath, undefined, true);
     }
     return;

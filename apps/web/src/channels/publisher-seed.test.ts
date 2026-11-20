@@ -3,7 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { channelSeedFor, notePublisherCommitLanded, notePublisherSeedAt } from "./channel-access";
+import { anchorChannelEpoch, channelSeedFor, notePublisherCommitLanded, notePublisherSeedAt } from "./channel-access";
+import { landedEpochOffset, reanchoredEpochOffset } from "./channel-access-record";
 import { composerSeedFor, outgoingPublisherSeed, readsPublicSeeds } from "./publisher-seed";
 import { channelsActions, channelsState } from "../state/channels-state";
 
@@ -124,3 +125,34 @@ describe("notePublisherSeedAt (a co-publisher applying the owner's commit)", () 
     expect(channelsState.keysByChannel().get(id)).toBe(before);
   });
 });
+
+describe("the epoch mapping after commits whose reseal never landed (2026-11-20)", () => {
+  it("re-anchors only a group more than one epoch ahead of the service", () => {
+    expect(reanchoredEpochOffset(5n, undefined, 5)).toBeNull();
+    expect(reanchoredEpochOffset(6n, undefined, 5)).toBeNull();
+    expect(reanchoredEpochOffset(2n, 8, 9)).toBeNull();
+    // About 150 rotations with no reseal: the current epoch maps to the next.
+    expect(reanchoredEpochOffset(160n, undefined, 6)).toBe(-153);
+    expect(landedEpochOffset(160n, 7)).toBe(-153);
+    expect(landedEpochOffset(7n, 7)).toBeUndefined();
+  });
+
+  it("an anchor keeps the landed seed, drops the seeds filed above, and the composer moves down", () => {
+    const id = "c7".repeat(16);
+    const current = new Uint8Array(32).fill(9);
+    const first = new Uint8Array(32).fill(3);
+    channelsActions.setKeys(id, { seed: current, signingKeySeed: SIGNING, seedEpoch: 160 });
+    channelsActions.setSubscribedSeedForEpoch(id, 6, OLD);
+    channelsActions.setSubscribedSeedForEpoch(id, 7, first);
+    channelsActions.setSubscribedSeedForEpoch(id, 90, NEW);
+    notePublisherSeedAt(id, 7, current);
+    anchorChannelEpoch(id, 160n, 7, current);
+    expect(channelsActions.accessOf(id).epochOffset).toBe(-153);
+    expect(channelsActions.currentSeed(id, 7)).toEqual(current);
+    expect(channelsActions.currentSeed(id, 6)).toEqual(OLD);
+    expect(channelsActions.currentSeed(id, 90)).toBeUndefined();
+    expect(channelsActions.currentSeed(id, 160)).toBeUndefined();
+    expect(channelsState.keysByChannel().get(id)?.seedEpoch).toBe(7);
+  });
+});
+

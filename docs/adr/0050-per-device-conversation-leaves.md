@@ -471,6 +471,76 @@ with no other device alive gets its contacts only from there).
 Call history has no store on any client; it is out of scope here and is
 listed in `docs/PRODUCT-READINESS.md` section 5 D.
 
+**Amended 2026-11-13 (maintainer): channels.** The premise above that kept
+channels out of the bundle ("the channel list does not survive a reload on any
+device yet") is stale: the channel list is durable on all three clients. Two
+carriers replace the proposed `ChannelSubscribed` / `ChannelUnsubscribed`
+DeviceGroup kinds (proto fields 14-17 stay reserved and unused):
+
+1. **A `lakko-sync` channel-subscription register**
+   (`lakko_sync::synced::channel_subscription`), keyed by the 16-byte channel
+   id: subscribed { role subscriber / owner / co-publisher, the account's ONE
+   subscriber key for the channel as its 32-byte Ed25519 seed (ADR-0064
+   section 7: shared by the account's devices), the read key when held, a
+   co-publisher's PublisherGroup id, a fallback name and handle } or left
+   (a kept tombstone; a later re-subscribe wins, so a leave is not final).
+   It travels as its own DeviceGroup service envelope
+   (`lakko/sync/channel-subscription/v1\0`), is re-sent on DeviceGroup growth
+   beside the link records, and is persisted with the synced state (state
+   version 13), so the backup carries it. It carries no epoch seed (they
+   change every rotation), no publisher signing seed or publish counter
+   (G-51), and no PublisherGroup state (2.9a).
+2. **The pairing state bundle carries the newest epoch seeds once.** The
+   bundle is per-client JSON, hand-mirrored (`state-bundle.ts`,
+   `StateBundle.swift`, `StateBundle.kt`), so the field is written down here
+   exactly. State bundle `v` becomes **4** (flag day: v3 refused, no dual
+   accept) with one more required array:
+
+   ```json
+   "channelSeeds": [
+     {
+       "channelIdB64": "wcHBwcHBwcHBwcHBwcHBwQ==",
+       "seeds": [
+         { "epoch": 41, "seedB64": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=" },
+         { "epoch": 42, "seedB64": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=" }
+       ]
+     }
+   ]
+   ```
+
+   (golden: channel id 16 x `0xC1`, epoch 41 seed 32 x `0x01`, epoch 42 seed
+   32 x `0x02`; standard base64 with padding, as every other bundle field).
+   - Sender: one entry per channel with a live channel-subscription register
+     on this device for which it holds seeds, ascending by channel id bytes;
+     per channel the newest seeds it holds, at most **32** (chosen: at the
+     default of one rotation a day that is a month, the post retention),
+     ascending by epoch. Fitting the 1 MiB bundle cap: the other arrays are
+     built as before, then the seeds are added at 32 per channel, and if the
+     encoded bundle is over the cap the per-channel count is lowered for every
+     channel at once, 32 -> 16 -> 8 -> 4 -> 0, until it fits; seeds never push
+     out another array. Arithmetic, not measured: one seed is about 77 bytes
+     of JSON, so 32 seeds is about 2.5 KB per channel.
+   - Decoder, fail-closed (any violation refuses the whole bundle, as for the
+     other arrays): at most **1000** entries (the live-subscription client
+     limit), no channel id twice, `channelIdB64` decodes to 16 bytes; `seeds`
+     has 1..=32 elements, `epoch` an integer in `0..=4294967295` (the post
+     header's `epoch_id`), strictly ascending, `seedB64` decodes to 32 bytes.
+   - Receiver: adds each seed to the channel's `epoch -> seed` map unless a
+     seed is already held for that epoch (never overwritten); keeps seeds for
+     a channel whose register has not arrived yet (it may follow the bundle on
+     the DeviceGroup), and drops them when the register is or becomes left.
+
+   A device restored from the phrase alone reads what the channel service
+   retains (the newest four envelopes per subscriber key, ADR-0031) and
+   nothing older; the register gives it the channels and the key.
+
+A second device of a channel's owner or co-publisher is a **reader** for now
+(UX `second-device.md` section 4a): it lists the channel and reads it with the
+shared subscriber key; posting, approving, rotating and admitting stay on the
+device holding the PublisherGroup (G-54). No client founds a PublisherGroup or
+resets a channel journal for a channel it holds no group state for, except in
+the create-channel flow.
+
 ### 2.9a The backup carries no MLS state (amended 2026-10-02)
 
 **Found.** The account backup carried a whole-provider MLS snapshot of the
@@ -594,8 +664,8 @@ which `prepareAnonymousJoinFlow` had skipped outright ("no device key"): both
 bundles are now fetched at accept and applied at `persistTo`. Not built on
 web: the DeviceGroup sync kinds 14-17 (a contact accepted after the pairing
 reaches the other device only through a backup), and channel subscriptions in
-the bundle (the channel list does not survive a reload on any device yet, so
-there is nothing durable to carry).
+the bundle (the reason recorded here was stale: see the 2026-11-13 amendment
+of section 2.9, which carries them in the synced state instead).
 
 Live on `test.lakko.me`, 2026-09-15 evening, two accounts, three web
 clients: a device added through the ADR-0049 confirmation prompt showed

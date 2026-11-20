@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# On-disk size of each lakko_* MariaDB schema for node_exporter (ADR-0096
+# P3). Started hourly by lakko-schema-size.timer; see
+# infra/scripts/schema-size.sh (installed as /usr/local/bin/lakko-schema-size).
+
+[Unit]
+Description=Lakko MariaDB schema sizes for node_exporter
+
+[Service]
+Type=oneshot
+# Root: the MariaDB data directory is readable by mysql and root only.
+User=root
+ExecStart=/usr/local/bin/lakko-schema-size
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/mysql
+ReadWritePaths=/var/lib/node_exporter/textfile_collector
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

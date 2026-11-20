@@ -64,10 +64,14 @@ describe("the translation result store", () => {
   it("round-trips a result and the conversation choices", async () => {
     const s = store();
     await s.saveResult(A, "text", CONV, 7, translation);
-    await s.savePrefs(A, CONV, { autoTranslate: true, translationSource: "es", transcriptionLanguage: null, dismissed: ["de"] });
+    await s.savePrefs(A, CONV, { autoTranslate: true, languages: { picks: [{ tag: "es", atMs: 1 }], detections: [{ messageId: 3, tag: "es" }] }, transcriptionLanguage: null, dismissed: ["de"] });
     const fresh = store();
     expect(await fresh.result(A, "text", CONV, 7)).toEqual(translation);
     expect((await fresh.prefs(A, CONV)).autoTranslate).toBe(true);
+    expect((await fresh.prefs(A, CONV)).languages).toEqual({
+      picks: [{ tag: "es", atMs: 1 }],
+      detections: [{ messageId: 3, tag: "es" }],
+    });
     expect(await fresh.count(A)).toBe(1);
   });
 
@@ -120,7 +124,7 @@ describe("the translation result store", () => {
   it("Delete all keeps the conversation choices", async () => {
     const s = store();
     await s.saveResult(A, "text", CONV, 7, translation);
-    await s.savePrefs(A, CONV, { autoTranslate: true, translationSource: null, transcriptionLanguage: null, dismissed: [] });
+    await s.savePrefs(A, CONV, { autoTranslate: true, languages: { picks: [], detections: [] }, transcriptionLanguage: null, dismissed: [] });
     expect(await s.deleteAll(A)).toBe(1);
     const fresh = store();
     expect(await fresh.count(A)).toBe(0);
@@ -138,7 +142,7 @@ describe("the translation result store", () => {
       text: "hola",
       complete: true,
     });
-    await s.savePrefs(A, CONV, { autoTranslate: true, translationSource: null, transcriptionLanguage: null, dismissed: [] });
+    await s.savePrefs(A, CONV, { autoTranslate: true, languages: { picks: [], detections: [] }, transcriptionLanguage: null, dismissed: [] });
     await s.saveResult(A, "text", OTHER, 7, translation);
     await s.saveResult(B, "text", CONV, 7, translation);
     // The tag names no conversation in the clear.

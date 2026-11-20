@@ -46,6 +46,10 @@ internal fun ChannelInviteContactsDialog(
     /** True for `Add publisher` (section 15.2): the title says so instead
      *  of `Invite people`. */
     publisher: Boolean = false,
+    /** Account keys (hex) known to be in the channel already: the owner, the
+     *  publishers and, for `Invite people`, subscribers known by their card.
+     *  Not offered (sections 14.1, 15.2). */
+    inChannelHex: Set<String> = emptySet(),
 ) {
     val scope = rememberCoroutineScope()
     var busyKey by remember { mutableStateOf<String?>(null) }
@@ -56,9 +60,9 @@ internal fun ChannelInviteContactsDialog(
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
     val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
-    val rows = remember(contactsState.accepted, nameVersion) {
+    val rows = remember(contactsState.accepted, nameVersion, inChannelHex) {
         inviteContactRows(
-            contactsState.accepted.map { contact ->
+            withoutInChannel(contactsState.accepted, { it.request.fromPubkey }, inChannelHex).map { contact ->
                 val resolved = directory.resolve(contact.request.fromPubkey)
                 ContactRowModel(
                     key = contactRouteKey(contact.request.fromPubkey),
@@ -129,6 +133,15 @@ internal fun ChannelInviteContactsDialog(
         )
     }
 }
+
+/** Sections 14.1 and 15.2 — [items] less every one whose account key is in
+ *  [inChannelHex] (lower-case hex), in the order given. Pure. */
+internal fun <T> withoutInChannel(items: List<T>, accountKeyOf: (T) -> ByteArray, inChannelHex: Set<String>): List<T> =
+    if (inChannelHex.isEmpty()) {
+        items
+    } else {
+        items.filter { me.lakko.app.reach.reachHex(accountKeyOf(it)).lowercase() !in inChannelHex }
+    }
 
 /** The picker's title: what the pick does — `Add publisher` or `Invite
  *  people`, the same keys web and iOS use for this screen. */

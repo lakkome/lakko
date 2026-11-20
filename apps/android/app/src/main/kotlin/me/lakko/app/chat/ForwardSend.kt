@@ -21,7 +21,7 @@ import uniffi.lakko_ffi_uniffi.ThumbRef
  * poster thumb goes the same way. What is kept is the metadata the bubble
  * draws from: kind, duration, waveform, dimensions.
  *
- * The four effects are injected so the composition is host-testable:
+ * The effects are injected so the composition is host-testable:
  * production passes the attachment bridge and the repository's send, which
  * already serialises under the target group's MLS lock.
  */
@@ -53,6 +53,7 @@ public class ForwardSender(
         text: String,
         attachments: List<AttachmentRef>,
         forward: ForwardRef,
+        content: uniffi.lakko_ffi_uniffi.MessageContent?,
     ) -> Unit,
     private val onLog: (String) -> Unit = {},
 ) {
@@ -72,8 +73,14 @@ public class ForwardSender(
             originGroupIdHex = request.sourceGroupIdHex,
             sourceIsOneToOne = request.sourceIsOneToOne,
         )
+        // ADR-0092 / UX 11a — a location, contact card or article goes as the
+        // same content; an article's images are its attachments, re-encrypted
+        // below in order so each image block's index still names its image. A
+        // poll or a checklist is never forwarded (the menu does not offer it).
+        val content = request.message.content
+        check(isForwardableContent(content) { true }) { "a poll or checklist is not forwarded" }
         val attachments = request.message.attachments.map { reEncrypt(it) }
-        send(targetGroupIdHex, text, attachments, ref)
+        send(targetGroupIdHex, text, attachments, ref, content)
     }
 
     /**
@@ -104,7 +111,12 @@ public class ForwardSender(
                 height = source.height,
                 thumb = thumb,
             ),
-        )
+        ).let { ref ->
+            // ADR-0047 section 6 — the micro thumbnail is part of the message
+            // text, not a blob: it goes along as it is (the core keeps it on
+            // the first photo or video only).
+            me.lakko.app.media.inlineThumbOrNull(source.inlineThumb)?.let { ref.copy(inlineThumb = it) } ?: ref
+        }
     }
 
     private suspend fun reEncryptThumb(source: ThumbRef): ThumbRef? {

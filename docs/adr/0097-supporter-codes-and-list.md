@@ -120,9 +120,9 @@ walked. Where the build differs from or adds to the text above:
   (redeemed this epoch over another element), `410 supporter-code-expired` (redeemed in an
   earlier window), `429 supporter-code-limited` (address bucket
   `LAKKO_AUTH_IP_LIMIT_SUPPORTER_CODE`, default 20/3600, and per-code counter
-  `LAKKO_AUTH_LIMIT_SUPPORTER_CODE`, scope 23, default 10/3600; both chosen, not
+  `LAKKO_AUTH_LIMIT_SUPPORTER_CODE`, scope 24, default 10/3600; both chosen, not
   measured), `503 supporter-codes-disabled` (no pepper or no anonymous-token master).
-  `supporter_codes` (migration `0040`) also stores the blinded element, so a repeat is
+  `supporter_codes` (migration `0041`) also stores the blinded element, so a repeat is
   recognised by equality.
 - **Pepper:** `LAKKO_AUTH_SUPPORTER_CODE_PEPPER`; the code hash is
   `BLAKE3-keyed(pepper, 10 code bytes)`.

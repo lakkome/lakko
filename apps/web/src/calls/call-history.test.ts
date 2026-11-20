@@ -199,15 +199,15 @@ describe("a call with no conversation, in words", () => {
   });
 
   it("carries the out or in glyph, never missed", () => {
-    expect(callHistoryRowIcon(standalone({ outcome: "outgoing" }))).toBe("outgoing");
-    expect(callHistoryRowIcon(standalone({ outcome: "incoming" }))).toBe("incoming");
+    expect(callHistoryRowIcon(standalone({ outcome: "outgoing" }))).toBe("phone-outgoing");
+    expect(callHistoryRowIcon(standalone({ outcome: "incoming" }))).toBe("phone-incoming");
   });
 });
 
 describe("callHistoryRowIcon", () => {
   it("marks every unanswered outcome as missed", () => {
-    expect(callHistoryRowIcon(entry({ outcome: "missed" }))).toBe("missed");
-    expect(callHistoryRowIcon(entry({ outcome: "declined" }))).toBe("missed");
-    expect(callHistoryRowIcon(entry({ outcome: "failed" }))).toBe("missed");
+    expect(callHistoryRowIcon(entry({ outcome: "missed" }))).toBe("phone-down");
+    expect(callHistoryRowIcon(entry({ outcome: "declined" }))).toBe("phone-down");
+    expect(callHistoryRowIcon(entry({ outcome: "failed" }))).toBe("phone-down");
   });
 });

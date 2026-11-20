@@ -139,6 +139,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         }
     }
 
@@ -197,10 +198,10 @@ mod tests {
     fn golden_pins_the_swift_prefilter_shape() {
         // Profile v4 (ADR-0084): v3 plus the avatar length byte and, at most,
         // a still and a video reference.
-        assert_eq!(profile_envelope_min_len(), 32);
-        assert_eq!(profile_envelope_max_len(), 926);
+        assert_eq!(profile_envelope_min_len(), 33);
+        assert_eq!(profile_envelope_max_len(), 927);
         let smallest = compose_profile(&profile(None, None)).unwrap();
-        assert_eq!(smallest.len(), 32);
+        assert_eq!(smallest.len(), 33);
         assert_eq!(smallest[0], 0x6c);
         let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
         let mut maximal = profile(Some(&name), Some(&"a".repeat(32)));
@@ -231,7 +232,7 @@ mod tests {
             }),
         });
         let largest = compose_profile(&maximal).unwrap();
-        assert_eq!(largest.len(), 926);
+        assert_eq!(largest.len(), 927);
         decode_profile_envelope(largest).expect("the maximal envelope decodes");
     }
 

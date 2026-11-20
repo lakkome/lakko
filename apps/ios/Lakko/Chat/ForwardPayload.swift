@@ -66,6 +66,50 @@ public enum ForwardPayload {
         )
     }
 
+    // MARK: - Content messages (ADR-0092, forwarding amended 2026-11-18)
+
+    /// Whether `message` may be forwarded, by what it holds. A plain message
+    /// may. A location and an article may, sent again as the same content. A
+    /// contact card may unless the newest profile this device holds from the
+    /// person on the card says their card may not be shared
+    /// (`cardShareable(accountKey)`, `true` when nothing is held). A poll or a
+    /// checklist may not: its votes and ticks belong to the conversation it
+    /// was posted in. Content this build cannot read may not either.
+    public static func isForwardable(
+        _ message: ChatMessage, cardShareable: (Data) -> Bool
+    ) -> Bool {
+        isForwardable(content: message.content, cardShareable: cardShareable)
+    }
+
+    /// The same rule over the stored content alone (`nil` = a plain message).
+    public static func isForwardable(
+        content stored: PersistedContent?, cardShareable: (Data) -> Bool
+    ) -> Bool {
+        guard let stored else { return true }
+        switch ContentModel.content(stored) {
+        case .location?, .article?: return true
+        case .contactCard(let card)?: return cardShareable(card.accountKey)
+        case .poll?, .checklist?, nil: return false
+        }
+    }
+
+    /// The content a forward of `message` sends again, or `nil` for a plain
+    /// message (and for content that is never forwarded, which
+    /// ``isForwardable(_:cardShareable:)`` already keeps out).
+    public static func forwardedContent(of message: ChatMessage) -> ContentDraft? {
+        forwardedContent(message.content)
+    }
+
+    public static func forwardedContent(_ stored: PersistedContent?) -> ContentDraft? {
+        guard let stored else { return nil }
+        switch ContentModel.content(stored) {
+        case .location(let location)?: return .location(location)
+        case .contactCard(let card)?: return .contactCard(card)
+        case .article(let article)?: return .article(article)
+        case .poll?, .checklist?, nil: return nil
+        }
+    }
+
     /// The ``ForwardRef`` a received envelope becomes, or `nil` when it
     /// carried no forward field at all (an ordinary message).
     ///
@@ -158,7 +202,7 @@ public enum ForwardAttachments {
         }
         let hasMedia = ref.kind != nil || ref.durationMs != nil || ref.waveform != nil
             || ref.width != nil || ref.height != nil || thumb != nil
-        return try await AttachmentBridge.encryptAndUpload(
+        let uploaded = try await AttachmentBridge.encryptAndUpload(
             bytes: bytes,
             mime: ref.mime,
             name: ref.name,
@@ -172,6 +216,20 @@ public enum ForwardAttachments {
                     thumb: thumb)
                 : nil,
             storage: storage)
+        return carryingInlineFields(from: ref, onto: uploaded)
+    }
+
+    /// The fields of `original` that ride inside the message rather than in
+    /// a blob, copied onto the re-encrypted `uploaded` as they are: an audio
+    /// file's title and artist (ADR-0092 section 2), and the micro thumbnail
+    /// (ADR-0047 section 6; the core keeps it only on the first photo or
+    /// video).
+    static func carryingInlineFields(from original: AttachmentRef, onto uploaded: AttachmentRef) -> AttachmentRef {
+        var out = uploaded
+        out.title = original.title
+        out.artist = original.artist
+        out.inlineThumb = InlineThumb.bounded(original.inlineThumb)
+        return out
     }
 
     /// Every attachment of a message, re-encrypted in order. One failure

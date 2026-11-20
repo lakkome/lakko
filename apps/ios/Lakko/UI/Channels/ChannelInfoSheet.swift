@@ -83,14 +83,16 @@ struct ChannelInfoSheet: View {
     private var sections: [InfoSection] {
         // Read so the screen redraws when the publisher record changes.
         _ = publishersRevision
-        return channelInfoSections(caps: ChannelInfoCapabilities(
+        return ChannelReaderDeviceInfo.sections(
+            readerDevice: state.readerDeviceRole(channelId) != nil,
+            channelInfoSections(caps: ChannelInfoCapabilities(
             role: role,
             hasHandle: !handle.isEmpty,
             // The co-publishers this account approved; a co-publisher always
             // has the owner. Delete channel itself waits for the core route.
             hasOtherPublishers: CoPublisherKeyBook.hasOtherPublishers(
                 channelIdHex: channelId, isOwner: isOwner),
-            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil))
+            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil)))
     }
 
     private var title: String {
@@ -346,6 +348,11 @@ struct ChannelInfoSheet: View {
             try await client.deleteChannel(channelIdHex: channelId, accountIdentity: identity)
             state.endDeleted(channelId)
             onUnsubscribed()
+            // ADR-0064 section 1 — the channel's vault goes with it, best
+            // effort: a failure does not undo the delete.
+            let id = channelId
+            let seed = accountIdentitySeed
+            Task { @MainActor in await ChannelVaultHead.deleteVault(channelIdHex: id, currentSeed: seed) }
         } catch {
             deleteFailed = true
         }
@@ -510,11 +517,10 @@ struct ChannelPublishersScreen: View {
                             publisher: true)
                     } label: {
                         HStack {
-                            Label(l10n.t("channels.publishers.add"), systemImage: "person.badge.plus")
+                            Label(l10n.t("channels.publishers.add"), icon: .personPlus)
                                 .foregroundStyle(Color.lakkoText)
                             Spacer()
-                            Image(systemName: "chevron.forward")
-                                .font(.footnote.weight(.semibold))
+                            LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
                         .padding(14)
@@ -576,7 +582,8 @@ struct ChannelPublishersScreen: View {
     private func load() {
         guard let (identity, group) = open(), let members = try? group.members() else { return }
         let owner = CoPublisher.ownerAccountKey(group)
-        let own = identity.signaturePublicKey()
+        // ADR-0090 — leaves are devices; "you" is this ACCOUNT.
+        let own = identity.accountPublicKey() ?? identity.signaturePublicKey()
         var seen: Set<Data> = []
         var list: [Row] = []
         for member in members.sorted(by: { $0.leafIndex < $1.leafIndex }) {

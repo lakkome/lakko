@@ -75,6 +75,10 @@
 //!    (ADR-0086 §6): a contact request sealed to one member of the group.
 //!    Never rendered; every member tries
 //!    [`crate::group_contact_request::check_group_contact_request`].
+//!    Then [`crate::open_items::try_unwrap_open_items`] and
+//!    [`crate::poll_ballots::try_unwrap_poll_ballots`] (ADR-0092 §3.9): the
+//!    open-items hand-over and old ballot rows a committer sends after an
+//!    admission. Never rendered.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
@@ -123,6 +127,9 @@ use thiserror::Error;
 use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::channel_admission_mark::{
+    try_unwrap_channel_admission_mark, ChannelAdmissionMark, ChannelAdmissionMarkError,
+};
 use crate::channel_epoch_seeds::{
     try_unwrap_channel_epoch_seeds, ChannelEpochSeedsEnvelope, ChannelEpochSeedsError,
 };
@@ -137,6 +144,9 @@ use crate::committer_delegation::{
 use crate::conversation_handle::{
     try_unwrap_conversation_handle, ConversationHandle, ConversationHandleError,
 };
+use crate::conversation_reentry::{
+    try_unwrap_conversation_reentry, ConversationReentry, ConversationReentryError,
+};
 use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_contact_request::{
@@ -150,13 +160,19 @@ use crate::introduction::{
     IntroductionsBundle,
 };
 use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
+use crate::knock_key::{try_unwrap_knock_key, KnockKey, KnockKeyError};
 use crate::knock_seed::{try_unwrap_knock_seed, KnockSeedEnvelope, KnockSeedError};
 use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
 use crate::link_founded::{try_unwrap_link_founded, LinkFounded, LinkFoundedError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
+use crate::open_items::{try_unwrap_open_items, OpenItems, OpenItemsError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
+use crate::poll_ballots::{try_unwrap_poll_ballots, PollBallots, PollBallotsError};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
+use crate::publisher_device_request::{
+    try_unwrap_publisher_device_request, PublisherDeviceRequest, PublisherDeviceRequestError,
+};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 use crate::registrar_seed::{try_unwrap_registrar_seed, RegistrarSeedEnvelope, RegistrarSeedError};
 use crate::shared_channels::{try_unwrap_shared_channels, SharedChannels, SharedChannelsError};
@@ -454,6 +470,40 @@ pub enum IncomingEnvelope<'a> {
     /// journal, sent by a current publisher resolved at receipt; requests
     /// before the next rotation collapse into it.
     ChannelRotateRequest([u8; 16]),
+    /// A co-publisher's device asks an owner device to admit or retire one of
+    /// its account's devices in the PublisherGroup (ADR-0090 section 2.2).
+    /// Never a chat bubble. Only an owner device acts on it, under the rule
+    /// in [`crate::publisher_device_request`].
+    PublisherDeviceRequest(PublisherDeviceRequest),
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). Never a chat bubble. Every publishing device keeps the
+    /// largest mark from a current publisher, under the rule in
+    /// [`crate::channel_admission_mark`].
+    ChannelAdmissionMark(ChannelAdmissionMark),
+    /// An open-items hand-over (ADR-0092 section 3.9): the open polls and
+    /// checklists of the group, sent by the committer of an admission. Never
+    /// a chat bubble. A device that already holds an item ignores it; a
+    /// device admitted by the commit takes it only from a sender
+    /// [`crate::open_items::open_items_sender_trusted`] accepts, puts parts
+    /// together with [`crate::open_items::assemble_open_items`] and checks
+    /// each item (author signature, body, ring) before adopting it.
+    OpenItems(OpenItems),
+    /// Old ballot rows of an anonymous poll the journal may no longer hold
+    /// (ADR-0092 section 3.9). Never a chat bubble. Taken from the same
+    /// senders as [`IncomingEnvelope::OpenItems`]; each row is opened and
+    /// verified like a ballot read from the journal.
+    PollBallots(PollBallots),
+    /// A device that fell behind the conversation asks to be brought back
+    /// (ADR-0091 phase 2, route 1: a DeviceGroup service envelope from
+    /// another device of this account). Never a chat bubble. Handled under
+    /// the re-admitter rules of `lakko_mls::Group::reentry_request_target`
+    /// and `lakko_mls::reentry_admission_verdict`.
+    ConversationReentry(ConversationReentry),
+    /// The group's knock public key and version (ADR-0091 phase 2, route 3).
+    /// Never a chat bubble. Kept only from the owner or an admin resolved at
+    /// receipt (C-68), and only when strictly newer
+    /// ([`crate::knock_key::knock_key_is_newer`]).
+    KnockKey(KnockKey),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -569,6 +619,26 @@ pub enum DispatchError {
     /// malformed payload.
     #[error(transparent)]
     ChannelRotateRequest(#[from] ChannelRotateRequestError),
+    /// The publisher device-request domain (ADR-0090) with a malformed
+    /// payload.
+    #[error(transparent)]
+    PublisherDeviceRequest(#[from] PublisherDeviceRequestError),
+    /// The channel admission-mark domain (ADR-0090) with a malformed payload.
+    #[error(transparent)]
+    ChannelAdmissionMark(#[from] ChannelAdmissionMarkError),
+    /// The open-items domain (ADR-0092 section 3.9) with a malformed payload.
+    #[error(transparent)]
+    OpenItems(#[from] OpenItemsError),
+    /// The poll-ballots domain (ADR-0092 section 3.9) with a malformed
+    /// payload.
+    #[error(transparent)]
+    PollBallots(#[from] PollBallotsError),
+    /// The conversation re-entry domain (ADR-0091) with a malformed payload.
+    #[error(transparent)]
+    ConversationReentry(#[from] ConversationReentryError),
+    /// The knock-key domain (ADR-0091) with a malformed payload.
+    #[error(transparent)]
+    KnockKey(#[from] KnockKeyError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -589,6 +659,9 @@ pub enum DispatchError {
 /// `Ok(IntroMessage(&[]))`, which is a valid (degenerate)
 /// ContactRequest payload the UI can render as an empty
 /// message body.
+// One arm per envelope kind, in dispatch order; splitting it would hide the
+// order that decides which domain wins.
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'_>, DispatchError> {
     // 1. Call-Welcome — first joiner.
     if let Some(welcome) = try_unwrap_call_welcome(plaintext)? {
@@ -699,7 +772,30 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(channel) = try_unwrap_channel_rotate_request(plaintext)? {
         return Ok(IncomingEnvelope::ChannelRotateRequest(channel));
     }
+    // 7n5. A co-publisher's device asks for a device admission or
+    // retirement — ADR-0090 section 2.2.
+    if let Some(request) = try_unwrap_publisher_device_request(plaintext)? {
+        return Ok(IncomingEnvelope::PublisherDeviceRequest(request));
+    }
+    // 7n6. A publishing device's admission mark — ADR-0090 section 6.
+    if let Some(mark) = try_unwrap_channel_admission_mark(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelAdmissionMark(mark));
+    }
+    // 7n7. A device asks to come back — ADR-0091 phase 2.
+    if let Some(request) = try_unwrap_conversation_reentry(plaintext)? {
+        return Ok(IncomingEnvelope::ConversationReentry(request));
+    }
+    // 7n8. The group's knock public key — ADR-0091 phase 2.
+    if let Some(key) = try_unwrap_knock_key(plaintext)? {
+        return Ok(IncomingEnvelope::KnockKey(key));
+    }
     // 7o. Contact request inside a group — ADR-0086 §6.
+    if let Some(items) = try_unwrap_open_items(plaintext)? {
+        return Ok(IncomingEnvelope::OpenItems(items));
+    }
+    if let Some(ballots) = try_unwrap_poll_ballots(plaintext)? {
+        return Ok(IncomingEnvelope::PollBallots(ballots));
+    }
     if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {
         return Ok(IncomingEnvelope::GroupContactRequest(envelope));
     }
@@ -938,6 +1034,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         };
         let wrapped = compose_profile(&profile).unwrap();
         assert_eq!(
@@ -950,15 +1047,15 @@ mod tests {
     fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
         // Fail-closed: a profile carrying a right-to-left override in
         // its name must be dropped, never rendered as chat text.
-        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V4};
+        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V5};
         let name = "Alice\u{202E}".as_bytes();
         let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
-        wrapped.push(PROFILE_VERSION_V4);
+        wrapped.push(PROFILE_VERSION_V5);
         wrapped.extend_from_slice(&0u64.to_be_bytes());
         wrapped.push(u8::try_from(name.len()).unwrap());
         wrapped.extend_from_slice(name);
-        // No username, account id, certificate, grants or avatar.
-        wrapped.extend_from_slice(&[0, 0, 0, 0, 0]);
+        // No username, account id, certificate, grants, avatar or flags.
+        wrapped.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
         assert_eq!(
             dispatch_incoming_envelope(&wrapped),
             Err(DispatchError::Profile(ProfileError::DisplayName(

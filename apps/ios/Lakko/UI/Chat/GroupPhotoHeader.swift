@@ -74,8 +74,7 @@ struct GroupPhotoHeader<Model: ConversationPhotoModel>: View {
                     .onTapGesture { if viewModel.canSetPhoto { menuOpen = true } }
                 if viewModel.canSetPhoto {
                     Button { menuOpen = true } label: {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 14, weight: .semibold))
+                        LkIconView(.pencil, size: 14, relativeTo: nil)
                             .foregroundStyle(Color.lakkoAccentForeground)
                             .frame(width: 32, height: 32)
                             .background(Circle().fill(Color.lakkoAccent))
@@ -127,7 +126,7 @@ struct GroupPhotoHeader<Model: ConversationPhotoModel>: View {
     private var picture: some View {
         InitialsAvatar(
             name: viewModel.photoTitle, identity: viewModel.photoIdHex, size: Self.size,
-            isGroup: viewModel.photoIsGroup, placeholderSymbol: viewModel.photoIsGroup ? nil : "megaphone.fill",
+            isGroup: viewModel.photoIsGroup, placeholderIcon: viewModel.photoIsGroup ? nil : .megaphoneFill,
             photo: .group(viewModel.photoIdHex), playsVideo: true)
     }
 
@@ -167,20 +166,20 @@ struct GroupPhotoHeader<Model: ConversationPhotoModel>: View {
 
     private var menu: some View {
         VStack(spacing: 0) {
-            menuRow(l10n.t("profile.avatar.menu.library"), systemImage: "photo.on.rectangle") {
+            menuRow(l10n.t("profile.avatar.menu.library"), icon: .photoStack) {
                 menuOpen = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { libraryOpen = true }
             }
             if AvatarCameraScreen.hasCamera {
                 Divider()
-                menuRow(l10n.t("profile.avatar.menu.camera"), systemImage: "camera") {
+                menuRow(l10n.t("profile.avatar.menu.camera"), icon: .camera) {
                     menuOpen = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { cameraOpen = true }
                 }
             }
             if viewModel.currentPhoto != nil {
                 Divider()
-                menuRow(l10n.t("profile.avatar.menu.remove"), systemImage: "trash", destructive: true) {
+                menuRow(l10n.t("profile.avatar.menu.remove"), icon: .trash, destructive: true) {
                     menuOpen = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { removeConfirm = true }
                 }
@@ -192,11 +191,11 @@ struct GroupPhotoHeader<Model: ConversationPhotoModel>: View {
     }
 
     private func menuRow(
-        _ title: String, systemImage: String, destructive: Bool = false, action: @escaping () -> Void
+        _ title: String, icon: LkIcon, destructive: Bool = false, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage).frame(width: 24)
+                LkIconView(icon, size: 20).frame(width: 24)
                 Text(title)
                 Spacer()
             }
@@ -312,7 +311,7 @@ struct AllowedReactionsScreen<Model: AllowedReactionsModel>: View {
                                 HStack {
                                     Text(emoji).font(.title2)
                                     Spacer()
-                                    Image(systemName: "minus.circle")
+                                    LkIconView(.minusCircle, size: 20)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                             }
@@ -347,7 +346,7 @@ struct AllowedReactionsScreen<Model: AllowedReactionsModel>: View {
                     Button {
                         if changed { leaveAsk = true } else { onClose() }
                     } label: {
-                        Image(systemName: "chevron.backward")
+                        LkIconView(.chevronBack, size: 24)
                     }
                     .accessibilityLabel(l10n.t("common.back"))
                 }
@@ -402,7 +401,7 @@ struct AllowedReactionsScreen<Model: AllowedReactionsModel>: View {
                 }
                 Spacer()
                 if choice == value {
-                    Image(systemName: "checkmark").foregroundStyle(Color.lakkoAccent)
+                    LkIconView(.checkmark, size: 20).foregroundStyle(Color.lakkoAccent)
                 }
             }
             .contentShape(Rectangle())
@@ -451,8 +450,7 @@ struct NewGroupPhotoSlot: View {
             }
             .onTapGesture { if !disabled { menuOpen = true } }
             Button { menuOpen = true } label: {
-                Image(systemName: "pencil")
-                    .font(.system(size: 14, weight: .semibold))
+                LkIconView(.pencil, size: 14, relativeTo: nil)
                     .foregroundStyle(Color.lakkoAccentForeground)
                     .frame(width: 32, height: 32)
                     .background(Circle().fill(Color.lakkoAccent))
@@ -465,20 +463,20 @@ struct NewGroupPhotoSlot: View {
         .frame(maxWidth: .infinity)
         .sheet(isPresented: $menuOpen) {
             VStack(spacing: 0) {
-                row(l10n.t("profile.avatar.menu.library"), "photo.on.rectangle") {
+                row(l10n.t("profile.avatar.menu.library"), .photoStack) {
                     menuOpen = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { libraryOpen = true }
                 }
                 if AvatarCameraScreen.hasCamera {
                     Divider()
-                    row(l10n.t("profile.avatar.menu.camera"), "camera") {
+                    row(l10n.t("profile.avatar.menu.camera"), .camera) {
                         menuOpen = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { cameraOpen = true }
                     }
                 }
                 if media != nil {
                     Divider()
-                    row(l10n.t("profile.avatar.menu.remove"), "trash", destructive: true) {
+                    row(l10n.t("profile.avatar.menu.remove"), .trash, destructive: true) {
                         menuOpen = false
                         media = nil
                     }
@@ -515,10 +513,10 @@ struct NewGroupPhotoSlot: View {
         }
     }
 
-    private func row(_ title: String, _ image: String, destructive: Bool = false, action: @escaping () -> Void) -> some View {
+    private func row(_ title: String, _ icon: LkIcon, destructive: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: image).frame(width: 24)
+                LkIconView(icon, size: 20).frame(width: 24)
                 Text(title)
                 Spacer()
             }

@@ -399,8 +399,8 @@ pub enum PostContent<'a> {
     Message {
         /// The decrypted plaintext, as given.
         plaintext: &'a [u8],
-        /// What it parsed to.
-        body: MessageBody,
+        /// What it parsed to (boxed: since ADR-0092 the largest variant).
+        body: Box<MessageBody>,
     },
     /// A well-formed, in-bounds metadata record (boxed: with its photo it is
     /// the larger variant by far).
@@ -540,7 +540,10 @@ pub fn classify_post_plaintext(plaintext: &[u8]) -> PostContent<'_> {
             MessageBody::Typing { .. }
             | MessageBody::ReadReceipt { .. }
             | MessageBody::Reaction { .. } => PostContent::NotAPost,
-            body => PostContent::Message { plaintext, body },
+            body => PostContent::Message {
+                plaintext,
+                body: Box::new(body),
+            },
         };
     };
     match decode_payload(payload) {
@@ -1043,11 +1046,11 @@ mod tests {
     fn a_non_record_is_parsed_as_the_chat_envelope() {
         let post = lakko_attachments::compose("hello channel", Vec::new()).unwrap();
         match classify_post_plaintext(&post) {
-            PostContent::Message {
-                plaintext,
-                body: MessageBody::Chat { text, .. },
-            } => {
+            PostContent::Message { plaintext, body } => {
                 assert_eq!(plaintext, post.as_slice());
+                let MessageBody::Chat { text, .. } = *body else {
+                    panic!("expected a chat post, got {body:?}");
+                };
                 assert_eq!(text, "hello channel");
             },
             other => panic!("expected a chat post, got {other:?}"),
@@ -1055,18 +1058,12 @@ mod tests {
         let edit = lakko_attachments::compose_edit(7, "fixed").unwrap();
         assert!(matches!(
             classify_post_plaintext(&edit),
-            PostContent::Message {
-                body: MessageBody::Edit { target: 7, .. },
-                ..
-            }
+            PostContent::Message { body, .. } if matches!(*body, MessageBody::Edit { target: 7, .. })
         ));
         let delete = lakko_attachments::compose_delete(7).unwrap();
         assert!(matches!(
             classify_post_plaintext(&delete),
-            PostContent::Message {
-                body: MessageBody::Delete { target: 7 },
-                ..
-            }
+            PostContent::Message { body, .. } if matches!(*body, MessageBody::Delete { target: 7 })
         ));
         // Bytes that are not the record's domain plus NUL are a post, not a
         // record.

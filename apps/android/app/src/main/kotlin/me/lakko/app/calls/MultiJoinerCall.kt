@@ -744,6 +744,11 @@ class MultiJoinerCall private constructor(
             // chat receive loop), never the SFU signal-relay. A peer that
             // relays one here is off-contract — fail-closed drop.
             FfiIncomingEnvelopeKind.PUSH_ROUTING_SECRET -> Unit
+            // ADR-0092 section 3.9 — the open-items hand-over and its ballot
+            // rows ride the GROUP JOURNAL, never the SFU relay. Dropped.
+            FfiIncomingEnvelopeKind.OPEN_ITEMS,
+            FfiIncomingEnvelopeKind.POLL_BALLOTS,
+            -> Unit
             // ADR-0045 — a committer-liveness beacon likewise rides the GROUP
             // JOURNAL as an MLS application message, never the SFU
             // signal-relay, and it says nothing about a CALL committer (the
@@ -793,6 +798,10 @@ class MultiJoinerCall private constructor(
             // the PublisherGroup journal, never the SFU signal-relay. Dropped.
             FfiIncomingEnvelopeKind.CHANNEL_EPOCH_SEEDS,
             FfiIncomingEnvelopeKind.CHANNEL_ROTATE_REQUEST,
+            // ADR-0090 - a publisher's device request and the admission mark
+            // ride the PublisherGroup journal too. Dropped.
+            FfiIncomingEnvelopeKind.PUBLISHER_DEVICE_REQUEST,
+            FfiIncomingEnvelopeKind.CHANNEL_ADMISSION_MARK,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.
@@ -816,6 +825,12 @@ class MultiJoinerCall private constructor(
             // `docs/ux/who-can-find-me.md` 6.4 - a contact request sealed to
             // one member rides a GROUP JOURNAL; on the relay it is dropped.
             FfiIncomingEnvelopeKind.GROUP_CONTACT_REQUEST -> Unit
+            // ADR-0091 phase 2 - a conversation re-entry request rides the
+            // DeviceGroup, a mailbox or a knock queue, and a knock key rides a
+            // GROUP JOURNAL; neither means anything on the SFU relay. Dropped.
+            FfiIncomingEnvelopeKind.CONVERSATION_REENTRY,
+            FfiIncomingEnvelopeKind.KNOCK_KEY,
+            -> Unit
         }
     }
 

@@ -53,16 +53,30 @@ public enum PairingCodec {
     /// joining device's own ADR-0080 card envelope (UX section 2.1,
     /// ``DeviceCardCenter/pairingCardEnvelope(nowMs:)``), display only on the
     /// confirming device; `nil` puts no card in the payload.
+    ///
+    /// G-56 — `selfRemovalProof` (empty for none): a device already in the
+    /// account's DeviceGroup pairing again carries its self-removal proof for
+    /// `keyPackage` (`buildPairingQrWithSelfRemovalProof`).
     public static func buildPairingQrPayload(
         loginHandle: Data,
         keyPackage: Data,
         rendezvousPseudonym: Data,
-        deviceCardEnvelope: Data? = nil
+        deviceCardEnvelope: Data? = nil,
+        selfRemovalProof: Data = Data()
     ) throws -> Data {
-        return try buildPairingQr(
+        guard !selfRemovalProof.isEmpty else {
+            return try buildPairingQr(
+                loginHandle: loginHandle,
+                keyPackage: keyPackage,
+                rendezvousPseudonym: rendezvousPseudonym,
+                deviceCardEnvelope: deviceCardEnvelope
+            )
+        }
+        return try buildPairingQrWithSelfRemovalProof(
             loginHandle: loginHandle,
             keyPackage: keyPackage,
             rendezvousPseudonym: rendezvousPseudonym,
+            selfRemovalProof: selfRemovalProof,
             deviceCardEnvelope: deviceCardEnvelope
         )
     }
@@ -75,21 +89,46 @@ public enum PairingCodec {
     }
 
     /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
-    /// plus this device's self-removal proof (signed with its old leaf key,
-    /// which is its device identity's key) for `keyPackage`. A parsed knock
-    /// returns it as `DecodedPairingQr.selfRemovalProof` (not verified there).
+    /// plus, when the journal names an epoch, this device's self-removal
+    /// proof (signed with its old leaf key, which is its device identity's
+    /// key) for `keyPackage`; an empty proof for none.
+    ///
+    /// G-55: the row is sealed under a key derived from `lineageSeed`, the
+    /// 64-byte seed the DeviceGroup id derives from
+    /// (``DeviceGroupLifecycle/lineageSeed(accountIdB64:currentSeed:predecessors:)``),
+    /// and padded, so the Delivery Service reads neither the login handle nor
+    /// the KeyPackage. A sibling opens it with ``openRejoinKnockPayload``.
     public static func buildRejoinKnockPayload(
+        lineageSeed: Data,
         loginHandle: Data,
         keyPackage: Data,
         rendezvousPseudonym: Data,
         selfRemovalProof: Data
     ) throws -> Data {
+        let lineage = try Identity.fromSeed(seed: lineageSeed)
         return try buildRejoinKnock(
+            accountIdentity: lineage,
             loginHandle: loginHandle,
             keyPackage: keyPackage,
             rendezvousPseudonym: rendezvousPseudonym,
             selfRemovalProof: selfRemovalProof
         )
+    }
+
+    /// A sibling's side of ``buildRejoinKnockPayload`` (G-55): open a row
+    /// read from the account's DeviceGroup knock queue under `lineageSeed`,
+    /// then check the payload names this account's own handle, as
+    /// ``parsePairingQrPayload(wireBytes:expectedLoginHandle:)`` does. Throws
+    /// for a row that is not a sealed knock or does not open under this
+    /// account's key.
+    public static func openRejoinKnockPayload(
+        lineageSeed: Data,
+        row: Data,
+        expectedLoginHandle: Data
+    ) throws -> DecodedPairingQr {
+        let lineage = try Identity.fromSeed(seed: lineageSeed)
+        return try openRejoinKnock(
+            accountIdentity: lineage, row: row, expectedLoginHandle: expectedLoginHandle)
     }
 
     /// Parse a pairing QR payload and check it names this device's own

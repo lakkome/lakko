@@ -7,6 +7,10 @@
  * disposing the bubble: after a failed send, chats and sections would not
  * switch until the app restarted. Reached the cleanup is, read the key it is
  * not.
+ *
+ * A photo or video of a message is drawn in its mosaic and played in the
+ * viewer (`docs/ux/media-messages.md` section 11); the viewer hides what it
+ * shows when it is disposed, without reading its parent either.
  */
 
 // @vitest-environment jsdom
@@ -16,7 +20,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { VideoNoteBubble } from "./MediaBubbles";
 import { createMediaHub } from "./media-hub";
-import { VideoBubble } from "./VisualBubbles";
+import { MediaGallery } from "./MediaGallery";
 import type { AttachmentRefBytes } from "../chat/attachments";
 import { initWasm } from "../test/ui";
 
@@ -40,7 +44,6 @@ function ref(kind: "video_note" | "other", mime: string): AttachmentRefBytes {
 
 const bubbles = [
   ["a video note", VideoNoteBubble, ref("video_note", "video/mp4")],
-  ["a video", VideoBubble, ref("other", "video/mp4")],
 ] as const;
 
 describe("disposing a media bubble", () => {
@@ -64,5 +67,31 @@ describe("disposing a media bubble", () => {
     tornDown = true;
     expect(dispose).not.toThrow();
     expect(release).toHaveBeenCalledWith("local:1");
+  });
+});
+
+describe("disposing the media viewer", () => {
+  it("hides the item it shows without reading its parent", () => {
+    const onHide = vi.fn();
+    let tornDown = false;
+    const item = {
+      kind: "video" as const,
+      url: (): string | null => null,
+      saveName: "video.mp4",
+      onHide,
+    };
+    const host = document.createElement("div");
+    const props = {
+      get items() {
+        if (tornDown) throw new Error("stale read");
+        return [item];
+      },
+      start: 0,
+      onClose: (): void => {},
+    };
+    const dispose = render(() => MediaGallery(props), host);
+    tornDown = true;
+    expect(dispose).not.toThrow();
+    expect(onHide).toHaveBeenCalledTimes(1);
   });
 });

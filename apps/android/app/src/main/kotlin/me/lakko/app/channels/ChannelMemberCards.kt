@@ -53,6 +53,13 @@ public data class ChannelMemberRow(
     val isSelf: Boolean,
     /** ADR-0084 — the member's profile photo, carried in the card. */
     val avatar: me.lakko.app.profile.AvatarRefs? = null,
+    /** Every subscriber key a card of this member was stored under (one per
+     *  device): what `Remove` takes in a private channel (UX 7.3). */
+    val subscriberPksHex: List<String> = emptyList(),
+    /** The card carries something to call the person by: a display name or
+     *  a username shown here. A card without one is not a named row (UX
+     *  15.1). */
+    val named: Boolean = false,
 )
 
 /** What reading the member list came back with. */
@@ -151,8 +158,17 @@ public suspend fun loadChannelMembers(
                 unreadable += 1
                 continue
             }
-            if (!seen.add(row.key)) continue
-            rows += row
+            if (!seen.add(row.key)) {
+                // Another device of the same member: one row, every key.
+                val at = rows.indexOfFirst { it.key == row.key }
+                if (at >= 0) {
+                    val earlier = rows[at]
+                    val keys = if (pkHex in earlier.subscriberPksHex) earlier.subscriberPksHex else earlier.subscriberPksHex + pkHex
+                    rows[at] = if (row.named && !earlier.named) row.copy(subscriberPksHex = keys) else earlier.copy(subscriberPksHex = keys)
+                }
+                continue
+            }
+            rows += row.copy(subscriberPksHex = listOf(pkHex))
         }
         after = res.nextAfter
         if (after == null) break
@@ -225,15 +241,26 @@ private suspend fun readCard(
             username = profile.username
         }
     }
+    val displayName = profile.displayName?.trim().orEmpty()
     return ChannelMemberRow(
         // Every device of the viewer's own account collapses into one row.
         key = if (isSelf) "self" else senderHex ?: "pk:$pkHex",
-        name = memberRowName(profile.displayName, isSelf),
+        // A card with a username but no display name is called by it.
+        name = if (!isSelf && displayName.isEmpty() && username != null) "@$username" else memberRowName(profile.displayName, isSelf),
         username = username,
         isSelf = isSelf,
         avatar = me.lakko.app.profile.avatarRefsOf(profile.avatar),
+        named = isSelf || displayName.isNotEmpty() || username != null,
     )
 }
+
+/**
+ * Whether a publisher's device registers a subscriber key for its own member
+ * card: only in a channel known to be public. A private channel's service
+ * takes a key only with an admission ticket, which a publisher has no reason
+ * to hold, and an unknown type registers nothing either.
+ */
+public fun publisherMayRegisterCardKey(public: Boolean?): Boolean = public == true
 
 /** How an own-card upload ended. */
 public enum class OwnCardOutcome {
@@ -283,6 +310,9 @@ public object ChannelMemberCards {
         public val usernameCertificate: ByteArray?,
         /** ADR-0084 — the own profile photo, or `null`. */
         public val avatar: me.lakko.app.profile.AvatarRefs? = null,
+        /** ADR-0092 section 7 — the own profile's card-sharing flag. A
+         *  change moves [updatedAtMs], so the card is uploaded again. */
+        public val cardShareable: Boolean = true,
     )
 
     /** Upload this device's card for [input]'s epoch when one is due. Never
@@ -329,6 +359,7 @@ public object ChannelMemberCards {
                         usernameCertificate = if (content.username == null) null else input.usernameCertificate,
                         grants = listOfNotNull(grant),
                         avatar = input.avatar?.toFfi(),
+                        cardShareable = input.cardShareable,
                     ),
                 )
                 // The card is bound to the account: without a reach session
@@ -375,17 +406,17 @@ public object ChannelMemberCards {
      * due, and when the channel does not know the key, register it once and
      * try again.
      */
-    public suspend fun keepOwnCardCurrent(reach: ReachManager, client: ChannelsClient, input: OwnCardInput) {
+    public suspend fun keepOwnCardCurrent(reach: ReachManager, client: ChannelsClient, input: OwnCardInput): OwnCardOutcome {
         val outcome = ensureOwnCard(reach, client, input)
-        if (outcome != OwnCardOutcome.NOT_REGISTERED) return
+        if (outcome != OwnCardOutcome.NOT_REGISTERED) return outcome
         try {
             client.subscribe(input.channelIdHex, reachHex(input.keys.publicKey))
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Throwable) {
-            return
+            return outcome
         }
-        ensureOwnCard(reach, client, input)
+        return ensureOwnCard(reach, client, input)
     }
 
     /**
@@ -420,6 +451,7 @@ public object ChannelMemberCards {
             accountId = accountId.takeIf { it.size == 16 },
             usernameCertificate = username?.let { ReachManager.get(context).usernameCertificate() },
             avatar = own?.avatar,
+            cardShareable = own?.cardShareable ?: true,
         )
     }
 
@@ -430,11 +462,12 @@ public object ChannelMemberCards {
         state: ChannelsUiState,
         client: ChannelsClient,
         channelIdHex: String,
-    ) {
-        val epoch = state.epochByChannel.value[channelIdHex] ?: return
-        val seed = state.subscribedSeeds(channelIdHex)[epoch] ?: return
-        val input = ownCardInput(context, state, channelIdHex, epoch, seed) ?: return
-        keepOwnCardCurrent(ReachManager.get(context), client, input)
+    ): Boolean {
+        val epoch = state.epochByChannel.value[channelIdHex] ?: return false
+        val seed = state.subscribedSeeds(channelIdHex)[epoch] ?: return false
+        val input = ownCardInput(context, state, channelIdHex, epoch, seed) ?: return false
+        val outcome = keepOwnCardCurrent(ReachManager.get(context), client, input)
+        return outcome == OwnCardOutcome.UPLOADED || outcome == OwnCardOutcome.UNCHANGED || outcome == OwnCardOutcome.STALE
     }
 
     /**
@@ -454,7 +487,13 @@ public object ChannelMemberCards {
         val sealing = state.sealingSeed(channelIdHex, current) ?: return
         val epoch = sealing.epoch
         val seed = sealing.seed
+        // A private channel registers a key only with an admission ticket
+        // (the service refuses one without), so a publisher there registers
+        // none: no request that can only be refused.
+        val channel = state.channels.value.firstOrNull { it.id == channelIdHex }
+        val mayRegister = publisherMayRegisterCardKey(channelVisibilityOf(context, state.boundAccount, channel, channelIdHex))
         if (state.subscriberKeysByChannel.value[channelIdHex] == null) {
+            if (!mayRegister) return
             val fresh = ChannelsComposer.freshSubscriberKeys()
             state.setSubscriberKeys(channelIdHex, fresh)
             try {
@@ -466,7 +505,7 @@ public object ChannelMemberCards {
             }
         }
         val input = ownCardInput(context, state, channelIdHex, epoch, seed) ?: return
-        keepOwnCardCurrent(ReachManager.get(context), client, input)
+        if (mayRegister) keepOwnCardCurrent(ReachManager.get(context), client, input) else ensureOwnCard(ReachManager.get(context), client, input)
     }
 
     /** The seed a member card of [epoch] opens with: the publisher's

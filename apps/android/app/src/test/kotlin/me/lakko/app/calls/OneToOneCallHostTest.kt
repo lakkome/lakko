@@ -354,6 +354,19 @@ class OneToOneCallHostTest {
         assertFalse(h.host.startOutgoing(groupB))
     }
 
+    @Test
+    fun `a 1x1 call in a chat this device is behind in is refused before anything is signalled`() = runTest {
+        val h = harness()
+        h.host.behindHeld = { it == groupA }
+        assertTrue(h.host.isHeldWhileBehind(groupA))
+        assertFalse(h.host.startOutgoing(groupA))
+        runCurrent()
+        assertNull(h.host.active.value)
+        assertTrue(h.port.published.isEmpty())
+        assertFalse(h.host.isHeldWhileBehind(groupB))
+        assertTrue("another chat still calls", h.host.startOutgoing(groupB))
+    }
+
     // ---- C-11 / C-12 ---------------------------------------------------------
 
     @Test

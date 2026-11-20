@@ -43,6 +43,8 @@ use crate::storage::{
     SealedTicket, StorageError, StoredListing, StoredPost, SubscriberEntry, SubscriberId,
     INVITE_KEY_LEN, OWNER_NONCE_LEN, OWNER_PUBKEY_LEN, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
+use crate::votes::{PostVoteCounts, Tag, VoteOutcome};
+use crate::votes_sql;
 
 /// MariaDB-backed `ChannelStore`. Construct with a pool
 /// that has been migrated via `sqlx::migrate!` from the
@@ -1999,6 +2001,25 @@ impl ChannelStore for SqlChannelStore {
         post_cursors: &[u64],
     ) -> Result<Vec<(u64, u64)>, StorageError> {
         feedback_sql::comment_counts(&self.pool, channel, post_cursors).await
+    }
+
+    async fn apply_vote(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        tag: Tag,
+        labels: Vec<Label>,
+        at_ms: u64,
+    ) -> Result<VoteOutcome, StorageError> {
+        votes_sql::apply_vote(&self.pool, channel, post_cursor, tag, &labels, at_ms).await
+    }
+
+    async fn vote_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostVoteCounts>, StorageError> {
+        votes_sql::vote_counts(&self.pool, channel, post_cursors).await
     }
 
     async fn add_comment_reaction(

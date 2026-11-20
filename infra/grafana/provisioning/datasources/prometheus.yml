@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Grafana datasource on the monitoring VPS (ADR-0096 P3). Installed into
+# /etc/grafana/provisioning/datasources/ by infra/monitoring/setup-monitoring.sh.
+# The dashboards in infra/grafana/dashboards/ refer to it by the uid
+# `prometheus`.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s

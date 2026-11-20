@@ -343,6 +343,8 @@ class AccountLocalWipeTest {
             check(me.lakko.app.auth.guestAccountState(it, acct)?.claimedUsername == "mira")
         }
         DeviceGroupJournalAccess.markFoundingUnconfirmed(context, acct)
+        // A passkey this device learned cannot carry keys (UX 10.2).
+        me.lakko.app.webauthn.PasskeyNoPrfStore.record(context, acct, "cred-$marker")
         StateBundle.saveKnownGroupIds(context, acct, listOf(group))
         check(deviceLinkAnswerLimit(context, acct).tryConsume() != null)
         DeviceReadmission.recordRemoved(context, acct, group, before = listOf("k1", "k2"), after = listOf("k1"))
@@ -416,6 +418,9 @@ class AccountLocalWipeTest {
             context, acct, listOf(me.lakko.app.chat.LineageEntry("ab".repeat(32), group, 1UL)),
         )
         me.lakko.app.channels.OrphanedChannelsStore.onDevice(context).add(acct, listOf(CHANNEL))
+        // docs/ux/channel-notifications.md section 5 — the last post notified
+        // per channel on this device.
+        me.lakko.app.feed.ChannelNotifiedStore.on(context).write(acct, CHANNEL, 7L, setOf(CHANNEL))
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
         FolderTabPrefs.save(context, "ee".repeat(8))
@@ -581,7 +586,7 @@ class AccountLocalWipeTest {
             "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
             "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
-            "lakko-guest-account",
+            "lakko-guest-account", "lakko-passkeys-no-prf",
         )
 
         /** The files [seed] writes a row naming the account into. */
@@ -598,7 +603,7 @@ class AccountLocalWipeTest {
             "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
             "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
-            "lakko-guest-account",
+            "lakko-guest-account", "lakko-passkeys-no-prf",
             CHANNEL_PUBLISHER_PREFS,
         )
 
@@ -635,6 +640,9 @@ class AccountLocalWipeTest {
             "push-routing-secrets", "session-token", "account-identity-seed", "device-identity-seed", "export-key",
             "recovery-phrase", "guest-phrase", "backup-floor", "journal-ownership", "reach", "identity-pins",
             "channel-log-and-keys",
+            // ADR-0091 phase 2 section 7 - the returning device's gap looks
+            // (their history secret is sealed under the Keystore key).
+            "reentry-gap-looks",
         )
     }
 }

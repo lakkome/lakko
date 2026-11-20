@@ -14,8 +14,8 @@ import java.io.IOException
 
 /**
  * What a passkey does about the account's keys: asked for them on a device
- * that has none, and given them when the person turns that on. The vault,
- * the core and the ceremony are fakes.
+ * that has none, and given them when it is added or repaired (UX 10.2). The
+ * vault, the core and the ceremony are fakes.
  */
 class PasskeyKeysTest {
 
@@ -116,7 +116,7 @@ class PasskeyKeysTest {
         }
     }
 
-    // ---- turning it on -----------------------------------------------------
+    // ---- storing the keys for a passkey -------------------------------------
 
     private val identitySeed = ByteArray(64) { 4 }
 

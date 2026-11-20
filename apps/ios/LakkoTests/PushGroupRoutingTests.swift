@@ -471,6 +471,45 @@ final class PushGroupRoutingTests: XCTestCase {
     /// guard short-circuited on every later launch and NEVER retried — no
     /// other member ever learned the secret and the whole group deferred
     /// push permanently. The owner must re-broadcast until it lands.
+    /// ADR-0091 live walk 2026-11-19 — on iOS a send refused because this
+    /// device is behind in the conversation is an ERROR
+    /// (`ChatRepository.BehindInConversation`, thrown by
+    /// `broadcastPushRoutingControl` via `requireNotBehind`), so it takes the
+    /// failed-publish path: the secret stays undistributed and goes out once
+    /// the device is back.
+    func testBroadcastRefusedWhileBehindStaysUndistributedAndGoesOutOnceBack() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+        final class Behind: @unchecked Sendable { var on = true }
+        let behind = Behind()
+
+        let identity = try makeIdentity(0x3e)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+        let send: (Data) async throws -> Void = { bytes in
+            if behind.on { throw ChatRepository.BehindInConversation() }
+            try broadcaster.send(bytes)
+        }
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: send)
+        XCTAssertTrue(broadcaster.envelopes.isEmpty, "nothing reached the wire")
+        let minted = try XCTUnwrap(store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertFalse(minted.distributed, "a refused send is never recorded as sent")
+        XCTAssertTrue(ConversationReentryRules.isBehindRefusal(ChatRepository.BehindInConversation()))
+
+        behind.on = false
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: send)
+        XCTAssertEqual(broadcaster.envelopes.count, 1, "sent once the device is back")
+        let after = try XCTUnwrap(store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertTrue(after.distributed)
+        XCTAssertEqual(after.secret, minted.secret, "never re-minted")
+    }
+
     func testFailedBroadcastReBroadcastsOnTheNextProvision() async throws {
         let store = makeStore()
         let spy = SubscribeSpy()

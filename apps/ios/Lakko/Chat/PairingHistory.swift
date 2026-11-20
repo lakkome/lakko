@@ -98,7 +98,8 @@ struct WaitingLogSlots {
             lastViewedMessageId: slot.lastViewedMessageId,
             feedSeen: slot.feedSeen,
             syncedThroughMessageId: PairingHistory.higherFloor(
-                slot.syncedThroughMessageId, incoming.syncedThroughMessageId))
+                slot.syncedThroughMessageId, incoming.syncedThroughMessageId),
+            cursorEpoch: slot.cursorEpoch)
     }
 
     /// The slot of `groupIdHex`, taken out: its group has just been joined.

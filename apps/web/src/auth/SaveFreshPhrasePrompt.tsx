@@ -25,7 +25,9 @@
  */
 import { isAbandoned } from "./binding-epoch";
 import { createEffect, createSignal, Show, type JSX } from "solid-js";
-import { newWordsShown, publishOwedTextKey } from "./protect/account-protection";
+import { newWordsShown } from "./protect/account-protection";
+import { publishOwedView } from "./key-reset-owed";
+import { createPublishWaitClock, directoryCooldownOf } from "./publish-wait-clock";
 import { phraseProtectedHere } from "./protect/protection-state";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
@@ -82,6 +84,8 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
     try {
       await auth.retryFreshPublish();
     } catch (err) {
+      // UX 15.4: the directory's cool-down is said by the waiting copy.
+      if (directoryCooldownOf(err) !== null) return;
       const secs = attemptsRetryAfterSecs(err);
       if (secs !== null) wait.startFor(secs);
       else {
@@ -95,6 +99,22 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
       setRetryBusy(false);
     }
   }
+
+  // UX 15.4 "Waiting for the directory": the minutes count down and the
+  // publish is retried by itself when the wait ends, while this is open.
+  const clock = createPublishWaitClock({
+    waitUntilMs: () => auth.freshPublishWaitUntilMs(),
+    busy: retryBusy,
+    retry: onRetryPublish,
+  });
+  const owedView = () =>
+    publishOwedView({
+      waitUntilMs: auth.freshPublishWaitUntilMs(),
+      nowMs: clock.nowMs(),
+      retrying: retryBusy(),
+      wordsShown: wordsShown(),
+      signInNeeded: auth.freshPublishSignInNeeded(),
+    });
 
   async function onDone(): Promise<void> {
     setError(null);
@@ -127,10 +147,11 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
             <Show when={wordsShown()}>
               <h1>{t("recovery_phrase.fresh.title")}</h1>
             </Show>
-            <div class="lk-alert danger" role="alert">
-              {auth.freshPublishSignInNeeded()
-                ? t("recovery_phrase.fresh.sign_in_to_finish")
-                : t(publishOwedTextKey(wordsShown()))}
+            <div class={owedView().waiting ? "lk-alert" : "lk-alert danger"} role="alert">
+              {(() => {
+                const view = owedView();
+                return view.minutes === null ? t(view.textKey) : t(view.textKey, { minutes: view.minutes });
+              })()}
             </div>
             <Show when={retryError() !== null}>
               <div class="form-error" role="alert">
@@ -138,7 +159,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
               </div>
             </Show>
             <WaitNotice remainingMs={wait.remainingMs} />
-            <Show when={!auth.freshPublishSignInNeeded()}>
+            <Show when={owedView().tryAgain}>
               <button
                 class="primary"
                 type="button"

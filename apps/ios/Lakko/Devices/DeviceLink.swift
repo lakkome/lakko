@@ -705,7 +705,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         if owedResult != nil {
             // The decision is made and waits for the proof; the block's own
             // button carries on (``continueAfterProof()``).
-            if modal != .proofNeeded { await finishOwedResult(token: token) }
+            if modal != .proofNeeded { await finishOwedResultUncancelled(token: token) }
             return
         }
         guard let responder, request.outcome == nil,
@@ -723,7 +723,18 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         }
         owedResult = (id, accepted, answeredAt)
         answeredAt = nil
-        await finishOwedResult(token: token)
+        await finishOwedResultUncancelled(token: token)
+    }
+
+    /// ``finishOwedResult(token:)`` run in its own task. `check()` is driven
+    /// by the sheet's `.task(id: modal)`, and `finishOwedResult` itself moves
+    /// the sheet to `.adding` before posting the result: the view then
+    /// restarts its task and cancels the old one, which cancelled the result
+    /// request (NSURLError -999) and ended every right code in "Could not
+    /// add the device" (seen live on an iPhone, 2026-11-15). An unstructured
+    /// task does not inherit that cancellation.
+    private func finishOwedResultUncancelled(token: String) async {
+        await Task { @MainActor in await self.finishOwedResult(token: token) }.value
     }
 
     /// Post the decision of ``owedResult`` and, when the code verified, add

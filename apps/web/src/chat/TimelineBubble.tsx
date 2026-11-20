@@ -21,12 +21,15 @@
  * button, so pressing play paused it. They are now `MessageMenu.tsx`, opened
  * on a deliberate gesture and rendered outside the bubble.
  */
-import { createEffect, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createResource, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
 
+import { base64Encode } from "../auth/account-id";
 import { callInviteOf } from "../calls/call-invite-link";
 import { ChannelInviteCard, groupLinkOf } from "./ChannelInviteCard";
+import { linkOpening, linkWithoutSecret, openStoredCard } from "./channel-invite-preview";
+import type { OpenedChannelInvite } from "../channels/channel-invites";
 
 import type { MemberIdentity } from "./author-identity";
 import {
@@ -37,6 +40,7 @@ import {
   type ReplyRef,
 } from "./attachments";
 import { useChats } from "./ChatContext";
+import { bubbleCopyText, bubbleOffersEdit, bubbleOffersForward } from "./bubble-copy";
 import { copyMessageText } from "./copy-message";
 import { heldBy, type MessageOpState } from "./message-ops";
 import {
@@ -77,8 +81,10 @@ import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
 import { EmojiPicker } from "../media/EmojiPicker";
 import { MediaAttachment, type MediaUpload } from "../media/MediaBubbles";
+import { MediaMosaic } from "../media/MediaMosaic";
 import {
   bubbleMetaSlot,
+  onlyVisualMedia,
   soleMediaBubble,
   type BubbleMetaSlot,
   type MediaBubble,
@@ -88,17 +94,26 @@ import { useProfiles } from "../profile/ProfileContext";
 import { ownAvatarLabel } from "../profile/member-label";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
+import type { ContentState, MessageContent } from "../../wasm/lakko_ffi_wasm";
+import { ContentBubble, contentMenuActions, type ContentHost } from "../attach/ContentBubble";
+import { canForwardContent } from "./forward";
+import { AudioBubble } from "../attach/AudioBubble";
+import { registerMessageMenu } from "./message-menu-registry";
 import { Icon } from "../ui/icons";
 import { joinList, t } from "../l10n";
 import { displayLocale } from "../l10n/display-locale";
 import { publicOrigin } from "../platform";
-import type { MessageRef, TextSlot } from "../translation/controller";
+import type { MessageRef, TextSlot, TextView } from "../translation/controller";
 import { useTranslation } from "../translation/context";
 import { TranslationLine } from "../translation/TranslationLine";
 import type { TranscriptHost } from "../translation/Transcript";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
+  /** ADR-0092 — what a poll, checklist, location, contact card or article
+   *  bubble needs from the conversation. Absent: content renders read-only
+   *  as the unsupported sentence. */
+  contentHost?: ContentHost | undefined;
   /** ADR-0082 — the conversation a translation or transcript is filed
    *  under (the group id, standard base64). Absent: no translation. */
   conversationId?: string | undefined;
@@ -342,9 +357,10 @@ export function TimelineBubble(
       // Defensive.
       return null;
     }
-    if (ev.kind === "serviceEnvelope") {
-      // An unrecognised `lakko/…` service envelope, dropped at receipt by the
-      // chat client and never a bubble. Defensive.
+    if (ev.kind === "serviceEnvelope" || ev.kind === "contentOp" || ev.kind === "openItems") {
+      // An unrecognised `lakko/…` service envelope, or an ADR-0092 op or
+      // hand-over: consumed at receipt by the chat client and never a bubble.
+      // Defensive.
       return null;
     }
     if (ev.kind === "membershipProposal") {
@@ -382,6 +398,11 @@ export function TimelineBubble(
         reply={ev.reply}
         forward={ev.forward}
         unsupported={ev.unsupportedVersion !== undefined}
+        content={ev.content}
+        contentState={ev.contentState}
+        authorKeyB64={ev.senderKey}
+        createdAt={ev.createdAt}
+        channelInviteB64={ev.channelInvite === undefined ? undefined : base64Encode(ev.channelInvite)}
         {...props}
       />
     );
@@ -418,6 +439,11 @@ export function TimelineBubble(
       mediaLocalKey={live().mediaLocalKey}
       reply={live().reply}
       forward={live().forward}
+      content={live().content}
+      contentState={live().contentState}
+      authorKeyB64={live().authorKey}
+      createdAt={live().createdAt}
+      channelInviteB64={live().channelInviteB64}
       {...props}
     />
   );
@@ -492,6 +518,15 @@ function ChatBubbleBody(
      *  read: the bubble says so in the catalog's words, in the language
      *  current when drawn. */
     unsupported?: boolean | undefined;
+    /** ADR-0092 — a poll, checklist, location, contact card or article. */
+    content?: MessageContent | undefined;
+    contentState?: ContentState | undefined;
+    /** The author's key (base64), for a content bubble's attribution. */
+    authorKeyB64?: string | undefined;
+    createdAt?: string | undefined;
+    /** ADR-0087 section 14 — the channel invitation card the message
+     *  carried (base64), drawn as the card, opened on this device. */
+    channelInviteB64?: string | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -540,6 +575,34 @@ function ChatBubbleBody(
     return groupLinkOf(displayText(), origin);
   };
   const [isChannelCard, setIsChannelCard] = createSignal(false);
+  /** ADR-0087 section 14 — the invitation the message's own card opens to,
+   *  on this device and offline; `null` without a card. */
+  const storedInvite = (): OpenedChannelInvite | null => {
+    if (props.channelInviteB64 === undefined || isDeleted()) return null;
+    let origin: string;
+    try {
+      origin = publicOrigin();
+    } catch {
+      return null;
+    }
+    return openStoredCard(props.channelInviteB64, origin);
+  };
+  /**
+   * The words drawn in place of a `/g/` link that is not drawn as a card:
+   * the link without its secret while it is opened or the ledger does not
+   * answer, the catalog's "invalid link" sentence when it is gone. `null`
+   * draws the text as it is: a link that opened as a group's is live and is
+   * tapped. The secret after `#` is never drawn otherwise.
+   */
+  const linkText = (): string | null => {
+    if (storedInvite() !== null) return null;
+    const link = groupLink();
+    if (link === null) return null;
+    const o = linkOpening(link.url);
+    if (o === undefined || o.kind === "offline") return linkWithoutSecret(link.url);
+    if (o.kind === "dead") return t("invite.link.invalid");
+    return null;
+  };
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
 
@@ -566,6 +629,14 @@ function ChatBubbleBody(
     return translation === undefined || ref === null || isEditing()
       ? ({ phase: "none" } as const)
       : translation.textView("text", ref);
+  };
+  /** UX 3.2 — the quiet line: the translation's line, or before any, the
+   *  message's language with `Translate` up front. */
+  const lineView = (): TextView => {
+    const v = textView();
+    const ref = messageRef();
+    if (translation === undefined || ref === null || isEditing() || isDeleted()) return v;
+    return translation.textLine(ref, displayText(), props.tone === "outgoing");
   };
   /** The text the bubble shows: the translation while it is shown. */
   const shownText = (): string => {
@@ -595,8 +666,13 @@ function ChatBubbleBody(
   };
   /** Copy is "the text I see" (UX 3.2): the translation while it is shown. */
   const copyableText = (): string | null => {
+    // ADR-0092 — a content message has no text to copy (a location's
+    // coordinates are its own row).
+    if (props.content !== undefined) return null;
     const ref = messageRef();
-    if (displayText().length > 0) return shownText();
+    if (displayText().length > 0) {
+      return bubbleCopyText(shownText(), storedInvite() !== null || isChannelCard(), linkText());
+    }
     const tr = openTranscript();
     if (tr === null || translation === undefined || ref === null) return null;
     const v = translation.textView("transcript-translation", ref);
@@ -689,6 +765,19 @@ function ChatBubbleBody(
     });
   }
 
+  // ADR-0092 / UX attachments 11.3 — the article reader opens this bubble's
+  // menu directly through the registry.
+  createEffect(() => {
+    const id = props.messageId;
+    const conv = props.conversationId;
+    if (id === undefined || conv === undefined) return;
+    const off = registerMessageMenu(conv, id, () => {
+      const rect = bubbleEl?.getBoundingClientRect();
+      openMenu((rect?.left ?? 0) + 12, (rect?.top ?? 0) + 12);
+    });
+    onCleanup(off);
+  });
+
   // A touch screen has no right-click, so the deliberate act is a long press.
   // Tracked here rather than in the menu because the gesture belongs to the
   // bubble and must be abandoned the moment the finger starts scrolling.
@@ -752,10 +841,24 @@ function ChatBubbleBody(
 
   // ADR-0047 — media attachments render as their own bubbles; anything the
   // hub does not accept as media stays a file chip.
+  // ADR-0092 — an article's images are its own; an audio file has its own
+  // bubble (title, artist, cover).
+  const plainRefs = (): AttachmentRefBytes[] =>
+    props.content !== undefined ? [] : props.attachments.filter((a) => a.kind !== "audio");
+  const audioRefs = (): AttachmentRefBytes[] =>
+    props.content !== undefined ? [] : props.attachments.filter((a) => a.kind === "audio");
   const mediaRefs = (): AttachmentRefBytes[] =>
-    props.attachments.filter((a) => props.hub.decision(a).bubble !== "file");
+    plainRefs().filter((a) => props.hub.decision(a).bubble !== "file");
   const fileRefs = (): AttachmentRefBytes[] =>
-    props.attachments.filter((a) => props.hub.decision(a).bubble === "file");
+    plainRefs().filter((a) => props.hub.decision(a).bubble === "file");
+  // Section 11 — every photo and video of the message is one mosaic; voice
+  // messages, video notes and GIFs keep their own bubbles.
+  const isMosaicRef = (a: AttachmentRefBytes): boolean => {
+    const b = props.hub.decision(a).bubble;
+    return b === "photo" || b === "video";
+  };
+  const mosaicRefs = (): AttachmentRefBytes[] => mediaRefs().filter(isMosaicRef);
+  const otherMediaRefs = (): AttachmentRefBytes[] => mediaRefs().filter((a) => !isMosaicRef(a));
   /**
    * The bubble of a message that is nothing but one piece of media, and where
    * its meta line goes — ONE rule, in `inline-media.ts`, rather than the
@@ -787,7 +890,17 @@ function ChatBubbleBody(
           // never be made against two different answers.
           allowlist,
         );
-  const metaSlot = (): BubbleMetaSlot => bubbleMetaSlot(sole());
+  // Section 11 — a message of nothing but photos and videos (one or ten) has
+  // its time on the mosaic, in the translucent pill.
+  const mosaicOnly = (): boolean =>
+    props.reply === undefined &&
+    props.forward === undefined &&
+    props.content === undefined &&
+    onlyVisualMedia(
+      { deleted: isDeleted() || isEditing(), text: displayText(), attachments: props.attachments },
+      allowlist,
+    );
+  const metaSlot = (): BubbleMetaSlot => (mosaicOnly() ? "media-pill" : bubbleMetaSlot(sole()));
   // UX spec section 3 — a video note is a circle with no bubble chrome.
   // UX spec section 10 — a lone photo or video fills its bubble, and the time
   // and ticks sit on the media in a translucent pill.
@@ -818,7 +931,7 @@ function ChatBubbleBody(
       {/* ADR-0065 section 2 — the saved mark, seen only by this account. */}
       <Show when={props.messageId !== undefined && props.isSavedOf?.(props.messageId) === true}>
         <span class="lk-bubble-saved" role="img" aria-label={t("chat.message.saved_mark")} title={t("chat.message.saved_mark")}>
-          <Icon name="bookmark" size={12} />
+          <Icon name="bookmark-fill" size={14} />
         </span>
       </Show>
       {/* A failed row offers Retry where the message is. The media
@@ -826,7 +939,7 @@ function ChatBubbleBody(
           before it, a plain text message that did not send showed the
           words "Not sent" and no way to act on them. */}
       <Show
-        when={props.ack === "failed" && mediaRefs().length === 0}
+        when={props.ack === "failed" && otherMediaRefs().length === 0}
         fallback={<span>{props.time}</span>}
       >
         <NotSent onRetry={() => props.onRetrySend()} />
@@ -857,7 +970,7 @@ function ChatBubbleBody(
               }
               aria-label={read() ? t("chat.message.read") : t("chat.message.sent")}
             >
-              <Icon name={read() ? "dcheck" : "check"} size={14} />
+              <Icon name={read() ? "checkmark-double" : "checkmark"} size={14} />
             </span>
           );
         })()}
@@ -917,9 +1030,7 @@ function ChatBubbleBody(
               toggleRow();
             }}
           >
-            <Show when={rowSelected()}>
-              <Icon name="check" size={14} strokeWidth={2.4} />
-            </Show>
+            <Icon name={rowSelected() ? "checkmark-circle-fill" : "circle"} size={26} />
           </button>
         </Show>
       </Show>
@@ -940,6 +1051,7 @@ function ChatBubbleBody(
           "emoji-only": emojiOnly() > 0,
           [`emoji-only-${emojiOnly()}`]: emojiOnly() > 0,
           "media-only": mediaOnly(),
+          "has-mosaic": mosaicRefs().length > 0 && !isDeleted() && !isEditing(),
           pending: pending(),
           "run-start": props.startsRun,
           "run-end": props.endsRun,
@@ -1057,52 +1169,20 @@ function ChatBubbleBody(
                     );
                   }}
                 </Show>
-                <Show when={props.unsupported === true}>
-                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                {/* Section 11 — the photos and videos of the message, laid
+                    out together by the shared mosaic rule. */}
+                <Show when={mosaicRefs().length > 0}>
+                  <MediaMosaic
+                    refs={mosaicRefs()}
+                    hub={props.hub}
+                    keyFor={keyFor}
+                    pending={typeof props.mediaUpload === "number"}
+                  />
                 </Show>
-                <Show when={callInvite()}>
-                  {(invite) => (
-                    <div class="lk-bubble-call-invite">
-                      <span class="lk-bubble-call-invite-icon" aria-hidden="true">
-                        <Icon name="phone" size={20} />
-                      </span>
-                      <span class="lk-bubble-call-invite-title">
-                        {t("chat.call_invite.title")}
-                      </span>
-                      <A class="lk-button-link primary" href={invite().href}>
-                        {t("chat.call.join_short")}
-                      </A>
-                    </div>
-                  )}
-                </Show>
-                <Show when={callInvite() === null ? groupLink() : null}>
-                  {(link) => <ChannelInviteCard link={link()} onResolved={setIsChannelCard} />}
-                </Show>
-                <Show when={displayText().length > 0 && callInvite() === null && !isChannelCard()}>
-                  <div class="lk-bubble-text" dir="auto">
-                    <MessageText text={shownText()} />
-                    <Show when={isEdited()}>
-                      <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
-                    </Show>
-                  </div>
-                  {/* UX 3.2 — machine output is always marked, and the
-                      original is one tap away on this line. */}
-                  <Show when={translation !== undefined && messageRef()}>
-                    {(ref) => (
-                      <TranslationLine
-                        controller={translation!}
-                        slot="text"
-                        messageRef={ref()}
-                        text={displayText()}
-                        view={textView()}
-                      />
-                    )}
-                  </Show>
-                </Show>
-                <Show when={mediaRefs().length > 0}>
+                <Show when={otherMediaRefs().length > 0}>
                   <div
                     class="lk-bubble-media"
-                    classList={{ "after-text": displayText().length > 0 }}
+                    classList={{ "after-text": mosaicRefs().length > 0 }}
                   >
                     {/* `Index`, not `For`, and it is the media bubble's
                         lifetime that turns on it. A message's attachments are
@@ -1113,7 +1193,7 @@ function ChatBubbleBody(
                         ref). `For` reconciles by reference, so that replacement
                         discarded the bubble and, with it, the element playing
                         the message the person was listening to. */}
-                    <Index each={mediaRefs()}>
+                    <Index each={otherMediaRefs()}>
                       {(ref) => (
                         <MediaAttachment
                           attachment={ref()}
@@ -1134,6 +1214,58 @@ function ChatBubbleBody(
                     </Index>
                   </div>
                 </Show>
+                <Show when={props.content !== undefined && props.contentHost !== undefined ? props.content : null}>
+                  {(content) => (
+                    <ContentBubble
+                      host={props.contentHost!}
+                      content={content()}
+                      snapshot={props.contentState}
+                      messageId={props.messageId}
+                      attachments={props.attachments}
+                      own={props.isOwn}
+                      authorKeyB64={props.authorKeyB64}
+                      createdAt={props.createdAt}
+                      onOpenMenu={() => {
+                        const rect = bubbleEl?.getBoundingClientRect();
+                        openMenu((rect?.left ?? 0) + 12, (rect?.top ?? 0) + 12);
+                      }}
+                    />
+                  )}
+                </Show>
+                <Show when={props.content !== undefined && props.contentHost === undefined}>
+                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                </Show>
+                <For each={audioRefs()}>
+                  {(ref) => {
+                    const [cover] = createResource(
+                      () => ref.thumb,
+                      async (thumb) => {
+                        try {
+                          return (await props.hub.loadThumb(thumb)) ?? undefined;
+                        } catch {
+                          return undefined;
+                        }
+                      },
+                    );
+                    return (
+                    <AudioBubble
+                      title={ref.title ?? ref.name ?? t("attach.menu.audio")}
+                      artist={ref.artist}
+                      durationMs={ref.durationMs}
+                      coverUrl={cover()}
+                      playable={props.hub.inlineType(ref.mime) === "audio"}
+                      src={async () => {
+                        try {
+                          return await props.hub.load(ref);
+                        } catch {
+                          return null;
+                        }
+                      }}
+                      onSave={() => void props.onDownload(ref)}
+                    />
+                    );
+                  }}
+                </For>
                 <Show when={fileRefs().length > 0}>
                   <AttachmentChips
                     hub={props.hub}
@@ -1144,6 +1276,59 @@ function ChatBubbleBody(
                     getCachedUrl={props.getCachedUrl}
                     tone={props.tone}
                   />
+                </Show>
+                {/* `docs/ux/media-messages.md` section 11 — the text sits below
+                    the mosaic and the file chips. */}
+                <Show when={props.unsupported === true}>
+                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                </Show>
+                <Show when={callInvite()}>
+                  {(invite) => (
+                    <div class="lk-bubble-call-invite">
+                      <span class="lk-bubble-call-invite-icon" aria-hidden="true">
+                        <Icon name="phone-fill" size={20} />
+                      </span>
+                      <span class="lk-bubble-call-invite-title">
+                        {t("chat.call_invite.title")}
+                      </span>
+                      <A class="lk-button-link primary" href={invite().href}>
+                        {t("chat.call.join_short")}
+                      </A>
+                    </div>
+                  )}
+                </Show>
+                <Show when={callInvite() === null ? storedInvite() : null}>
+                  {(o) => <ChannelInviteCard opened={o()} />}
+                </Show>
+                <Show when={callInvite() === null && storedInvite() === null ? groupLink() : null}>
+                  {(link) => <ChannelInviteCard link={link()} onResolved={setIsChannelCard} />}
+                </Show>
+                <Show
+                  when={
+                    displayText().length > 0 && callInvite() === null && !isChannelCard() && storedInvite() === null
+                  }
+                >
+                  <div class="lk-bubble-text" dir="auto">
+                    <Show when={linkText()} fallback={<MessageText text={shownText()} />}>
+                      {(words) => <span>{words()}</span>}
+                    </Show>
+                    <Show when={isEdited()}>
+                      <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
+                    </Show>
+                  </div>
+                  {/* UX 3.2 — machine output is always marked, and the
+                      original is one tap away on this line. */}
+                  <Show when={translation !== undefined && messageRef()}>
+                    {(ref) => (
+                      <TranslationLine
+                        controller={translation!}
+                        slot="text"
+                        messageRef={ref()}
+                        text={displayText()}
+                        view={lineView()}
+                      />
+                    )}
+                  </Show>
                 </Show>
               </>
             }
@@ -1334,6 +1519,7 @@ function ChatBubbleBody(
               anchor={anchor()}
               pinOnly={pinOnlyMenu()}
               canEditDelete={props.isOwn}
+              canReply={true}
               /* `message-actions.md` section 3 — offered on "any message with
                  text", which is not the same predicate as Edit / Delete: Copy
                  is offered on somebody else's message too, and withheld from
@@ -1354,7 +1540,9 @@ function ChatBubbleBody(
                 if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
               }}
               reactionRow={
-                props.messageId !== undefined && props.ack === "sent" ? props.reactionRowFor(props.messageId) : []
+                props.messageId !== undefined && props.ack === "sent"
+                  ? props.reactionRowFor(props.messageId)
+                  : []
               }
               ownReactions={ownGiven()}
               showExpand={rowExpandsFor()}
@@ -1365,7 +1553,14 @@ function ChatBubbleBody(
               /* Section 5.1 — offered once the send is complete. An incoming
                  row is always complete; an own row is once acked. The id gate
                  is the menu's own (it never opens without one). */
-              canForward={props.messageId !== undefined && props.ack === "sent"}
+              canForward={
+                props.messageId !== undefined &&
+                props.ack === "sent" &&
+                bubbleOffersForward(storedInvite() !== null || isChannelCard()) &&
+                // UX `attachments.md` section 11a: never a poll or checklist,
+                // a contact card only while its person lets it be shared.
+                canForwardContent(props.content, (k) => profiles.cardShareableOf(k))
+              }
               onForward={() => {
                 if (props.messageId !== undefined) props.onForward(props.messageId);
               }}
@@ -1406,6 +1601,21 @@ function ChatBubbleBody(
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);
               }}
               onClose={() => setMenuAnchor(null)}
+              // A content message edits through its own menu rows (ADR-0092),
+              // an invitation card never (ADR-0087 section 14).
+              canEdit={props.content === undefined && bubbleOffersEdit(storedInvite() !== null || isChannelCard())}
+              extraActions={
+                props.content !== undefined && props.contentHost !== undefined
+                  ? contentMenuActions({
+                      host: props.contentHost,
+                      content: props.content,
+                      messageId: props.messageId,
+                      attachments: props.attachments,
+                      own: props.isOwn,
+                      authorKeyB64: props.authorKeyB64,
+                    })
+                  : []
+              }
             />
           )}
         </Show>

@@ -57,6 +57,8 @@
  * backup does not upload, so the blob this still has to read is not replaced
  * by this device's nearly empty state.
  */
+import { createSignal } from "solid-js";
+
 import { registerAccountMemory } from "../auth/account-memory";
 import type { DeviceCipher } from "../auth/device-cipher";
 import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
@@ -515,6 +517,49 @@ const DEFAULT_OWED_DEPS: OwedRestoreDeps = {
 export async function restoreOwedAccountBackup(
   inputs: OwedRestoreInputs,
   overrides: Partial<OwedRestoreDeps> = {},
+): Promise<AccountBackupRestoreOutcome | null> {
+  try {
+    return await runOwedRestore(inputs, overrides);
+  } finally {
+    markLandingRestoreSettled(inputs.accountIdB64);
+  }
+}
+
+/** The accounts whose landing step ({@link restoreOwedAccountBackup}) has
+ *  finished in this page, whatever it did. Reactive: what a landing learns
+ *  from the backup (the username, `auth/username-prompt.ts`) is only asked
+ *  of the person after this. */
+const [settledAccounts, setSettledAccounts] = createSignal<ReadonlySet<string>>(new Set());
+
+function markLandingRestoreSettled(accountIdB64: string): void {
+  const current = settledAccounts();
+  if (current.has(accountIdB64)) return;
+  const next = new Set(current);
+  next.add(accountIdB64);
+  setSettledAccounts(next);
+}
+
+/** Whether the landing's backup step has finished for `accountIdB64` in
+ *  this page. Reactive. */
+export function landingRestoreSettled(accountIdB64: string): boolean {
+  return settledAccounts().has(accountIdB64);
+}
+
+registerAccountMemory(
+  "backup-landing-settled",
+  (ids) => {
+    const current = settledAccounts();
+    if (!ids.some((id) => current.has(id))) return;
+    const next = new Set(current);
+    for (const id of ids) next.delete(id);
+    setSettledAccounts(next);
+  },
+  { signOut: true },
+);
+
+async function runOwedRestore(
+  inputs: OwedRestoreInputs,
+  overrides: Partial<OwedRestoreDeps>,
 ): Promise<AccountBackupRestoreOutcome | null> {
   const deps: OwedRestoreDeps = { ...DEFAULT_OWED_DEPS, ...overrides };
   try {

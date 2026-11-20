@@ -3,20 +3,25 @@
 
 package me.lakko.app.devices
 
+import me.lakko.app.chat.toAttachmentRef
 import android.content.Context
 import android.util.Base64
 import android.util.Log
 import me.lakko.app.chat.MessageLogPayload
 import me.lakko.app.chat.MessageLogStore
 import me.lakko.app.chat.PersistedAttachment
+import me.lakko.app.chat.PersistedForward
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
+import me.lakko.app.chat.PersistedReply
 import me.lakko.app.chat.PersistedThumb
 import me.lakko.app.chat.bundleFloor
 import me.lakko.app.chat.higherFloor
 import uniffi.lakko_ffi_uniffi.HistoryAttachment
+import uniffi.lakko_ffi_uniffi.HistoryForward
 import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
 import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
+import uniffi.lakko_ffi_uniffi.HistoryReply
 import uniffi.lakko_ffi_uniffi.HistoryThumb
 import uniffi.lakko_ffi_uniffi.StructuredHistoryGroup
 import uniffi.lakko_ffi_uniffi.StructuredHistoryMessage
@@ -71,6 +76,10 @@ public object HistoryBundleCodec {
         context: Context,
         accountIdB64: String,
         secret: ByteArray,
+        /** Walk 3, W3-R3 — this account's own person key in a conversation
+         *  (base64), by group id hex; `null` falls back to the key a sent
+         *  outgoing row was stamped with. */
+        ownAuthorKeyB64: (groupIdHex: String) -> String? = { null },
     ): ByteArray? {
         val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
         if (log.groups.isEmpty()) return null
@@ -92,6 +101,7 @@ public object HistoryBundleCodec {
             val trimmed = carried.takeLast(perGroupCap)
             val capped = trimmed.size < carried.size
             val messages = mutableListOf<StructuredHistoryMessage>()
+            val ownKey = ownAuthorKeyB64(hex)
             for (m in trimmed) {
                 // G-6 step 2: encode the canonical cross-platform
                 // placeholder via the shared Rust core. Web / iOS
@@ -99,7 +109,7 @@ public object HistoryBundleCodec {
                 // wire (replacing the Android-only kotlinx JSON
                 // shape that did not interoperate with web).
                 val placeholder = try {
-                    encodePlaceholder(m)
+                    encodePlaceholder(m, ownKey)
                 } catch (_: Throwable) {
                     continue
                 }
@@ -138,6 +148,114 @@ public object HistoryBundleCodec {
             secret = secret,
             groups = groupInputs,
             maxHlc = maxHlc,
+        )
+    }
+
+    /**
+     * ADR-0091 phase 2 section 7 — the gap bundle a device that brings
+     * another back sends: ONE conversation's rows from [fromMs] on (at most
+     * [MAX_BUNDLE_MESSAGES], the newest kept), sealed under [secret]. `null`
+     * when there is nothing in the gap.
+     */
+    public fun buildGroupSince(
+        context: Context,
+        accountIdB64: String,
+        secret: ByteArray,
+        groupIdHex: String,
+        fromMs: Long,
+        /** Walk 3, W3-R3 — this account's own person key in the conversation
+         *  (base64): the author an outgoing row carries. */
+        ownAuthorKeyB64: String? = null,
+    ): ByteArray? {
+        val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
+        val slot = log.groups[groupIdHex] ?: log.groups[groupIdHex.lowercase()] ?: return null
+        val groupIdBytes = hexToBytes(groupIdHex) ?: return null
+        val carried = bundledMessages(slot.messages)
+        val timeOf: (me.lakko.app.chat.PersistedMessage) -> Long? = { m -> parseIsoMs(m.createdAt).toLong().takeIf { it > 0 } }
+        val (kept, cut) = me.lakko.app.chat.gapRows(carried, fromMs, MAX_BUNDLE_MESSAGES, timeOf)
+        // Not everything of the gap (the receiver keeps its gap line): the
+        // cap trimmed the rows, or this device holds no row older than the
+        // gap's start, so it may have been away for part of it too. The same
+        // rule as web `buildGapHistoryBundle` and iOS `buildForGroup`.
+        val capped = me.lakko.app.chat.gapBundleIncomplete(carried, fromMs, cut, timeOf)
+        if (kept.isEmpty()) return null
+        var maxHlc: ULong = 0u
+        val messages = kept.mapNotNull { m ->
+            val placeholder = try {
+                encodePlaceholder(m, ownAuthorKeyB64)
+            } catch (_: Throwable) {
+                return@mapNotNull null
+            }
+            if (m.messageId > 0 && m.messageId.toULong() > maxHlc) maxHlc = m.messageId.toULong()
+            StructuredHistoryMessage(
+                payloadBytes = placeholder,
+                senderLeaf = 0u,
+                messageId = java.nio.ByteBuffer.allocate(8)
+                    .order(java.nio.ByteOrder.BIG_ENDIAN)
+                    .putLong(m.messageId)
+                    .array(),
+                receivedAtMs = parseIsoMs(m.createdAt),
+            )
+        }
+        if (messages.isEmpty()) return null
+        return sealHistoryBundleStructured(
+            secret = secret,
+            groups = listOf(StructuredHistoryGroup(groupId = groupIdBytes, messages = messages, countCapped = capped)),
+            maxHlc = maxHlc,
+        )
+    }
+
+    /** What [applyReentryBundle] took in. */
+    public class ReentryBundleApplied(
+        /** Rows added to the log. */
+        public val applied: Int,
+        /** The bundle rows' times (ms), for the gap line. */
+        public val rowTimesMs: List<Long>,
+        /** The sender cut the bundle to its size cap. */
+        public val capped: Boolean,
+    )
+
+    /**
+     * ADR-0091 phase 2 section 7 — take in a gap bundle for [groupIdHex]
+     * only (any other group in it is ignored). [adapt] makes each row this
+     * device's: given the decoded row (the SENDER's direction) and the
+     * author the placeholder names (walk 3, W3-R3; base64, `null` when it
+     * names none), it sets the author and the direction
+     * ([me.lakko.app.chat.reentryBundleRow]).
+     */
+    public fun applyReentryBundle(
+        context: Context,
+        accountIdB64: String,
+        secret: ByteArray,
+        sealedBytes: ByteArray,
+        groupIdHex: String,
+        adapt: (row: PersistedMessage, authorKeyB64: String?) -> PersistedMessage,
+    ): ReentryBundleApplied {
+        val opened = openHistoryBundleStructured(secret = secret, sealedBytes = sealedBytes)
+        val group = opened.groups.firstOrNull { bytesToHex(it.groupId).equals(groupIdHex, ignoreCase = true) }
+            ?: return ReentryBundleApplied(0, emptyList(), false)
+        val rows = group.messages.mapNotNull { m ->
+            try {
+                val placeholder = decodeHistoryPlaceholder(m.payloadBytes)
+                adapt(persistedOf(placeholder), authorKeyB64Of(placeholder))
+            } catch (cause: Throwable) {
+                Log.v(LOG_TAG, "decode placeholder failed", cause)
+                null
+            }
+        }
+        val existing = MessageLogStore.getLog(context, accountIdB64)
+            ?: MessageLogPayload(version = 1, groups = emptyMap())
+        val merged = mergeBundle(existing.groups, mapOf(groupIdHex.lowercase() to rows))
+        MessageLogStore.putLog(
+            context = context,
+            accountIdB64 = accountIdB64,
+            payload = MessageLogPayload(version = existing.version, groups = merged.groups),
+        )
+        liveLogSink?.invoke(accountIdB64, merged.opened)
+        return ReentryBundleApplied(
+            applied = merged.applied,
+            rowTimesMs = rows.mapNotNull { parseIsoMs(it.createdAt).toLong().takeIf { t -> t > 0 } },
+            capped = group.countCapped,
         )
     }
 
@@ -278,7 +396,45 @@ public object HistoryBundleCodec {
 
     /** Encode a local-store message row into the canonical
      *  cross-platform placeholder bytes via the shared Rust core. */
-    private fun encodePlaceholder(m: PersistedMessage): ByteArray {
+    private fun encodePlaceholder(m: PersistedMessage, ownAuthorKeyB64: String?): ByteArray =
+        encodeHistoryPlaceholder(placeholderOf(m, ownAuthorKeyB64))
+
+    /**
+     * Walk 3, W3-R3 — the author a bundled row carries (placeholder version
+     * 6): an incoming row its stored author key (the key the live row was
+     * attributed to), an outgoing row this account's own key in the
+     * conversation ([ownAuthorKeyB64], else the key a sent row was stamped
+     * with), a system row none. Anything that is not a 32-byte key is none.
+     */
+    internal fun bundleAuthorKey(m: PersistedMessage, ownAuthorKeyB64: String?): ByteArray? {
+        val b64 = when (m.direction) {
+            "incoming" -> m.authorKeyB64
+            "outgoing" -> ownAuthorKeyB64 ?: m.authorKeyB64
+            else -> null
+        } ?: return null
+        val bytes = try {
+            java.util.Base64.getDecoder().decode(b64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return bytes.takeIf { it.size == AUTHOR_KEY_LEN }
+    }
+
+    /** The author a decoded placeholder names, base64 (the form a live row
+     *  stores), or `null`. */
+    internal fun authorKeyB64Of(placeholder: HistoryPlaceholder): String? =
+        placeholder.authorKey?.takeIf { it.size == AUTHOR_KEY_LEN }
+            ?.let { java.util.Base64.getEncoder().encodeToString(it) }
+
+    private const val AUTHOR_KEY_LEN: Int = 32
+
+    /**
+     * A local-store message row as the placeholder record. Version 3 also
+     * carries the ADR-0087 channel invitation card (without it the new device
+     * drew an invitation as its bare `/g/` link, seen live 2026-11-13) and
+     * the ADR-0052 reply and forward. A deleted row carries no card.
+     */
+    internal fun placeholderOf(m: PersistedMessage, ownAuthorKeyB64: String? = null): HistoryPlaceholder {
         // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
         // voice message, video note or GIF restores as itself on the new
         // device. The core applies the envelope's bounds on encode and decode.
@@ -297,23 +453,48 @@ public object HistoryBundleCodec {
                 width = a.width,
                 height = a.height,
                 thumb = a.thumb?.let(::historyThumb),
+                inlineThumb = a.inlineThumbB64?.let { runCatching { Base64.decode(it, Base64.NO_WRAP) }.getOrNull() }
+                    ?.let { me.lakko.app.media.inlineThumbOrNull(it) },
             )
         }
-        val placeholder = HistoryPlaceholder(
+        val card = if (m.deleted) {
+            null
+        } else {
+            m.channelInviteB64?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+                ?.takeIf { it.isNotEmpty() }
+        }
+        val forward = m.forward?.let { f ->
+            val origin = f.originGroupIdHex?.let(::hexToBytes)?.takeIf { f.originMessageId != null }
+            HistoryForward(
+                author = f.author,
+                originGroupId = origin,
+                originMessageId = if (origin == null) null else f.originMessageId,
+            )
+        }
+        return HistoryPlaceholder(
             messageId = m.messageId.toULong(),
             direction = directionFromString(m.direction),
             createdAt = m.createdAt,
             text = m.text,
             attachments = attachments,
+            channelInvite = card,
+            reply = m.reply?.let { HistoryReply(target = it.target, author = it.author, excerpt = it.excerpt) },
+            forward = forward,
+            // ADR-0092 section 3.11 — a content row carries its content and
+            // folded state, so the new device draws the card, not a blank.
+            content = me.lakko.app.chat.historyContentOf(m),
+            authorKey = bundleAuthorKey(m, ownAuthorKeyB64),
         )
-        return encodeHistoryPlaceholder(placeholder)
     }
 
     /** Decode canonical placeholder bytes (from any platform) back
      *  into a local-store message row. Throws on malformed input;
      *  callers wrap in try/catch. */
-    private fun decodePlaceholder(bytes: ByteArray): PersistedMessage {
-        val placeholder = decodeHistoryPlaceholder(bytes)
+    private fun decodePlaceholder(bytes: ByteArray): PersistedMessage = persistedOf(decodeHistoryPlaceholder(bytes))
+
+    /** A decoded placeholder as the local-store row, the invitation card and
+     *  the reply and forward included. */
+    internal fun persistedOf(placeholder: HistoryPlaceholder): PersistedMessage {
         val attachments = placeholder.attachments.map { a ->
             PersistedAttachment(
                 blobIdB64 = Base64.encodeToString(a.blobId, Base64.NO_WRAP),
@@ -338,6 +519,8 @@ public object HistoryBundleCodec {
                         height = t.height,
                     )
                 },
+                inlineThumbB64 = me.lakko.app.media.inlineThumbOrNull(a.inlineThumb)
+                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
             )
         }
         return PersistedMessage(
@@ -346,6 +529,27 @@ public object HistoryBundleCodec {
             text = placeholder.text,
             attachments = attachments,
             createdAt = placeholder.createdAt,
+            content = placeholder.content?.let { c ->
+                me.lakko.app.chat.persistedContentOf(c, attachments.mapNotNull { it.toAttachmentRef() })
+            },
+            reply = placeholder.reply?.let { PersistedReply(target = it.target, author = it.author, excerpt = it.excerpt) },
+            forward = placeholder.forward?.let {
+                PersistedForward(
+                    author = it.author,
+                    originGroupIdHex = it.originGroupId?.let(::bytesToHex),
+                    originMessageId = it.originMessageId,
+                )
+            },
+            channelInviteB64 = placeholder.channelInvite?.takeIf { it.isNotEmpty() }
+                ?.let { java.util.Base64.getEncoder().encodeToString(it) },
+            // Walk 3, W3-R3 — an incoming row names its author, so it renders
+            // with the author's name and avatar like a live row. (A gap
+            // bundle's rows are re-attributed by [applyReentryBundle].)
+            authorKeyB64 = if (placeholder.direction == HistoryMessageDirection.INCOMING) {
+                authorKeyB64Of(placeholder)
+            } else {
+                null
+            },
         )
     }
 

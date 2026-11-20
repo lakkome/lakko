@@ -12,6 +12,7 @@ import { historyRowId } from "./lineage";
 import type { MemberIdentity } from "./author-identity";
 import type { AttachmentRefBytes, ForwardRef, ReplyRef } from "./attachments";
 import type { IncomingChatEvent } from "./client";
+import type { ContentState, MessageContent } from "../../wasm/lakko_ffi_wasm";
 
 /** A timeline entry — verified incoming events PLUS optimistic
  *  outbound bubbles that haven't been confirmed yet.
@@ -59,6 +60,14 @@ export type TimelineRow =
       /** ADR-0052 decision 2 — the forward attribution this row was sent
        *  with, so the sender's own bubble draws the line it sent. */
       forward?: ForwardRef;
+      /** ADR-0087 section 14 — the channel invitation card this row was
+       *  sent with (standard base64), so the sender's own bubble and Chats
+       *  row read the invitation, never the link. */
+      channelInviteB64?: string;
+      /** ADR-0092 — a poll, checklist, location, contact card or article. */
+      content?: MessageContent;
+      /** ADR-0092 section 3.11 — a restored poll's or checklist's state. */
+      contentState?: ContentState;
     };
 
 /** Read the author IDENTITY a displayed row should be gated on:

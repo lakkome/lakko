@@ -12,9 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Campaign
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +47,9 @@ import me.lakko.app.search.searchEndLine
 import me.lakko.app.search.searchShowsNothingFound
 import me.lakko.app.search.withCurrentContacts
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * People under a search field (`docs/ux/who-can-find-me.md` section 6.1,
@@ -84,6 +84,9 @@ internal fun PeopleSearchSection(
     /** The people whose one-to-one is among the conversations above (standard
      *  base64 account keys): a contact among them is left out. */
     chatPeersB64: Set<String> = emptySet(),
+    /** ADR-0087 section 5 — the ids (hex) of the groups and channels already
+     *  shown as rows of the list above: no card or handle row for them. */
+    listedConversationIdsHex: Set<String> = emptySet(),
     /** The name of a channel this device knows, by its id; `null` when none. */
     channelName: (channelIdHex: String) -> String? = { null },
     /** ADR-0087 section 5 — public groups and channels under People. */
@@ -117,10 +120,27 @@ internal fun PeopleSearchSection(
         val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
         peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
     }
-    val channel = shown?.channel
     // ADR-0087 section 5 — the public groups and channels, asked here so the
     // field knows whether anything matched at all.
-    val found = rememberFoundConversations(query, conversations)
+    val foundAll = rememberFoundConversations(query, conversations)
+    val found = remember(foundAll.rows, foundAll.pending, listedConversationIdsHex) {
+        FoundConversations(
+            foundAll.rows.filter {
+                me.lakko.app.search.foundConversationShown(me.lakko.app.search.searchHex(it.id), listedConversationIdsHex)
+            },
+            foundAll.pending,
+        )
+    }
+    // One row per channel: the card stands for a channel the handle lookup
+    // also named.
+    val channel = shown?.channel?.takeIf { c ->
+        me.lakko.app.search.handleChannelRowShown(
+            channelIdHex = c.idHex,
+            foundIdsHex = foundAll.rows.map { me.lakko.app.search.searchHex(it.id) },
+            foundPending = found.pending,
+            listedIdsHex = listedConversationIdsHex,
+        )
+    }
     // who-can-find-me.md section 6.1, "One list": no headings. The rows this
     // device holds stand above (the caller's list), then the people (local
     // first), the groups and channels, the channel a handle names; the spinner
@@ -150,7 +170,7 @@ internal fun PeopleSearchSection(
             PersonRow(
                 person = person,
                 send = rowSendState(person, sends[person.keyHex], outgoing),
-                canAskAgain = outgoing.canAskAgain(person),
+                canAskAgain = outgoing.canAskAgain(person, System.currentTimeMillis()),
                 onAdd = { session.add(person) },
                 onAskAgain = { session.askAgain(person) },
                 onOpenContact = onOpenContact,
@@ -200,7 +220,7 @@ private fun ChannelRow(label: String, handle: String, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Campaign, contentDescription = null, modifier = Modifier.size(40.dp).padding(8.dp))
+        LkIcon(R.drawable.ic_lk_megaphone, contentDescription = null, modifier = Modifier.size(40.dp).padding(8.dp))
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyLarge)
@@ -211,7 +231,7 @@ private fun ChannelRow(label: String, handle: String, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Icon(Icons.Filled.ChevronRight, contentDescription = null)
+        LkIcon(R.drawable.ic_lk_chevron_forward, contentDescription = null, size = LkIconSize.Mark)
     }
 }
 

@@ -49,10 +49,11 @@ public enum HistoryBundleCodec {
     /// Caller handles the `nil` case by skipping the mailbox
     /// PUT; the joining side's `pollForHistoryBundle` timeout
     /// fires harmlessly.
-    public static func buildFromMessageLog(
+    static func buildFromMessageLog(
         accountIdB64: String,
         secret: Data,
-        store: MessageLogStore = MessageLogStore()
+        store: MessageLogStore = MessageLogStore(),
+        cards: ChannelInviteCardStore = .shared
     ) throws -> Data? {
         guard let log = store.getLog(accountIdB64: accountIdB64) else {
             return nil
@@ -67,52 +68,11 @@ public enum HistoryBundleCodec {
 
         for hex in groupHexes {
             guard let slot = log.groups[hex] else { continue }
-            guard let groupIdBytes = Self.hexToBytes(hex) else { continue }
-            // The MLS bookkeeping rows (a commit, an external-join request)
-            // are never carried: this client hides them, and a receiver that
-            // draws them as "Members changed" showed one per device commit.
-            let carried = bundledMessages(slot.messages)
-            let trimmed = Array(carried.suffix(perGroupCap))
-            let capped = trimmed.count < carried.count
-            var messages: [StructuredHistoryMessage] = []
-            for m in trimmed {
-                // G-6 step 2: encode the canonical cross-platform
-                // placeholder via the shared Rust core. Web /
-                // Android call the SAME codec, so the bytes agree
-                // on the wire (replacing the iOS-only JSONEncoder
-                // shape that did not interoperate with web).
-                let placeholder: Data
-                do {
-                    placeholder = try Self.encodePlaceholder(m)
-                } catch {
-                    continue
-                }
-                let createdMs = Self.parseIsoMs(m.createdAt)
-                // `messageId` is the HLC-derived Int64 the chat
-                // pipeline assigns; serialise it big-endian for
-                // the structured-history wire so the joining
-                // device sees the same numeric value back.
-                var idBE = m.messageId.bigEndian
-                let idBytes = withUnsafeBytes(of: &idBE) { Data($0) }
-                messages.append(
-                    StructuredHistoryMessage(
-                        payloadBytes: placeholder,
-                        senderLeaf: 0,
-                        messageId: idBytes,
-                        receivedAtMs: createdMs
-                    )
-                )
-                if m.messageId > 0, UInt64(m.messageId) > maxHlc {
-                    maxHlc = UInt64(m.messageId)
-                }
-            }
-            groupInputs.append(
-                StructuredHistoryGroup(
-                    groupId: groupIdBytes,
-                    messages: messages,
-                    countCapped: capped
-                )
-            )
+            guard let projected = projectGroup(
+                hex: hex, rows: bundledMessages(slot.messages), cap: perGroupCap,
+                accountIdB64: accountIdB64, cards: cards) else { continue }
+            groupInputs.append(projected.group)
+            maxHlc = max(maxHlc, projected.maxHlc)
         }
         if groupInputs.isEmpty { return nil }
 
@@ -123,22 +83,174 @@ public enum HistoryBundleCodec {
         )
     }
 
+    /// ADR-0091 phase 2 section 7 — one conversation's `rows` (already the
+    /// gap's, bookkeeping rows left out) sealed under `secret`, or `nil` when
+    /// none of them projects.
+    ///
+    /// `heldBeforeGap`: whether this device holds a row older than the gap's
+    /// start. Without one it cannot vouch that it saw the start of the gap,
+    /// and the group is marked `countCapped` ("not everything"), the web rule;
+    /// a receiver whose bundle is not capped drops its gap line.
+    static func buildForGroup(
+        hex: String,
+        rows: [PersistedMessage],
+        accountIdB64: String,
+        secret: Data,
+        heldBeforeGap: Bool = true,
+        ownKey: Data? = nil,
+        cards: ChannelInviteCardStore = .shared
+    ) throws -> Data? {
+        guard let projected = projectGroup(
+            hex: hex, rows: rows, cap: Self.maxBundleMessages,
+            accountIdB64: accountIdB64, cards: cards, notEverything: !heldBeforeGap, ownKey: ownKey),
+              !projected.group.messages.isEmpty else { return nil }
+        return try sealHistoryBundleStructured(
+            secret: secret, groups: [projected.group], maxHlc: projected.maxHlc)
+    }
+
+    /// One group's rows projected onto the structured history wire: the
+    /// newest `cap` of `carried`, each as the canonical placeholder.
+    private static func projectGroup(
+        hex: String,
+        rows carried: [PersistedMessage],
+        cap: Int,
+        accountIdB64: String,
+        cards: ChannelInviteCardStore,
+        notEverything: Bool = false,
+        ownKey: Data? = nil
+    ) -> (group: StructuredHistoryGroup, maxHlc: UInt64)? {
+        guard let groupIdBytes = Self.hexToBytes(hex) else { return nil }
+        // The MLS bookkeeping rows (a commit, an external-join request)
+        // are never carried: this client hides them, and a receiver that
+        // draws them as "Members changed" showed one per device commit.
+        let trimmed = Array(carried.suffix(cap))
+        let capped = trimmed.count < carried.count || notEverything
+        var maxHlc: UInt64 = 0
+        var messages: [StructuredHistoryMessage] = []
+        for m in trimmed {
+            // G-6 step 2: encode the canonical cross-platform
+            // placeholder via the shared Rust core. Web /
+            // Android call the SAME codec, so the bytes agree
+            // on the wire (replacing the iOS-only JSONEncoder
+            // shape that did not interoperate with web).
+            let placeholder: Data
+            do {
+                // ADR-0087 section 14 — the invitation card lives beside
+                // the log, keyed on (conversation, message id); without it
+                // the new device draws the bare `/g/` link.
+                let card = m.deleted ? nil : cards.card(
+                    conversationIdHex: hex, messageId: m.messageId, accountIdB64: accountIdB64)
+                placeholder = try Self.encodePlaceholder(
+                    m, channelInvite: card, authorKey: Self.placeholderAuthorKey(m, ownKey: ownKey))
+            } catch {
+                continue
+            }
+            let createdMs = Self.parseIsoMs(m.createdAt)
+            // `messageId` is the HLC-derived Int64 the chat
+            // pipeline assigns; serialise it big-endian for
+            // the structured-history wire so the joining
+            // device sees the same numeric value back.
+            var idBE = m.messageId.bigEndian
+            let idBytes = withUnsafeBytes(of: &idBE) { Data($0) }
+            messages.append(
+                StructuredHistoryMessage(
+                    payloadBytes: placeholder,
+                    senderLeaf: 0,
+                    messageId: idBytes,
+                    receivedAtMs: createdMs
+                )
+            )
+            if m.messageId > 0, UInt64(m.messageId) > maxHlc {
+                maxHlc = UInt64(m.messageId)
+            }
+        }
+        return (StructuredHistoryGroup(groupId: groupIdBytes, messages: messages, countCapped: capped), maxHlc)
+    }
+
     // MARK: - Joining side
 
     /// Open the sealed bytes + project rows into the joining
     /// device's persistent message log. Returns the number of
     /// rows applied (across all groups). Idempotent on
     /// `messageId` — collisions take the on-disk value.
-    public static func applyToMessageLog(
+    static func applyToMessageLog(
         accountIdB64: String,
         secret: Data,
         sealedBytes: Data,
-        store: MessageLogStore = MessageLogStore()
+        store: MessageLogStore = MessageLogStore(),
+        cards: ChannelInviteCardStore = .shared
     ) throws -> Int {
         let opened = try openHistoryBundleStructured(
             secret: secret,
             sealedBytes: sealedBytes
         )
+        return applyOpened(opened, accountIdB64: accountIdB64, store: store, cards: cards, gap: nil)
+    }
+
+    /// ADR-0091 section 7 — what a filed gap history tells the gap line.
+    struct GapApplied: Equatable {
+        /// Rows the merge added.
+        let applied: Int
+        /// No group was marked `countCapped`: the bundle carries everything
+        /// from the gap's start.
+        let complete: Bool
+        /// The earliest row the bundle carried, in milliseconds.
+        let earliestMs: Int64?
+    }
+
+    /// Open a gap history, file it like ``applyToMessageLog(accountIdB64:secret:sealedBytes:store:cards:)``
+    /// and report what it carried (the web `applyGapHistoryBundle`).
+    ///
+    /// Walk-3 rule W3-R3: `ownKey` is this account's own key in the
+    /// conversation (the person key peers resolve this device's leaf to) and
+    /// `route` the route of the request that brought this device back; each
+    /// row takes the author and direction ``gapRow(_:author:ownKey:route:)``
+    /// gives it.
+    static func applyGapBundle(
+        accountIdB64: String,
+        secret: Data,
+        sealedBytes: Data,
+        ownKey: Data? = nil,
+        route: String? = nil,
+        store: MessageLogStore = MessageLogStore(),
+        cards: ChannelInviteCardStore = .shared
+    ) throws -> GapApplied {
+        let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealedBytes)
+        let summary = gapSummary(opened)
+        let applied = applyOpened(
+            opened, accountIdB64: accountIdB64, store: store, cards: cards,
+            gap: GapContext(ownKey: ownKey, route: route))
+        return GapApplied(applied: applied, complete: summary.complete, earliestMs: summary.earliestMs)
+    }
+
+    /// Whether `opened` carries everything, and its earliest row.
+    static func gapSummary(_ opened: StructuredHistoryBundle) -> (complete: Bool, earliestMs: Int64?) {
+        var complete = true
+        var earliest: Int64?
+        for g in opened.groups {
+            if g.countCapped { complete = false }
+            for m in g.messages {
+                guard let row = Self.decodeOpenedPlaceholder(m.payloadBytes)?.message,
+                      let ms = ChatRepository.parseDsTimestampMs(row.createdAt) else { continue }
+                if earliest.map({ ms < $0 }) ?? true { earliest = ms }
+            }
+        }
+        return (complete, earliest)
+    }
+
+    /// What a gap bundle's receiver knows to place each row (W3-R3).
+    struct GapContext {
+        let ownKey: Data?
+        let route: String?
+    }
+
+    private static func applyOpened(
+        _ opened: StructuredHistoryBundle,
+        accountIdB64: String,
+        store: MessageLogStore,
+        cards: ChannelInviteCardStore,
+        gap: GapContext?
+    ) -> Int {
         let existing = store.getLog(accountIdB64: accountIdB64)
             ?? MessageLogPayload(version: 1, groups: [:])
 
@@ -148,9 +260,24 @@ public enum HistoryBundleCodec {
             // the shared Rust core. Bytes from a web or Android scanner decode
             // identically here. A bookkeeping row from a sender that still
             // carries them is dropped: it is nothing the person reads.
-            decoded[Self.bytesToHex(g.groupId), default: []] += g.messages
-                .compactMap { Self.decodePlaceholder($0.payloadBytes) }
-                .filter { !Self.isBookkeepingSystemRow($0) }
+            let hex = Self.bytesToHex(g.groupId)
+            for opened in g.messages.compactMap({ Self.decodeOpenedPlaceholder($0.payloadBytes) }) {
+                if Self.isBookkeepingSystemRow(opened.message) { continue }
+                let row = gap.map {
+                    Self.gapRow(opened.message, author: opened.authorKey, ownKey: $0.ownKey, route: $0.route)
+                } ?? Self.pairingRow(opened.message, author: opened.authorKey)
+                decoded[hex, default: []].append(row)
+                // ADR-0087 section 14 — the card goes where this client keeps
+                // cards, so the bubble and the Chats row draw it. A card this
+                // device already holds for the row stays.
+                if let card = opened.channelInvite,
+                   cards.card(conversationIdHex: hex, messageId: opened.message.messageId,
+                              accountIdB64: accountIdB64) == nil {
+                    cards.put(
+                        card: card, conversationIdHex: hex, messageId: opened.message.messageId,
+                        accountIdB64: accountIdB64)
+                }
+            }
         }
         let merged = Self.mergeBundle(held: existing.groups, decoded: decoded)
 
@@ -206,7 +333,8 @@ public enum HistoryBundleCodec {
                 messages: merged.rows,
                 lastViewedMessageId: slot.lastViewedMessageId,
                 feedSeen: slot.feedSeen,
-                syncedThroughMessageId: PairingHistory.higherFloor(slot.syncedThroughMessageId, floor)
+                syncedThroughMessageId: PairingHistory.higherFloor(slot.syncedThroughMessageId, floor),
+                cursorEpoch: slot.cursorEpoch
             )
             opened[hex] = PersistedGroup(
                 cursor: 0,
@@ -236,8 +364,12 @@ public enum HistoryBundleCodec {
     // MARK: - Placeholder codec (G-6 step 2)
 
     /// Encode a local-store message row into the canonical
-    /// cross-platform placeholder bytes via the shared Rust core.
-    static func encodePlaceholder(_ m: PersistedMessage) throws -> Data {
+    /// cross-platform placeholder bytes via the shared Rust core. Version 3
+    /// also carries `channelInvite` (the ADR-0087 card this client keeps
+    /// beside the log) and the row's ADR-0052 reply and forward.
+    static func encodePlaceholder(
+        _ m: PersistedMessage, channelInvite: Data? = nil, authorKey: Data? = nil
+    ) throws -> Data {
         // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
         // voice message, video note or GIF restores as itself on the new
         // device. The core applies the envelope's bounds on encode and decode.
@@ -255,7 +387,23 @@ public enum HistoryBundleCodec {
                 waveform: a.waveformB64.flatMap { Data(base64Encoded: $0) },
                 width: a.width,
                 height: a.height,
-                thumb: a.thumb.flatMap(Self.historyThumb(from:))
+                thumb: a.thumb.flatMap(Self.historyThumb(from:)),
+                title: a.title,
+                artist: a.artist,
+                // ADR-0047 section 6 — the micro thumbnail travels too; the
+                // core keeps it only on the first photo or video.
+                inlineThumb: a.inlineThumbB64.flatMap { Data(base64Encoded: $0) }
+            )
+        }
+        // ADR-0092 section 3.11 — a content message travels with its content
+        // and the state this device folded.
+        let content = m.toChatMessage().flatMap { ContentModel.bundleContent($0, nowMs: ChatRepository.nowMs()) }
+        let forward = m.forward.map { f in
+            let origin = f.originGroupIdHex.flatMap(Self.hexToBytes)
+            return HistoryForward(
+                author: f.author,
+                originGroupId: f.originMessageId == nil ? nil : origin,
+                originMessageId: origin == nil ? nil : f.originMessageId
             )
         }
         let placeholder = HistoryPlaceholder(
@@ -263,15 +411,34 @@ public enum HistoryBundleCodec {
             direction: Self.directionFromString(m.direction),
             createdAt: m.createdAt,
             text: m.text,
-            attachments: attachments
+            attachments: attachments,
+            content: content,
+            channelInvite: channelInvite,
+            reply: m.reply.map { HistoryReply(target: $0.target, author: $0.author, excerpt: $0.excerpt) },
+            forward: forward,
+            authorKey: authorKey
         )
         return try encodeHistoryPlaceholder(placeholder: placeholder)
+    }
+
+    /// A decoded placeholder: the log row and the invitation card, which this
+    /// client keeps beside the log rather than in the row.
+    struct OpenedPlaceholder {
+        let message: PersistedMessage
+        let channelInvite: Data?
+        /// The author's key the sender stored (W3-R3), 32 bytes, or `nil`.
+        let authorKey: Data?
     }
 
     /// Decode canonical placeholder bytes (from any platform)
     /// back into a local-store message row; `nil` on malformed
     /// input.
     static func decodePlaceholder(_ bytes: Data) -> PersistedMessage? {
+        decodeOpenedPlaceholder(bytes)?.message
+    }
+
+    /// ``decodePlaceholder(_:)`` with the invitation card.
+    static func decodeOpenedPlaceholder(_ bytes: Data) -> OpenedPlaceholder? {
         guard let placeholder = try? decodeHistoryPlaceholder(bytes: bytes) else {
             return nil
         }
@@ -298,16 +465,83 @@ public enum HistoryBundleCodec {
                         width: t.width,
                         height: t.height
                     )
-                }
+                },
+                title: a.title,
+                artist: a.artist,
+                inlineThumbB64: a.inlineThumb.flatMap { $0.isEmpty ? nil : $0.base64EncodedString() }
             )
         }
-        return PersistedMessage(
+        let restored = placeholder.content.flatMap { content in
+            ContentModel.restored(content, attachments: attachments.compactMap { $0.toAttachmentRef() })
+        }
+        let message = PersistedMessage(
             messageId: Int64(bitPattern: placeholder.messageId),
             direction: Self.directionToString(placeholder.direction),
             text: placeholder.text,
             attachments: attachments,
-            createdAt: placeholder.createdAt
+            createdAt: placeholder.createdAt,
+            reply: placeholder.reply.map { PersistedReply(target: $0.target, author: $0.author, excerpt: $0.excerpt) },
+            forward: placeholder.forward.map {
+                PersistedForward(
+                    author: $0.author,
+                    originGroupIdHex: $0.originGroupId.map(Self.bytesToHex),
+                    originMessageId: $0.originMessageId
+                )
+            },
+            content: restored
         )
+        return OpenedPlaceholder(
+            message: message,
+            channelInvite: placeholder.channelInvite.flatMap { $0.isEmpty ? nil : $0 },
+            authorKey: placeholder.authorKey.flatMap { $0.count == 32 ? $0 : nil }
+        )
+    }
+
+    // MARK: - The author of a bundled row (walk-3 rule W3-R3)
+
+    /// The author key a bundled row carries: an incoming row the key its live
+    /// row was attributed to; an outgoing row this account's own key in the
+    /// conversation (`ownKey`, else the key stamped on the row when it was
+    /// sent); a system row none. Only a 32-byte key is carried.
+    static func placeholderAuthorKey(_ m: PersistedMessage, ownKey: Data?) -> Data? {
+        let key: Data?
+        switch m.direction {
+        case "incoming": key = m.authorKeyB64.flatMap { Data(base64Encoded: $0) }
+        case "outgoing": key = ownKey ?? m.authorKeyB64.flatMap { Data(base64Encoded: $0) }
+        default: key = nil
+        }
+        return key.flatMap { $0.count == 32 ? $0 : nil }
+    }
+
+    /// A gap bundle row on the device that came back. With an author: the
+    /// row is attributed to it, outgoing when it is this account's own key in
+    /// the conversation, incoming otherwise. Without one: the old route rule
+    /// (``ConversationReentryRules/bundleDirection(route:senderDirection:)``).
+    /// A system row stays one.
+    static func gapRow(_ m: PersistedMessage, author: Data?, ownKey: Data?, route: String?) -> PersistedMessage {
+        guard m.direction != "system" else { return m }
+        guard let author else {
+            return reauthored(
+                m, authorKeyB64: m.authorKeyB64,
+                direction: ConversationReentryRules.bundleDirection(route: route, senderDirection: m.direction))
+        }
+        let direction = (ownKey.map { $0 == author } ?? false) ? "outgoing" : "incoming"
+        return reauthored(m, authorKeyB64: base64Encode(author), direction: direction)
+    }
+
+    /// A pairing bundle row (the same account): an incoming row takes the
+    /// author it carries; the direction is as sent.
+    static func pairingRow(_ m: PersistedMessage, author: Data?) -> PersistedMessage {
+        guard m.direction == "incoming", let author else { return m }
+        return reauthored(m, authorKeyB64: base64Encode(author), direction: m.direction)
+    }
+
+    private static func reauthored(_ m: PersistedMessage, authorKeyB64: String?, direction: String) -> PersistedMessage {
+        PersistedMessage(
+            messageId: m.messageId, direction: direction, text: m.text, attachments: m.attachments,
+            createdAt: m.createdAt, authorKeyB64: authorKeyB64, edited: m.edited, deleted: m.deleted,
+            reactions: m.reactions, reply: m.reply, forward: m.forward,
+            unsupportedVersion: m.unsupportedVersion, lastOpId: m.lastOpId, content: m.content)
     }
 
     /// A stored poster frame as the placeholder's thumb; `nil` when a byte

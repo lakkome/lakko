@@ -36,6 +36,7 @@ incremental.
 | Web Push VAPID keys | `/etc/lakko-test/vapid_private.pem` (PKCS#8, 640) and `vapid_public.b64url` (read by `deploy.sh` for the web build) |
 | Databases | `lakko_test_{auth,ds,discovery,push_gw,channels}`, user `lakko_test` |
 | Blobs | `/var/lib/lakko-test/blobs` |
+| Donation methods | `/etc/lakko-test/credstore/lakko-donations.json` (root 0600), loaded by discovery as the `lakko-donations` systemd credential; `setup-server.sh` and every deploy write `{"methods":[]}` when it is absent, because a missing credential source fails the unit |
 | Web client | `/var/www/lakko-test-web` |
 | nginx | `/etc/nginx/sites-available/lakko-test` from `nginx/lakko-test.conf`; `/etc/nginx/snippets/lakko-test-security-headers.inc` from `nginx/lakko-test-security-headers.inc` |
 | Ports | services on `127.0.0.1:8081-8086,8091`, SFU signaling `127.0.0.1:7880`, SFU media UDP `43210` public |
@@ -64,6 +65,33 @@ Optional SFU switches, set by hand in `/etc/lakko-test/lakko.env` and followed b
   changed (the negotiation differs). Read `services/sfu/README.md`, "Bitrate control": not
   yet seen against a real browser.
 
+## Monitoring (ADR-0096 P4)
+
+The monitoring VPS (`infra/README.md`, "Monitoring") scrapes this host under
+`stack="test"`, through the same metrics server block as production, on
+`test.lakko.me:9643` with the test stack's existing certificate. Each
+service's `/metrics` listener (`LAKKO_<SVC>_METRICS_BIND`, 127.0.0.1:9641 and
+9651-9660), node_exporter, mysqld_exporter and the nginx exporter listen on
+127.0.0.1 only; the firewall opens 9643 to the monitoring VPS alone, and a
+client certificate from the monitoring CA is required. The test coturn
+instances (edge, edge2) export no metrics; edge's TURN-over-TLS on 443 is
+probed instead. Test-stack alerts go to Telegram only, never to e-mail.
+
+Setup, once the monitoring VPS exists:
+
+```bash
+just push-monitoring-ca-test
+LAKKO_MONITORING_IP=<monitoring VPS address> just setup-metrics-test
+just deploy-test        # restarts lakko-test.target, so the listeners open
+```
+
+`setup-metrics-test` copies `infra/` from the working tree to
+`/root/lakko-infra/` on the server and runs `infra/scripts/setup-metrics.sh`
+with `STACK=test`: the exporters, journald retention, the schema-size timer,
+the metrics lines in `/etc/lakko-test/lakko.env`, the server block
+(`/etc/nginx/sites-available/lakko-metrics.conf`) and the firewall rule. No
+backup timers: the test stack's data is disposable.
+
 ## One-time setup
 
 1. DNS: an `A` record for the domain, **not** proxied by Cloudflare (the SFU media port and
@@ -84,6 +112,25 @@ Optional SFU switches, set by hand in `/etc/lakko-test/lakko.env` and followed b
    `certbot certonly --webroot -w /var/www/certbot -d test.lakko.me`, restore the TLS block,
    `nginx -t && systemctl reload nginx`.
 4. `just deploy-test`.
+
+## Donation methods
+
+The donations page shows only methods signed offline (`infra/README.md`,
+"Donation methods"). To put methods on this stack, sign the file on the machine
+that holds the donations key and install it as root:
+
+```bash
+just sign-donations donations.json
+scp -i "$LAKKO_TEST_SSH_KEY" donations.signed.json root@test.lakko.me:/tmp/
+ssh -i "$LAKKO_TEST_SSH_KEY" root@test.lakko.me 'install -m 600 -o root -g root \
+  /tmp/donations.signed.json /etc/lakko-test/credstore/lakko-donations.json && \
+  rm /tmp/donations.signed.json && systemctl restart lakko-test-discovery'
+```
+
+The web build must pin the same public key (`VITE_LAKKO_DONATIONS_KEY`); a
+build without it shows no method. `LAKKO_DISCOVERY_DONATIONS_KEY` in
+`/etc/lakko-test/lakko.env` is optional and makes discovery refuse a file whose
+signatures do not verify.
 
 ## Server-specific notes (the current Hetzner host)
 
@@ -158,6 +205,19 @@ build it on a fresh host, as root, after the main one-time setup:
 9. Check: `ss -ltnp` shows HAProxy on `127.0.0.1:5350`, `:3478` and `:5349` and coturn on
    `:5351` only; a STUN binding to UDP 3478 of edge2 over IPv4 and IPv6 answers; a call with
    only `turns:edge.lakko.me:443` connects in Firefox.
+
+## Passkeys in the apps
+
+The relying-party id is the stack's domain. iOS creates and uses passkeys
+for it only when the app carries `webcredentials:<domain>` (in
+`apps/ios/Lakko/Lakko.entitlements`) and the domain's
+`apple-app-site-association` names the app under `webcredentials` (the web
+deploy writes it with the applinks, from `LAKKO_APPLE_TEAM_ID`). Android
+needs the `delegate_permission/common.get_login_creds` relation in
+`assetlinks.json`, and auth must accept the app's origin,
+`android:apk-key-hash:<base64url SHA-256 of the signing certificate>`: the
+deploy derives it from the fingerprint in the shipped `assetlinks.json` and
+writes `LAKKO_WEBAUTHN_EXTRA_ORIGINS` into `/etc/lakko-test/lakko.env`.
 
 ## App links (a tapped link opens the installed app)
 

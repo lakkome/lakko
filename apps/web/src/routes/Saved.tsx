@@ -187,11 +187,28 @@ export default function Saved(): JSX.Element {
 
   return (
     <section class="lk-page lk-saved">
+      {/* Saved opens from the Chats menu and is not a tab: without this it had
+          no way back on any width (base scenario 30, 2026-11-11). */}
+      <button
+        type="button"
+        class="ghost small"
+        style={{ "align-self": "flex-start" }}
+        onClick={() => navigate(paths.home)}
+      >
+        <Icon name="chevron-back" size={20} />
+        {t("nav.chats")}
+      </button>
       <div class="lk-page-head">
         <h1>{t("saved.title")}</h1>
       </div>
       <Show when={error()}>{(m) => <div class="form-error" role="alert">{m()}</div>}</Show>
-      <Show when={rows().length > 0} fallback={<p class="lk-pane-nomatch">{t("saved.empty")}</p>}>
+      <Show when={rows().length > 0} fallback={
+          <div class="lk-empty">
+            <Icon name="bookmark" size={48} />
+            <span>{t("saved.empty")}</span>
+          </div>
+        }
+      >
         <ul class="lk-saved-list">
           <For each={rows()}>
             {(row) => {
@@ -255,7 +272,7 @@ export default function Saved(): JSX.Element {
               style={{ left: `${m().x}px`, top: `${m().y}px` }}
             >
               <button type="button" role="menuitem" onClick={() => void remove(m().row)}>
-                <Icon name="bookmark" size={16} />
+                <Icon name="bookmark-slash" size={20} />
                 {t("chat.message.unsave")}
               </button>
             </div>

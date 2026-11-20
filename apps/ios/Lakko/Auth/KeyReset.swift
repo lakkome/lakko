@@ -142,10 +142,133 @@ enum IdentityUploadRefusal: Equatable {
         case (400, "key-reset-attestation-invalid"): return .attestationInvalid
         case (409, "key-generation-not-newer"): return .generationNotNewer
         case (429, "identity-changed-too-recently"):
-            return .changedTooRecently(retryAfterSecs: json?["retry_after_secs"] as? Int)
+            return .changedTooRecently(retryAfterSecs: retryAfterSecs(json?["retry_after_secs"]))
         case (503, "key-reset-disabled"): return .keyResetDisabled
         case (401, "key-generation-superseded"): return .superseded
         default: return .other
+        }
+    }
+
+    /// `retry_after_secs` as a whole number of seconds, whatever numeric
+    /// type `JSONSerialization` read it as (`120`, `120.0`). A missing,
+    /// non-numeric, boolean or non-positive value reads as `nil`.
+    static func retryAfterSecs(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let secs = number.doubleValue
+        guard secs.isFinite, secs > 0 else { return nil }
+        return Int(min(secs.rounded(.up), Double(Int32.max)))
+    }
+}
+
+// MARK: - Waiting for the directory (UX 15.4, amended 2026-11-12)
+
+/// The directory's cool-down on a reset's publish: `429
+/// identity-changed-too-recently` with how long is left. The device waits
+/// that long and then publishes by itself.
+public struct KeyResetPublishWait: Equatable, Sendable {
+    /// The account the wait is for.
+    public let accountIdB64: String
+    /// Unix ms at which the directory accepts the publish.
+    public let untilMs: Int64
+
+    public init(accountIdB64: String, untilMs: Int64) {
+        self.accountIdB64 = accountIdB64
+        self.untilMs = untilMs
+    }
+
+    /// The longest wait taken from a refusal; a longer one is read as this.
+    static let maxWaitSecs = 24 * 60 * 60
+
+    /// The wait a failed publish asks for, or `nil` when `error` is not the
+    /// cool-down refusal or carries no readable time (that refusal keeps
+    /// the "could not finish" copy and Try again).
+    static func after(_ error: Error, accountIdB64: String, nowMs: Int64) -> KeyResetPublishWait? {
+        let cause = (error as? KeyResetPublishFailed)?.underlying ?? error
+        guard case .changedTooRecently(let secs)? = IdentityUploadRefusal.of(cause),
+              let secs, secs > 0 else { return nil }
+        return KeyResetPublishWait(
+            accountIdB64: accountIdB64,
+            untilMs: nowMs + Int64(min(secs, maxWaitSecs)) * 1000)
+    }
+}
+
+/// What a publish-owed screen shows (UX 15.4): the "could not finish" copy
+/// with Try again, or, while the directory's cool-down runs, the waiting
+/// copy with the minutes left and no Try again. Pure: the screens render it
+/// once a second.
+public struct PublishOwedDisplay: Equatable {
+    public enum Message: Equatable {
+        /// A catalog key with no argument.
+        case copy(key: String)
+        /// A catalog key with `{minutes}`
+        /// (``PublishOwedDisplay/waitingKey(showsWords:)``).
+        case waiting(key: String, minutes: Int)
+    }
+
+    public let message: Message
+    /// Whether Try again is on the screen.
+    public let showsTryAgain: Bool
+    /// The wait is over: the screen retries by itself now.
+    public let retryDue: Bool
+
+    /// The waiting copy: the one that promises the new words for a
+    /// phrase-protected account, the wordless one for any other (ADR-0075).
+    public static func waitingKey(showsWords: Bool) -> String {
+        showsWords ? "recovery_phrase.fresh.publish_waiting" : "account.keys_changed.waiting"
+    }
+
+    /// The retry runs this long after the time the directory named, so a
+    /// time rounded down by the server does not meet the cool-down again.
+    /// Chosen, not measured.
+    public static let retryMarginMs: Int64 = 1_000
+
+    /// The minutes the waiting copy names: `ceil(remaining / 60 s)`, at
+    /// least 1.
+    public static func minutes(remainingMs: Int64) -> Int {
+        guard remainingMs > 60_000 else { return 1 }
+        return Int((remainingMs + 59_999) / 60_000)
+    }
+
+    /// - Parameters:
+    ///   - copyKey: the "could not finish" key for this account
+    ///     (``KeysChangedCopy/publishOwedKey(showsWords:needsSignIn:)``).
+    ///   - showsWords: the account is phrase-protected and its new words
+    ///     are shown once published.
+    ///   - waitUntilMs: the running cool-down, if any.
+    ///   - needsSignIn: the stored attestation is too old; a sign-in comes
+    ///     first, whatever the directory said.
+    public static func decide(
+        copyKey: String, showsWords: Bool, waitUntilMs: Int64?, needsSignIn: Bool, nowMs: Int64
+    ) -> PublishOwedDisplay {
+        guard !needsSignIn, let until = waitUntilMs else {
+            return PublishOwedDisplay(message: .copy(key: copyKey), showsTryAgain: true, retryDue: false)
+        }
+        return PublishOwedDisplay(
+            message: .waiting(key: waitingKey(showsWords: showsWords), minutes: minutes(remainingMs: until - nowMs)),
+            showsTryAgain: false,
+            retryDue: nowMs >= until + retryMarginMs)
+    }
+}
+
+// MARK: - The baseline backup of a parked pair (base scenario 4b)
+
+/// Whether the baseline backup of a route that landed a parked pair (the
+/// new phrase after a reset, the restore prompt) goes up, by what auth
+/// answered to the refresh run first.
+enum BaselineBackupGate: Equatable {
+    /// Auth refreshed the pair: upload.
+    case upload
+    /// Auth could not be asked: keep the phrase cache, no upload.
+    case cacheOnly
+    /// Superseded, revoked or invalid: nothing at all.
+    case skip
+
+    static func decide(_ outcome: SessionRefreshOutcome) -> BaselineBackupGate {
+        switch outcome {
+        case .refreshed: return .upload
+        case .noCredential, .failed: return .cacheOnly
+        case .superseded, .revoked, .invalid: return .skip
         }
     }
 }

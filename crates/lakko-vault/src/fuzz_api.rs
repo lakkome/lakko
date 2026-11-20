@@ -31,6 +31,7 @@ pub fn head_decode(data: &[u8]) {
             Ok(data),
             "the head encoding is canonical"
         );
+        reentry_seeds_in_place(data, &head.reentry);
     }
     if let Ok(head) = DevicesHead::decode(data) {
         assert!(head.validate().is_ok(), "a decoded devices head validates");
@@ -38,6 +39,28 @@ pub fn head_decode(data: &[u8]) {
             head.encode().as_deref(),
             Ok(data),
             "the devices head encoding is canonical"
+        );
+        reentry_seeds_in_place(data, &head.reentry);
+    }
+}
+
+/// Every decoded re-entry epoch's access seed is the 32 bytes that follow its
+/// epoch number in the input, verbatim (ADR-0064 section 7 amendment): a
+/// decoder that shifted, truncated or zeroed the seed would hand an entering
+/// device a key that signs nothing the Delivery Service registered.
+fn reentry_seeds_in_place(data: &[u8], reentry: &[crate::record::ReentryEpoch]) {
+    for epoch in reentry {
+        let mut needle = epoch.epoch.to_be_bytes().to_vec();
+        needle.extend_from_slice(epoch.ds_access_seed.as_bytes());
+        needle.extend_from_slice(
+            &u32::try_from(epoch.group_info.len())
+                .unwrap_or(0)
+                .to_be_bytes(),
+        );
+        needle.extend_from_slice(&epoch.group_info);
+        assert!(
+            data.windows(needle.len()).any(|w| w == needle.as_slice()),
+            "a re-entry epoch's access seed is read in place"
         );
     }
 }
@@ -53,6 +76,21 @@ pub fn chunk_decode(data: &[u8]) {
     };
     assert!(data.len() <= MAX_RECORD_BYTES, "a decoded chunk is bounded");
     assert!(chunk.validate().is_ok(), "a decoded chunk validates");
+    // ADR-0092: a content block and the audio tags are within their bounds.
+    for message in &chunk.messages {
+        if let Some(c) = &message.content {
+            assert!(crate::record::CONTENT_KINDS.contains(&c.kind));
+            assert!(
+                !c.payload.is_empty()
+                    && c.payload.len() <= crate::record::MAX_CONTENT_PAYLOAD_BYTES
+            );
+            assert!(c.state.len() <= crate::record::MAX_CONTENT_STATE_BYTES);
+        }
+        for a in &message.attachments {
+            assert!(a.title.len() <= crate::record::MAX_AUDIO_TAG_BYTES);
+            assert!(a.artist.len() <= crate::record::MAX_AUDIO_TAG_BYTES);
+        }
+    }
     assert_eq!(
         chunk.encode().as_deref(),
         Ok(data),

@@ -60,7 +60,7 @@ public struct LoginScreen: View {
 
             AuthSecondaryButton(
                 title: l10n.t("auth.login.passkey"),
-                systemImage: "person.badge.key",
+                icon: .passkey,
                 disabled: viewModel.busy,
                 action: viewModel.onPasskeyLogin
             )

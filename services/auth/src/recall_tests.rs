@@ -112,6 +112,7 @@ pub(crate) fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: None,
+        anon_cred: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
         limits: Arc::new(limits),

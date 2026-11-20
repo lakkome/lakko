@@ -148,7 +148,7 @@ final class ProfileRequester {
         do {
             try await ports.send(groupIdHex)
         } catch {
-            NSLog("ADR-0048 profile request not sent: \(error)")
+            if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0048 profile request not sent: \(error)") }
             return .sendFailed
         }
         // Stamped after the send so a failed publish keeps the next trigger

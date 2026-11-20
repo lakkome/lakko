@@ -139,6 +139,17 @@ public final class AutoBackupDriver {
             AutoBackupStore.markDirty(accountIdB64: accountIdB64, nowMs: nowMs, defaults: defaults)
         }
 
+        // The synced state is asked here too, for the same reason: a write
+        // to any of its registers (a channel created, an admission seed, a
+        // folder) changes what the backup carries, and no single write path
+        // covers them all. Read once and uploaded as read.
+        let syncedState = inputs.syncedState()
+        if let syncedState,
+           AutoBackupStore.syncedStateChanged(
+               accountIdB64: accountIdB64, bytes: syncedState, defaults: defaults) {
+            AutoBackupStore.markDirty(accountIdB64: accountIdB64, nowMs: nowMs, defaults: defaults)
+        }
+
         let state = AutoBackupStore.load(accountIdB64: accountIdB64, defaults: defaults)
         switch AutoBackup.verdict(state, nowMs: nowMs) {
         case .clean: return .clean
@@ -197,7 +208,7 @@ public final class AutoBackupDriver {
             // from a freshly restored device does not erase the list.
             knownGroupIdsHex: RestoredKnownGroupsStore.uploadGroupIds(
                 accountIdB64: accountIdB64, own: ownGroups, defaults: defaults),
-            syncedState: inputs.syncedState()
+            syncedState: syncedState
         ))
         guard case .uploaded = result else {
             // `cacheMiss` is the ordinary state for a device that joined by

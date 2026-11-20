@@ -111,9 +111,13 @@ enum ChannelOwnership {
     /// co-published channel is recorded with its PublisherGroup id when it is
     /// joined). Holds for a channel made before ADR-0087 phase B too, which
     /// recorded no owner generation and no @name.
+    ///
+    /// A co-publisher's register role (ADR-0050 section 2.9 as amended
+    /// 2026-11-13) never reads as the owner either, whatever keys are held.
     static func isOwner(channelId: String, state: ChannelsUiState) -> Bool {
         state.keysByChannel[channelId] != nil
             && CoPublishedJournals.shared.journalIdHex(channelIdHex: channelId) == nil
+            && state.extras(channelId).accountRole != ChannelAccountRole.coPublisher
     }
 }
 

@@ -58,6 +58,28 @@ enum UiTestFixture: String {
     /// call's settings sheet on its own, with the camera background section.
     case callSettings
 
+    /// `docs/ux/attachments.md` section 2 — the paperclip menu of a group,
+    /// presented as the sheet a conversation presents.
+    case attachmentMenu
+
+    /// `docs/ux/attachments.md` sections 7.1 and 7.1a — the poll editor.
+    case pollEditor
+
+    /// `docs/ux/attachments.md` sections 8.1 and 7.1a — the checklist editor.
+    case checklistEditor
+
+    /// `docs/ux/attachments.md` section 2.5 — the production composer field,
+    /// with a line saying what its last media paste carried.
+    case composerPaste
+
+    /// `docs/ux/media-messages.md` section 11 — two message bubbles with a
+    /// photo mosaic (three photos; five photos and text).
+    case mediaMosaic
+
+    /// Section 11 — the composer tray with three items, and a chat list row
+    /// with the thumbnail of a message of several photos.
+    case mediaTray
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -92,7 +114,232 @@ struct UiTestFixtureRoot: View {
             MessageActionsFixture()
         case .callSettings:
             CallSettingsSheet(state: CallUiState(), onDone: {})
+        case .attachmentMenu:
+            AttachmentMenuFixture()
+        case .pollEditor:
+            PollEditorScreen(anonymity: .switchDefaultOn, onCreate: { _ in }, onCancel: {})
+        case .checklistEditor:
+            ChecklistEditorScreen(initial: nil, onDone: { _ in }, onCancel: {})
+        case .composerPaste:
+            ComposerPasteFixture()
+        case .mediaMosaic:
+            MediaMosaicFixture()
+        case .mediaTray:
+            MediaTrayFixture()
         }
+    }
+}
+
+/// Canned photos for the media fixtures: generated pictures filed in the
+/// session cache under their refs, so the production tiles draw them with no
+/// download.
+@MainActor
+private enum FixtureMedia {
+    static let hues: [CGFloat] = [0.58, 0.08, 0.33, 0.83, 0.13, 0.5, 0.95]
+
+    static func picture(_ index: Int, width: Int, height: Int) -> Data {
+        let size = CGSize(width: width, height: height)
+        let image = UIGraphicsImageRenderer(size: size).image { ctx in
+            let hue = hues[index % hues.count]
+            let colors = [
+                UIColor(hue: hue, saturation: 0.55, brightness: 0.95, alpha: 1).cgColor,
+                UIColor(hue: hue, saturation: 0.8, brightness: 0.5, alpha: 1).cgColor,
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: nil) {
+                ctx.cgContext.drawLinearGradient(
+                    gradient, start: .zero, end: CGPoint(x: size.width, y: size.height), options: [])
+            }
+            UIColor.white.withAlphaComponent(0.35).setFill()
+            ctx.cgContext.fillEllipse(in: CGRect(
+                x: size.width * 0.55, y: size.height * 0.15, width: size.width * 0.25, height: size.width * 0.25))
+        }
+        return image.jpegData(compressionQuality: 0.85) ?? Data()
+    }
+
+    /// A photo ref whose bytes and thumb are already in the session cache.
+    static func photo(_ index: Int, width: UInt32, height: UInt32) -> AttachmentRef {
+        let full = picture(index, width: Int(width), height: Int(height))
+        let small = picture(index, width: Int(width) / 4, height: Int(height) / 4)
+        let thumb = ThumbRef(
+            blobId: Data(repeating: UInt8(100 + index), count: 32), key: Data(repeating: 3, count: 32),
+            nonce: Data(repeating: 4, count: 12), mime: "image/jpeg", size: UInt64(small.count),
+            width: width / 4, height: height / 4)
+        let ref = AttachmentRef(
+            blobId: Data(repeating: UInt8(index), count: 32), key: Data(repeating: 1, count: 32),
+            nonce: Data(repeating: 2, count: 12), mime: "image/jpeg", size: UInt64(full.count), name: nil,
+            kind: nil, durationMs: nil, waveform: nil, width: width, height: height, thumb: thumb)
+        MediaSessionCache.shared.store(full, key: MediaSessionCache.key(for: ref))
+        MediaSessionCache.shared.store(small, key: MediaSessionCache.key(for: thumb))
+        return ref
+    }
+
+    static func controller() -> ChatMediaController {
+        ChatMediaController(
+            port: .init(sendAttachment: { _, _ in }, sessionToken: { nil }),
+            prefs: MediaPrefs(defaults: UserDefaults(suiteName: "me.lakko.uitest.fixture") ?? .standard))
+    }
+}
+
+/// Section 11 — the production ``MessageRow`` over two messages: three
+/// photos alone, and five photos with text.
+private struct MediaMosaicFixture: View {
+    @StateObject private var media = FixtureMedia.controller()
+    private let three: ChatMessage
+    private let five: ChatMessage
+
+    init() {
+        three = ChatMessage(
+            messageId: 201, direction: .incoming, text: "",
+            attachments: [
+                FixtureMedia.photo(0, width: 1200, height: 1600),
+                FixtureMedia.photo(1, width: 1600, height: 1200),
+                FixtureMedia.photo(2, width: 1600, height: 1200),
+            ],
+            createdAt: "2026-11-19T10:00:00Z", authorKeyB64: "them")
+        five = ChatMessage(
+            messageId: 202, direction: .outgoing, text: "The walk along the river this morning",
+            attachments: (3..<8).map { FixtureMedia.photo($0, width: 1600, height: 1200) },
+            createdAt: "2026-11-19T10:01:00Z", authorKeyB64: "me")
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                row(three)
+                row(five)
+            }
+            .padding(16)
+        }
+        .background(Color.lakkoBackground.ignoresSafeArea())
+        .environmentObject(media)
+        .environmentObject(media.live)
+    }
+
+    private func row(_ message: ChatMessage) -> some View {
+        MessageRow(
+            message: message, ownIdentity: "me", timeLabel: "10:00", maxBubbleWidth: 300,
+            actionsAvailable: true, readState: message.direction == .outgoing ? .read : nil,
+            onPreview: { _ in }, onEdit: {}, onDelete: {}, onReact: { _ in })
+    }
+}
+
+/// Section 11 — the production ``ComposerTrayView`` with a photo and a video
+/// uploaded and a file still going up, over a message field, and a chat list
+/// row whose last message is several photos.
+private struct MediaTrayFixture: View {
+    @StateObject private var media = FixtureMedia.controller()
+    @StateObject private var tray: ComposerTrayStore
+    @State private var draft = "Here are the files"
+    private let row: ConversationListRow
+
+    init() {
+        let photo = FixtureMedia.photo(0, width: 1600, height: 1200)
+        let video = FixtureMedia.photo(3, width: 1200, height: 1600)
+        let store = ComposerTrayStore(worker: { source, _, report in
+            switch source {
+            case .photo:
+                report(.prepared(kind: .photo, name: nil, size: photo.size, durationMs: nil,
+                                 thumbnail: MediaSessionCache.shared.cachedData(MediaSessionCache.key(for: photo.thumb!))))
+                return photo
+            case .video:
+                report(.prepared(kind: .video, name: nil, size: 4_200_000, durationMs: 17_000,
+                                 thumbnail: MediaSessionCache.shared.cachedData(MediaSessionCache.key(for: video.thumb!))))
+                report(.progress(0.6))
+                try await Task.sleep(nanoseconds: .max)
+                return video
+            case .file, .audio:
+                report(.prepared(kind: .file, name: "Quarterly report.pdf", size: 1_350_000, durationMs: nil, thumbnail: nil))
+                return AttachmentRef(
+                    blobId: Data(repeating: 50, count: 32), key: Data(repeating: 1, count: 32),
+                    nonce: Data(repeating: 2, count: 12), mime: "application/pdf", size: 1_350_000,
+                    name: "Quarterly report.pdf", kind: nil, durationMs: nil, waveform: nil,
+                    width: nil, height: nil, thumb: nil)
+            }
+        })
+        store.add([.photo(Data([1])), .video(URL(fileURLWithPath: "/dev/null")), .file(Data([1]), name: "Quarterly report.pdf", mime: "application/pdf")])
+        _tray = StateObject(wrappedValue: store)
+        let first = FixtureMedia.photo(1, width: 1600, height: 1200)
+        row = ConversationListRow(
+            id: "fixture", kind: .chat, title: "Anna Berg", preview: "4 photos",
+            lastActivityMs: nil, unread: 2,
+            previewMedia: ConversationPreviewMedia(thumb: first.thumb, isVideo: false, count: 4))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ConversationRowView(row: row, timeLabel: "10:02")
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.lakkoSurface)
+            Spacer()
+            VStack(spacing: 8) {
+                ComposerTrayView(store: tray)
+                HStack(spacing: 8) {
+                    TextField("", text: $draft)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Capsule().fill(Color.lakkoSurfaceSunken))
+                    Circle().fill(Color.lakkoAccent.opacity(0.5)).frame(width: 40, height: 40)
+                }
+            }
+            .padding(8)
+            .background(Color.lakkoSurface)
+        }
+        .background(Color.lakkoBackground.ignoresSafeArea())
+        .environmentObject(media)
+        .environmentObject(media.live)
+    }
+}
+
+/// The production composer field. A media paste reads what it carried through
+/// the production loader and names it in a line a test can find.
+private struct ComposerPasteFixture: View {
+    @State private var draft = ""
+    @State private var focused = false
+    @State private var pasted = "none"
+    @StateObject private var caret = ComposerCaret()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("UI test fixture")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("pasted: \(pasted)")
+                .accessibilityIdentifier("composer-paste-result")
+            Spacer()
+            ComposerTextField(
+                text: $draft, caret: caret, disabled: false, focus: $focused,
+                onPasteMedia: { providers in
+                    Task {
+                        let loaded = await PastedMedia.load(providers)
+                        pasted = loaded.map { item -> String in
+                            switch item {
+                            case .photo(let data): return "photo \(data.count)"
+                            case .video: return "video"
+                            case .failed: return "failed"
+                            }
+                        }.joined(separator: ", ")
+                    }
+                })
+                .accessibilityIdentifier("composer-field")
+        }
+        .padding(16)
+    }
+}
+
+/// The production attachment menu of a group member, shown in the sheet a
+/// conversation presents it in.
+private struct AttachmentMenuFixture: View {
+    @State private var open = true
+
+    var body: some View {
+        Color.lakkoBackground
+            .ignoresSafeArea()
+            .sheet(isPresented: $open) {
+                AttachmentMenuSheet(rows: attachmentMenu(
+                    kind: .group, role: .member, hasCamera: true, hasLocation: true, callHoldsCamera: false)
+                ) { _ in }
+            }
     }
 }
 

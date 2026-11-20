@@ -26,14 +26,18 @@ export interface PendingPublisherRequest {
   readonly channelIdHex: string;
   /** The PublisherGroup the link named. */
   readonly groupIdHex: string;
-  /** base64 of the account key the knocked KeyPackage belongs to (the
-   *  conversation account identity at the time of the request). */
+  /** base64 of the leaf key of the knocked KeyPackage: since ADR-0090 this
+   *  DEVICE's key (the account key on an older record). */
   readonly joinerKeyB64: string;
+  /** ADR-0090: base64 of the owner's account key (the `/g/` capability's
+   *  issuer), which the Welcome's sender must be a device of. Absent on an
+   *  older record: no Welcome lands it. */
+  readonly ownerKeyB64?: string;
   /** What the link said, for the channel row once joined. */
   readonly name: string;
   readonly description: string;
   /** When the request was last sent: the first `Accept`, or the last
-   *  `Ask again` that went out (UX 15.2.2: the 7 days start from it). */
+   *  `Ask again` that went out (UX 15.2.2: the day starts from it). */
   readonly requestedAtMs: number;
   /** `Ask again` found the link no longer works (UX 15.2.2). The record
    *  stays, so an approval of the earlier request still lands. */

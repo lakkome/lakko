@@ -134,12 +134,16 @@ class LinkJoinKnockTest {
             assertTrue(!builder.contains("persistSnapshotBestEffort"))
         }
         assertTrue(chat.contains("sealKnockRow("))
-        // The channel co-publisher joiner: the persist it is handed, before the
-        // proposal is returned to the knock.
+        // The channel co-publisher joiner (ADR-0090: its KeyPackage is this
+        // device's leaf, in the device provider): the durable persist of that
+        // provider between minting the KeyPackage and sealing the knock row.
         val coPublisher = source("channels/CoPublisher.kt")
-        val coBuilder = coPublisher.substringAfter("buildProposal = { epoch ->").substringBefore("buildAttribution")
-        assertTrue(coBuilder.indexOf("createExternalJoinProposal") < coBuilder.indexOf("persistProposalKeys()"))
-        assertTrue(source("ui/channels/ChannelsScreen.kt").contains("withIdentityPersistingFirst"))
+        val request = coPublisher.substringAfter("public suspend fun requestToCoPublish(").substringBefore("ds.knock(")
+        val mint = request.indexOf("device.createKeyPackage()")
+        val persist = request.indexOf("ids.persist()")
+        val seal = request.indexOf("sealKnockRow(")
+        assertTrue(mint in 0 until persist)
+        assertTrue(persist < seal)
     }
 
     @Test
@@ -223,8 +227,6 @@ class LinkJoinKnockTest {
         assertEquals(generic, joinFailureCopy(ChatError("DS knock (external-join request) failed", refused())).en)
         assertEquals(generic, joinFailureCopy(me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = false, body = "")).en)
         assertEquals(generic, joinFailureCopy(RuntimeException("raw protocol text")).en)
-        assertEquals("You joined the group.", JOIN_SUCCESS_TEXT.en)
-        assertEquals("Open chat", JOIN_OPEN_CHAT_TEXT.en)
         assertEquals("Try again", JOIN_TRY_AGAIN_TEXT.en)
     }
 

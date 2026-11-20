@@ -233,8 +233,8 @@ class StateBundleV3Test {
                 """"displayName":"VG2","username":"vg2","addedAtMs":1,"linkIdB64":"${b64(ByteArray(16))}",""" +
                 """"heldMessages":[$messages]}"""
         fun wire(names: String = "", profiles: String = "", pending: String = "") =
-            """{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],""" +
-                """"groupNames":[$names],"profiles":[$profiles],"pendingContacts":[$pending]}"""
+            """{"v":4,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],""" +
+                """"groupNames":[$names],"profiles":[$profiles],"pendingContacts":[$pending],"channelSeeds":[]}"""
         fun n(k: Int, s: String) = List(k) { s }.joinToString(",")
         // Distinct ids and keys (a repeat refuses the bundle on its own).
         fun idOf(i: Int) = b64(java.nio.ByteBuffer.allocate(32).putInt(i).array())
@@ -325,8 +325,8 @@ class StateBundleV3Test {
             """{"accountIdHex":"$id","signaturePubkeyB64":"$bob","x25519PubkeyB64":"$bob",""" +
                 """"displayName":"","username":"","addedAtMs":1,"linkIdB64":"${b64(ByteArray(16))}","heldMessages":[]}"""
         fun wire(names: String = "", profiles: String = "", pending: String = "") =
-            """{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],""" +
-                """"groupNames":[$names],"profiles":[$profiles],"pendingContacts":[$pending]}"""
+            """{"v":4,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],""" +
+                """"groupNames":[$names],"profiles":[$profiles],"pendingContacts":[$pending],"channelSeeds":[]}"""
         val name = """{"groupIdB64":"$gid","envelopeB64":"$env"}"""
         val prof = """{"personKeyB64":"$bob","envelopeB64":"$env"}"""
         assertNotNull(StateBundle.decode(wire(name, prof, pc("11".repeat(16)) + "," + pc("12".repeat(16))).toByteArray()))

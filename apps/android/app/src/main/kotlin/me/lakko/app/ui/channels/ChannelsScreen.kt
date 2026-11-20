@@ -25,14 +25,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -127,6 +119,8 @@ import java.util.Locale
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * The Channels screens (docs/ux/client-redesign.md section 5.4): the list,
@@ -211,7 +205,7 @@ private fun ChannelTopBar(
         },
         navigationIcon = {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
             }
         },
         actions = { actions() },
@@ -277,6 +271,11 @@ public fun NewChannelScreen(
     LaunchedEffect(canonical, private) {
         taken = false
         if (private || canonical.length < 3 || !wellFormed) return@LaunchedEffect
+        // A name a failed create of this account claimed is this account's (a
+        // retry takes it back): the lookup answering it is not "taken".
+        // Read under the account the create keeps it under.
+        val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
+        if (claims.isClaimed(state.boundAccount.orEmpty(), canonical)) return@LaunchedEffect
         delay(500)
         taken = try {
             me.lakko.app.discovery.DiscoveryClient().use { it.lookupChannel(canonical) != null }
@@ -374,13 +373,18 @@ public fun NewChannelScreen(
                     val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
                     val claimAccount = state.boundAccount.orEmpty()
                     // A retry of a failed create reuses the id its name was
-                    // claimed for.
-                    val id = claims.idFor(claimAccount, wanted)
+                    // claimed for, only while that create is recorded as
+                    // unfinished (security pass F5): a finished create's id
+                    // may be a live channel, never founded over.
+                    val id = me.lakko.app.channels.newChannelCreateId(claims, claimAccount, wanted) { cid ->
+                        me.lakko.app.channels.ChannelCreatePending.isPending(context, claimAccount, cid)
+                    }
                     scope.launch {
                         try {
                             createChannel(
                                 state = state,
                                 client = client,
+                                recordOwed = me.lakko.app.channels.PrefsOwedRecordMarks(context) { state.boundAccount },
                                 id = id,
                                 name = name.trim(),
                                 description = description.trim(),
@@ -439,9 +443,10 @@ private fun suggestedChannelHandle(name: String, private: Boolean, random: ULong
 }
 
 /** The New channel steps, in the order of [NewChannelScreen]. */
-private suspend fun createChannel(
+internal suspend fun createChannel(
     state: ChannelsUiState,
     client: ChannelsClient,
+    recordOwed: me.lakko.app.channels.OwedRecordMarks,
     id: String,
     name: String,
     description: String,
@@ -451,11 +456,20 @@ private suspend fun createChannel(
     language: String,
 ) {
     val publisher = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
+    // Security pass F5 (2026-11-15) - this create is unfinished until the
+    // channel exists here: only then may a retry reuse [id]. Written before
+    // anything is founded or claimed under it.
+    val pendingContext = me.lakko.app.channels.SubscriberAdmission.appContext
+        ?: throw IllegalStateException("no context for the channel create")
+    val pendingAccount = state.boundAccount ?: throw IllegalStateException("no account bound")
+    if (!me.lakko.app.channels.ChannelCreatePending.mark(pendingContext, pendingAccount, id)) {
+        throw IllegalStateException("the channel create was not recorded")
+    }
     // ADR-0057 finding 3 — the PublisherGroup journal is claimed with the
     // owner's root BEFORE anything announces the channel.
     try {
-        publisher.withIdentity { identity ->
-            DsClient().use { ds -> CoPublisher.foundAndClaimAtCreation(ds, identity, id) }
+        publisher.withChannel { ids ->
+            DsClient().use { ds -> CoPublisher.foundAndClaimAtCreation(ds, ids, id) }
         }
     } catch (e: LegacyChannelException) {
         throw e
@@ -477,13 +491,35 @@ private suspend fun createChannel(
             route = me.lakko.app.discovery.HandleRoute.CLAIM,
         )
     }
+    // Security pass F1 (2026-11-15) - a private channel's admission seed
+    // version 0 is minted here, before the service knows the channel, with
+    // the admission mark at 0 set by this device: no row can be genuine yet,
+    // so no row is listed or marked (a row the service lists now was planted
+    // by it, and a ticketless one is removed by the let-in pass). A retry
+    // finds the seed it minted.
+    if (private) {
+        val context = me.lakko.app.channels.SubscriberAdmission.appContext
+            ?: throw IllegalStateException("no context for the channel's admission seed")
+        val account = state.boundAccount ?: throw IllegalStateException("no account bound")
+        me.lakko.app.channels.admissionSeedFor(
+            reason = me.lakko.app.channels.AdmissionSeedReason.CREATE,
+            held = { me.lakko.app.channels.ChannelAdmissionKeys.current(context, account, id) },
+            mint = { me.lakko.app.channels.ChannelAdmissionKeys.currentOrMint(context, account, id) },
+            markRowsAsReaders = {},
+        )?.second?.fill(0)
+        me.lakko.app.channels.ChannelAdmissionMark.raise(context, account, id, 0L, markSet = true)
+    }
     val owner = publisher.withIdentity(persist = false) { identity -> ChannelsClient.ownerSigner(identity, id) }
     owner.use { client.createChannel(id, it, private = private) }
-    val keys = publisher.withIdentity { identity ->
+    val keys = publisher.withChannel { ids ->
+        // New channel is the one flow that may found the PublisherGroup
+        // (docs/ux/second-device.md section 4a); it was founded and claimed
+        // just above.
         ChannelsComposer.freshPublisherKeys(
-            identity = identity,
+            ids = ids,
             channelIdHex = id,
             existingSigningSeed = state.persistedPublisherSigningSeed(id),
+            allowFound = true,
         )
     }
     state.addChannel(
@@ -496,10 +532,19 @@ private suspend fun createChannel(
         ),
     )
     state.setKeys(id, keys)
+    // ADR-0090 decision A — a channel founded here is never founded again by
+    // a pending re-founding of this device.
+    state.boundAccount?.let { acct ->
+        me.lakko.app.channels.ChannelRefounding.markDone(context = me.lakko.app.channels.SubscriberAdmission.appContext ?: return@let, account = acct, channelId = id)
+    }
+    // F5 - the channel exists here: its id is never reused by a retry.
+    me.lakko.app.channels.ChannelCreatePending.clear(pendingContext, pendingAccount, id)
     // ADR-0051 §4 / ADR-0087 section 18.2 — the v3 record is the first post:
-    // subscribers title the channel from it and read its @name and flag. A
-    // failed post leaves the channel created; the publisher loop re-issues it.
-    try {
+    // subscribers title the channel from it and read its @name and flag. It
+    // is kept here before it is sent and owed until it lands, so a failed
+    // post leaves the channel created and the publisher loop re-issues THIS
+    // record (never one composed without the flag).
+    me.lakko.app.channels.postFirstChannelRecord(recordOwed, id) {
         ChannelMetaPublisher.post(
             state = state,
             client = client,
@@ -511,11 +556,8 @@ private suspend fun createChannel(
             language = language,
             listed = !private,
             handle = ChannelDiscovery.conversationHandleOf(signed),
+            keepBeforeSend = true,
         )
-    } catch (e: kotlinx.coroutines.CancellationException) {
-        throw e
-    } catch (e: Throwable) {
-        Log.w(TAG, "channel record not posted at creation", e)
     }
     // ADR-0087 section 16 — public means listed in Discover.
     if (!private) {
@@ -732,13 +774,12 @@ public suspend fun joinAsCoPublisher(
     // identity's provider; the join below must run on the SAME identity, and
     // the joined group is persisted with it.
     val request = me.lakko.app.discovery.DiscoveryClient().use { discovery ->
-        publisher.withIdentityPersistingFirst { identity, persistNow ->
+        publisher.withChannel { ids ->
             CoPublisher.requestToCoPublish(
                 ds,
-                identity,
+                ids,
                 link,
                 coPublished,
-                persistNow,
                 { blobId -> discovery.fetchGroupInvite(blobId) },
                 ownProfileEnvelopeWithAccount(context, state.boundAccount),
                 beforeKnock = { r ->
@@ -751,6 +792,7 @@ public suspend fun joinAsCoPublisher(
                             joinerKeyB64 = java.util.Base64.getEncoder().encodeToString(r.joinerKey),
                             name = channelName,
                             requestedAtMs = System.currentTimeMillis(),
+                            ownerAccountKeyB64 = java.util.Base64.getEncoder().encodeToString(r.ownerAccountKey),
                         ),
                     )
                 },
@@ -770,21 +812,19 @@ public suspend fun joinAsCoPublisher(
             if (!PendingPublisherRequests.isPending(context, account, request.channelIdHex)) {
                 return@withLock state.keysByChannel.value.containsKey(request.channelIdHex)
             }
-            val keys = publisher.withIdentityPersistingFirst { identity, persistNow ->
+            val keys = publisher.withChannel { ids ->
+                // Joined: the PublisherGroup is persisted with the device's
+                // provider at the post-approve epoch before anything else.
                 CoPublisher.pollForCoPublishWelcome(
                     ds,
-                    identity,
+                    ids,
                     request.groupId,
-                    request.joinerKey,
+                    request.ownerAccountKey,
                     request.channelIdHex,
                     coPublished,
                     // G-29 — reuse the persisted signing seed on a re-poll.
                     state.persistedPublisherSigningSeed(request.channelIdHex),
-                )?.also {
-                    // Joined: the PublisherGroup now lives in the provider at
-                    // the post-approve epoch; on disk before anything else.
-                    persistNow()
-                }
+                )
             } ?: return@withLock false
             settleLandedRequest(context, state, account, request.channelIdHex, channelName, keys)
             true
@@ -842,31 +882,97 @@ public suspend fun landPendingPublisherWelcome(
     welcome: ByteArray,
 ): Boolean {
     val account = state.boundAccount ?: return false
-    if (PendingPublisherRequests.load(context, account).isEmpty()) return false
     val publisher = state.publisher ?: return false
+    if (!publisher.hasDevice()) return false
     return publisherLanding.withLock {
-        val ownKey = publisher.withIdentity(persist = false) { it.signaturePublicKey() }
-            .let { java.util.Base64.getEncoder().encodeToString(it) }
+        val ownKey = publisher.withChannel { ids -> java.util.Base64.getEncoder().encodeToString(ids.device.signaturePublicKey()) }
         for (r in PendingPublisherRequests.load(context, account)) {
             // The Welcome is sealed to the knocked KeyPackage, whose private
-            // key is in this identity's provider only when the request was
-            // made with it.
+            // key is in this device's provider only when the request was made
+            // on it.
             if (r.joinerKeyB64 != ownKey) continue
             val groupId = hexToBytesOrNull(r.groupIdHex) ?: continue
-            val keys = publisher.withIdentityPersistingFirst { identity, persistNow ->
+            val ownerKey = r.ownerAccountKeyB64?.let {
+                try {
+                    java.util.Base64.getDecoder().decode(it)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            } ?: continue
+            val keys = publisher.withChannel { ids ->
                 CoPublisher.joinCoPublishWelcome(
-                    identity,
+                    ids,
                     welcome,
                     groupId,
+                    ownerKey,
                     r.channelIdHex,
                     coPublished,
                     state.persistedPublisherSigningSeed(r.channelIdHex),
-                )?.also { persistNow() }
+                )
             } ?: continue
             settleLandedRequest(context, state, account, r.channelIdHex, r.name, keys)
             return@withLock true
         }
-        false
+        // ADR-0090 section 2.3 — an owner device admitted this device to a
+        // channel the account owns or co-publishes (the subscription
+        // register). Offered to every such channel, a channel whose group or
+        // keys this device still holds included (walk of 2026-11-14): a device
+        // that returns after another device retired its leaf holds its old
+        // group, and the replace rule ([CoPublisher.joinAdmissionWelcome]:
+        // same group id, signed by a device of the owner account, the held
+        // group restored if the join fails) decides.
+        val registers = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.channelSubscriptions?.value.orEmpty()
+        val targets = me.lakko.app.channels.publisherWelcomeTargets(
+            registers.map { me.lakko.app.channels.viewOf(it) },
+            state.channels.value.map { it.id }.toSet(),
+        )
+        if (targets.isEmpty()) return@withLock false
+        val target = publisher.withChannel { ids ->
+            val welcomeGroupId = CoPublisher.welcomeGroupId(ids, welcome)
+            me.lakko.app.channels.publisherWelcomeTarget(targets, welcomeGroupId) { t ->
+                CoPublisher.expectedPublisherGroupId(
+                    ids,
+                    t.channelIdHex,
+                    owned = t.role == me.lakko.app.channels.ChannelAccountRole.OWNER,
+                    joinedGroupId = t.publisherGroupId,
+                )
+            }
+        } ?: return@withLock false
+        val channelIdHex = state.channels.value.firstOrNull { it.id.equals(target.channelIdHex, ignoreCase = true) }?.id
+            ?: return@withLock false
+        val owned = target.role == me.lakko.app.channels.ChannelAccountRole.OWNER
+        val join: suspend () -> me.lakko.app.channels.ChannelPublisherKeys? = {
+            try {
+                publisher.withChannel { ids ->
+                    CoPublisher.joinAdmissionWelcome(
+                        ids,
+                        welcome,
+                        channelIdHex,
+                        owned = owned,
+                        joinedGroupId = if (owned) null else target.publisherGroupId.takeIf { it.size == 32 },
+                        ownerAccountKey = if (owned) {
+                            null
+                        } else {
+                            me.lakko.app.channels.coPublisherWelcomeOwnerKey(target.ownerAccountKey, coPublished.ownerKeyOf(channelIdHex))
+                        },
+                        coPublished = coPublished,
+                        existingSigningSeed = state.persistedPublisherSigningSeed(channelIdHex),
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        // The publisher loop's open handle of a held group is closed first,
+        // under its lock, so no pass acts on the replaced group's old state.
+        val loop = me.lakko.app.channels.ChannelPublisherLoop.peek(state)
+        val keys = (if (loop != null) loop.releasingGroup(channelIdHex) { join() } else join())
+            ?: return@withLock false
+        state.setKeys(channelIdHex, keys)
+        Log.i(TAG, "ADR-0090: admitted to post in a channel of the account")
+        true
     }
 }
 

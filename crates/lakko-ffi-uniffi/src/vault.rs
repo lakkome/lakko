@@ -589,6 +589,16 @@ pub struct VaultAttachment {
     pub height: Option<u32>,
     /// Poster frame.
     pub thumb: Option<VaultThumb>,
+    /// ADR-0092 audio title tag.
+    #[uniffi(default = None)]
+    pub title: Option<String>,
+    /// ADR-0092 audio artist tag.
+    #[uniffi(default = None)]
+    pub artist: Option<String>,
+    /// ADR-0047 section 6 micro thumbnail: raw JPEG bytes, at most 4096,
+    /// kept only on the first image or video of the message.
+    #[uniffi(default = None)]
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for VaultAttachment {
@@ -687,6 +697,11 @@ pub struct VaultMessage {
     /// Set when the message was of a wire version the saving device could
     /// not read: that version.
     pub unsupported_version: Option<u32>,
+    /// ADR-0092 — the content of a poll, checklist, location, contact card
+    /// or article message and its saved state. On decode a payload that does
+    /// not decode is `None` and a state that does not belong is dropped.
+    #[uniffi(default = None)]
+    pub content: Option<crate::content::ContentMessage>,
 }
 
 /// One person in a conversation, as shown at save time. Never a device leaf.
@@ -736,14 +751,32 @@ pub struct VaultChunkEntry {
     pub version: u64,
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14).
+///
+/// **`ds_access_seed` is secret**: the 32-byte Delivery Service access seed
+/// of `epoch` (`PublisherGroup.dsAccessSeed` / `stagedDsAccessSeed`), from
+/// which an entering device rebuilds the epoch's access signer
+/// (`dsAccessSignerFromSeed`). Never log it.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct VaultReentryEpoch {
     /// The epoch the GroupInfo describes.
     pub epoch: u64,
+    /// The 32-byte Delivery Service access seed of `epoch`. Secret.
+    pub ds_access_seed: Vec<u8>,
     /// The GroupInfo with its ratchet tree, as MLS encodes it. Opaque to the
     /// codec; 1 byte to 1 MiB.
     pub group_info: Vec<u8>,
+}
+
+impl std::fmt::Debug for VaultReentryEpoch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultReentryEpoch")
+            .field("epoch", &self.epoch)
+            .field("ds_access_seed", &"<redacted>")
+            .field("group_info_len", &self.group_info.len())
+            .finish()
+    }
 }
 
 /// The account's registrar seed for a conversation's journal (ADR-0057).
@@ -852,6 +885,9 @@ fn attachment_to_core(a: VaultAttachment) -> Result<rec::VaultAttachment, FfiErr
         width: a.width,
         height: a.height,
         thumb: thumb_meta,
+        title: a.title,
+        artist: a.artist,
+        inline_thumb: a.inline_thumb,
     }
     .bounded();
     let thumb = match (thumb_refs, media.thumb) {
@@ -881,6 +917,9 @@ fn attachment_to_core(a: VaultAttachment) -> Result<rec::VaultAttachment, FfiErr
         width: narrow(media.width),
         height: narrow(media.height),
         thumb,
+        title: media.title.unwrap_or_default(),
+        artist: media.artist.unwrap_or_default(),
+        inline_thumb: media.inline_thumb.unwrap_or_default(),
     })
 }
 
@@ -899,6 +938,9 @@ fn attachment_from_core(a: rec::VaultAttachment) -> VaultAttachment {
             width: t.width.map(u32::from),
             height: t.height.map(u32::from),
         }),
+        title: some_text(a.title),
+        artist: some_text(a.artist),
+        inline_thumb: (!a.inline_thumb.is_empty()).then_some(a.inline_thumb),
     }
     .bounded();
     let thumb = match (a.thumb, media.thumb) {
@@ -926,19 +968,62 @@ fn attachment_from_core(a: rec::VaultAttachment) -> VaultAttachment {
         width: media.width,
         height: media.height,
         thumb,
+        title: media.title,
+        artist: media.artist,
+        inline_thumb: media.inline_thumb,
+    }
+}
+
+/// ADR-0047 section 6: only the first image or video of a message keeps its
+/// micro thumbnail, as on the envelope route.
+fn keep_inline_thumb_on_carrier(attachments: &mut [VaultAttachment]) {
+    let carrier =
+        lakko_attachments::inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()));
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb = None;
+        }
+    }
+}
+
+/// [`keep_inline_thumb_on_carrier`] over the core shape (an empty `mime` or
+/// `inline_thumb` is none).
+fn keep_core_inline_thumb_on_carrier(attachments: &mut [rec::VaultAttachment]) {
+    let carrier = lakko_attachments::inline_thumb_carrier(
+        attachments
+            .iter()
+            .map(|a| (!a.mime.is_empty()).then_some(a.mime.as_str())),
+    );
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb.clear();
+        }
     }
 }
 
 fn message_to_core(m: VaultMessage) -> Result<rec::VaultMessage, FfiError> {
+    let content = m
+        .content
+        .map(|c| {
+            crate::content::content_message_to_core(c).map(|(kind, payload, state)| {
+                rec::VaultContent {
+                    kind,
+                    payload,
+                    state,
+                }
+            })
+        })
+        .transpose()?;
     let author = m
         .author
         .map(|a| fixed::<32>(&a, "accountKeyLength", "author account key"))
         .transpose()?;
-    let attachments = m
+    let mut attachments = m
         .attachments
         .into_iter()
         .map(attachment_to_core)
         .collect::<Result<Vec<_>, _>>()?;
+    keep_core_inline_thumb_on_carrier(&mut attachments);
     let reactions = m
         .reactions
         .into_iter()
@@ -978,10 +1063,19 @@ fn message_to_core(m: VaultMessage) -> Result<rec::VaultMessage, FfiError> {
             duration_secs: c.duration_secs,
         }),
         unsupported_version: m.unsupported_version,
+        content,
     })
 }
 
 fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
+    let mimes: Vec<Option<String>> = m
+        .attachments
+        .iter()
+        .map(|a| some_text(a.mime.clone()))
+        .collect();
+    let content = m.content.as_ref().and_then(|c| {
+        crate::content::content_message_from_core(c.kind, &c.payload, &c.state, &mimes)
+    });
     VaultMessage {
         message_id: m.message_id,
         direction: m.direction.into(),
@@ -991,11 +1085,15 @@ fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
         edited: m.edited,
         deleted: m.deleted,
         text: m.text,
-        attachments: m
-            .attachments
-            .into_iter()
-            .map(attachment_from_core)
-            .collect(),
+        attachments: {
+            let mut attachments: Vec<VaultAttachment> = m
+                .attachments
+                .into_iter()
+                .map(attachment_from_core)
+                .collect();
+            keep_inline_thumb_on_carrier(&mut attachments);
+            attachments
+        },
         reply: m.reply.map(|r| VaultReply {
             target: r.target,
             author: r.author,
@@ -1022,8 +1120,23 @@ fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
             duration_secs: c.duration_secs,
         }),
         unsupported_version: m.unsupported_version,
+        content,
     }
 }
+
+// The vault's content bounds must equal the content codec's.
+const _: () = assert!(
+    rec::MAX_CONTENT_PAYLOAD_BYTES == lakko_attachments::content_state::MAX_CONTENT_PAYLOAD_BYTES
+);
+const _: () = assert!(
+    rec::MAX_CONTENT_STATE_BYTES == lakko_attachments::content_state::MAX_CONTENT_STATE_BYTES
+);
+const _: () = assert!(rec::MAX_AUDIO_TAG_BYTES == lakko_attachments::MAX_AUDIO_TAG_BYTES);
+const _: () = assert!(rec::MAX_INLINE_THUMB_BYTES == lakko_attachments::MAX_INLINE_THUMB_BYTES);
+const _: () = assert!(
+    *rec::CONTENT_KINDS.start() == lakko_attachments::content_state::CONTENT_KIND_POLL
+        && *rec::CONTENT_KINDS.end() == lakko_attachments::content_state::CONTENT_KIND_ARTICLE
+);
 
 fn messages_to_core(messages: Vec<VaultMessage>) -> Result<Vec<rec::VaultMessage>, FfiError> {
     messages.into_iter().map(message_to_core).collect()
@@ -1033,12 +1146,19 @@ fn messages_from_core(messages: Vec<rec::VaultMessage>) -> Vec<VaultMessage> {
     messages.into_iter().map(message_from_core).collect()
 }
 
-fn reentry_to_core(reentry: Vec<VaultReentryEpoch>) -> Vec<rec::ReentryEpoch> {
+fn reentry_to_core(reentry: Vec<VaultReentryEpoch>) -> Result<Vec<rec::ReentryEpoch>, FfiError> {
     reentry
         .into_iter()
-        .map(|e| rec::ReentryEpoch {
-            epoch: e.epoch,
-            group_info: e.group_info,
+        .map(|e| {
+            Ok(rec::ReentryEpoch {
+                epoch: e.epoch,
+                ds_access_seed: SecretBytes::new(fixed::<32>(
+                    &e.ds_access_seed,
+                    "seedLength",
+                    "re-entry access seed",
+                )?),
+                group_info: e.group_info,
+            })
         })
         .collect()
 }
@@ -1048,6 +1168,7 @@ fn reentry_from_core(reentry: Vec<rec::ReentryEpoch>) -> Vec<VaultReentryEpoch> 
         .into_iter()
         .map(|e| VaultReentryEpoch {
             epoch: e.epoch,
+            ds_access_seed: e.ds_access_seed.as_bytes().to_vec(),
             group_info: e.group_info,
         })
         .collect()
@@ -1110,7 +1231,7 @@ fn head_to_core(head: VaultConversationHead) -> Result<rec::ConversationHead, Ff
             })
             .collect(),
         tail: messages_to_core(head.tail)?,
-        reentry: reentry_to_core(head.reentry),
+        reentry: reentry_to_core(head.reentry)?,
         registrar_seed,
     })
 }
@@ -1277,7 +1398,7 @@ pub fn decode_vault_index(bytes: Vec<u8>) -> Result<Vec<VaultIndexEntry>, FfiErr
 #[uniffi::export]
 pub fn encode_devices_head(reentry: Vec<VaultReentryEpoch>) -> Result<Vec<u8>, FfiError> {
     let head = rec::DevicesHead {
-        reentry: reentry_to_core(reentry),
+        reentry: reentry_to_core(reentry)?,
     };
     Ok(head.encode()?)
 }
@@ -1368,6 +1489,9 @@ mod tests {
                 width: Some(240),
                 height: Some(180),
             }),
+            title: None,
+            artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -1405,6 +1529,7 @@ mod tests {
                 duration_secs: 61,
             }),
             unsupported_version: Some(7),
+            content: None,
         }
     }
 
@@ -1424,6 +1549,7 @@ mod tests {
             reactions: vec![],
             call: None,
             unsupported_version: None,
+            content: None,
         }
     }
 
@@ -1459,10 +1585,12 @@ mod tests {
             reentry: vec![
                 VaultReentryEpoch {
                     epoch: 11,
+                    ds_access_seed: vec![0xA1; 32],
                     group_info: vec![0x11; 40],
                 },
                 VaultReentryEpoch {
                     epoch: 12,
+                    ds_access_seed: vec![0xA2; 32],
                     group_info: vec![0x12; 40],
                 },
             ],
@@ -1630,6 +1758,7 @@ mod tests {
 
         let reentry = vec![VaultReentryEpoch {
             epoch: 4,
+            ds_access_seed: vec![0x44; 32],
             group_info: vec![9; 12],
         }];
         let bytes = encode_devices_head(reentry.clone()).unwrap();
@@ -1653,19 +1782,41 @@ mod tests {
             code(
                 &encode_devices_head(vec![VaultReentryEpoch {
                     epoch: 1,
+                    ds_access_seed: vec![0; 32],
                     group_info: vec![],
                 }])
                 .unwrap_err()
             ),
             "reentry"
         );
+        // A re-entry access seed is exactly 32 bytes.
+        assert_eq!(
+            code(
+                &encode_devices_head(vec![VaultReentryEpoch {
+                    epoch: 1,
+                    ds_access_seed: vec![0; 31],
+                    group_info: vec![1],
+                }])
+                .unwrap_err()
+            ),
+            "seedLength"
+        );
+        assert!(!format!(
+            "{:?}",
+            VaultReentryEpoch {
+                epoch: 1,
+                ds_access_seed: vec![0xA7; 32],
+                group_info: vec![1],
+            }
+        )
+        .contains("167"));
         // Hostile bytes.
         assert_eq!(
             code(&decode_conversation_head(vec![]).unwrap_err()),
             "truncated"
         );
         assert_eq!(
-            code(&decode_history_chunk(vec![0x02, 0, 0]).unwrap_err()),
+            code(&decode_history_chunk(vec![0x01, 0, 0]).unwrap_err()),
             "unknownVersion"
         );
         let mut trailing = encode_devices_head(vec![]).unwrap();
@@ -1855,6 +2006,9 @@ mod tests {
                 width: Some(240),
                 height: Some(0),
             }),
+            title: String::new(),
+            artist: String::new(),
+            inline_thumb: vec![0xFF, 0xD8, 0xFF, 0xE1],
         };
         let message = rec::VaultMessage {
             message_id: 1,
@@ -1875,6 +2029,7 @@ mod tests {
             reactions: vec![],
             call: None,
             unsupported_version: None,
+            content: None,
         };
         rec::HistoryChunk {
             messages: vec![message],
@@ -1911,6 +2066,11 @@ mod tests {
         assert_eq!(voice.kind.as_deref(), Some("voice"));
         assert_eq!(voice.duration_ms, Some(7_250));
         assert_eq!(voice.waveform, Some(vec![7; 3]));
+
+        // ADR-0047 section 6: only the first image or video keeps its micro
+        // thumbnail, though the core row carried one on each.
+        assert_eq!(note.inline_thumb, Some(vec![0xFF, 0xD8, 0xFF, 0xE1]));
+        assert_eq!((&gif.inline_thumb, &voice.inline_thumb), (&None, &None));
 
         // The same holds on the way in: re-encoding what a client was handed
         // writes the bounded row, not the original.

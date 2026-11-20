@@ -41,7 +41,10 @@
 //! 4. The nonce is new (`401 statement-refused`): consumed only after the
 //!    signature verified, so nobody can burn another key's nonce.
 //! 5. The row: held by this key (`401 statement-refused` otherwise, the same
-//!    answer as a bad signature), the name free (`409 name-taken`).
+//!    answer as a bad signature), the name free (`409 name-taken`). A claim
+//!    of a name this key already holds as its current row is not a conflict:
+//!    it answers as the first claim did, with the statement's content and a
+//!    renewed lease (a retry of a claim whose answer was lost).
 //!
 //! ## The lease
 //!
@@ -104,7 +107,10 @@ const CODE_NO_HANDLE: &str = "no-such-handle";
 const CODE_KEY_IN_USE: &str = "key-in-use";
 
 fn coded(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(serde_json::json!({ "error": code }))).into_response()
+    crate::metrics::with_code(
+        (status, Json(serde_json::json!({ "error": code }))).into_response(),
+        code,
+    )
 }
 
 fn bad_request(what: impl Into<String>) -> Response {
@@ -515,9 +521,16 @@ async fn begin(
 }
 
 /// `POST /discovery/handle/claim` — take a name (one `discovery-register`
-/// token, spent by the gate). `409 name-taken` when it is held by anyone;
-/// `409 handle-already-set` when this key holds a current name (a move is
-/// `replace`).
+/// token, spent by the gate). `409 name-taken` when it is held by anyone
+/// else, or retired; `409 handle-already-set` when this key holds another
+/// current name (a move is `replace`).
+///
+/// A claim of a name this key already holds as its current row answers as
+/// a fresh claim does: the statement's content and flag replace the stored
+/// ones and the lease is renewed, exactly as an update would. That is what
+/// lets a client that lost the answer to its first claim (a crash, a failed
+/// step after the claim) retry with the same handle key. A retired row of
+/// this key is not taken back here; that is `PUT /discovery/handle`.
 pub(crate) async fn claim(
     State(state): State<AppState>,
     Json(req): Json<HandleRequest>,
@@ -532,31 +545,69 @@ pub(crate) async fn claim(
     };
     let content = content_of(&req, visibility, &content_hash)?;
     let (st, stmt, body) = (&state, &statement, &content);
-    let until = retry_on_lock_conflict(|| async move {
+    let (until, reclaimed) = retry_on_lock_conflict(|| async move {
         let mut conn = connection(st).await?;
         let mut tx = begin(&mut conn).await?;
         consume_nonce(&mut tx, stmt).await?;
+        let held = held_by_this_key(&mut tx, &stmt.lookup_key, &stmt.write_pk).await?;
         let (until, lease_secs) = lease_from_now();
-        insert_name(
-            &mut tx,
-            &stmt.lookup_key,
-            &random_handle_id(),
-            &stmt.write_pk,
-            body,
-            lease_secs,
-        )
-        .await?;
+        match &held {
+            Some(handle_id) => {
+                revive(&mut tx, &stmt.lookup_key, handle_id, body, lease_secs).await?;
+            },
+            None => {
+                insert_name(
+                    &mut tx,
+                    &stmt.lookup_key,
+                    &random_handle_id(),
+                    &stmt.write_pk,
+                    body,
+                    lease_secs,
+                )
+                .await?;
+            },
+        }
         tx.commit().await.map_err(internal("commit claim"))?;
-        Ok(until)
+        Ok((until, held.is_some()))
     })
     .await?;
-    tracing::info!(public = content.visibility.is_public(), "handle claimed");
+    tracing::info!(
+        public = content.visibility.is_public(),
+        reclaimed,
+        "handle claimed"
+    );
     Ok(answer(
         &state,
         statement.lookup_key,
         statement.write_pk,
         until,
     ))
+}
+
+/// The `handle_id` of the name at `lookup_key` when it is held by
+/// `write_pk` as a current row; `None` when the name is free; `409
+/// name-taken` when anyone else holds it, it is a username, or the row is
+/// retired. Locks the claim, then the row (the module's lock order).
+async fn held_by_this_key(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    lookup_key: &[u8],
+    write_pk: &[u8],
+) -> Result<Option<Vec<u8>>, Response> {
+    let claimed: Option<(u8,)> =
+        sqlx::query_as("SELECT kind FROM name_claims WHERE lookup_key = ? FOR UPDATE")
+            .bind(lookup_key)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal("read name claim"))?;
+    if claimed.is_none() {
+        return Ok(None);
+    }
+    match (claimed, lock_row(tx, lookup_key).await?) {
+        (Some((CLAIM_HANDLE,)), Some(row)) if !row.retired && row.write_pk == write_pk => {
+            Ok(Some(row.handle_id))
+        },
+        _ => Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN)),
+    }
 }
 
 /// `PUT /discovery/handle` — replace the record and terms, set the flag,
@@ -953,12 +1004,16 @@ async fn free_held_batch(pool: &MySqlPool, hold: i64) -> Result<(usize, u64), sq
 
 /// Hourly pruner: lapsed leases, held names past the hold, old nonces.
 pub(crate) fn spawn_pruner(pool: MySqlPool, hold_secs: u64) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::{job_run, jobs};
+    lakko_metrics::job_registered(jobs::HANDLE_PRUNE);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
-            match prune(&pool, hold_secs).await {
+            let result = prune(&pool, hold_secs).await;
+            job_run(jobs::HANDLE_PRUNE, &result);
+            match result {
                 Ok((0, 0)) => {},
                 Ok((lapsed, freed)) => tracing::info!(lapsed, freed, "handles pruned"),
                 Err(e) => tracing::warn!(error = %e, "handles prune failed"),

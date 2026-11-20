@@ -14,8 +14,7 @@ struct InfoBanner: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "info.circle")
-                .font(.subheadline)
+            LkIconView(.infoCircle, size: 17, relativeTo: .subheadline)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {

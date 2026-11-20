@@ -9,7 +9,7 @@
  * `channel-invites.ts` and `channel-publishers.ts` hold; none of them holds a
  * key or talks to a server itself.
  */
-import { createEffect, createResource, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, onMount, Show, type JSX } from "solid-js";
 
 import { base64Encode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
@@ -26,8 +26,9 @@ import { currentLanguage, joinList, t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
+import { PickRow } from "../ui/LabelledRows";
 import { LakkoPicker } from "../ui/LakkoPicker";
-import { loadWasm } from "../wasm";
+import { loadWasm, wasmSync } from "../wasm";
 import { BannedList } from "./BannedList";
 import {
   channelHandleOf,
@@ -61,8 +62,10 @@ import {
   stepDownAsPublisher,
 } from "./channel-publishers";
 import { bytesToHex } from "./composer";
+import { channelInviteCandidates, inChannelKeys } from "./invite-candidates";
 import { useChannelInviteSender } from "./invite-contacts";
 import { loadChannelMembers, type ChannelMembersResult } from "./member-cards";
+import { subscriberListView, type SubscriberListView } from "./subscriber-list";
 
 // ---------------------------------------------------------------------------
 // Channel type (UX 4.1)
@@ -319,7 +322,10 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
     if (publishes() && isPrivate()) void loadPage();
   });
 
-  async function remove(pkHex: string): Promise<void> {
+  /** UX 7.3 — remove a subscriber: every key of the person (one per
+   *  device), each followed by the rotation the removal asks for. */
+  async function remove(pksHex: readonly string[]): Promise<void> {
+    if (pksHex.length === 0) return;
     const ok = await requestConfirm({
       title: t("channels.subscribers.remove_title"),
       body: t("channels.subscribers.remove_body"),
@@ -330,28 +336,58 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
     if (!ok) return;
     const identity = chats.conversationAccountIdentity();
     if (identity === null) return;
-    setRemoving(pkHex);
+    setRemoving(pksHex[0] ?? null);
     setRemoveError(null);
+    const gone = new Set<string>();
     try {
-      await removeChannelSubscriber(identity, props.id, pkHex);
-      setRows(rows().filter((r) => r.pkHex !== pkHex));
+      for (const pkHex of pksHex) {
+        await removeChannelSubscriber(identity, props.id, pkHex);
+        gone.add(pkHex);
+      }
     } catch (err) {
       setRemoveError(channelErrorText(err, () => t("group_handle.error.failed")));
     } finally {
+      if (gone.size > 0) {
+        setRows(rows().filter((r) => !gone.has(r.pkHex)));
+        setRemovedKeys(new Set([...removedKeys(), ...gone]));
+      }
       setRemoving(null);
     }
   }
+  /** Keys removed on this screen: their names go at once, without waiting
+   *  for the member cards to be read again. */
+  const [removedKeys, setRemovedKeys] = createSignal<ReadonlySet<string>>(new Set());
 
   const viaLine = (r: ChannelSubscriberRow): string => {
-    if (r.via === null) return "";
+    if (r.via === null) return t("channels.subscribers.from_invitation");
     return r.via.kind === "link" ? t("channels.subscribers.from_link", { label: r.via.label }) : t("channels.subscribers.from_invitation");
   };
 
-  const others = (): number | null => {
+  /** The shared rule (`lakko_ui_rules::subscribers`): named rows, the others
+   *  and their count, so the owner can always tell whom `Remove` takes. */
+  const view = createMemo((): SubscriberListView<ChannelSubscriberRow> | null => {
     const m = members();
-    if (props.count === null || m === undefined) return null;
-    return Math.max(0, props.count - m.rows.length);
-  };
+    const wasm = wasmSync();
+    if (m === undefined) return null;
+    const removed = removedKeys();
+    const kept = m.rows
+      .map((r) => ({ ...r, subscriberPksHex: r.subscriberPksHex.filter((k) => !removed.has(k)) }))
+      .filter((r) => r.isSelf || r.subscriberPksHex.length > 0);
+    try {
+      const ownKeys = channelsState.subscriberKeysByChannel().get(props.id);
+      return subscriberListView(
+        wasm,
+        kept,
+        rows(),
+        props.count,
+        publishes() && isPrivate(),
+        ownKeys === undefined ? null : bytesToHex(ownKeys.public),
+      );
+    } catch {
+      // The module is not loaded yet: the memo runs again once it is.
+      return null;
+    }
+  });
 
   return (
     <div class="lk-stack" style={{ padding: "16px" }}>
@@ -372,78 +408,85 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
             </button>
           </div>
         </Show>
-        <Show when={!members.loading && members.error === undefined ? members() : undefined}>
-          {(m) => (
+        <Show when={removeError()}>
+          {(msg) => (
+            <p class="form-error" role="alert">
+              {msg()}
+            </p>
+          )}
+        </Show>
+        <Show when={!members.loading && members.error === undefined ? view() : undefined}>
+          {(v) => (
             <>
-              <Show when={m().rows.length === 0 && (props.count === null || props.count === 0)}>
+              <Show when={v().people.length === 0 && v().others.length === 0 && (props.count === null || props.count === 0)}>
                 <p class="lk-meta">{t("channels.subscribers.none")}</p>
               </Show>
               <ul class="lk-member-list" style={{ "list-style": "none", margin: 0, padding: 0 }}>
-                <For each={m().rows}>
-                  {(row): JSX.Element => (
+                <For each={v().people}>
+                  {(person): JSX.Element => (
                     <li class="lk-card-row">
                       <span class="lk-card-row-icon">
-                        <Avatar label={row.name} id={row.key} size="sm" personKey={row.personKeyB64} />
+                        <Avatar label={person.row.name} id={person.row.key} size="sm" personKey={person.row.personKeyB64} />
                       </span>
                       <div class="lk-card-row-body">
-                        <span class="lk-card-row-title">{row.isSelf ? t("channels.members.you") : row.name}</span>
-                        <Show when={row.username}>{(u) => <span class="lk-card-row-sub" dir="ltr">@{u()}</span>}</Show>
+                        <span class="lk-card-row-title">{person.row.isSelf ? t("channels.members.you") : person.row.name}</span>
+                        <Show when={person.row.name.startsWith("@") ? null : person.row.username}>{(u) => <span class="lk-card-row-sub" dir="ltr">@{u()}</span>}</Show>
                       </div>
+                      <Show when={person.removable}>
+                        <button
+                          type="button"
+                          class="danger lk-card-row-action"
+                          disabled={removing() !== null}
+                          onClick={() => void remove(person.pksHex)}
+                        >
+                          {t("common.remove")}
+                        </button>
+                      </Show>
                     </li>
                   )}
                 </For>
               </ul>
-              <Show when={others() !== null && (others() ?? 0) > 0}>
-                <p class="lk-meta">{t("channels.subscribers.others", { count: others() ?? 0 })}</p>
+              <Show when={v().othersCount > 0}>
+                <p class="lk-meta">{t("channels.subscribers.others", { count: v().othersCount })}</p>
+              </Show>
+              <Show when={v().others.length > 0}>
+                <ul style={{ "list-style": "none", margin: 0, padding: 0 }}>
+                  <For each={v().others}>
+                    {(r) => (
+                      <li class="lk-card-row">
+                        <div class="lk-card-row-body">
+                          <span class="lk-card-row-title">{viaLine(r)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          class="danger lk-card-row-action"
+                          disabled={removing() !== null}
+                          onClick={() => void remove([r.pkHex])}
+                        >
+                          {t("common.remove")}
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+              <Show when={pageError()}>
+                <div class="lk-alert danger" role="alert">
+                  {t("channels.subscribers.load_failed")}
+                  <button type="button" class="ghost" onClick={() => void loadPage()}>
+                    {t("common.try_again")}
+                  </button>
+                </div>
+              </Show>
+              <Show when={publishes() && isPrivate() && !done() && !pageError() && rows().length > 0}>
+                <button type="button" class="ghost" onClick={() => void loadPage()}>
+                  {t("channels.subscribers.more")}
+                </button>
               </Show>
             </>
           )}
         </Show>
       </section>
-
-      <Show when={publishes() && isPrivate()}>
-        <section class="lk-card">
-          <Show when={removeError()}>
-            {(m) => (
-              <p class="form-error" role="alert">
-                {m()}
-              </p>
-            )}
-          </Show>
-          <ul style={{ "list-style": "none", margin: 0, padding: 0 }}>
-            <For each={rows()}>
-              {(r) => (
-                <li class="lk-card-row">
-                  <div class="lk-card-row-body">
-                    <span class="lk-card-row-title">{viaLine(r) || t("channels.subscribers.title")}</span>
-                  </div>
-                  <button
-                    type="button"
-                    class="danger lk-card-row-action"
-                    disabled={removing() !== null}
-                    onClick={() => void remove(r.pkHex)}
-                  >
-                    {t("common.remove")}
-                  </button>
-                </li>
-              )}
-            </For>
-          </ul>
-          <Show when={pageError()}>
-            <div class="lk-alert danger" role="alert">
-              {t("channels.subscribers.load_failed")}
-              <button type="button" class="ghost" onClick={() => void loadPage()}>
-                {t("common.try_again")}
-              </button>
-            </div>
-          </Show>
-          <Show when={!done() && !pageError() && rows().length > 0}>
-            <button type="button" class="ghost" onClick={() => void loadPage()}>
-              {t("channels.subscribers.more")}
-            </button>
-          </Show>
-        </section>
-      </Show>
 
       <Show when={publishes()}>
         <BannedList channelIdHex={props.id} />
@@ -536,8 +579,9 @@ export function ChannelPublishersScreen(props: { readonly id: string }): JSX.Ele
     setError(null);
     setSent(null);
     try {
-      const url = await mintPublisherInviteLink(identity, props.id);
-      const outcome = await sendInvite(contact, { kind: "link", url });
+      // UX 15.2: the card travels in the message, so every client draws
+      // "... invites you to be a publisher of {channel}." with `Accept`.
+      const outcome = await sendInvite(contact, await mintPublisherInviteLink(identity, props.id));
       // Only an invitation written into their conversation is "sent"; a
       // contact request or nothing at all is not.
       if (outcome !== "invited") throw new Error(`publisher invitation not delivered: ${outcome}`);
@@ -606,7 +650,7 @@ export function ChannelPublishersScreen(props: { readonly id: string }): JSX.Ele
         </Show>
         <Show when={isOwner()}>
           <button type="button" class="secondary" onClick={() => setPicking((v) => !v)}>
-            <Icon name="userPlus" size={16} />
+            <Icon name="person-plus" size={20} />
             {t("channels.publishers.add")}
           </button>
         </Show>
@@ -634,6 +678,9 @@ export function ChannelPublishersScreen(props: { readonly id: string }): JSX.Ele
         <ContactPicker
           single
           title={t("channels.publishers.add")}
+          inChannel={() =>
+            inChannelKeys({ ownKeyB64: ownKeyB64(), publisherKeysB64: channelPublishers(props.id).map((p) => p.accountKeyB64) })
+          }
           onPick={(contacts) => {
             const c = contacts[0];
             if (c !== undefined) void invite(c);
@@ -654,6 +701,33 @@ export function ChannelInvitePeopleScreen(props: { readonly id: string; readonly
   const sendInvite = useChannelInviteSender();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+
+  // UX 14.1: people known to subscribe, by their card, are not offered; nor
+  // are the owner and the publishers, who are in the channel already.
+  const [members] = createResource(
+    () => props.id,
+    async (id): Promise<ChannelMembersResult | null> => {
+      const keys = channelsState.subscriberKeysByChannel().get(id);
+      try {
+        return await loadChannelMembers({
+          channelIdHex: id,
+          seedForEpoch: (e) => channelSeedFor(id, e),
+          ownSubscriberPkHex: keys === undefined ? null : bytesToHex(keys.public),
+        });
+      } catch {
+        // The cards could not be read: the list keeps every contact.
+        return null;
+      }
+    },
+  );
+  const inChannel = (): Set<string> => {
+    const identity = chats.conversationAccountIdentity();
+    return inChannelKeys({
+      ownKeyB64: identity === null ? null : base64Encode(identity.signaturePublicKey),
+      publisherKeysB64: channelPublishers(props.id).map((p) => p.accountKeyB64),
+      memberKeysB64: (members() ?? null)?.rows.map((r) => r.personKeyB64) ?? [],
+    });
+  };
 
   async function invite(contacts: readonly AcceptedContact[]): Promise<void> {
     const identity = chats.conversationAccountIdentity();
@@ -680,7 +754,12 @@ export function ChannelInvitePeopleScreen(props: { readonly id: string; readonly
 
   return (
     <div class="lk-stack" style={{ padding: "16px" }}>
-      <ContactPicker title={t("channels.info.invite_people")} busy={busy()} onPick={(c) => void invite(c)} />
+      <ContactPicker
+        title={t("channels.info.invite_people")}
+        busy={busy()}
+        inChannel={inChannel}
+        onPick={(c) => void invite(c)}
+      />
       <Show when={error()}>
         {(m) => (
           <p class="form-error" role="alert">
@@ -695,20 +774,24 @@ export function ChannelInvitePeopleScreen(props: { readonly id: string; readonly
 /** The contacts list with check boxes and the trailing `Invite (n)` button;
  *  `single` picks one and acts at once. Contacts only: an invitation is a
  *  message in a one-to-one, and a stranger has none (UX 14.1). Every contact
- *  is offered: a contact can always be messaged, and the invitation founds the
- *  one-to-one when none is held. */
+ *  not known to be in the channel (`inChannel`) is offered: a contact can
+ *  always be messaged, and the invitation founds the one-to-one when none is
+ *  held. */
 function ContactPicker(props: {
   readonly title: string;
   readonly single?: boolean;
   readonly busy?: boolean;
+  /** Account keys known to be in the channel already: not offered. */
+  readonly inChannel?: () => ReadonlySet<string>;
   readonly onPick: (contacts: readonly AcceptedContact[]) => void;
 }): JSX.Element {
   const profiles = useProfiles();
-  const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
+  const [all, setAll] = createSignal<AcceptedContact[]>(loadAccepted());
   onMount(() => {
-    const off = subscribeAcceptedChanged(() => setAccepted(loadAccepted()));
+    const off = subscribeAcceptedChanged(() => setAll(loadAccepted()));
     return off;
   });
+  const accepted = (): AcceptedContact[] => channelInviteCandidates(all(), props.inChannel?.() ?? new Set());
   const [picked, setPicked] = createSignal<ReadonlySet<string>>(new Set());
   const labelOf = (c: AcceptedContact): string => memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the channel contact picker");
   const toggle = (key: string): void => {
@@ -733,18 +816,14 @@ function ContactPicker(props: {
                 </button>
               }
             >
-              <label class="lk-row pick">
-                <input
-                  type="checkbox"
-                  checked={picked().has(c.signaturePubkeyB64)}
-                  disabled={props.busy === true}
-                  onChange={() => toggle(c.signaturePubkeyB64)}
-                />
+              <PickRow
+                label={labelOf(c)}
+                checked={picked().has(c.signaturePubkeyB64)}
+                disabled={props.busy === true}
+                onToggle={() => toggle(c.signaturePubkeyB64)}
+              >
                 <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} personKey={c.signaturePubkeyB64} />
-                <div class="lk-row-body">
-                  <span class="lk-row-title">{labelOf(c)}</span>
-                </div>
-              </label>
+              </PickRow>
             </Show>
           )}
         </For>
@@ -874,7 +953,7 @@ export function ChannelInviteLinksScreen(props: { readonly id: string }): JSX.El
         />
         <div class="lk-actions">
           <button type="button" class="primary" disabled={busy()} onClick={() => void create()}>
-            <Icon name="link" size={16} />
+            <Icon name="link" size={20} />
             {t("chat.invite_link.create")}
           </button>
         </div>

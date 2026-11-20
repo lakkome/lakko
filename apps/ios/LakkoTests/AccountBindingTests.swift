@@ -178,7 +178,8 @@ final class AuthBindingTests: XCTestCase {
             loginHandleBinds: LoginHandleBindLedger(),
             restoreDirectory: directory,
             pushBinding: PushAccountBindingStore(defaults: nil),
-            removeDeliveredNotifications: {}
+            removeDeliveredNotifications: {},
+            earlierKeysInputs: skipEarlierKeysGate
         )
         return Harness(repository: repository, store: store, persistence: persistence, directory: directory)
     }

@@ -135,7 +135,7 @@ final class DeviceLeavesTests: XCTestCase {
 
     // MARK: - state bundle
 
-    private let bundle = StateBundle.V3(
+    private let bundle = StateBundle.V4(
         contacts: [
             StateBundle.CarriedContact(
                 signaturePubkeyB64: "c2ln",
@@ -156,14 +156,14 @@ final class DeviceLeavesTests: XCTestCase {
     }
 
     func testStateBundleDecodesTheContractEncoding() {
-        // The JSON shape of the cross-client contract (format 3): iOS must
+        // The JSON shape of the cross-client contract (format 4): iOS must
         // read it whichever client wrote it.
         let wire = """
-        {"v":3,"contacts":[{"signaturePubkeyB64":"c2ln","displayName":"Bob",\
+        {"v":4,"contacts":[{"signaturePubkeyB64":"c2ln","displayName":"Bob",\
         "acceptedAtMs":1700000000000,"accountIdHex":"00112233445566778899aabbccddeeff"}],\
         "pins":[{"accountIdB64":"ABEiM0RVZneImaq7zN3u/w==","pinnedSignaturePubkeyB64":"c2ln",\
         "rotationMarker":0,"provenPredecessorsB64":[]}],"knownGroupIdsB64":["Z3JvdXA="],\
-        "ownPredecessors":[],"groupNames":[],"profiles":[],"pendingContacts":[]}
+        "ownPredecessors":[],"groupNames":[],"profiles":[],"pendingContacts":[],"channelSeeds":[]}
         """
         XCTAssertEqual(StateBundle.decode(Data(wire.utf8)), bundle)
     }
@@ -183,16 +183,25 @@ final class DeviceLeavesTests: XCTestCase {
             (#"{"v":2,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],"#
                 + #""groupNames":[],"profiles":[],"pendingContacts":[]}"#).utf8)
         XCTAssertNil(StateBundle.decode(v2WithNewFields))
-        let v3MissingArrays = Data(
-            #"{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[]}"#.utf8)
-        XCTAssertNil(StateBundle.decode(v3MissingArrays), "the three arrays are required")
-        let empty = Data(
+        // Format 3 is refused too (bundle v4 is a flag day).
+        let v3 = Data(
             (#"{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],"#
+                + #""groupNames":[],"profiles":[],"pendingContacts":[],"channelSeeds":[]}"#).utf8)
+        XCTAssertNil(StateBundle.decode(v3))
+        let v4MissingArrays = Data(
+            #"{"v":4,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[]}"#.utf8)
+        XCTAssertNil(StateBundle.decode(v4MissingArrays), "the arrays are required")
+        let v4MissingSeeds = Data(
+            (#"{"v":4,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],"#
                 + #""groupNames":[],"profiles":[],"pendingContacts":[]}"#).utf8)
+        XCTAssertNil(StateBundle.decode(v4MissingSeeds), "channelSeeds is required")
+        let empty = Data(
+            (#"{"v":4,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[],"#
+                + #""groupNames":[],"profiles":[],"pendingContacts":[],"channelSeeds":[]}"#).utf8)
         XCTAssertNotNil(StateBundle.decode(empty))
         let broken = Data(
-            (#"{"v":3,"contacts":[{"displayName":1}],"pins":[],"knownGroupIdsB64":[],"#
-                + #""ownPredecessors":[],"groupNames":[],"profiles":[],"pendingContacts":[]}"#).utf8)
+            (#"{"v":4,"contacts":[{"displayName":1}],"pins":[],"knownGroupIdsB64":[],"#
+                + #""ownPredecessors":[],"groupNames":[],"profiles":[],"pendingContacts":[],"channelSeeds":[]}"#).utf8)
         XCTAssertNil(StateBundle.decode(broken))
         XCTAssertNil(StateBundle.decode(Data([0x7B])))
     }
@@ -291,8 +300,9 @@ final class StateBundleV3Tests: XCTestCase {
     }
 
     private func bundleJson(groupNames: String = "[]", profiles: String = "[]", pending: String = "[]") -> Data {
-        Data(("{\"v\":3,\"contacts\":[],\"pins\":[],\"knownGroupIdsB64\":[],\"ownPredecessors\":[],"
-            + "\"groupNames\":\(groupNames),\"profiles\":\(profiles),\"pendingContacts\":\(pending)}").utf8)
+        Data(("{\"v\":4,\"contacts\":[],\"pins\":[],\"knownGroupIdsB64\":[],\"ownPredecessors\":[],"
+            + "\"groupNames\":\(groupNames),\"profiles\":\(profiles),\"pendingContacts\":\(pending),"
+            + "\"channelSeeds\":[]}").utf8)
     }
 
     // MARK: - Round trip
@@ -323,7 +333,7 @@ final class StateBundleV3Tests: XCTestCase {
                 StateBundle.CarriedHeldMessage(text: "hello", heldAtMs: 5_000),
                 StateBundle.CarriedHeldMessage(text: "again", heldAtMs: 6_000),
             ] })
-        XCTAssertEqual(built.v, 3)
+        XCTAssertEqual(built.v, 4)
         XCTAssertEqual(built.groupNames.count, 1)
         XCTAssertEqual(built.profiles.map(\.personKeyB64), [base64Encode(alice)], "never this account's own")
         XCTAssertEqual(built.pendingContacts.count, 1)
@@ -422,7 +432,7 @@ final class StateBundleV3Tests: XCTestCase {
                 signatureKeyB64: base64Encode(alice), accountIdB64: account),
             .stored)
 
-        let bundle = StateBundle.V3(
+        let bundle = StateBundle.V4(
             contacts: [], pins: [], knownGroupIdsB64: [],
             groupNames: StateBundle.carriedGroupNames(groupIdHexes: [groupIdHex]) { _ in
                 StoredGroupName(name: "Old name", updatedAtMs: 1_000)
@@ -444,7 +454,7 @@ final class StateBundleV3Tests: XCTestCase {
         let carried = StateBundle.carriedProfiles(
             [base64Encode(own): ProfileClaim(displayName: "Me", username: nil, updatedAtMs: 5)], ownKeysB64: [])
         XCTAssertEqual(carried.count, 1, "a sender that did not leave it out")
-        let bundle = StateBundle.V3(contacts: [], pins: [], knownGroupIdsB64: [], profiles: carried)
+        let bundle = StateBundle.V4(contacts: [], pins: [], knownGroupIdsB64: [], profiles: carried)
         let applied = StateBundle.applyNames(
             bundle, accountIdB64: account, groupNameStore: GroupNameStore(defaults: try freshDefaults()),
             directory: directory, ownKeysB64: [base64Encode(own)])
@@ -483,7 +493,7 @@ final class StateBundleV3Tests: XCTestCase {
         }
         let held = (0..<4).map { StateBundle.CarriedHeldMessage(text: big, heldAtMs: Int64($0)) }
         let contact = StateBundle.CarriedContact(signaturePubkeyB64: "c2ln", displayName: big, acceptedAtMs: 1)
-        let bundle = StateBundle.V3(
+        let bundle = StateBundle.V4(
             contacts: [contact], pins: [], knownGroupIdsB64: ["Z3JvdXA="],
             groupNames: (0..<3).map(name),
             profiles: (0..<5).map(profile),

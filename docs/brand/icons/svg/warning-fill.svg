@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+  <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+  <path d="M10.25 4.6C11.05 3.25 12.95 3.25 13.75 4.6L21.05 17.3C21.85 18.65 20.9 20.25 19.35 20.25L4.65 20.25C3.1 20.25 2.15 18.65 2.95 17.3L10.25 4.6ZM10.22 9.25L10.22 13.75A1.77 1.77 0 0 0 13.78 13.75L13.78 9.25A1.77 1.77 0 0 0 10.22 9.25ZM12 14.88A2.08 2.08 0 0 0 12 19.02A2.08 2.08 0 0 0 12 14.88Z" fill="currentColor" fill-rule="evenodd" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

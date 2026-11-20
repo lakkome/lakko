@@ -66,7 +66,9 @@ user is on lives in the browser's session history instead, so back and
 forward move between screens and a reload keeps the screen. A link opened
 from outside (`/i/`, `/c/`, `/g/`, a notification) is read once on entry and
 cleared from the address bar before anything renders
-(`apps/web/src/routes/origin-history.ts`).
+(`apps/web/src/routes/origin-history.ts`). One exception: a public page made
+to be shared, which carries nothing private, shows its own address exactly
+(`/donations`; never with a query or fragment).
 
 ## 2. The conversation list
 
@@ -334,9 +336,17 @@ a filter. Channels do not, and the mapping that costs something is the same
 everywhere: a channel's "last post time" has to become the same field as a
 chat's "last message time", or the one ordering has nothing to order by.
 
-Pinned, muted, archived and unread are keyed on a conversation id a channel
-does not carry. Until that is resolved a channel row shows none of them,
-which is honest; inventing a badge that can never be non-zero is not.
+A channel row carries all four (updated 2026-11-13). Its unread count is the
+channel's count of new posts, kept on the device ([`feed.md`](feed.md)
+section 5). Pinned, muted and archived are the account's synced flags, the
+same register a chat or a group uses, keyed on the channel id: so a long
+press (or a right-click on the web) on a channel row offers Pin, Mute,
+Archive and the folder items, as a group row does
+([`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 12),
+and the choice reaches the account's other devices. Channel posts raise no
+notification on any client yet, so Mute on a channel today drops it from the
+feeds that leave muted conversations out and greys its badge; nothing else
+is there to silence.
 
 ### 6.2 The calls list
 

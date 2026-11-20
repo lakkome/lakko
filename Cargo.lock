@@ -1920,6 +1920,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -2680,6 +2682,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-anon-cred"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "curve25519-dalek",
+ "getrandom 0.2.17",
+ "proptest",
+ "rand_core 0.6.4",
+ "subtle",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "lakko-anon-token"
 version = "0.0.0"
 dependencies = [
@@ -2701,6 +2717,7 @@ dependencies = [
  "axum",
  "lakko-anon-token",
  "lakko-crypto",
+ "lakko-metrics",
  "serde_json",
  "sqlx",
  "thiserror 1.0.69",
@@ -2714,7 +2731,9 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
+ "lakko-contacts",
  "lakko-crypto",
+ "proptest",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -2775,6 +2794,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-ballot"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "lakko-bootstrap-config-tool"
 version = "0.0.0"
 dependencies = [
@@ -2808,6 +2842,40 @@ dependencies = [
  "prost 0.13.5",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "lakko-canary-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "hex",
+ "lakko-anon-token",
+ "lakko-attachments",
+ "lakko-auth-client",
+ "lakko-calls",
+ "lakko-contacts",
+ "lakko-ds-proof",
+ "lakko-metrics",
+ "lakko-mls",
+ "lakko-mnemonic",
+ "lakko-pow",
+ "lakko-sfu-proto",
+ "lakko-vault",
+ "rand 0.8.6",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "str0m",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2899,6 +2967,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-donations-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "lakko-attest",
+ "lakko-crypto",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lakko-ds-proof"
 version = "0.0.0"
 dependencies = [
@@ -2922,11 +3001,13 @@ name = "lakko-ffi-extension"
 version = "0.0.0"
 dependencies = [
  "lakko-attachments",
+ "lakko-ballot",
  "lakko-calls",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-ds-proof",
  "lakko-mls",
+ "lakko-sync",
  "thiserror 1.0.69",
  "uniffi",
 ]
@@ -2937,11 +3018,13 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-attachments",
  "lakko-attest",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-ballot",
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-channels",
@@ -2955,6 +3038,7 @@ dependencies = [
  "lakko-l10n",
  "lakko-mls",
  "lakko-mnemonic",
+ "lakko-open-items",
  "lakko-pow",
  "lakko-proto",
  "lakko-segment",
@@ -2979,11 +3063,13 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-attachments",
  "lakko-attest",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-ballot",
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-channels",
@@ -2997,6 +3083,7 @@ dependencies = [
  "lakko-l10n",
  "lakko-mls",
  "lakko-mnemonic",
+ "lakko-open-items",
  "lakko-pow",
  "lakko-presence",
  "lakko-proto",
@@ -3010,6 +3097,8 @@ dependencies = [
  "lakko-vault",
  "openmls",
  "prost 0.13.5",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -3047,6 +3136,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-metrics"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "lakko-log-hygiene",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
@@ -3072,6 +3175,7 @@ dependencies = [
  "bip39",
  "getrandom 0.2.17",
  "lakko-crypto",
+ "proptest",
  "thiserror 1.0.69",
  "zeroize",
 ]
@@ -3088,6 +3192,18 @@ name = "lakko-noise-wasm"
 version = "0.0.0"
 dependencies = [
  "lakko-noise",
+]
+
+[[package]]
+name = "lakko-open-items"
+version = "0.0.0"
+dependencies = [
+ "lakko-attachments",
+ "lakko-ballot",
+ "lakko-contacts",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3109,6 +3225,7 @@ dependencies = [
  "base64 0.22.1",
  "equix",
  "http",
+ "lakko-metrics",
  "rand 0.8.6",
  "serde",
  "sha2 0.10.9",
@@ -3215,6 +3332,7 @@ dependencies = [
  "equix",
  "hmac 0.12.1",
  "http-body-util",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-anon-token-server",
  "lakko-attest",
@@ -3223,6 +3341,7 @@ dependencies = [
  "lakko-crypto",
  "lakko-device-link",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-mnemonic",
  "lakko-pow-server",
  "lakko-sfu-proto",
@@ -3247,6 +3366,7 @@ dependencies = [
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "webauthn-rs-core",
+ "webauthn-rs-proto",
 ]
 
 [[package]]
@@ -3259,10 +3379,12 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "hex",
+ "lakko-anon-cred",
  "lakko-anon-token",
  "lakko-anon-token-server",
  "lakko-channels",
  "lakko-crypto",
+ "lakko-metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -3295,6 +3417,7 @@ dependencies = [
  "lakko-crypto",
  "lakko-discovery-client",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-mls",
  "lakko-transparency",
  "maxminddb",
@@ -3329,6 +3452,7 @@ dependencies = [
  "lakko-contacts",
  "lakko-ds-proof",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -3360,6 +3484,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "lakko-auth-token",
+ "lakko-metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -3381,6 +3506,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hex",
+ "lakko-metrics",
  "lakko-transport",
  "rustls",
  "sha2 0.10.9",
@@ -3411,6 +3537,7 @@ dependencies = [
  "lakko-contacts",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "p256",
  "parking_lot",
  "rand 0.8.6",
@@ -3442,9 +3569,9 @@ dependencies = [
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-sfu-proto",
  "metrics",
- "metrics-exporter-prometheus",
  "reqwest",
  "serde",
  "serde_json",
@@ -3477,6 +3604,7 @@ dependencies = [
  "lakko-auth-token",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-vault",
  "reqwest",
  "rustix",
@@ -3508,6 +3636,7 @@ dependencies = [
  "lakko-attest",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-transparency",
  "rand 0.8.6",
  "reqwest",
@@ -3544,6 +3673,7 @@ dependencies = [
  "http-body-util",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-transparency",
  "rand 0.8.6",
  "serde",
@@ -3563,6 +3693,7 @@ name = "lakko-sync"
 version = "0.0.0"
 dependencies = [
  "lakko-contacts",
+ "lakko-crypto",
  "proptest",
  "serde",
  "thiserror 1.0.69",
@@ -3630,10 +3761,12 @@ name = "lakko-ui-rules"
 version = "0.0.0"
 dependencies = [
  "icu_properties",
+ "lakko-attachments",
  "lakko-contacts",
  "lakko-sync",
  "proptest",
  "unicode-segmentation",
+ "whatlang",
 ]
 
 [[package]]
@@ -7640,6 +7773,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "998d2c24ec099a87daf9467808859f9d82b61f1d9c9701251aea037f514eae0e"
 dependencies = [
  "nom 7.1.3",
+]
+
+[[package]]
+name = "whatlang"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e8f38b596e2a359b755342473520a99421e43658548c79489ee221b728c107"
+dependencies = [
+ "hashbrown 0.15.5",
 ]
 
 [[package]]

@@ -138,7 +138,8 @@ import {
   quietCallOfferIsLive,
   type QuietCallOffer,
 } from "./quiet-call-offer";
-import { ChatClient } from "../chat/client";
+import { ChatClient, ConversationBehindError } from "../chat/client";
+import { conversationBehind } from "../chat/conversation-behind";
 import { sealedWakeForGroup } from "../push/group-routing";
 import {
   makeCallSignalingPublisher,
@@ -210,6 +211,7 @@ import {
   groupCallAloneAction,
   groupCallStartAbandoned,
   runGroupCallStart,
+  callStartHeldWhileBehind,
   planGroupCallLeave,
   selectGroupCallBanner,
   type GroupLeaveReason,
@@ -1431,6 +1433,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   async function dial(askedGroupIdB64: string, askedVideo: boolean): Promise<void> {
     if (currentOccupant() !== null) return;
     if (groupEntry(askedGroupIdB64) === undefined) return;
+    // ADR-0091 — nothing is set up in a chat this device is behind in: the
+    // caller shows its ordinary could-not-start state (no copy of its own),
+    // before anything is captured or published.
+    if (callStartHeldWhileBehind(conversationBehind.stopsActing(askedGroupIdB64))) {
+      throw new ConversationBehindError();
+    }
     // The refusal screen of the desktop; the gate can sit there for as long
     // as the person takes, so the slot is read again after it.
     const permits = await captureGate({ audio: true, video: askedVideo });
@@ -1749,6 +1757,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * (see `onGroupSessionState`); leaving is `leaveGroupCall`.
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
+    // ADR-0091 — a start or a join in a chat this device is behind in fails
+    // with the ordinary could-not-start (could-not-join) outcome, before
+    // anything is captured, the slot taken or anything published.
+    if (callStartHeldWhileBehind(conversationBehind.stopsActing(opts.groupIdB64))) {
+      return {
+        kind: "failed",
+        message: () => t(opts.joinCallIdHex === null ? "call.error.start_group" : "call.error.join_group"),
+      };
+    }
     // Before the latch below: a group call goes on whatever the answer is,
     // since a person with no microphone can still listen and watch
     // (`capture-fallback.ts`).
@@ -3693,7 +3710,7 @@ export function CallHostView(): JSX.Element {
         {(text) => (
           <div class="lk-call-incoming bottom" role="status">
             <span class="lk-call-incoming-icon" aria-hidden="true">
-              <Icon name="phoneEnd" size={20} />
+              <Icon name="phone-down-fill" size={20} />
             </span>
             <div class="lk-call-incoming-text">
               <span>{text()}</span>
@@ -3952,7 +3969,7 @@ function GroupCallBanner(): JSX.Element {
       {(ref) => (
         <div class="lk-call-incoming" role="status" aria-label={t("chat.call.group_in_progress")}>
           <span class="lk-call-incoming-icon" aria-hidden="true">
-            <Icon name="groups" size={20} />
+            <Icon name="phone-connection-fill" size={20} />
           </span>
           <div class="lk-call-incoming-text">
             <strong>{t("call.group_banner.title", { name: internals.nameFor(ref().groupIdB64) })}</strong>
@@ -3983,7 +4000,7 @@ function GroupCallBanner(): JSX.Element {
               {t("call.group_banner.open_chat")}
             </A>
             <button type="button" disabled={joining()} onClick={() => void join(true)}>
-              <Icon name="video" size={18} />
+              <Icon name="video-fill" size={20} />
               {t("call.group_banner.join_video")}
             </button>
             <button
@@ -3992,7 +4009,7 @@ function GroupCallBanner(): JSX.Element {
               disabled={joining()}
               onClick={() => void join(false)}
             >
-              <Icon name="phone" size={18} />
+              <Icon name="phone-fill" size={20} />
               {t("chat.call.join_short")}
             </button>
           </div>

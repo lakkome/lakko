@@ -488,7 +488,8 @@ public final class DsClient {
             )
         }
         return FetchResult(
-            messages: messages, hasMore: parsed.hasMore, latestEpoch: parsed.latestEpoch)
+            messages: messages, hasMore: parsed.hasMore, latestEpoch: parsed.latestEpoch,
+            registeredCommits: parsed.commits.map(FetchResult.registeredCommits(from:)))
     }
 
     // MARK: - ADR-0053 claim and knock
@@ -847,12 +848,21 @@ private struct FetchWireResponse: Decodable {
     let messages: [FetchWireMessage]
     let hasMore: Bool
     let latestEpoch: UInt64?
+    /// ADR-0091 — `[{epoch, id}]`, see ``FetchResult/registeredCommits``.
+    let commits: [FetchWireCommit]?
 
     enum CodingKeys: String, CodingKey {
         case messages
         case hasMore = "has_more"
         case latestEpoch = "latest_epoch"
+        case commits
     }
+}
+
+/// One entry of the DS `commits` field (ADR-0091).
+struct FetchWireCommit: Decodable, Equatable {
+    let epoch: UInt64
+    let id: Int64
 }
 
 private struct FetchWireMessage: Decodable {
@@ -1043,11 +1053,29 @@ public struct FetchResult: Equatable {
     /// journal and for mailboxes. The DeviceGroup sync runtime compares it
     /// with its own epoch to notice it is behind (``DeviceGroupRejoin``).
     public let latestEpoch: UInt64?
+    /// ADR-0091 — present only where ``latestEpoch`` is: the commit row the DS
+    /// registered for each epoch above the one the read was signed at, keyed
+    /// by the epoch the row moves the journal TO. Row id of entry `n` is THE
+    /// commit from `n - 1` to `n` (ADR-0081: registered with its row in one
+    /// transaction); a commit-shaped row posted through the plain publish
+    /// route is never named.
+    public let registeredCommits: [UInt64: Int64]?
 
-    public init(messages: [MailboxMessage], hasMore: Bool, latestEpoch: UInt64? = nil) {
+    public init(
+        messages: [MailboxMessage], hasMore: Bool, latestEpoch: UInt64? = nil,
+        registeredCommits: [UInt64: Int64]? = nil
+    ) {
         self.messages = messages
         self.hasMore = hasMore
         self.latestEpoch = latestEpoch
+        self.registeredCommits = registeredCommits
+    }
+
+    /// The `commits` entries keyed by epoch; a negative row id is dropped.
+    static func registeredCommits(from wire: [FetchWireCommit]) -> [UInt64: Int64] {
+        var out: [UInt64: Int64] = [:]
+        for entry in wire where entry.id >= 0 { out[entry.epoch] = entry.id }
+        return out
     }
 }
 
@@ -1073,11 +1101,20 @@ public enum DsClientError: Error {
 }
 
 extension DsClientError: LocalizedError {
+    /// The endpoint as it may appear in an error message: the route without its
+    /// query and with every run of 16 or more hex digits (a journal, mailbox or
+    /// rendezvous id) replaced by `:id`. Error messages reach logs, which carry
+    /// no identifier (ADR-0078 section 11); the case keeps the full value.
+    static func redacted(_ endpoint: String) -> String {
+        let path = endpoint.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? endpoint
+        return path.replacingOccurrences(of: "[0-9a-fA-F]{16,}", with: ":id", options: .regularExpression)
+    }
+
     public var errorDescription: String? {
         switch self {
         case .argument(let m): return m
-        case .http(let s, let e, let b): return "ds \(e) → \(s): \(b)"
-        case .network(let e, let u): return "ds \(e) network error: \(u)"
+        case .http(let s, let e, let b): return "ds \(DsClientError.redacted(e)) → \(s): \(b)"
+        case .network(let e, let u): return "ds \(DsClientError.redacted(e)) network error: \(u)"
         case .clockSkew: return DsClockSkew.copy
         }
     }

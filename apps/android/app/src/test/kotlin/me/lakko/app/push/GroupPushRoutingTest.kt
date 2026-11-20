@@ -353,6 +353,47 @@ class GroupPushRoutingTest {
     // is what turns the failure from terminal into recoverable.
     // -----------------------------------------------------------------
 
+    /**
+     * ADR-0091 live walk 2026-11-19 — the production port's adapter: a send
+     * the repository SKIPPED (behind, or a superseded one-to-one) answers
+     * `null`. [skipping] stands for it; [publishing] for a send that landed.
+     */
+    private class SkippingPorts(accountIdB64: String) : FakePorts(accountIdB64) {
+        var skipping = true
+
+        override suspend fun broadcast(envelope: ByteArray) {
+            requireRoutingBroadcastSent<Any> { if (skipping) null else super.broadcast(envelope) }
+        }
+    }
+
+    @Test
+    fun `a skipped send is not a send`() = runTest {
+        assertEquals(7, requireRoutingBroadcastSent { 7 })
+        val thrown = runCatching { requireRoutingBroadcastSent<Int> { null } }.exceptionOrNull()
+        assertTrue(thrown is RoutingBroadcastSkipped)
+    }
+
+    @Test
+    fun `a broadcast SKIPPED while behind leaves the row pending, and it goes out once back`() = runTest {
+        val ports = SkippingPorts(account)
+        val g = "2f".repeat(32)
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals("nothing reached the wire", 0, ports.broadcastCount)
+        assertFalse("a skipped send never marks the row distributed", ports.isDistributed(g))
+
+        // `redistribute` (after a re-entry or an add) skipped too: still pending.
+        runCatching { GroupPushRouting.redistribute(account, g, ports) }
+        assertFalse(ports.isDistributed(g))
+
+        // The device is back: the next ensure re-sends the stored secret.
+        ports.skipping = false
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals("sent once the device is back", 1, ports.broadcastCount)
+        assertTrue(ports.isDistributed(g))
+        assertEquals("never re-minted", 1, ports.mintCount)
+    }
+
     @Test
     fun `a FAILED broadcast stores the secret but leaves it NOT distributed`() = runTest {
         val ports = FakePorts(account)

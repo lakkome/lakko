@@ -28,13 +28,13 @@ import kotlin.coroutines.resume
 
 /**
  * Translation through Android's on-device translation service
- * (`TranslationManager.createOnDeviceTranslator`, API 31), the Android engine
- * of ADR-0082 (amended 2026-10-27: ML Kit is not used, its data disclosure says
- * it reports the configured source and target languages to Google). Only the
- * `OnDevice` factory and the `OnDevice` capability query are called; the
- * deprecated `createTranslator` is never called (the fail-closed source test
- * refuses it). The service belongs to the system (on Pixel devices, Android
- * System Intelligence), so its packs are "Managed by Android".
+ * (`TranslationManager.createOnDeviceTranslator`, API 31), used for a pair
+ * whose pack the system already has (ADR-0082 notes of 2026-10-27 and
+ * 2026-11-15; every other pair goes to ML Kit, [SystemFirstTranslationEngine]).
+ * Only the `OnDevice` factory and the `OnDevice` capability query are called;
+ * the deprecated `createTranslator` is never called (the fail-closed source
+ * test refuses it). The service belongs to the system (on Pixel devices,
+ * Android System Intelligence), so its packs are "Managed by Android".
  */
 @RequiresApi(Build.VERSION_CODES.S)
 internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
@@ -67,11 +67,18 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
     override suspend fun available(): Boolean =
         capabilities().any { stateOf(it) != TranslationEngineState.UNAVAILABLE }
 
+    /** A locale the service reported, in the tag form the core uses. */
+    private fun tagOf(locale: ULocale): String = PlatformLanguageTags.fromPlatform(locale.toLanguageTag())
+
+    /** The service's capabilities for a pair, whatever it calls the languages. */
+    private fun matching(all: Set<TranslationCapability>, source: String, target: String): List<TranslationCapability> {
+        val s = PlatformLanguageTags.fromPlatform(source)
+        val t = PlatformLanguageTags.fromPlatform(target)
+        return all.filter { sameLanguage(tagOf(it.sourceSpec.locale), s) && sameLanguage(tagOf(it.targetSpec.locale), t) }
+    }
+
     override suspend fun state(source: String, target: String): TranslationEngineState {
-        val match = capabilities().filter {
-            sameLanguage(it.sourceSpec.locale.toLanguageTag(), source) &&
-                sameLanguage(it.targetSpec.locale.toLanguageTag(), target)
-        }
+        val match = matching(capabilities(), source, target)
         return when {
             match.any { stateOf(it) == TranslationEngineState.READY } -> TranslationEngineState.READY
             match.any { stateOf(it) == TranslationEngineState.NEEDS_PACK } -> TranslationEngineState.NEEDS_PACK
@@ -81,15 +88,23 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
 
     override suspend fun sources(target: String): List<String> =
         capabilities()
-            .filter { sameLanguage(it.targetSpec.locale.toLanguageTag(), target) && stateOf(it) != TranslationEngineState.UNAVAILABLE }
-            .map { it.sourceSpec.locale.toLanguageTag() }
+            .filter {
+                sameLanguage(tagOf(it.targetSpec.locale), PlatformLanguageTags.fromPlatform(target)) &&
+                    stateOf(it) != TranslationEngineState.UNAVAILABLE
+            }
+            .map { tagOf(it.sourceSpec.locale) }
             .distinct()
 
     private suspend fun translator(source: String, target: String): android.view.translation.Translator? {
         val m = manager() ?: return null
+        // The locales as the service itself names them (`nb` may be `no`,
+        // `tl` may be `fil` there), else the tags as given.
+        val match = matching(capabilities(), source, target).firstOrNull()
+        val sourceLocale = match?.sourceSpec?.locale ?: ULocale.forLanguageTag(source)
+        val targetLocale = match?.targetSpec?.locale ?: ULocale.forLanguageTag(target)
         val ctx = TranslationContext.Builder(
-            TranslationSpec(ULocale.forLanguageTag(source), TranslationSpec.DATA_FORMAT_TEXT),
-            TranslationSpec(ULocale.forLanguageTag(target), TranslationSpec.DATA_FORMAT_TEXT),
+            TranslationSpec(sourceLocale, TranslationSpec.DATA_FORMAT_TEXT),
+            TranslationSpec(targetLocale, TranslationSpec.DATA_FORMAT_TEXT),
         ).build()
         return withTimeoutOrNull(TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
@@ -137,53 +152,35 @@ internal class PlatformTranslationEngine(context: Context) : TranslationEngine {
     }
 
     /**
-     * Creating an on-device translator for a pair that is available to
-     * download is how the platform is asked for the pack. Whether every
-     * implementation starts a download for it is not documented; the outcome
-     * is read back from the capability state, and a pair that does not reach
-     * the device in time reads as scheduled. Not run on a device.
+     * Lakko has no documented way to make the system download a pack:
+     * creating a translator for the pair did not (seen on a Pixel 9, API 35,
+     * 2026-11-15, the pack never arrived). A pair whose pack is not on the
+     * device goes to ML Kit instead ([SystemFirstTranslationEngine]), so this
+     * answers only what is already true.
      */
-    override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome {
-        progress(null)
-        val t = translator(source, target)
-        try {
-            t?.destroy()
-        } catch (_: Throwable) {
-            // nothing to release
-        }
-        val deadline = System.currentTimeMillis() + DOWNLOAD_WAIT_MS
-        while (System.currentTimeMillis() < deadline) {
-            when (state(source, target)) {
-                TranslationEngineState.READY -> return PackOutcome.DONE
-                TranslationEngineState.UNAVAILABLE -> return PackOutcome.FAILED
-                TranslationEngineState.NEEDS_PACK -> kotlinx.coroutines.delay(POLL_MS)
-            }
-        }
-        return PackOutcome.SCHEDULED
-    }
+    override suspend fun download(source: String, target: String, progress: (Int?) -> Unit): PackOutcome =
+        if (state(source, target) == TranslationEngineState.READY) PackOutcome.DONE else PackOutcome.FAILED
 
     override suspend fun installedPacks(): List<PackInfo> =
         capabilities()
             .filter { it.state == TranslationCapability.STATE_ON_DEVICE }
-            .map { it.sourceSpec.locale.toLanguageTag() }
+            .map { tagOf(it.sourceSpec.locale) }
             .distinct()
             .map { PackInfo(it, null, forTranslation = true, forTranscription = false, managedBySystem = true) }
 
     private companion object {
         const val TAG = "LakkoTranslation"
         const val TIMEOUT_MS = 20_000L
-        const val DOWNLOAD_WAIT_MS = 120_000L
-        const val POLL_MS = 2_000L
     }
 }
 
 /**
- * The translation engine for this device: the platform's on-device service
- * when the system has one (API 31+), ML Kit otherwise (ADR-0082 amended
- * 2026-10-27).
+ * The translation engine for this device: per language pair, the platform's
+ * on-device service (API 31+) where it has the pack, ML Kit otherwise
+ * (ADR-0082 notes of 2026-10-27 and 2026-11-15).
  */
-internal fun translationEngineFor(context: Context, antiCensorshipArmed: () -> Boolean): TranslationEngine =
+internal fun translationEngineFor(context: Context): TranslationEngine =
     SystemFirstTranslationEngine(
         system = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PlatformTranslationEngine(context) else null,
-        fallback = MlKitTranslationEngine(antiCensorshipArmed),
+        fallback = MlKitTranslationEngine(),
     )

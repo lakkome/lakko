@@ -107,6 +107,7 @@ mod tests {
             reactions: Vec::new(),
             call: None,
             unsupported_version: None,
+            content: None,
         }
     }
 

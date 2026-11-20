@@ -327,4 +327,19 @@ class GroupInvitePageTest {
         assertNull(invitedByLine(named.copy(inviterName = "  ")))
         assertNull(invitedByLine(null))
     }
+
+    // ADR-0087 15.2 — seen live 2026-11-12: a publisher link opened as
+    // "Icons QA invites you to a group, 0 members".
+    @Test
+    fun `a co-publisher link reads as an invitation to publish, with no member count`() {
+        val channel = ByteArray(16) { 0x42 }
+        val lines = groupInvitePageLines(GroupInvitePreviewUi("Walk 22 channel", "Icons QA", 0, channelId = channel))
+        assertEquals("Icons QA invites you to be a publisher of Walk 22 channel.", lines.headline.en)
+        assertNull(lines.groupLine)
+        assertNull(lines.membersLine)
+        assertEquals(
+            "You are invited to be a publisher of Channel.",
+            groupInvitePageLines(GroupInvitePreviewUi(null, null, 0, channelId = channel)).headline.en,
+        )
+    }
 }

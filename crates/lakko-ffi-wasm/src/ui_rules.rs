@@ -56,6 +56,10 @@ use lakko_ui_rules::layer_display::{
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
+use lakko_ui_rules::media_mosaic::{
+    media_mosaic as rust_media_mosaic, MediaMosaic as RustMediaMosaic, MediaSize as RustMediaSize,
+    MOSAIC_GAP, MOSAIC_MAX_ITEMS,
+};
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
@@ -363,6 +367,323 @@ pub fn guest_name(random: u32) -> String {
 #[must_use]
 pub fn avatar_initials(name: &str) -> String {
     lakko_ui_rules::initials::avatar_initials(name)
+}
+
+/// What follows the first comments under a collapsed channel post
+/// (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of comments
+/// this reader hides. `kind` is `nothing`, `count`, `unknown` or `comment`;
+/// `count` is set on `count` only.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub struct CollapsedComments {
+    inner: lakko_ui_rules::comments::CollapsedComments,
+}
+
+#[wasm_bindgen]
+impl CollapsedComments {
+    /// `nothing`, `count`, `unknown` or `comment`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        use lakko_ui_rules::comments::CollapsedComments as Rust;
+        match self.inner {
+            Rust::Nothing => "nothing",
+            Rust::Count(_) => "count",
+            Rust::Unknown => "unknown",
+            Rust::Comment => "comment",
+        }
+        .to_owned()
+    }
+
+    /// How many more, on `count`; `undefined` otherwise.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn count(&self) -> Option<u32> {
+        match self.inner {
+            lakko_ui_rules::comments::CollapsedComments::Count(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+/// The collapsed comment line. `visible`: the comments read that this reader
+/// shows; `rowsRead`: every row the service returned; `firstPageRead`;
+/// `moreRows`: the last page was full; `serverCount`: the service's count,
+/// `undefined` before it answered.
+#[wasm_bindgen(js_name = collapsedComments)]
+#[must_use]
+pub fn collapsed_comments(
+    visible: u32,
+    rows_read: u32,
+    first_page_read: bool,
+    more_rows: bool,
+    server_count: Option<f64>,
+) -> CollapsedComments {
+    // A JS number; a negative or non-finite count reads as none answered.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let server = server_count
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| c as u64);
+    CollapsedComments {
+        inner: lakko_ui_rules::comments::collapsed_comments(
+            visible,
+            rows_read,
+            first_page_read,
+            more_rows,
+            server,
+        ),
+    }
+}
+
+/// What kind of channel read produced the records
+/// (`docs/ux/channel-notifications.md` section 2). See
+/// [`lakko_ui_rules::channel_notify`].
+#[wasm_bindgen(js_name = ChannelReadKind)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelReadKind {
+    /// An ordinary read of posts that arrived since the last one.
+    Ongoing = 0,
+    /// The first read after subscribing: its newest post may notify while it
+    /// is less than an hour old, nothing else.
+    FirstAfterSubscribe = 1,
+    /// Any other history refetch (joined as a publisher, a dropped or
+    /// restored post log): nothing notifies.
+    History = 2,
+}
+
+impl From<ChannelReadKind> for lakko_ui_rules::channel_notify::ChannelReadKind {
+    fn from(k: ChannelReadKind) -> Self {
+        match k {
+            ChannelReadKind::Ongoing => Self::Ongoing,
+            ChannelReadKind::FirstAfterSubscribe => Self::FirstAfterSubscribe,
+            ChannelReadKind::History => Self::History,
+        }
+    }
+}
+
+/// A JS number as a cursor or a time: a negative or non-finite one reads as
+/// `0`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn js_count(n: f64) -> u64 {
+    if n.is_finite() && n >= 0.0 {
+        n as u64
+    } else {
+        0
+    }
+}
+
+/// The channel as this device holds it when the records were read.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelNotifyContext {
+    inner: lakko_ui_rules::channel_notify::ChannelNotifyContext,
+}
+
+#[wasm_bindgen]
+impl ChannelNotifyContext {
+    /// In order: the channel is muted; it is open and visible on this
+    /// device; the newest post cursor read (`0` when none); the cursor this
+    /// device stored after its last read (`0` when none); the kind of read;
+    /// now, unix milliseconds.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(
+        muted: bool,
+        open_and_visible: bool,
+        read_marker: f64,
+        last_notified: f64,
+        read_kind: ChannelReadKind,
+        now_ms: f64,
+    ) -> Self {
+        Self {
+            inner: lakko_ui_rules::channel_notify::ChannelNotifyContext {
+                muted,
+                open_and_visible,
+                read_marker: js_count(read_marker),
+                last_notified: js_count(last_notified),
+                read_kind: read_kind.into(),
+                now_ms: js_count(now_ms),
+            },
+        }
+    }
+}
+
+/// Whether one channel record notifies. `newestOfRead`: it is the newest
+/// post of the read it came in (matters on the first read after subscribing
+/// only).
+#[wasm_bindgen(js_name = channelPostNotifies)]
+#[must_use]
+pub fn channel_post_notifies(
+    context: &ChannelNotifyContext,
+    cursor: f64,
+    is_post: bool,
+    own: bool,
+    server_ts_ms: f64,
+    newest_of_read: bool,
+) -> bool {
+    lakko_ui_rules::channel_notify::channel_post_notifies(
+        &context.inner,
+        &lakko_ui_rules::channel_notify::ChannelPostCandidate {
+            cursor: js_count(cursor),
+            is_post,
+            own,
+            server_ts_ms: js_count(server_ts_ms),
+        },
+        newest_of_read,
+    )
+}
+
+/// Which records of a read notify, and the cursor to store.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct ChannelNotifyBatch {
+    inner: lakko_ui_rules::channel_notify::ChannelNotifyBatch,
+}
+
+#[wasm_bindgen]
+impl ChannelNotifyBatch {
+    /// Indices into the records passed, ascending by cursor, each cursor at
+    /// most once; show the last one (one notification per channel).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn notify(&self) -> Vec<u32> {
+        self.inner.notify.clone()
+    }
+
+    /// The last-notified cursor to store, per device, never synced.
+    #[wasm_bindgen(getter, js_name = lastNotified)]
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn last_notified(&self) -> f64 {
+        self.inner.last_notified as f64
+    }
+}
+
+/// The channel notification rule over the records of one read. The records
+/// are four parallel arrays: `cursors`, `isPost` and `own` (`1` true, else
+/// false) and `serverTsMs`. A record an array is short of never notifies.
+#[wasm_bindgen(js_name = channelPostsToNotify)]
+#[must_use]
+pub fn channel_posts_to_notify(
+    context: &ChannelNotifyContext,
+    cursors: Vec<f64>,
+    is_post: &[u8],
+    own: &[u8],
+    server_ts_ms: Vec<f64>,
+) -> ChannelNotifyBatch {
+    let posts: Vec<lakko_ui_rules::channel_notify::ChannelPostCandidate> = cursors
+        .iter()
+        .enumerate()
+        .map(
+            |(i, &c)| lakko_ui_rules::channel_notify::ChannelPostCandidate {
+                cursor: js_count(c),
+                is_post: is_post.get(i) == Some(&1),
+                own: own.get(i) != Some(&0),
+                server_ts_ms: js_count(server_ts_ms.get(i).copied().unwrap_or(0.0)),
+            },
+        )
+        .collect();
+    ChannelNotifyBatch {
+        inner: lakko_ui_rules::channel_notify::channel_posts_to_notify(&context.inner, &posts),
+    }
+}
+
+/// A channel's subscriber list as a person sees it
+/// (`docs/ux/group-and-channel-privacy.md` 15.1, 7.3). See
+/// [`lakko_ui_rules::subscribers`].
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct ChannelSubscriberList {
+    inner: lakko_ui_rules::subscribers::SubscriberList,
+}
+
+#[wasm_bindgen]
+impl ChannelSubscriberList {
+    /// How many people are shown by name.
+    #[wasm_bindgen(getter, js_name = peopleCount)]
+    #[must_use]
+    pub fn people_count(&self) -> u32 {
+        u32::try_from(self.inner.people.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The card indices of person `i` (the first draws the row); empty past
+    /// the end.
+    #[wasm_bindgen(js_name = personCards)]
+    #[must_use]
+    pub fn person_cards(&self, i: u32) -> Vec<u32> {
+        self.inner
+            .people
+            .get(i as usize)
+            .map(|p| p.cards.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether `Remove` is offered on person `i`.
+    #[wasm_bindgen(js_name = personRemovable)]
+    #[must_use]
+    pub fn person_removable(&self, i: u32) -> bool {
+        self.inner
+            .people
+            .get(i as usize)
+            .is_some_and(|p| p.removable)
+    }
+
+    /// Indices into the listed keys: the others listed one row each.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn others(&self) -> Vec<u32> {
+        self.inner.others.clone()
+    }
+
+    /// The number in "{n} others."; `0` says nothing.
+    #[wasm_bindgen(getter, js_name = othersCount)]
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn others_count(&self) -> f64 {
+        self.inner.others_count as f64
+    }
+}
+
+/// The subscriber list. The cards are three parallel arrays:
+/// `cardSubscriberKeys` (hex), `cardPersonKeys` (the account each card is
+/// bound to; empty stands alone) and `cardFlags` (bit 0: the card carries a
+/// display name or a username the viewer may show; bit 1: the viewer's own
+/// account). `listedKeys`: every registered key read (private channel, owner
+/// and publishers), else empty; `count`: the subscriber count, `undefined`
+/// before it is known; `canRemove`: the viewer is the owner or a publisher of
+/// a private channel. A missing entry of a shorter array reads as empty / 0.
+#[wasm_bindgen(js_name = channelSubscriberList)]
+#[must_use]
+pub fn channel_subscriber_list(
+    card_subscriber_keys: Vec<String>,
+    card_person_keys: Vec<String>,
+    card_flags: &[u8],
+    listed_keys: Vec<String>,
+    count: Option<f64>,
+    can_remove: bool,
+) -> ChannelSubscriberList {
+    use lakko_ui_rules::subscribers::{subscriber_list, SubscriberCard};
+    let cards: Vec<SubscriberCard> = card_subscriber_keys
+        .into_iter()
+        .enumerate()
+        .map(|(i, subscriber_key)| {
+            let flags = card_flags.get(i).copied().unwrap_or(0);
+            SubscriberCard {
+                subscriber_key,
+                person_key: card_person_keys.get(i).cloned().unwrap_or_default(),
+                named: flags & 1 != 0,
+                is_self: flags & 2 != 0,
+            }
+        })
+        .collect();
+    // A JS number; a negative or non-finite count reads as unknown.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let count = count
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| c as u64);
+    ChannelSubscriberList {
+        inner: subscriber_list(&cards, &listed_keys, count, can_remove),
+    }
 }
 
 /// One run of a message's text: `docs/ux/message-links.md`.
@@ -1186,6 +1507,87 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
     CallGrid {
         inner: rust_call_grid(count, width, height),
     }
+}
+
+/// The laid-out media mosaic of one message (`docs/ux/media-messages.md`
+/// section 11). `x` is measured from the START edge: a right-to-left layout
+/// places a tile at `width - x - tileWidth`.
+#[wasm_bindgen(js_name = MediaMosaic)]
+#[derive(Clone, Debug)]
+pub struct MediaMosaic {
+    inner: RustMediaMosaic,
+}
+
+#[wasm_bindgen(js_class = MediaMosaic)]
+impl MediaMosaic {
+    /// Width of the mosaic: the bubble width, or less for one narrow item.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.inner.width
+    }
+
+    /// Total height, gaps included.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.inner.height
+    }
+
+    /// Number of tiles: one per item, in input order, for the first ten;
+    /// 0 when there is nothing to lay out or the width cannot hold them.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.inner.tiles.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The tiles flattened, four numbers each: `x, y, width, height`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tiles(&self) -> Vec<u32> {
+        self.inner
+            .tiles
+            .iter()
+            .flat_map(|t| [t.x, t.y, t.width, t.height])
+            .collect()
+    }
+}
+
+/// Lay out the photos and videos of one message in a bubble `bubbleWidth`
+/// wide with `gap` between tiles. `widths` and `heights` are parallel, one
+/// entry per item (`0` = unknown, laid out as 4:3); a missing entry reads
+/// as unknown, entries past `widths.length` are ignored. Every tile is drawn
+/// cropped to fill.
+#[wasm_bindgen(js_name = mediaMosaic)]
+#[must_use]
+pub fn media_mosaic(bubble_width: u32, gap: u32, widths: &[u32], heights: &[u32]) -> MediaMosaic {
+    let items: Vec<RustMediaSize> = widths
+        .iter()
+        .enumerate()
+        .map(|(i, &width)| RustMediaSize {
+            width,
+            height: heights.get(i).copied().unwrap_or(0),
+        })
+        .collect();
+    MediaMosaic {
+        inner: rust_media_mosaic(bubble_width, gap, &items),
+    }
+}
+
+/// The gap the spec draws between mosaic tiles. Chosen.
+#[wasm_bindgen(js_name = mediaMosaicGap)]
+#[must_use]
+pub fn media_mosaic_gap() -> u32 {
+    MOSAIC_GAP
+}
+
+/// The most photos and videos one message carries and its mosaic shows.
+/// Chosen, not measured.
+#[wasm_bindgen(js_name = mediaMosaicMaxItems)]
+#[must_use]
+pub fn media_mosaic_max_items() -> u32 {
+    u32::try_from(MOSAIC_MAX_ITEMS).unwrap_or(u32::MAX)
 }
 
 /// Flag bit of {@link callStage}: this device's own tile.
@@ -2096,9 +2498,211 @@ pub fn speaking_floor_onset_ms() -> u32 {
     small_ms(FLOOR_ONSET_MS)
 }
 
+// ============================================================================
+// ADR-0092 — the paperclip menu and the poll editor's anonymity switch
+// ============================================================================
+
+/// One paperclip-menu row.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct AttachmentMenuRow {
+    item: &'static str,
+    section: u8,
+    disabled: Option<&'static str>,
+}
+
+#[wasm_bindgen]
+impl AttachmentMenuRow {
+    /// `"photo-or-video" | "camera" | "file" | "audio" | "poll" |
+    /// "checklist" | "location" | "contact" | "article"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn item(&self) -> String {
+        self.item.to_string()
+    }
+
+    /// The row's group (0 files, 1 things people answer, 2 things people
+    /// share, 3 long text); a separator goes between rows whose sections
+    /// differ.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn section(&self) -> u8 {
+        self.section
+    }
+
+    /// `"no-camera" | "camera-in-call" | "no-location"` when shown disabled,
+    /// else `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn disabled(&self) -> Option<String> {
+        self.disabled.map(str::to_string)
+    }
+}
+
+/// The paperclip menu (`docs/ux/attachments.md` section 2.4). `role` is
+/// `"owner" | "admin" | "member"`. Empty means no paperclip.
+///
+/// # Errors
+///
+/// `attachmentMenu.badRole` for another role string.
+#[wasm_bindgen(js_name = attachmentMenu)]
+pub fn attachment_menu(
+    kind: ConversationKind,
+    role: &str,
+    has_camera: bool,
+    has_location: bool,
+    call_holds_camera: bool,
+) -> Result<Vec<AttachmentMenuRow>, String> {
+    use lakko_ui_rules::attachment_menu as am;
+    use lakko_ui_rules::info::ConversationRole;
+    let role = match role {
+        "owner" => ConversationRole::Owner,
+        "admin" => ConversationRole::Admin,
+        "member" => ConversationRole::Member,
+        _ => return Err("attachmentMenu.badRole: role must be owner, admin or member".to_string()),
+    };
+    Ok(am::attachment_menu(
+        kind.into(),
+        role,
+        has_camera,
+        has_location,
+        call_holds_camera,
+    )
+    .into_iter()
+    .map(|r| AttachmentMenuRow {
+        item: r.item.name(),
+        section: r.item.section(),
+        disabled: r.disabled.map(am::AttachmentMenuDisabled::name),
+    })
+    .collect())
+}
+
+/// What the poll editor shows for anonymity in a conversation of `kind`
+/// with `accounts` distinct accounts: `"not-offered" | "switch-default-on" |
+/// "always-anonymous"`.
+#[wasm_bindgen(js_name = pollAnonymity)]
+#[must_use]
+pub fn poll_anonymity(kind: ConversationKind, accounts: u32) -> String {
+    use lakko_ui_rules::attachment_menu as am;
+    match am::poll_anonymity(kind.into(), accounts as usize) {
+        am::PollAnonymity::NotOffered => "not-offered",
+        am::PollAnonymity::SwitchDefaultOn => "switch-default-on",
+        am::PollAnonymity::AlwaysAnonymous => "always-anonymous",
+    }
+    .to_string()
+}
+
+/// A sent photo's longest side at most, pixels.
+#[wasm_bindgen(js_name = photoMaxLongestSidePx)]
+#[must_use]
+pub fn photo_max_longest_side_px() -> u32 {
+    lakko_ui_rules::attachment_menu::PHOTO_MAX_LONGEST_SIDE_PX
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_media_mosaic_crosses_the_boundary_intact() {
+        let m = media_mosaic(320, media_mosaic_gap(), &[1000, 1600], &[1000, 900]);
+        assert_eq!((m.width(), m.height(), m.count()), (320, 89, 2));
+        assert_eq!(m.tiles(), vec![0, 0, 159, 89, 161, 0, 159, 89]);
+        // A missing height reads as unknown (4:3 at 320 = 240).
+        assert_eq!(
+            media_mosaic(320, 2, &[7], &[]).tiles(),
+            vec![0, 0, 320, 240]
+        );
+        assert_eq!(media_mosaic_max_items(), 10);
+    }
+
+    #[test]
+    fn the_subscriber_list_crosses_the_boundary_intact() {
+        let list = channel_subscriber_list(
+            vec!["bb02".to_owned(), "aa01".to_owned()],
+            vec!["pixel".to_owned(), "iphone".to_owned()],
+            &[1, 0],
+            vec!["aa01".to_owned(), "bb02".to_owned()],
+            Some(2.0),
+            true,
+        );
+        assert_eq!(list.people_count(), 1);
+        assert_eq!(list.person_cards(0), vec![0]);
+        assert!(list.person_removable(0));
+        assert!(list.person_cards(5).is_empty());
+        assert_eq!(list.others(), vec![0]);
+        assert!((list.others_count() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_collapsed_comment_line_crosses_the_boundary_intact() {
+        let c = collapsed_comments(0, 2, true, false, Some(2.0));
+        assert_eq!(c.kind(), "comment");
+        assert_eq!(c.count(), None);
+        let c = collapsed_comments(5, 20, true, true, Some(30.0));
+        assert_eq!((c.kind().as_str(), c.count()), ("count", Some(13)));
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, None).kind(),
+            "unknown"
+        );
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, Some(-1.0)).kind(),
+            "unknown"
+        );
+        assert_eq!(
+            collapsed_comments(0, 0, false, false, Some(2.0)).kind(),
+            "nothing"
+        );
+    }
+
+    #[test]
+    fn the_channel_notification_rule_crosses_the_boundary_intact() {
+        let now = 1_800_000_000_000.0;
+        let ongoing =
+            ChannelNotifyContext::new(false, false, 3.0, 4.0, ChannelReadKind::Ongoing, now);
+        let batch = channel_posts_to_notify(
+            &ongoing,
+            vec![6.0, 4.0, 5.0],
+            &[1, 1, 1],
+            &[0, 0, 0],
+            vec![now, now, now],
+        );
+        assert_eq!(batch.notify(), vec![2, 0]);
+        assert!((batch.last_notified() - 6.0).abs() < f64::EPSILON);
+        // A record the arrays are short of never notifies.
+        let short = channel_posts_to_notify(&ongoing, vec![7.0, 8.0], &[1], &[0], vec![now]);
+        assert_eq!(short.notify(), vec![0]);
+        let muted = ChannelNotifyContext::new(true, false, 3.0, 4.0, ChannelReadKind::Ongoing, now);
+        assert!(!channel_post_notifies(&muted, 9.0, true, false, now, true));
+        let first = ChannelNotifyContext::new(
+            false,
+            false,
+            0.0,
+            0.0,
+            ChannelReadKind::FirstAfterSubscribe,
+            now,
+        );
+        assert!(channel_post_notifies(&first, 2.0, true, false, now, true));
+        assert!(!channel_post_notifies(
+            &first,
+            2.0,
+            true,
+            false,
+            now - 3_600_000.0,
+            true
+        ));
+        let history =
+            ChannelNotifyContext::new(false, false, 0.0, 0.0, ChannelReadKind::History, now);
+        assert!(
+            channel_posts_to_notify(&history, vec![1.0], &[1], &[0], vec![now])
+                .notify()
+                .is_empty()
+        );
+        // A negative cursor reads as 0: never above a marker.
+        assert!(!channel_post_notifies(
+            &ongoing, -5.0, true, false, now, true
+        ));
+    }
 
     #[test]
     fn the_avatar_initials_cross_the_boundary_intact() {

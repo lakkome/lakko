@@ -48,7 +48,7 @@ infra/
 | channels | 127.0.0.1:8086 (public API) + 127.0.0.1:8093 (internal, directory moderation) | `journalctl -u lakko-svc-channels` |
 | gif-proxy | 127.0.0.1:8091 | `journalctl -u lakko-svc-gif-proxy` |
 
-channels' second listener (`LAKKO_CHANNELS_INTERNAL_BIND`, default 127.0.0.1:8093) is **never** proxied: it serves only `POST /internal/v1/channels/{channel_id}/moderation` (`{"action": "remove"|"block"|"unblock", "reason": "<a-z0-9->"}`, ADR-0059 section 7), authenticated by `x-lakko-internal-secret` = `LAKKO_CHANNELS_INTERNAL_SECRET` (base64, at least 16 bytes). With the secret unset the listener does not start and listings cannot be removed by the operator. The service also needs `LAKKO_ANON_TOKEN_MASTER_SECRET` (the value auth and the other verifiers share) for subscribe and directory search; unset, both answer `503 anon-tokens-disabled`.
+channels' second listener (`LAKKO_CHANNELS_INTERNAL_BIND`, default 127.0.0.1:8093) is **never** proxied: it serves only `POST /internal/v1/channels/{channel_id}/moderation` (`{"action": "remove"|"block"|"unblock", "reason": "<a-z0-9->"}`, ADR-0059 section 7), authenticated by `x-lakko-internal-secret` = `LAKKO_CHANNELS_INTERNAL_SECRET` (base64, at least 16 bytes). With the secret unset the listener does not start and listings cannot be removed by the operator. The service also needs `LAKKO_ANON_TOKEN_MASTER_SECRET` (the value auth and the other verifiers share) for subscribe and directory search; unset, both answer `503 anon-tokens-disabled`. Channel poll votes (ADR-0092 section 4) need `LAKKO_ANON_CRED_MASTER_SECRET`, the value auth issues the poll credential under (a master of its own, not the token one); unset, `PUT`/`DELETE .../votes/{tag}` and auth's `/auth/anon-credential*` answer `503 anon-credential-disabled`.
 
 discovery's and storage's second listeners (`LAKKO_DISCOVERY_INTERNAL_BIND` 127.0.0.1:8094, `LAKKO_STORAGE_INTERNAL_BIND` 127.0.0.1:8095) are **never** proxied: they serve only `POST /internal/accounts/{hex}/purge` and `DELETE /internal/accounts/{hex}/backup`, which auth's account-purge worker calls after an account is deleted (`services/auth/src/purge.rs`, outbox table `account_purges`), authenticated by `x-lakko-internal-secret` = `LAKKO_INTERNAL_PURGE_SECRET` (one value in all three services). Auth reaches them through `LAKKO_AUTH_DISCOVERY_INTERNAL_URL` / `LAKKO_AUTH_STORAGE_INTERNAL_URL`. A service with only some of its variables set refuses to start; with none, the listener (or auth's worker) is off and purge rows wait in auth's database.
 
@@ -222,6 +222,16 @@ sudo chmod 640 /etc/lakko/secrets/*
 ```
 
 ### 10. Install systemd units
+
+Discovery loads the signed donations file as a systemd credential, and systemd
+fails a unit whose `LoadCredential=` source is missing, so create the empty
+placeholder first ("Donation methods" below replaces it):
+
+```bash
+sudo install -d -m 700 -o root -g root /etc/lakko/credstore
+sudo sh -c 'umask 077; f=/etc/lakko/credstore/lakko-donations.json; \
+  [ -f "$f" ] || printf "{\"methods\":[]}\n" > "$f"'
+```
 
 ```bash
 cd ~/lakko
@@ -443,6 +453,54 @@ scp release-manifest.bin lakkome@lakko.me:/var/www/lakko-release/lakko-release.b
 
 Served **immediately** — no service restart, no nginx reload. Clients fetch the raw blob, verify the Ed25519 signature against the pinned key, and render the notice; an **absent** manifest (before the first publish, or a 404) means **no notice** (fail-open). `latest` is the newest published release number; `min_supported` is the oldest release the backend still accepts (a client below it is told it must update). `no-store` means a freshly-published manifest is picked up on the next fetch.
 
+### Donation methods (`docs/ux/donations.md` section 3)
+
+The donations page shows only methods signed **offline** by a dedicated
+donations key: each payment link, QR image hash, crypto address and phone
+number is an Ed25519 statement (`lakko-attest`'s `donation` module) that the web
+client verifies against the key pinned into its build. The server can hide a
+method; it cannot alter one. Discovery reads the signed file from the systemd
+credential `lakko-donations` (source `/etc/lakko/credstore/lakko-donations.json`,
+root:root 0600; systemd hands the service a private copy in
+`$CREDENTIALS_DIRECTORY`). The country rule (`countries`) is the only unsigned
+part.
+
+**Generate the key - once, offline:**
+
+```bash
+just gen-donations-key
+# -> donations-signing-key.seed (0600, keep OFFLINE, never commit) and the
+#    base64url public key: pin it in the web build (VITE_LAKKO_DONATIONS_KEY)
+#    and, optionally, in /etc/lakko/lakko.env as LAKKO_DISCOVERY_DONATIONS_KEY
+#    (discovery then refuses a file whose signatures do not verify)
+```
+
+**Sign and install - whenever a method changes:**
+
+```bash
+# donations.json: {"methods":[{"id","kind": sbp|revolut|bmc|crypto,"link",
+#   "qr_file" (path relative to the file),"phone","countries","coin","network","address",
+#   "icon": btc|eth|ton (crypto only: the coin mark in the centre of its QR)}]}
+just sign-donations donations.json        # -> donations.signed.json (0600)
+scp donations.signed.json lakkome@lakko.me:/tmp/
+ssh lakkome@lakko.me 'sudo install -m 600 -o root -g root /tmp/donations.signed.json \
+  /etc/lakko/credstore/lakko-donations.json && rm /tmp/donations.signed.json && \
+  sudo systemctl restart lakko-svc-discovery'
+```
+
+The two `sudo` commands are not in the deploy sudoers entry; run them in an
+interactive session. A file discovery refuses (bad JSON, a statement that does
+not match its entry, a QR that does not hash to the signed value, a bad
+signature when the key is set) leaves the page empty and logs one warning
+naming only the method's position. QR images are PNG, at most 512 KiB; the
+signed file is at most 1 MiB (the tool refuses a larger one).
+
+**At rest the file is plain.** Ubuntu 22.04 has systemd 249;
+`LoadCredentialEncrypted=` needs 250. After an OS upgrade, encrypt it with
+`systemd-creds encrypt --name=lakko-donations donations.signed.json
+/etc/lakko/credstore.encrypted/lakko-donations.cred` and switch the unit line
+as its comment says.
+
 ### Translation bundle (ADR-0061)
 
 Translation fixes reach the iOS and Android apps between releases as one Ed25519-signed blob holding **every** interface language, served at **`https://lakko.me/.well-known/lakko-translations`** (an nginx `alias` to `/var/www/lakko-release/lakko-translations.bin`, `no-store`, the release-manifest directory above). Every device downloads the same bytes, so the request does not tell the server which language a device uses. The web client takes no bundle: a translation fix ships with the next web deploy.
@@ -561,7 +619,7 @@ Logs that can name a client address are kept **7 days** (the privacy policy stat
 same period): `just log-retention` runs `infra/scripts/log-retention.sh` on the lakko.me
 server (through `infra/scripts/host-ops.sh`; it applies to the whole machine, the test
 stack on it included), which installs
-`infra/journald/lakko-retention.conf` (journal 7 days, at most 2G, nothing forwarded to
+`infra/journald/lakko.conf` (journal 7 days, at most 1G, nothing forwarded to
 rsyslog) and sets the nginx logrotate to daily with 7 kept. coturn keeps no connection
 log (`log-file=/dev/null`, `infra/test-stack/turn/`). Because nothing is forwarded,
 `/var/log/syslog` and `/var/log/auth.log` stop growing: read the journal (`journalctl`)
@@ -626,11 +684,48 @@ the server's root.
 ### Routine
 
 - `just backup-status`: time of the last successful run (`/var/backups/lakko/last-success`)
-  and the snapshot list. There is no alert when a run fails yet; check this weekly, or
-  `journalctl -u lakko-backup`.
+  and the snapshot list; `journalctl -u lakko-backup` for a run's log.
+- Each successful run also writes `lakko_job_last_success_timestamp_seconds{task}` for
+  `backup_db` and `backup_blobs` to node_exporter's textfile directory
+  (`LAKKO_BACKUP_TEXTFILE_DIR`, default `/var/lib/node_exporter/textfile_collector`;
+  ADR-0096). The monitoring host alerts when it is older than 26 hours (dumps) or 8 days
+  (blobs), and when no dump has ever reported (`LakkoBackupStale`,
+  `LakkoBackupNeverRan`). A failed run writes nothing.
 - `just backup-restore-check` monthly: restores the newest snapshot to a scratch
   directory, checks each dump finished and the files are there, and reads one tenth of the
   repository data back.
+
+**A restore is a security incident, not a routine step.** A dump puts back
+state that must only ever move forward: key generations and device session
+floors (ADR-0073, ADR-0074: revoked devices and reset accounts come back),
+the anonymous-token spent set (spent tokens work again), recall anchors,
+the backup-head version counter (ADR-0037: version numbers reused), DS epoch
+registrations and journal rows (ADR-0053, ADR-0057), and, once they run
+here, the KT log and witness high-water marks (ADR-0020, ADR-0039). The
+procedure:
+
+1. Stop `lakko.target`. Restore **every** `lakko_*` database from the same
+   night, never one alone: auth older than discovery makes discovery refuse
+   every client's identity write as `key-generation-superseded`, and a
+   client that receives that answer wipes itself (ADR-0073).
+   Load them as in "Disaster restore" below.
+2. Before starting the services, in `/etc/lakko/lakko.env` replace
+   `LAKKO_SESSION_TOKEN_SECRET` and `LAKKO_ANON_TOKEN_MASTER_SECRET`
+   (`openssl rand -hex 32` each; the services that share a value must get
+   the same new one). Every session and every outstanding anonymous token
+   then fails: clients see `refresh-invalid` and ask the person to sign in
+   again, which does not wipe them, and refill their tokens.
+3. Move the backup-head counters past anything a client may have seen:
+   `UPDATE lakko_auth.backup_head_versions SET version = version + 1000000;`.
+4. A KT log or witness database restored shorter than what clients already
+   verified is refused by every client that pinned a later root (no-rollback,
+   fail closed); do not serve one without checking its size against the
+   last published root.
+5. Start `lakko.target`. What happened after the dump is gone: device
+   revocations, key resets and account deletions made since then must be
+   made again by the people who made them (the server cannot tell who),
+   and conversations whose epoch moved past the dump need their devices to
+   rejoin.
 
 ### Disaster restore (new server)
 
@@ -647,6 +742,78 @@ the server's root.
 
 Everything written after the last snapshot is lost: messages still on the Delivery
 Service since then, accounts made since then. Clients keep their own state and re-sync.
+
+## Monitoring (ADR-0096 P3)
+
+A separate small VPS runs Prometheus, Alertmanager, Grafana and
+blackbox_exporter. It scrapes the Lakko hosts over client-certificate TLS
+and sends alerts to a Telegram bot and e-mail, never through Lakko. Nothing
+on it listens publicly; Grafana is reached over an SSH port forward.
+
+| Host | What runs | Reached at |
+|---|---|---|
+| monitoring VPS (Ubuntu 24.04, x86_64) | Prometheus 127.0.0.1:9090 (30 days), Alertmanager :9093, blackbox :9115, node_exporter :9100, Grafana :3000, the canary :9661 (prod) and :9662 (test) | ssh only |
+| main VPS | every service's `/metrics` on 127.0.0.1:9641 (SFU) and 9651-9660, node_exporter :9100, mysqld_exporter :9104, nginx exporter :9113 | `metrics.lakko.me:9643/<target>/metrics`, client certificate required, firewall admits the monitoring VPS only |
+| coturn VPS | coturn's exporter :9641, node_exporter :9100 | `turn.lakko.me:9642/metrics` and `/node/metrics`, client certificate required, firewall admits the monitoring VPS only (when `deploy-coturn` ran with `LAKKO_MONITORING_IP`) |
+| test stack (`stack="test"`, ADR-0096 P4) | as the main VPS, without transparency and witness; coturn there exports nothing | `test.lakko.me:9643/<target>/metrics`; see `infra/test-stack/README.md` |
+
+Configuration in the repository: `infra/prometheus/` (scrape config, alert
+rules, rule tests), `infra/monitoring/` (setup script, Alertmanager template,
+blackbox modules, secrets example), `infra/grafana/` (datasource, six
+dashboards as code), `infra/nginx/sites-available/metrics.conf`,
+`infra/scripts/setup-metrics.sh`, `infra/journald/lakko.conf`.
+
+**First setup, in this order:**
+
+1. Create the monitoring VPS (Ubuntu 24.04, its own encrypted disk) and a DNS
+   name for it; add an A record `metrics.lakko.me` pointing at the MAIN VPS.
+2. On the monitoring VPS, as root: copy `infra/monitoring/secrets.env.example`
+   to `/etc/lakko-monitoring/secrets.env` (mode 0600) and fill in the Telegram
+   bot token, chat id and the SMTP relay.
+3. From a checkout: `LAKKO_MONITORING_HOST=<name> just deploy-monitoring`.
+   The first run makes the monitoring CA and Prometheus's client certificate
+   in `/etc/lakko-monitoring/mtls` (the CA key stays there).
+4. `just push-monitoring-ca` copies the CA certificate (not the key) to
+   `/etc/lakko/mtls/monitoring-ca.crt` on the main and coturn VPSes.
+5. `LAKKO_MONITORING_IP=<its address> just setup-metrics` on the main VPS
+   (runs the script from the VPS checkout of `main`): exporters, the metrics
+   server block and its certificate, journald retention, the schema-size
+   timer and a check of the backup timer, the `LAKKO_<SVC>_METRICS_BIND` lines in `lakko.env`. Then
+   `just restart` so the services open their listeners.
+6. `LAKKO_MONITORING_IP=<its address> just deploy-coturn` once more:
+   node_exporter moves to loopback behind the coturn vhost, its old public
+   port 9100 is closed, and 9642 admits the monitoring VPS only.
+7. `just grafana`, then http://127.0.0.1:3000 (user `admin`, password in
+   `/etc/lakko-monitoring/grafana-admin-password` on the monitoring VPS). The
+   Prometheus targets page is at `ssh -L 9090:127.0.0.1:9090`.
+
+**After editing** rules, dashboards or the Alertmanager template: `just
+deploy-monitoring` again. Dashboards edited in the Grafana UI are not kept;
+change the JSON in `infra/grafana/dashboards/`.
+
+**Checks that need no server** (Docker): `just monitoring-check` runs
+`promtool check config`, the rule unit tests, `amtool check-config` on the
+rendered template with the example secrets, and the blackbox config check.
+
+**The canary (ADR-0096 P5).** `lakko-canary@prod` and `lakko-canary@test`
+run on the monitoring VPS (`tools/canary`, metrics on 127.0.0.1:9661 and
+:9662). Each holds two dedicated accounts that only talk to each other and
+every 10 minutes signs both in, sends a message from one and decrypts it on
+the other, moves an encrypted attachment between them and deletes it, and
+every third run places a call whose SFrame-sealed audio must reach the
+other side. The accounts' secrets and MLS state are in
+`/var/lib/lakko-canary/<stack>/state.json` (mode 0600, user `lakko-canary`);
+losing the file means running init again with new accounts. Setup, after
+step 3 above: `just deploy-canary` (builds on the main VPS from `main`,
+copies the binary), then `just canary-init prod` and `just canary-init test`.
+The call step starts a day after init (a young account gets 8 call-join
+tokens a day). Settings per stack in `/etc/lakko-monitoring/canary-<stack>.env`.
+A step that fails twice in a row alerts (`LakkoCanaryStepFailing`).
+
+**Not covered yet:** a STUN answer from coturn (blackbox has no STUN
+prober; only the TLS handshake on 443 is probed), the obfs listeners, and an
+alert when the monitoring VPS itself is down (nothing outside it watches
+it).
 
 ## Out of scope for Phase 1
 

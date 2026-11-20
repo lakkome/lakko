@@ -2025,6 +2025,11 @@ public class ContactsRepository(
                     for (refusal in result.events.filterIsInstance<IncomingMailboxEvent.LinkRefusal>()) {
                         applyLinkRefusal(refusal.refusal, sender.signaturePubkey)
                     }
+                    // ADR-0091 phase 2 route 2 — a one-to-one's other person
+                    // asks to be brought back; the chat layer decides.
+                    for (row in result.events.filterIsInstance<IncomingMailboxEvent.ConversationReentry>()) {
+                        chatRepo?.receiveConversationReentry(row.envelope, me.lakko.app.chat.ReentryRouteKind.MAILBOX)
+                    }
                     // ADR-0060 §6 — a request's reply key is kept for the
                     // accept and the ack (bound to the signature-verified
                     // sender). This device's own reply key is NOT retired on
@@ -2134,6 +2139,12 @@ public class ContactsRepository(
                                 // to another of its devices lands here too and
                                 // fails to open: not a failure of this device.
                                 if (me.lakko.app.chat.isWelcomeForAnotherDevice(e)) continue
+                                // C-86 — the core refused it as not a
+                                // conversation: a PublisherGroup or DeviceGroup
+                                // Welcome sharing the account mailbox (the
+                                // channel side was offered it above). Not a
+                                // failed join; no banner.
+                                if (me.lakko.app.chat.isWelcomeNotAConversation(e)) continue
                                 // ADR-0087 section 9 — the core refused it for
                                 // a group this device still holds as active:
                                 // the removing commit may be behind it in the
@@ -2156,7 +2167,11 @@ public class ContactsRepository(
                                 // ADR-0053 — unless it is a co-publisher's
                                 // Welcome, which shares this mailbox and is
                                 // opened by the channel screen instead.
-                                if (!me.lakko.app.channels.CoPublisher.awaitingCoPublishWelcome()) {
+                                if (me.lakko.app.chat.welcomeFailureRaisesBanner(
+                                        e,
+                                        me.lakko.app.channels.CoPublisher.awaitingCoPublishWelcome(),
+                                    )
+                                ) {
                                     joinFailure = InboxError.WELCOME_JOIN_FAILED
                                 }
                             }

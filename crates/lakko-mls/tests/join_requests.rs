@@ -508,32 +508,37 @@ fn a_joiner_admitted_elsewhere_leaves_the_queue() {
 /// an epoch the request did not name.
 #[test]
 fn a_co_publisher_joins_from_a_retained_request() {
-    let alice = Identity::from_seed(&OWNER_SEED).expect("alice");
+    let owner_account = [0xA7u8; 32];
+    let alice = Identity::from_seed_bound(&OWNER_SEED, &owner_account, 1).expect("alice");
     let channel =
         ChannelId::try_from_slice(&[0x5Cu8; lakko_mls::CHANNEL_ID_LEN]).expect("channel id");
-    let mut alice_pg = PublisherGroup::create(&alice, &channel).expect("publisher group");
-    let bob = id(0x37);
+    let mut alice_pg =
+        PublisherGroup::create(&alice, &owner_account, &channel).expect("publisher group");
+    let bob = Identity::from_seed_bound(&[0x37; 64], &[0xB7; 32], 1).expect("bob");
 
     let answer = alice_pg
         .retain_join_request(&alice, &kp_wire(&bob))
         .expect("retain");
     assert_eq!(answer.outcome, JoinRequestOutcome::Retained);
     // A rotation between the request and the decision.
-    alice_pg.rotate(&alice).expect("rotate");
+    alice_pg.stage_rotate(&alice).expect("rotate");
+    assert!(alice_pg.merge_staged_commit(&alice).expect("merge"));
 
     let addition = alice_pg
-        .approve_external_join(&alice, &pk(&bob))
+        .stage_approve_external_join(&alice, &pk(&bob))
         .expect("approve");
+    assert!(alice_pg.merge_staged_commit(&alice).expect("merge"));
     let bob_pg = PublisherGroup::join_from_welcome(
         &bob,
-        &wire(&addition.welcome),
+        &addition.welcome,
         &alice_pg.group_id(),
         &channel,
+        &lakko_mls::publisher_owner_account_key(&owner_account),
     )
     .expect("bob joins");
     assert_eq!(
         bob_pg.channel_seed(&bob).expect("bob's seed"),
         alice_pg.channel_seed(&alice).expect("alice's seed"),
     );
-    assert!(alice_pg.inner().pending_external_joins().is_empty());
+    assert!(alice_pg.pending_external_joins().is_empty());
 }

@@ -21,7 +21,7 @@ import { WebauthnClient } from "../webauthn-client";
 import { t } from "../../l10n";
 import { AuthLayout } from "../../ui/AuthLayout";
 import { requestConfirm } from "../../ui/confirm-dialog";
-import { Icon } from "../../ui/icons";
+import { Icon, type IconName } from "../../ui/icons";
 import { phraseProtectedHere, protectionStatus, refreshProtection } from "./protection-state";
 import {
   protectStepDone,
@@ -36,9 +36,9 @@ import { SavePhrasePanel } from "./SavePhrasePanel";
 
 const PASSKEYS_SUPPORTED = WebauthnClient.isWebauthnAvailable();
 
-const ROW: Record<ProtectChoice, { icon: "mail" | "lock" | "key"; titleKey: string; bodyKey: string }> = {
-  email: { icon: "mail", titleKey: "protect.email.title", bodyKey: "protect.email.body" },
-  passkey: { icon: "lock", titleKey: "protect.passkey.title", bodyKey: "protect.passkey.body" },
+const ROW: Record<ProtectChoice, { icon: IconName; titleKey: string; bodyKey: string }> = {
+  email: { icon: "envelope", titleKey: "protect.email.title", bodyKey: "protect.email.body" },
+  passkey: { icon: "passkey", titleKey: "protect.passkey.title", bodyKey: "protect.passkey.body" },
   phrase: { icon: "key", titleKey: "protect.phrase.title", bodyKey: "protect.phrase.body" },
 };
 
@@ -113,7 +113,7 @@ export default function ProtectAccountPrompt(): JSX.Element {
           />
         </Match>
         <Match when={picked() === "passkey"}>
-          {/* The existing passkey creation, with its own keys choice, under
+          {/* The existing passkey creation, which stores the keys for it, under
               the sign-up's proof; then back to the step. */}
           <PasskeyOffer standalone onAdded={() => setHasPasskey(true)} onDone={() => setPicked(null)} />
         </Match>
@@ -134,7 +134,7 @@ export default function ProtectAccountPrompt(): JSX.Element {
                 <li>
                   <button type="button" class="lk-method-row" onClick={() => setPicked(row)}>
                     <span class="lk-card-row-icon">
-                      <Icon name={ROW[row].icon} size={18} />
+                      <Icon name={ROW[row].icon} size={20} />
                     </span>
                     <span class="lk-method-row-body">
                       <span class="lk-method-row-title">
@@ -154,7 +154,7 @@ export default function ProtectAccountPrompt(): JSX.Element {
                       </span>
                       <span class="lk-method-row-sub">{t(ROW[row].bodyKey)}</span>
                     </span>
-                    <Icon name="chevron" size={18} />
+                    <Icon name="chevron-forward" size={14} />
                   </button>
                 </li>
               )}

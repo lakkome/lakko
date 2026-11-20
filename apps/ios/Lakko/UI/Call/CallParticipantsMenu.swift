@@ -41,13 +41,13 @@ struct CallParticipantsMenu: View {
             ForEach(items, id: \.self) { item in
                 switch item {
                 case .participants:
-                    row(l10n.t("call.control.participants"), systemImage: "person.2", action: onParticipants)
+                    row(l10n.t("call.control.participants"), icon: .person2, action: onParticipants)
                 case .copyLink:
-                    row(l10n.t("call.invite.menu_copy"), systemImage: "doc.on.doc") {
+                    row(l10n.t("call.invite.menu_copy"), icon: .copy) {
                         Task { await offer.copyLink() }
                     }
                 case .inviteContacts:
-                    row(l10n.t("call.invite.menu_contact"), systemImage: "person.badge.plus") {
+                    row(l10n.t("call.invite.menu_contact"), icon: .personPlus) {
                         offer.openPicker()
                     }
                 }
@@ -68,12 +68,11 @@ struct CallParticipantsMenu: View {
     }
 
     private func row(
-        _ title: String, systemImage: String, action: @escaping () -> Void
+        _ title: String, icon: LkIcon, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 17))
+                LkIconView(icon, size: 20, relativeTo: nil)
                     .frame(width: 24)
                 Text(title)
                     .font(.body)
@@ -202,7 +201,7 @@ struct CallInviteContactsScreen: View {
                                         name: row.isPlaceholder ? "" : row.name,
                                         identity: row.id,
                                         size: 40,
-                                        placeholderSymbol: "person.fill",
+                                        placeholderIcon: .personFill,
                                         photo: .person(row.key)
                                     )
                                     VStack(alignment: .leading, spacing: 2) {
@@ -221,7 +220,7 @@ struct CallInviteContactsScreen: View {
                                             .foregroundStyle(Color.lakkoTextMuted)
                                             .fixedSize()
                                     } else if done {
-                                        Label(l10n.t("call.invite.row_invited"), systemImage: "checkmark")
+                                        Label(l10n.t("call.invite.row_invited"), icon: .checkmark, size: 14, relativeTo: .footnote)
                                             .font(.footnote.weight(.medium))
                                             .foregroundStyle(Color.lakkoTextMuted)
                                             .fixedSize()

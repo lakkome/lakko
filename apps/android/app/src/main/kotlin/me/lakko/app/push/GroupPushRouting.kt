@@ -2069,6 +2069,22 @@ public interface PushRoutingPorts {
 }
 
 /**
+ * ADR-0091 live walk 2026-11-19 — thrown by the production broadcast port when
+ * the repository skipped the send instead of publishing it (this device is
+ * behind in the conversation, or the one-to-one is superseded): nothing
+ * reached the journal. Thrown, so [GroupPushRouting] takes the path a failed
+ * publish takes: the row stays pending and the next `ensure` re-sends it once
+ * the device is back. Taking the skip as a send marked the secret distributed
+ * while no member had received it.
+ */
+public class RoutingBroadcastSkipped : Exception("push routing secret not sent: the send was skipped")
+
+/** A send that answers `null` when it skipped, as a broadcast port needs it:
+ *  the result, or [RoutingBroadcastSkipped]. */
+public suspend fun <T : Any> requireRoutingBroadcastSent(send: suspend () -> T?): T =
+    send() ?: throw RoutingBroadcastSkipped()
+
+/**
  * Production [PushRoutingPorts] — binds the real
  * [PushRoutingSecretStore] + [PushRouteStore] + UniFFI derivation /
  * compose + push-gw subscribe. `broadcastFn` is supplied by

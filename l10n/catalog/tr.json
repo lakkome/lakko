@@ -125,6 +125,10 @@
       "text": "Bu tarayıcı geçiş anahtarlarını desteklemiyor.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Bu cihaz geçiş anahtarlarını desteklemiyor.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Bu geçiş anahtarı, bu cihazdaki hesaptan farklı bir hesaba ait. Önce şifrenizle giriş yapın.",
       "status": "machine"
@@ -307,6 +311,42 @@
     },
     "auth.username.label": {
       "text": "Kullanıcı adı",
+      "status": "machine"
+    },
+    "auth.username_prompt.continue": {
+      "text": "Devam",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Kullanıcı adı kontrol edilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Bu, bu hesabın kullanıcı adı değil.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Çok fazla deneme. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Kullanıcı adı",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Hatırlamıyorum",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Diğer cihazınızda Ayarlar'da görebilirsiniz. O zamana kadar bu cihaz onlarla eşitlenmez.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Bu cihaz hesabınızın kullanıcı adını henüz bilmiyor. Diğer cihazlarınızla eşitlemek için girin.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Kullanıcı adınız nedir?",
       "status": "machine"
     },
     "backup.rollback_refused.body": {
@@ -783,6 +823,10 @@
     },
     "call.error.no_media_encryption": {
       "text": "Bu tarayıcı arama medyasını şifreleyemiyor, bu yüzden arama başlamadı.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Bu cihaz arama medyasını şifreleyemiyor, bu yüzden arama başlamadı.",
       "status": "machine"
     },
     "call.error.not_accepting": {
@@ -1990,7 +2034,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Bu kanal oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
+      "text": "Bu kanal oluşturulamadı. Tekrar deneyin.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -2151,6 +2195,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "Kanaldaki tepkiler anonimdir. Kimin tepki verdiğini kimse göremez, kanalın sahibi bile.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "Lakko diğer cihazınızda açıldığında burada paylaşım yapabilirsiniz.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "Lakko diğer cihazınızda ve sahibin cihazında açıldığında burada paylaşım yapabilirsiniz.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -3465,12 +3517,20 @@
       "text": "Lakko'nun görüntülü not kaydetmek için kamera erişimine ihtiyacı var. Tarayıcınızın site ayarlarından kamera erişimine izin verin.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko'nun görüntülü not kaydetmek için kamera erişimine ihtiyacı var. Sistemin gizlilik ayarlarından izin verin.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko'nun görüntülü not kaydetmek için kamera erişimine ihtiyacı var",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko'nun sesli mesaj kaydetmek için mikrofon erişimine ihtiyacı var. Tarayıcınızın site ayarlarından mikrofon erişimine izin verin.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko'nun sesli mesaj kaydetmek için mikrofon erişimine ihtiyacı var. Sistemin gizlilik ayarlarından izin verin.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3583,6 +3643,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "Bu tarayıcıda sesli mesaj kaydedilemez",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "Bu cihazda sesli mesaj kaydedilemez",
       "status": "machine"
     },
     "chat.record.video": {
@@ -4095,10 +4159,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "Diğer cihazlarınız bunu sohbetlerinize ekliyor.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -5193,10 +5253,6 @@
       "text": "Daha önce oluşturduğunuz davet ve arama bağlantıları artık çalışmaz. Yenilerini oluşturun.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "Yeni bir kurtarma ifadesi alırsınız. Eskisi artık çalışmaz.",
       "status": "machine"
@@ -5267,6 +5323,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko kamerayı kullanamıyor. Tarayıcının site ayarlarından kamera erişimine izin ver ve tekrar dene.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko kamerayı kullanamıyor. Sistemin gizlilik ayarlarından kamera erişimine izin verin ve tekrar deneyin.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5647,6 +5707,66 @@
     },
     "display_name.error.unknown": {
       "text": "Bu ad kullanılamaz",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "Bağış yap",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Kopyalandı",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Kopyala",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Adresi kopyala",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Ağ: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Bu adrese yalnızca {network} ağında {coin} gönderin. Başka her şey kaybolur.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Bağış yolları yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Bağışlar sunucuların masrafını karşılar ve çalışmanın sürmesini sağlar.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Şu anda ülkenizde kullanılabilen bir bağış yolu yok.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Numara gösterilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Göster",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "Telefon numarası gizli",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "Kripto",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Banka ve kart",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Lakko'yu destekle",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6417,10 +6537,6 @@
       "text": "Katılmak iste",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Yeniden iste",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "İsteğiniz iletilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
@@ -6442,11 +6558,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "İstek gönderildi. Bir yönetici onaylar, ardından değişiklik gruba uygulanır.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
+      "text": "İstek gönderildi. Bir yönetici Lakko'yu bir sonraki açışında görecek.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6926,7 +7038,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Davet kabul edilmedi",
+      "text": "Davet açılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7410,7 +7522,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Bu grup oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
+      "text": "Bu grup oluşturulamadı. Tekrar deneyin.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7881,10 +7993,6 @@
       "text": "Başka bir cihaz",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Giriş yapmanızı sağlar. Bu geçiş anahtarı için açtıysanız sohbetlerinizi de geri getirir.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Geçiş anahtarı",
       "status": "machine"
@@ -7959,6 +8067,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "Bu cihaz veya tarayıcı geçiş anahtarlarını desteklemiyor. Başka bir yol seçin.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Bu cihaz geçiş anahtarlarını desteklemiyor. Başka bir yol seçin.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8301,6 +8413,14 @@
       "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Lakko'yu oturumu hâlâ açık olan bir cihazda açın.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "{username} olarak giriş yaptınız, ancak bu cihazda sohbetlerinizin kullandığı anahtarlar henüz yok. Onları oturumu hâlâ açık olan başka bir cihazdan getirin.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "Bu cihazda kayıtlı hesapta bir sorun var. Çıkış yapıp yeniden giriş yapın veya kurtarma ifadenizi kullanın.",
       "status": "machine"
@@ -8359,10 +8479,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "Bunların hiçbiri bende yok",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Bir geçiş anahtarı için hesap anahtarlarını geri yüklemeyi açtıysanız.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8585,6 +8701,10 @@
       "text": "Destekçiler",
       "status": "machine"
     },
+    "settings.about.support": {
+      "text": "Lakko'yu destekle",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Çeviriler güncellendi: {date}",
       "status": "machine"
@@ -8647,6 +8767,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "Hesap verilerinizi bu tarayıcıdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için başka bir cihaza, hesap anahtarlarını geri yükleyen bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olacak.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Hesap verilerinizi bu cihazdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için başka bir cihaza, hesap anahtarlarını geri yükleyen bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olacak.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8833,6 +8957,10 @@
       "text": "Bu tarayıcı hesabınız için ayarlanmamış. Tekrar giriş yapın.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Bu cihaz hesabınız için ayarlanmamış. Tekrar giriş yapın.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "Cihaz kaldırılamadı. Tekrar deneyin.",
       "status": "machine"
@@ -8953,6 +9081,10 @@
       "text": "Bu cihazda oynatma.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Lakko kapalıyken kanal gönderileri gecikebilir.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "Bildirimler kapalı, bu yüzden Lakko yalnızca açıkken çalabilir. Kapalıyken de aramalar ve mesajlar size ulaşsın diye bildirimleri açın.",
       "status": "machine"
@@ -9017,56 +9149,20 @@
       "text": "Bu tarayıcı / cihaz şu anda geçiş anahtarı oluşturamıyor.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "Hesap anahtarlarını geri yüklemeyi aç",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Kapalı bırakırsanız geçiş anahtarı yalnızca giriş yapmanızı sağlar. Hesap anahtarlarını kurtarma ifadenizle veya başka bir cihazla geri yüklersiniz.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Bunu açarsanız yalnızca bu geçiş anahtarı hesabınızın anahtarlarını yeni bir cihaza getirebilir. Geçiş anahtarları genellikle Apple, Google veya şifre yöneticiniz tarafından eşitlenir. Apple, Google veya şifre yöneticisi hesabınıza girebilen kişi bundan sonra gelecekteki mesajlarınızı okuyabilir ve sizin adınıza işlem yapabilir.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "İptal edildi. Bu geçiş anahtarı hâlâ yalnızca giriş yapmanızı sağlıyor.",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Bu cihaz şu anda geçiş anahtarı oluşturamıyor.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "Bu geçiş anahtarı artık hesap anahtarlarınızı geri yüklüyor.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Farklı bir geçiş anahtarı yanıt verdi. Tekrar deneyin ve bunu açtığınız geçiş anahtarını seçin.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Bu kurtarma ifadesi bu hesaba ait değil. Hiçbir şey değiştirilmedi.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Bunu daha sonra her geçiş anahtarı için değiştirebilirsiniz.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "Bu geçiş anahtarı giriş yapmanızı sağlayabilir, ancak bu cihazda ve bu geçiş anahtarı sağlayıcısında hesap anahtarlarınızı taşıyamaz. Kurtarma ifadenizi saklayın.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Bunu açmak için kurtarma ifadenizi yazın.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Yalnızca giriş",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Bu geçiş anahtarı hesap anahtarlarınızı geri yükleyebilsin mi?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Aç",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -9079,14 +9175,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "Yalnızca giriş yapar",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "Şifreniz yerine Touch ID, Face ID veya bir güvenlik anahtarıyla giriş yapın. Açarsanız bir geçiş anahtarı hesap anahtarlarınızı yeni bir cihazda da geri yükleyebilir. Kurtarma ifadeniz de her zaman işe yarar.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "Şifreniz yerine parmak iziniz, yüzünüz veya ekran kilidinizle ya da bir güvenlik anahtarıyla giriş yapın. Açarsanız bir geçiş anahtarı hesap anahtarlarınızı yeni bir cihazda da geri yükleyebilir. Kurtarma ifadeniz de her zaman işe yarar.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9129,22 +9217,6 @@
       "text": "Hesap anahtarları sıfırlandığında geçiş anahtarlarınız silindi. Yeniden Face ID, Touch ID veya parmak izinizle giriş yapmak için bir geçiş anahtarı ekleyin.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Hesap anahtarlarını geri yüklemeyi durdur",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Bu geçiş anahtarı yalnızca giriş yapmanızı sağlayacak. Diğer cihazlarda zaten geri yüklenmiş hesap anahtarları orada kalır.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Bu geçiş anahtarı artık yalnızca giriş yapmanızı sağlıyor.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Bu geçiş anahtarıyla hesap anahtarlarını geri yükleme durdurulsun mu?",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "Geçiş anahtarları",
       "status": "machine"
@@ -9155,6 +9227,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Bu tarayıcı geçiş anahtarlarını yönetemiyor. Güncel bir Safari, Chrome, Firefox veya Edge kullanın.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Bu cihaz geçiş anahtarlarını yönetemiyor.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9461,6 +9537,10 @@
       "text": "Tarayıcınız tarafından yönetilir",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Sisteminiz tarafından yönetilir",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Kaldır",
       "status": "machine"
@@ -9645,10 +9725,6 @@
       "text": "Tekrar dene",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "Sansürü aşma açıkken dil paketleri indirilemez.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "Metne dökme bu cihazda yapılır. Lakko bunun için {language} paketine ihtiyaç duyar. Sesli mesajlar metne dökülmek için hiçbir yere gönderilmez.",
       "status": "machine"
@@ -9663,6 +9739,10 @@
     },
     "translate.pack.body.translation_sized": {
       "text": "Çeviri bu cihazda yapılır. Lakko bunun için {language} paketine ihtiyaç duyar ({size}). Mesajlar çevrilmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Çeviri bu cihazda yapılır. macOS {language} paketini Sistem Ayarları'nda indirir: Dil ve Bölge, ardından Çeviri Dilleri. Mesajlar çevrilmek için hiçbir yere gönderilmez.",
       "status": "machine"
     },
     "translate.pack.cancel": {
@@ -9693,6 +9773,10 @@
       "text": "Şimdi değil",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Sistem Ayarları'nı Aç",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "Paket Google tarafından sağlanır.",
       "status": "machine"
@@ -9703,6 +9787,10 @@
     },
     "translate.pack.source.web": {
       "text": "Paket, tarayıcınızın üreticisi tarafından sağlanır.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "Paket, sisteminizin üreticisi tarafından sağlanır.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9951,6 +10039,14 @@
     },
     "who_can_find_me.title": {
       "text": "Beni kimler bulabilir",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "Ekranınız paylaşılamıyor. Sistemin gizlilik ayarlarından Lakko'ya ekran kaydı izni verin.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Ekranınız paylaşılamıyor. Sistem Ayarları'ndan Lakko'ya ekran kaydı izni verin.",
       "status": "machine"
     }
   },

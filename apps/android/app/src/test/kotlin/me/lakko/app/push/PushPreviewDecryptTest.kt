@@ -205,6 +205,44 @@ class PushPreviewDecryptTest {
         assertFalse("no persist entry point may be reached", group.persistAttempted)
     }
 
+    /** ADR-0047 section 6 — the micro thumbnail decrypted with the message
+     *  rides the preview that shows its text, with nothing fetched. */
+    @Test
+    fun `the micro thumbnail rides a preview that shows the text`() = runTest {
+        val pic = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 1, 2, 3)
+        val group = FakeThrowawayGroup(decode = { chat("look").copy(previewPicture = pic) })
+        val deps = FakeDeps(account = okAccount(), group = group, rows = listOf(row(10, 1)))
+
+        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11, accountIdB64 = accountId), deps)
+
+        assertEquals("Anna: look", preview?.body)
+        assertTrue(pic.contentEquals(notificationPictureBytes(preview)))
+    }
+
+    /** Section 11 — no text, no picture: the unnamed-sender fallback shows the
+     *  generic line and never the micro thumbnail; a non-JPEG is dropped. */
+    @Test
+    fun `the picture is dropped when the text is not shown or is not a JPEG`() = runTest {
+        val pic = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 1)
+        val unnamed = FakeThrowawayGroup(decode = {
+            ProcessedRow(ProcessedKind.CHAT, "look", 1, senderName = null, previewPicture = pic)
+        })
+        val generic = decryptPushPreview(
+            PushWake(groupHex, pointer = 11, accountIdB64 = accountId),
+            FakeDeps(account = okAccount(), group = unnamed, rows = listOf(row(10, 1))),
+        )
+        assertNull(generic?.picture)
+        assertNull(notificationPictureBytes(generic))
+
+        val png = FakeThrowawayGroup(decode = { chat("look").copy(previewPicture = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)) })
+        val refused = decryptPushPreview(
+            PushWake(groupHex, pointer = 11, accountIdB64 = accountId),
+            FakeDeps(account = okAccount(), group = png, rows = listOf(row(10, 1))),
+        )
+        assertEquals("Anna: look", refused?.body)
+        assertNull(refused?.picture)
+    }
+
     /** ADR-0053 client contract point 9 — the background read is signed with
      *  the throwaway group's own signer. */
     @Test

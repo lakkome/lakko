@@ -176,6 +176,27 @@ pub fn verify_conversation_link(
     Ok(link.conversation_key)
 }
 
+/// The account's OWN conversation key, read from the link its directory
+/// bundle serves (ADR-0074, "Joining after a rotation", G-56).
+///
+/// `link` is the bundle's `conversation_link` field (`None` when absent) and
+/// `current_key` THIS device's own current account key, never one fetched
+/// from the directory. Answers `None` for an absent or empty link, one that
+/// does not verify against `current_key` (minted before a reset, or forged),
+/// and one naming the current key itself; otherwise the 32-byte conversation
+/// key the account's leaves are bound to. A server can strip the link (the
+/// answer is then `None`) but cannot add one: it needs the current key's
+/// signature.
+#[must_use]
+pub fn own_conversation_key(
+    link: Option<&[u8]>,
+    current_key: &[u8; PUBLIC_KEY_LEN],
+) -> Option<[u8; PUBLIC_KEY_LEN]> {
+    let link = link.filter(|l| !l.is_empty())?;
+    let key = verify_conversation_link(link, current_key).ok()?;
+    (key != *current_key).then_some(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +208,37 @@ mod tests {
 
     fn minted() -> [u8; CONVERSATION_LINK_LEN] {
         ConversationLink::sign(&key(1), &key(2), 1_793_000_000).expect("two keys")
+    }
+
+    #[test]
+    fn the_own_conversation_key_rule() {
+        let current = key(2).verifying_key().to_bytes();
+        let link = minted();
+        assert_eq!(own_conversation_key(None, &current), None, "absent");
+        assert_eq!(own_conversation_key(Some(&[]), &current), None, "empty");
+        assert_eq!(
+            own_conversation_key(Some(&link), &current),
+            Some(key(1).verifying_key().to_bytes()),
+            "verifies"
+        );
+        let other = key(3).verifying_key().to_bytes();
+        assert_eq!(
+            own_conversation_key(Some(&link), &other),
+            None,
+            "another current key"
+        );
+        let mut damaged = link;
+        damaged[CONVERSATION_LINK_LEN - 1] ^= 1;
+        assert_eq!(
+            own_conversation_key(Some(&damaged), &current),
+            None,
+            "does not verify"
+        );
+        assert_eq!(
+            own_conversation_key(Some(&link[..10]), &current),
+            None,
+            "truncated"
+        );
     }
 
     #[test]

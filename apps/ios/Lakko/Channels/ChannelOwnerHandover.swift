@@ -118,3 +118,99 @@ enum OwnedChannelGenerations {
 
     static let changed = Notification.Name("me.lakko.channels.owner-generation.changed")
 }
+
+/// 2026-11-20 — an owner device whose own channel refuses its owner proof
+/// (`401 owner-proof-required`) moves the channel's owner key to the key its
+/// CURRENT seed derives, signed by an own predecessor's key (ADR-0074
+/// section 3.5), instead of waiting for a handover that may never come.
+///
+/// Seen live: an iPhone's reseals were refused for hours. The service holds
+/// one owner key per channel, set at creation and moved only by a handover;
+/// this device signs with its current seed's key. They part when the account
+/// rotated and the handover for that channel never landed: a kept device's
+/// handover is tried once and not owed, a device hands over only the
+/// channels it created itself, and the web client signed with the lineage
+/// key (fixed the same day). Running the handover from every own predecessor
+/// heals each of those cases from any owner device.
+///
+/// One try per channel per process (a refusal hold lasts as long); a try
+/// with no verdict (offline) may run again at the next pass.
+@MainActor
+enum ChannelOwnerRepair {
+
+    private static var tried: Set<String> = []
+
+    static func reset() { tried = [] }
+
+    /// The predecessors to try, newest first: the key the service most
+    /// likely holds is the one the last rotation left.
+    nonisolated static func candidates(predecessorsOldestFirst: [Data], currentSeed: Data) -> [Data] {
+        var seen: Set<Data> = [currentSeed]
+        var out: [Data] = []
+        for seed in predecessorsOldestFirst.reversed() where !seen.contains(seed) {
+            seen.insert(seed)
+            out.append(seed)
+        }
+        return out
+    }
+
+    /// What one channel's repair came to over the predecessors' handovers:
+    /// owned at the first `.owned`; `.retry` when any handover got no
+    /// verdict and none owned; `.notOwner` otherwise.
+    static func repair(
+        predecessors: [Data], currentSeed: Data,
+        put: (_ signing: Identity, _ naming: Identity) async throws -> Void
+    ) async -> ChannelOwnerHandover.Outcome {
+        guard let new = try? Identity.fromSeed(seed: currentSeed) else { return .retry }
+        var sawRetry = false
+        for seed in candidates(predecessorsOldestFirst: predecessors, currentSeed: currentSeed) {
+            guard let old = try? Identity.fromSeed(seed: seed) else { continue }
+            switch await ChannelOwnerHandover.handOver(old: old, new: new, put: put) {
+            case .owned: return .owned
+            case .retry: sawRetry = true
+            case .notOwner: continue
+            }
+        }
+        return sawRetry ? .retry : .notOwner
+    }
+
+    /// Whether any of this device's channel retries holds `channelId` as
+    /// refused.
+    static func isRefused(accountIdB64: String, channelId: String) -> Bool {
+        PublisherCommitRetry.shared.hold(accountIdB64: accountIdB64, channelIdHex: channelId)?.refused == true
+            || SubscriberAdmission.retry.hold(accountIdB64: accountIdB64, channelIdHex: channelId)?.refused == true
+            || ChannelAccountReaderKey.isRefused(channelId: channelId)
+    }
+
+    /// Repair `channelId` if a retry holds it as refused and this process
+    /// has not tried yet. On `.owned` every hold of the channel goes, so the
+    /// next pass sends what was held.
+    static func repairIfRefused(
+        channelId: String, accountIdB64: String, currentSeed: Data, client: ChannelsClient
+    ) async {
+        let key = accountIdB64 + "|" + channelId.lowercased()
+        guard !tried.contains(key), isRefused(accountIdB64: accountIdB64, channelId: channelId) else { return }
+        tried.insert(key)
+        let predecessors = KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64)
+        guard !predecessors.isEmpty else {
+            NSLog("[channels] an owner proof is refused and the account has no earlier keys; nothing to hand over")
+            return
+        }
+        let outcome = await repair(predecessors: predecessors, currentSeed: currentSeed) { signing, naming in
+            try await client.replaceOwner(channelIdHex: channelId, signingIdentity: signing, newOwnerIdentity: naming)
+        }
+        switch outcome {
+        case .owned:
+            ChannelPublisherRoleCache.shared.clearAll()
+            PublisherCommitRetry.shared.noteSuccess(accountIdB64: accountIdB64, channelIdHex: channelId)
+            SubscriberAdmission.retry.noteSuccess(accountIdB64: accountIdB64, channelIdHex: channelId)
+            ChannelAccountReaderKey.clearHold(channelId: channelId)
+            NSLog("ADR-0074: a refused channel's owner key is now the current key's; held work runs again")
+        case .retry:
+            tried.remove(key)
+            NSLog("[channels] the owner key repair got no answer; tried again next pass")
+        case .notOwner:
+            NSLog("[channels] no key of this account owns a refused channel; nothing to hand over")
+        }
+    }
+}

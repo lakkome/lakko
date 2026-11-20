@@ -163,7 +163,7 @@ struct CallBackgroundSection: View {
                         }
                     ) { PhotoThumbnail(id: photo.id) }
                     .lakkoLongPressMenu {
-                        [.action(l10n.t("call.background.remove"), systemImage: "trash",
+                        [.action(l10n.t("call.background.remove"), icon: .trash,
                                  destructive: true) { background.removePhoto(id: photo.id) }]
                     }
                     .accessibilityAction(named: l10n.t("call.background.remove")) {
@@ -176,8 +176,7 @@ struct CallBackgroundSection: View {
                         ZStack {
                             RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous)
                                 .fill(Color.lakkoSurfaceSunken)
-                            Image(systemName: "plus")
-                                .font(.title3.weight(.semibold))
+                            LkIconView(.plus, size: 24, relativeTo: .title3)
                                 .foregroundColor(Color.lakkoAccent)
                         }
                         .frame(width: Self.side, height: Self.side)
@@ -302,8 +301,7 @@ private struct NoneSwatch: View {
     var body: some View {
         ZStack {
             Color.lakkoSurfaceSunken
-            Image(systemName: "circle.slash")
-                .font(.system(size: 26, weight: .regular))
+            LkIconView(.circleSlash, size: 28, relativeTo: nil)
                 .foregroundColor(Color.lakkoTextMuted)
         }
     }
@@ -404,7 +402,7 @@ struct BackgroundStartingCover: View {
                 Color.lakkoSurfaceSunken
                 InitialsAvatar(
                     name: name, identity: identity, size: avatarSize,
-                    placeholderSymbol: "person.fill", photo: .own)
+                    placeholderIcon: .personFill, photo: .own)
                 VStack {
                     Spacer(minLength: 0)
                     ProgressView()

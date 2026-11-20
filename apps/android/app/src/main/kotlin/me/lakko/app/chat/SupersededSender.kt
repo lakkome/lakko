@@ -83,6 +83,8 @@ internal fun senderActOf(
 ): Pair<SenderAct, MemberIdentity?>? = when (event) {
     is IncomingChatEvent.Application -> SenderAct.ROW to event.senderKey
     is IncomingChatEvent.Op -> SenderAct.ROW to event.senderKey
+    is IncomingChatEvent.ContentOp -> SenderAct.ROW to event.senderKey
+    is IncomingChatEvent.OpenItems -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.Typing -> SenderAct.ROW to event.senderKey
     is IncomingChatEvent.ReadReceipt -> SenderAct.ROW to event.senderKey
     is IncomingChatEvent.CallSignaling -> SenderAct.CALL to (event.senderPersonKey ?: personKeyOfLeaf(event.senderLeaf))
@@ -92,6 +94,7 @@ internal fun senderActOf(
     is IncomingChatEvent.Pin -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.SharedChannels -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.RegistrarSeed -> SenderAct.CONTROL to event.senderKey
+    is IncomingChatEvent.KnockKey -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.ScopedDiscovery -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.GroupSetting -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.ProfileRequest -> SenderAct.CONTROL to event.senderKey
@@ -99,6 +102,8 @@ internal fun senderActOf(
     is IncomingChatEvent.PushRoutingSecret -> SenderAct.CONTROL to personKeyOfLeaf(event.senderLeaf)
     is IncomingChatEvent.CommitterBeacon -> SenderAct.CONTROL to personKeyOfLeaf(event.senderLeaf)
     is IncomingChatEvent.System,
+    // ADR-0092 section 3.6 — a ballot names no sender by construction.
+    is IncomingChatEvent.PollBallotRow,
     is IncomingChatEvent.ServiceEnvelope,
     is IncomingChatEvent.ExternalJoinRequest,
     is IncomingChatEvent.MembershipProposal,

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+  <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+  <path d="M8.75 7.75L19 7.75A2.25 2.25 0 0 1 21.25 10L21.25 17.5A2.25 2.25 0 0 1 19 19.75L8.75 19.75A2.25 2.25 0 0 1 6.5 17.5L6.5 10A2.25 2.25 0 0 1 8.75 7.75Z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M3.75 15.87A2.25 2.25 0 0 1 2.75 14L2.75 6.5A2.25 2.25 0 0 1 5 4.25L15.25 4.25A2.25 2.25 0 0 1 16.93 5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M11 10.5A1.25 1.25 0 0 1 11 13A1.25 1.25 0 0 1 11 10.5Z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M7.21 19.56L10.87 16.17C11.26 15.82 11.89 15.82 12.24 16.21L14.42 18.51L16.18 16.83C16.57 16.48 17.15 16.48 17.54 16.87L20.31 19.56Z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

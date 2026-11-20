@@ -306,6 +306,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // throws, and the throw reaches the caller's loop, which drops the
         // row (fail-closed, invariant #4) and tells this device's own message
         // apart from one it cannot read.
+        // ADR-0092 section 3.6 — an anonymous poll ballot is a NON-MLS row on
+        // the group journal: never fed to MLS processing (it would throw and
+        // read as an unreadable message), never a notification.
+        if isPollBallotRow(row: payload) { return nil }
         let processed = try group.processIncomingVerifyingRoles(identity: identity, bytes: payload)
         // Only Application messages carry a user-visible preview. A Commit /
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
@@ -391,6 +395,21 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                     // rotate request ride PublisherGroup journals too.
                     || isChannelEpochSeedsEnvelope(plaintext: bytes)
                     || isChannelRotateRequestEnvelope(plaintext: bytes)
+                    // ADR-0090 — a co-publisher's device request and the
+                    // admission mark ride PublisherGroup journals too.
+                    || isPublisherDeviceRequestEnvelope(plaintext: bytes)
+                    || isChannelAdmissionMarkEnvelope(plaintext: bytes)
+                    // ADR-0091 phase 2 — the group's knock key (group
+                    // journal) and a re-entry request: never shown, never
+                    // acted on here (C-59).
+                    || isKnockKeyEnvelope(plaintext: bytes)
+                    || isConversationReentryEnvelope(plaintext: bytes)
+                    // ADR-0092 sections 3.6 and 3.9 — the open-items
+                    // hand-over, the old-ballot rows and the own poll-choice
+                    // register: never shown.
+                    || isOpenItemsEnvelope(plaintext: bytes)
+                    || isPollBallotsEnvelope(plaintext: bytes)
+                    || isPollChoiceEnvelope(plaintext: bytes)
             },
             // `docs/ux/who-can-find-me.md` 6.4 — a contact request inside the
             // group: a yes / no from the slim FFI, never opened here.
@@ -416,6 +435,19 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // ADR-0061 section 6 — a newer chat wire version: the body text is
         // empty by contract; the preview is the extension's own sentence.
         case .unsupported: kind = .unsupported
+        // ADR-0092 — content messages preview by one line; ops never notify.
+        case .poll, .checklist, .location, .contactCard, .article: kind = .content
+        case .pollVote, .pollClose, .checklistTick, .checklistAdd, .editChecklist, .editArticle:
+            kind = .contentOp
+        }
+        let contentKind: NseContentKind?
+        switch body.kind {
+        case .poll: contentKind = .poll
+        case .checklist: contentKind = .checklist
+        case .location: contentKind = .location
+        case .contactCard: contentKind = .contactCard
+        case .article: contentKind = .article
+        default: contentKind = nil
         }
         // Reactions-and-emoji spec section 12 — what a reaction row says, for
         // the "reacted to your message" notification.
@@ -425,14 +457,24 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                 targetMessageId: target, emoji: emoji, add: body.reactionAction != .remove,
                 targetAuthorB64: body.reactionTargetAuthor?.base64EncodedString())
         }
+        // ADR-0087 section 14 — a channel invitation card reads like the
+        // card, never as its text (the `/g/` link with its secret).
+        // A bare `/g/` link with no card: the link without its secret.
+        let text = body.channelInvite.map {
+            nseChannelInviteLine(opened: $0.opened, channelName: $0.channelName, publisher: $0.publisher)
+        } ?? nseWithoutGroupLinkSecret(body.text)
         return NseProcessedRow(
             kind: kind,
-            text: body.text,
+            text: contentKind.map { nseContentPreviewLine(kind: $0, text: body.text) } ?? text,
             attachmentCount: body.attachments.count,
             singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil,
             senderKeyB64: senderKeyB64,
             resendOrigin: Self.resendOrigin(of: body),
-            reaction: reaction
+            reaction: reaction,
+            attachmentCounts: nseAttachmentCounts(body.attachments.map { (kind: $0.kind, mime: $0.mime) }),
+            // ADR-0047 section 6 — the first photo or video's micro
+            // thumbnail, as the core read it from the envelope.
+            inlineThumb: body.inlineThumb
         )
     }
 

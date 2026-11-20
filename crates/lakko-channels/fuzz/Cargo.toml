@@ -124,3 +124,10 @@ path = "fuzz_targets/write_proof_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "channel_poll_tally_decode"
+path = "fuzz_targets/channel_poll_tally_decode.rs"
+test = false
+doc = false
+bench = false

@@ -59,9 +59,11 @@ describe("co-publisher binding", () => {
   it("is not an MLS knock row, so the owner reads it before processKnock", () => {
     const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x53));
     const joiner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x54));
-    const group = wasm.PublisherGroup.openOrCreate(owner, CHANNEL);
+    // ADR-0090: the group's leaf is a device bound to the owner's account.
+    const device = wasm.Identity.fromSeedBound(new Uint8Array(64).fill(0x55), owner.ed25519Seed, 1_700_000_000n);
+    const group = new wasm.PublisherGroup(device, owner.ed25519Seed, CHANNEL);
     const wire = wasm.composeChannelCoPublisherBinding(joiner, CHANNEL);
-    expect(() => group.processKnock(owner, wire)).toThrow();
+    expect(() => group.processKnock(device, wire)).toThrow();
   });
 
   it("builds the appointment path", () => {

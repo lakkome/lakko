@@ -40,7 +40,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { conversationLabelsOf, realNameOf } from "./member-label";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
-import { ChatClient } from "../chat/client";
+import { ChatClient, isConversationBehind } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import type { FoundName } from "../contacts/contact-list-model";
 import { isRemovedContact, loadAccepted, loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
@@ -51,6 +51,7 @@ import {
   loadOwnProfile,
   saveOwnProfile,
   saveOwnProfileFields,
+  restampOwnProfile,
   type OwnProfile,
 } from "./own-profile";
 import { avatarToWasm, type AvatarData } from "./avatar-model";
@@ -62,8 +63,10 @@ import {
   ProfileStore,
   accountIdHexOfBytes,
   awaitsOwnProfile,
+  profileCardShareable,
   type IncomingProfile,
 } from "./profile-store";
+import { ownCardFlagFlipped, ownCardShareable, usernameForConversation, withCardShareSignature } from "./card-share";
 import { installBeforeSend } from "../chat/before-send";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
 import { resolveDisplay, resolvePerson, type ResolvedName } from "./resolver";
@@ -130,6 +133,10 @@ export interface ProfileApi {
    *  call tile shows it as plain text while verification is still running
    *  (`calls/tile-name.ts`). Reactive. */
   claimedUsernameOf(keyB64: string): string | null;
+  /** ADR-0092 section 7 — whether the newest profile held from `keyB64` lets
+   *  others share the person's contact card; `true` when none is held.
+   *  Reactive. */
+  cardShareableOf(keyB64: string): boolean;
   /** File a received profile under its AUTHENTICATED sender key. With a
    *  `context`, the reach grants it carried are kept under the ADR-0060 rules
    *  for that conversation. */
@@ -365,9 +372,28 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     onPersist: durableSnapshotHook(chats, accountId),
   });
 
+  /** UX `who-can-find-me.md` section 6.2 — whether a group's profile may
+   *  carry the username: a one-to-one always, a group while the setting
+   *  lets its members find this person. `null` for no conversation (a
+   *  contact request, a call announcement). */
+  function usernameScopeOf(groupIdB64: string | undefined): { oneToOne: boolean; groupAllowed: boolean } | null {
+    if (groupIdB64 === undefined) return null;
+    const entry = chats.get(groupIdB64);
+    if (entry === undefined) return null;
+    if (isOneToOne(entry.group)) return { oneToOne: true, groupAllowed: true };
+    const session = reachSession();
+    let groupAllowed = false;
+    try {
+      groupAllowed = session !== null && session.allowsGroupMembers(base64Decode(groupIdB64));
+    } catch {
+      groupAllowed = false;
+    }
+    return { oneToOne: false, groupAllowed };
+  }
+
   async function ownProfileEnvelope(groupIdB64?: string): Promise<Uint8Array | null> {
     const own = ownProfile();
-    const username = ownUsername();
+    const username = usernameForConversation(ownUsername(), usernameScopeOf(groupIdB64));
     // A device that never saved a name and has no username has nothing to
     // say. Once a name was ever saved, an empty envelope is meaningful: it
     // clears the name on the receivers.
@@ -395,6 +421,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         grants,
         // ADR-0084 — the saved photo, in every envelope this account sends.
         own.avatar === null ? undefined : avatarToWasm<InstanceType<Wasm["ProfileAvatar"]>>(w, own.avatar),
+        // ADR-0092 section 7 — off exactly when "who can find me" is Nobody.
+        ownCardShareable(visibilitySetting()),
       );
     } finally {
       // `composeProfileEnvelope` takes the grants by value (moved into the
@@ -455,7 +483,23 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const session = reachSession();
     const entry = chats.get(groupIdB64);
     if (session === null || entry === undefined) return null;
-    return session.profileGrantSignature(base64Decode(groupIdB64), isOneToOne(entry.group), carriesContactGrant(entry.group));
+    return profileSignatureOf(session, groupIdB64, entry.group);
+  }
+
+  /** What a profile into a conversation carries that may change without a
+   *  new name: its grants (ADR-0060), the card flag (ADR-0092 section 7)
+   *  and, in a group, whether the username goes (UX `who-can-find-me.md`
+   *  section 6.2). A conversation whose published signature differs gets the
+   *  profile again. */
+  function profileSignatureOf(
+    session: NonNullable<ReturnType<typeof reachSession>>,
+    groupIdB64: string,
+    group: Parameters<typeof isOneToOne>[0],
+  ): string {
+    const grants = session.profileGrantSignature(base64Decode(groupIdB64), isOneToOne(group), carriesContactGrant(group));
+    const scope = usernameScopeOf(groupIdB64);
+    const withUser = scope !== null && !scope.oneToOne && !scope.groupAllowed ? `${grants}|nouser` : grants;
+    return withCardShareSignature(withUser, ownCardShareable(visibilitySetting()));
   }
 
   /** The conversations whose profile (and grants) is not published yet. */
@@ -473,7 +517,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         groupIdB64: g.groupIdB64,
         active: readIsActive(g.group) !== false,
         publishedSignature: grantSignatureOf(account, g.groupIdB64),
-        currentSignature: session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group), carriesContactGrant(g.group)),
+        currentSignature: profileSignatureOf(session, g.groupIdB64, g.group),
       });
     }
     return owedProfileConversations(rows);
@@ -514,8 +558,22 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     random: () => Math.random(),
     publish: publishInto,
     onError: (_groupIdB64, err) => {
+      // ADR-0091: a conversation this device fell behind in sends nothing
+      // until it is back; that is the stop list working, not a failure.
+      if (isConversationBehind(err)) return;
+      // The DS answer (status and error code) explains a failure; the
+      // endpoint is left out because it names the conversation.
+      const cause = (err as { cause?: unknown }).cause as
+        | { name?: unknown; status?: unknown; body?: unknown; message?: unknown }
+        | undefined;
+      const detail =
+        cause === undefined || cause === null
+          ? ""
+          : ` (${String(cause.name ?? "")}${
+              typeof cause.status === "number" ? ` ${cause.status} ${String(cause.body ?? "").slice(0, 80)}` : ""
+            })`;
       // eslint-disable-next-line no-console
-      console.warn("[profile] publish failed", err);
+      console.warn(`[profile] publish failed${detail}`, err);
     },
   });
 
@@ -571,7 +629,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       const due: string[] = [];
       for (const g of groups) {
         if (readIsActive(g.group) === false) continue;
-        const signature = session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group), carriesContactGrant(g.group));
+        const signature = profileSignatureOf(session, g.groupIdB64, g.group);
         if (grantSignatureOf(account, g.groupIdB64) === signature) continue;
         if (resendInFlight.has(g.groupIdB64)) continue;
         resendInFlight.add(g.groupIdB64);
@@ -582,6 +640,32 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
           for (const g of due) resendInFlight.delete(g);
         });
       }
+    });
+  });
+
+  // ADR-0092 section 7 — a switch to or from `Nobody` changes the card flag
+  // every profile carries. Receivers keep a strictly newer profile only, so
+  // the own profile is restamped (the same name and photo, a new stamp) and
+  // published everywhere, and sent to this account's other devices like an
+  // edit. Loading the setting (from `null`) is not a switch.
+  let lastCardFlag: { account: string; shareable: boolean } | null = null;
+  createEffect(() => {
+    const setting = visibilitySetting();
+    const account = accountId();
+    untrack(() => {
+      if (account === null || setting === null) {
+        if (account === null) lastCardFlag = null;
+        return;
+      }
+      const shareable = ownCardShareable(setting);
+      const previous = lastCardFlag !== null && lastCardFlag.account === account ? lastCardFlag.shareable : null;
+      lastCardFlag = { account, shareable };
+      if (!ownCardFlagFlipped(previous, shareable)) return;
+      restampOwnProfile(account, Date.now());
+      setOwnProfileTick((t) => t + 1);
+      bump();
+      ownProfileChanged();
+      void scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
     });
   });
 
@@ -756,6 +840,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     async usernameClaimed(certificate) {
       if (certificate !== null) ownCertSlot.put(accountId(), certificate);
       else await ensureOwnCertificate();
+      // The username is part of the profile, so a new one is a new profile:
+      // re-stamp the saved fields. With the old stamp every receiver took the
+      // republished envelope for one it already held, and a rename never
+      // reached a contact or a group (base scenario 3, 2026-11-11).
+      const account = accountId();
+      if (account !== null) {
+        const mine = ownProfile();
+        saveOwnProfileFields(account, { displayName: mine.displayName, avatar: mine.avatar }, Date.now());
+        setOwnProfileTick((t) => t + 1);
+      }
       bump();
       ownProfileChanged();
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
@@ -826,6 +920,13 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
           ? received.username
           : (pendingContactOf(keyB64, aliases().get(keyB64) ?? keyB64)?.username ?? null);
       return username !== null && username.length > 0 ? username : null;
+    },
+    cardShareableOf(keyB64) {
+      version();
+      // A card names the person by their account key; a profile filed under
+      // a retired key of theirs answers for them too (ADR-0073 R.2).
+      const canonical = aliases().get(keyB64) ?? keyB64;
+      return profileCardShareable(store.get(keyB64) ?? store.get(canonical));
     },
     ingest(senderKeyB64, profile, context) {
       const account = accountId();

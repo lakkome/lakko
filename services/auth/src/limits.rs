@@ -232,14 +232,18 @@ pub(crate) enum Scope {
     /// every device asks at every session landing, and the bind's five a day
     /// would be spent by the question.
     HandleCheck = 22,
+    /// `PUT /auth/anon-credential/commitment` and `POST /auth/anon-credential`,
+    /// keyed on the signed-in account (ADR-0092 section 4.2). Charged after
+    /// the body decodes and before the proof is verified.
+    AnonCredential = 23,
     /// `POST /auth/supporter-code/redeem`, keyed on the code's keyed hash
     /// (ADR-0097). Charged only for a code that exists, after the lookup:
     /// an unknown code has no counter to spend and answers `404` anyway.
-    SupporterCode = 23,
+    SupporterCode = 24,
 }
 
 impl Scope {
-    const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -258,6 +262,7 @@ impl Scope {
         Self::EmailVaultOpen,
         Self::EmailVaultStore,
         Self::HandleCheck,
+        Self::AnonCredential,
         Self::SupporterCode,
     ];
 
@@ -283,7 +288,34 @@ impl Scope {
             Self::EmailVaultOpen => 15,
             Self::EmailVaultStore => 16,
             Self::HandleCheck => 17,
-            Self::SupporterCode => 18,
+            Self::AnonCredential => 18,
+            Self::SupporterCode => 19,
+        }
+    }
+
+    /// The `scope` label of the refusal counter (ADR-0096).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoginPassword => "login_password",
+            Self::LoginRecovery => "login_recovery",
+            Self::PasswordReset => "password_reset",
+            Self::TotpRecover => "totp_recover",
+            Self::DeviceRequestTarget => "device_request_target",
+            Self::DeviceGrantMint => "device_grant_mint",
+            Self::HandleBind => "handle_bind",
+            Self::RecoveryReplace => "recovery_replace",
+            Self::KeyReset => "key_reset",
+            Self::DeviceRevoke => "device_revoke",
+            Self::Recall => "recall",
+            Self::KeyRotate => "key_rotate",
+            Self::EmailLetterHandle => "email_letter_handle",
+            Self::EmailLetterAccount => "email_letter_account",
+            Self::EmailVerify => "email_verify",
+            Self::EmailVaultOpen => "email_vault_open",
+            Self::EmailVaultStore => "email_vault_store",
+            Self::HandleCheck => "handle_check",
+            Self::AnonCredential => "anon_credential",
+            Self::SupporterCode => "supporter_code",
         }
     }
 
@@ -307,6 +339,7 @@ impl Scope {
             Self::EmailVaultOpen => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_OPEN",
             Self::EmailVaultStore => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_STORE",
             Self::HandleCheck => "LAKKO_AUTH_LIMIT_HANDLE_CHECK",
+            Self::AnonCredential => "LAKKO_AUTH_LIMIT_ANON_CREDENTIAL",
             Self::SupporterCode => "LAKKO_AUTH_LIMIT_SUPPORTER_CODE",
         }
     }
@@ -338,6 +371,8 @@ impl Scope {
             Self::EmailVerify => Window::new(15, 3600),
             // One question per device per landing, with room to spare.
             Self::HandleCheck => Window::new(120, 3600),
+            // A device asks once a period, a few devices and retries a day.
+            Self::AnonCredential => Window::new(30, 86_400),
         }
     }
 
@@ -356,7 +391,8 @@ impl Scope {
             | Self::EmailVerify
             | Self::EmailVaultOpen
             | Self::EmailVaultStore
-            | Self::HandleCheck => CODE_TOO_MANY_ATTEMPTS,
+            | Self::HandleCheck
+            | Self::AnonCredential => CODE_TOO_MANY_ATTEMPTS,
             Self::EmailLetterHandle | Self::EmailLetterAccount => CODE_EMAIL_RATE_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
@@ -387,7 +423,7 @@ pub(crate) enum Category {
 }
 
 impl Category {
-    const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Attempt,
         Self::DeviceRequest,
         Self::Signup,
@@ -399,6 +435,19 @@ impl Category {
 
     const fn index(self) -> usize {
         self as usize
+    }
+
+    /// The `category` label of the address-refusal counter (ADR-0096).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Attempt => "attempt",
+            Self::DeviceRequest => "device_request",
+            Self::Signup => "signup",
+            Self::Challenge => "challenge",
+            Self::HandleBind => "handle_bind",
+            Self::Email => "email",
+            Self::SupporterCode => "supporter_code",
+        }
     }
 
     const fn env_var(self) -> &'static str {
@@ -824,7 +873,8 @@ pub(crate) enum LimitError {
 
 impl IntoResponse for LimitError {
     fn into_response(self) -> Response {
-        match self {
+        let code = self.code();
+        let mut resp = match self {
             Self::Limited {
                 code,
                 retry_after_secs,
@@ -844,6 +894,18 @@ impl IntoResponse for LimitError {
                 Json(json!({ "error": CODE_LIMITER_UNAVAILABLE })),
             )
                 .into_response(),
+        };
+        resp.extensions_mut().insert(lakko_metrics::ErrorCode(code));
+        resp
+    }
+}
+
+impl LimitError {
+    /// The stable body code of the refusal.
+    pub(crate) const fn code(&self) -> &'static str {
+        match self {
+            Self::Limited { code, .. } => code,
+            Self::Unavailable => CODE_LIMITER_UNAVAILABLE,
         }
     }
 }
@@ -876,20 +938,22 @@ pub(crate) async fn charge_name(
     name: &[u8],
 ) -> Result<(), LimitError> {
     let w = limits.name_window(scope);
-    match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
-        Ok((hits, _)) if hits <= w.limit => Ok(()),
+    let refusal = match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
+        Ok((hits, _)) if hits <= w.limit => return Ok(()),
         Ok((_, retry_after_secs)) => {
             tracing::debug!(scope = ?scope, "auth name limit reached");
-            Err(LimitError::Limited {
+            LimitError::Limited {
                 code: scope.refusal_code(),
                 retry_after_secs,
-            })
+            }
         },
         Err(e) => {
             tracing::error!(error = %e, scope = ?scope, "auth name limit store failed; refusing");
-            Err(LimitError::Unavailable)
+            LimitError::Unavailable
         },
-    }
+    };
+    crate::metrics::scope_refused(scope, &refusal);
+    Err(refusal)
 }
 
 /// Atomically bump the fixed-window counter; returns `(hits in the current
@@ -1021,6 +1085,7 @@ pub(crate) async fn ip_gate(
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => {
             tracing::debug!(category = ?cat, "auth address limit reached");
+            crate::metrics::address_refused(cat);
             LimitError::Limited {
                 code: cat.refusal_code(),
                 retry_after_secs,
@@ -1038,11 +1103,14 @@ pub(crate) async fn ip_gate(
 /// buckets that have refilled, and device-link wrong codes and suspensions
 /// that no longer count.
 pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::LIMITS_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
+            let mut all_ok = true;
             let dropped = limits.prune_idle(Instant::now());
             if dropped > 0 {
                 tracing::debug!(dropped, "auth address buckets pruned");
@@ -1054,6 +1122,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .execute(&pool)
             .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "auth_name_limits prune failed");
             }
             let result = sqlx::query(
@@ -1063,6 +1132,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .execute(&pool)
             .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "device_link_wrong_codes prune failed");
             }
             let result =
@@ -1070,8 +1140,10 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
                     .execute(&pool)
                     .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "device_link_suspensions prune failed");
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }
@@ -1105,10 +1177,11 @@ mod tests {
         // 5 was the removed server-side three-word verifier's; 6, 7 and 8
         // were the removed one-time-code factor's. None is reused. 14 is the
         // ADR-0074 recall (listed after 15: it was added later); 16 is the
-        // key rotation.
+        // key rotation; 23 the ADR-0092 anonymous credential, 24 the
+        // ADR-0097 supporter code.
         assert_eq!(
             pinned,
-            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22, 23]
+            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24]
         );
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);

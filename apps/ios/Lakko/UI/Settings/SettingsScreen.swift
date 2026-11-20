@@ -132,8 +132,7 @@ struct SettingsScreen: View {
                             }
                         }
                         Spacer()
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .padding(.vertical, 4)
@@ -142,7 +141,7 @@ struct SettingsScreen: View {
             }
 
             Section(l10n.t("settings.section.account")) {
-                row(l10n.t("settings.section.profile"), systemImage: "person.crop.circle") { onOpen(.profile) }
+                row(l10n.t("settings.section.profile"), icon: .personSquare) { onOpen(.profile) }
                 // UX 19.1 / 19.2 / 19.5 — its own view observes the centre,
                 // so this screen is not re-evaluated by it.
                 if let accountProtection {
@@ -155,7 +154,7 @@ struct SettingsScreen: View {
 
             // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
             Section {
-                row(l10n.t("who_can_find_me.title"), systemImage: "person.2.badge.gearshape") {
+                row(l10n.t("who_can_find_me.title"), icon: .person2Gear) {
                     onOpen(.whoCanFindMe)
                 }
                 // ADR-0080 — per device, on by default.
@@ -163,7 +162,7 @@ struct SettingsScreen: View {
                     get: { deviceCards.showCity },
                     set: { deviceCards.setShowCity($0) }
                 )) {
-                    Label(l10n.t("settings.privacy.show_city"), systemImage: "mappin.and.ellipse")
+                    Label(l10n.t("settings.privacy.show_city"), icon: .location)
                         .foregroundStyle(Color.lakkoText)
                 }
             } header: {
@@ -176,16 +175,16 @@ struct SettingsScreen: View {
                 // Choosing a new password needs the login handle of a
                 // username, so a guest account has no row.
                 if !account.username.isEmpty {
-                    row(l10n.t("settings.password.title"), systemImage: "lock") { onOpen(.password) }
+                    row(l10n.t("settings.password.title"), icon: .lock) { onOpen(.password) }
                 }
-                row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
+                row(l10n.t("settings.passkeys.title"), icon: .passkey) { onOpen(.passkeys) }
                 // UX 17.5 — carries the exclamation-mark badge while a device
                 // added to the account is pending here.
                 DevicesSettingsRow { onOpen(.devices) }
-                row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
+                row(l10n.t("settings.recovery.title"), icon: .lifepreserver) { onOpen(.recoveryFactors) }
                 // ADR-0059 section 6 — every group the "Share my channels"
                 // switch is on in (docs/ux/feed.md 6.3).
-                row(l10n.t("discover.shared.title"), systemImage: "dot.radiowaves.left.and.right") {
+                row(l10n.t("discover.shared.title"), icon: .radiowaves) {
                     onOpen(.channelsIShare)
                 }
             }
@@ -207,17 +206,21 @@ struct SettingsScreen: View {
                 .tint(Color.lakkoAccent)
             } header: {
                 Text(l10n.t("settings.section.notifications"))
+            } footer: {
+                // `docs/ux/channel-notifications.md` section 3 — the one
+                // place that says channel posts can come late.
+                Text(l10n.t("settings.notifications.channel_posts_late"))
             }
 
             // `docs/ux/chat-folders.md` section 4 — between Notifications
             // (not a section on this client) and Appearance.
             Section {
-                row(l10n.t("settings.section.folders"), systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
+                row(l10n.t("settings.section.folders"), icon: .folder) { onOpen(.chatFolders(reorder: false)) }
             }
 
             Section {
                 LakkoPicker(
-                    l10n.t("settings.appearance.theme"), systemImage: "circle.lefthalf.filled",
+                    l10n.t("settings.appearance.theme"), icon: .appearance,
                     selection: appearance,
                     options: AppearanceSetting.allCases.map {
                         LakkoPickerOption(value: $0, label: l10n.t($0.labelKey))
@@ -226,13 +229,12 @@ struct SettingsScreen: View {
                 // trailing text; opening it shows the steps and a preview.
                 Button { choosingTextSize = true } label: {
                     HStack {
-                        Label(l10n.t("settings.text_size.title"), systemImage: "textformat.size")
+                        Label(l10n.t("settings.text_size.title"), icon: .textSize)
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Text(l10n.t(ChatTextSize.from(stored: chatTextSizeRaw).labelKey))
                             .foregroundStyle(Color.lakkoTextMuted)
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                 }
@@ -242,12 +244,11 @@ struct SettingsScreen: View {
                 // tapping opens the picker; a pick saves and closes.
                 Button { choosingQuickReaction = true } label: {
                     HStack {
-                        Label(l10n.t("settings.appearance.quick_reaction"), systemImage: "hand.thumbsup")
+                        Label(l10n.t("settings.appearance.quick_reaction"), icon: .thumbsup)
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Text(quickReaction.current).font(.title3)
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                 }
@@ -293,13 +294,12 @@ struct SettingsScreen: View {
             Section {
                 Button { onOpen(.language) } label: {
                     HStack {
-                        Label(l10n.t("settings.language.title"), systemImage: "globe")
+                        Label(l10n.t("settings.language.title"), icon: .globe)
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Text(l10n.ownName(of: l10n.language))
                             .foregroundStyle(Color.lakkoTextMuted)
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                 }
@@ -308,7 +308,7 @@ struct SettingsScreen: View {
 
             Section {
                 Toggle(isOn: $autoplayVideoNotes) {
-                    Label(l10n.t("settings.media.autoplay_video_notes.title"), systemImage: "play.circle")
+                    Label(l10n.t("settings.media.autoplay_video_notes.title"), icon: .playCircle)
                 }
             } header: {
                 Text(l10n.t("settings.section.media"))
@@ -317,7 +317,7 @@ struct SettingsScreen: View {
             }
 
             Section(l10n.t("settings.section.network")) {
-                row(l10n.t("settings.anti_censorship.title"), systemImage: "network.badge.shield.half.filled") {
+                row(l10n.t("settings.anti_censorship.title"), icon: .networkShield) {
                     onOpen(.antiCensorship)
                 }
             }
@@ -336,24 +336,29 @@ struct SettingsScreen: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } icon: {
-                    Image(systemName: "info.circle")
+                    LkIconView(.infoCircle, size: 20)
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Text(
                     l10n.t(BetaNoticeBanner.titleKey) + ". " + l10n.t(BetaNoticeBanner.bodyKey)))
                 HStack {
-                    Label(l10n.t("settings.about.version"), systemImage: "info.circle")
+                    Label(l10n.t("settings.about.version"), icon: .infoCircle)
                         .foregroundStyle(Color.lakkoText)
                     Spacer()
                     Text(versionLabel)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
                 HStack {
-                    Label(l10n.t("settings.about.licence"), systemImage: "doc.text")
+                    Label(l10n.t("settings.about.licence"), icon: .docText)
                         .foregroundStyle(Color.lakkoText)
                     Spacer()
                     Text("AGPL-3.0-or-later")
                         .foregroundStyle(Color.lakkoTextMuted)
+                }
+                // docs/ux/donations.md section 4 — the app's own donations
+                // screen (maintainer decision, 2026-11-16).
+                row(l10n.t("settings.about.support"), icon: .heart) {
+                    onOpen(.donations)
                 }
                 // The same row as web and Android, after the licence: static
                 // text, one accessibility element.
@@ -367,7 +372,7 @@ struct SettingsScreen: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } icon: {
-                    Image(systemName: "lock")
+                    LkIconView(.lockShield, size: 20)
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Text(
@@ -376,7 +381,7 @@ struct SettingsScreen: View {
                 // ADR-0097 / `docs/ux/supporters.md` section 2.1 — only while
                 // a checked list with at least one name is held.
                 if supporters.showsRow {
-                    row(l10n.t("settings.about.supporters"), systemImage: "heart") {
+                    row(l10n.t("settings.about.supporters"), icon: .star) {
                         onOpen(.supporters)
                     }
                 }
@@ -384,7 +389,7 @@ struct SettingsScreen: View {
                 // in the system browser.
                 ForEach([LegalPage.terms, LegalPage.privacy], id: \.path) { page in
                     if let url = page.url() {
-                        row(l10n.t(page.titleKey), systemImage: "doc.plaintext") {
+                        row(l10n.t(page.titleKey), icon: .doc) {
                             openURL(url)
                         }
                     }
@@ -408,20 +413,20 @@ struct SettingsScreen: View {
                 Button(role: .destructive) {
                     confirmingLogout = true
                 } label: {
-                    Label(l10n.t("settings.account.log_out"), systemImage: "rectangle.portrait.and.arrow.right")
+                    Label(l10n.t("settings.account.log_out"), icon: .logout)
                 }
                 .disabled(accountDeletion.isBusy)
                 Button(role: .destructive) {
                     confirmingForget = true
                 } label: {
-                    Label(l10n.t("settings.account.forget_device.label"), systemImage: "trash")
+                    Label(l10n.t("settings.account.forget_device.label"), icon: .trash)
                 }
                 .disabled(accountDeletion.isBusy)
                 Button(role: .destructive) {
                     confirmingDelete = true
                 } label: {
                     HStack {
-                        Label(l10n.t("settings.account.delete.confirm"), systemImage: "person.crop.circle.badge.xmark")
+                        Label(l10n.t("settings.account.delete.confirm"), icon: .personCircleXmark)
                         if accountDeletion.isBusy {
                             Spacer()
                             ProgressView().controlSize(.small)
@@ -468,14 +473,13 @@ struct SettingsScreen: View {
         }
     }
 
-    private func row(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func row(_ title: String, icon: LkIcon, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack {
-                Label(title, systemImage: systemImage)
+                Label(title, icon: icon)
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
-                Image(systemName: "chevron.forward")
-                    .font(.footnote.weight(.semibold))
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
         }
@@ -496,12 +500,11 @@ private struct DevicesSettingsRow: View {
         let attention = notice.badgeVisible
         Button(action: action) {
             HStack {
-                Label(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone")
+                Label(l10n.t("settings.devices.title"), icon: .devices)
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
                 if attention { NewDeviceAttentionBadge() }
-                Image(systemName: "chevron.forward")
-                    .font(.footnote.weight(.semibold))
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
         }
@@ -537,8 +540,7 @@ struct TextSizeScreen: View {
                             Text(l10n.t(step.labelKey)).foregroundStyle(Color.lakkoText)
                             Spacer()
                             if step == selected {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
+                                LkIconView(.checkmark, size: 20)
                                     .foregroundStyle(Color.lakkoAccent)
                             }
                         }

@@ -68,8 +68,9 @@ enum BrandedQr {
 
     /// The module matrix CoreImage produced, one pixel per module, read back
     /// and cropped to the dark modules' bounds (the symbol always has dark
-    /// modules in its first and last row and column: the finders).
-    private static func matrix(text: String, level: String) -> (size: Int, dark: [Bool])? {
+    /// modules in its first and last row and column: the finders). Also used
+    /// by the donation QR codes (``DonationQr``), which style it differently.
+    static func matrix(text: String, level: String) -> (size: Int, dark: [Bool])? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8)
         filter.correctionLevel = level

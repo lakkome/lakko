@@ -163,8 +163,14 @@ public fun attestationAgeAt(signedAtMs: Long, nowMs: Long, signedInAgainMs: Long
 
 /** Why the publish of a reset is still owed, as the phrase screen shows it. */
 public sealed interface PublishOwedReason {
-    /** A step failed and can be retried. */
-    public class Retryable(public val cause: Throwable?, public val retryAfterSecs: Long? = null) : PublishOwedReason
+    /** A step failed and can be retried. [observedAtMs] is when the refusal
+     *  was seen, so a stated wait ([retryAfterSecs]) counts from then and
+     *  not from when a screen first draws it. */
+    public class Retryable(
+        public val cause: Throwable?,
+        public val retryAfterSecs: Long? = null,
+        public val observedAtMs: Long = System.currentTimeMillis(),
+    ) : PublishOwedReason
 
     /** The attestation is older than 30 days: sign in again first. */
     public data object SignInRequired : PublishOwedReason
@@ -176,6 +182,76 @@ public sealed interface PublishOwedReason {
      *  attest key and the JWKS fetch failed): nothing is sent with it. */
     public class Unverified(public val cause: Throwable?) : PublishOwedReason
 }
+
+/**
+ * The directory's cool-down wait (UX identity-recovery 15.4, "Waiting for the
+ * directory"): `429 identity-changed-too-recently` with a readable
+ * `retry_after_secs` from `POST /discovery/identity`. Any other refusal, a
+ * `429` with another code, or one with no readable wait, is not this state.
+ * Returns the stated wait in seconds, or `null`.
+ */
+public fun publishCooldownSecs(reason: PublishOwedReason?): Long? {
+    val retryable = reason as? PublishOwedReason.Retryable ?: return null
+    val err = retryable.cause as? DiscoveryHttpError ?: return null
+    if (err.status != HTTP_TOO_MANY || err.code != DISCOVERY_IDENTITY_CHANGED_TOO_RECENTLY) return null
+    return retryable.retryAfterSecs?.takeIf { it > 0 }
+}
+
+/**
+ * What the publish-owed screen shows for [reason] at [nowMs] (UX 15.4).
+ *
+ * - [leadKeys]: catalog keys shown as they are, joined by a blank line.
+ * - [waitingMinutes]: when non-null, [waitingKey] with `{minutes}` = this
+ *   value follows the lead (minutes left, rounded up, at least 1).
+ * - [waitingKey]: the waiting sentence, `recovery_phrase.fresh.publish_waiting`
+ *   for a phrase-protected account, `account.keys_changed.waiting` (no word
+ *   about words) for any other; non-null exactly when [waitingMinutes] is.
+ * - [showTryAgain]: whether the "Try again" button is there.
+ * - [autoRetryAtMs]: when non-null, the screen retries by itself at that
+ *   time (immediately when it is already past).
+ */
+public data class PublishOwedScreenModel(
+    val leadKeys: List<String>,
+    val waitingMinutes: Long?,
+    val showTryAgain: Boolean,
+    val autoRetryAtMs: Long?,
+    val waitingKey: String? = null,
+)
+
+/** The decision behind [PublishOwedScreenModel]. [wordless]: the account is
+ *  not phrase-protected (ADR-0075), so the copy must not mention words; it
+ *  waits with `account.keys_changed.waiting`. */
+public fun publishOwedScreenModel(
+    reason: PublishOwedReason,
+    wordless: Boolean,
+    nowMs: Long,
+): PublishOwedScreenModel {
+    val owed = if (wordless) "account.keys_changed.finishing" else "recovery_phrase.fresh.publish_owed"
+    val cooldown = publishCooldownSecs(reason)
+    if (cooldown != null && reason is PublishOwedReason.Retryable) {
+        val retryAt = reason.observedAtMs + cooldown * MILLIS_PER_SECOND
+        val leftMs = (retryAt - nowMs).coerceAtLeast(0L)
+        val minutes = ((leftMs + MILLIS_PER_MINUTE - 1) / MILLIS_PER_MINUTE).coerceAtLeast(1L)
+        return PublishOwedScreenModel(
+            leadKeys = emptyList(),
+            waitingMinutes = minutes,
+            showTryAgain = false,
+            autoRetryAtMs = retryAt,
+            waitingKey = if (wordless) "account.keys_changed.waiting" else "recovery_phrase.fresh.publish_waiting",
+        )
+    }
+    return when (reason) {
+        is PublishOwedReason.SignInRequired ->
+            PublishOwedScreenModel(listOf("recovery_phrase.fresh.sign_in_to_finish"), null, showTryAgain = false, autoRetryAtMs = null)
+        is PublishOwedReason.Refused, is PublishOwedReason.Unverified ->
+            PublishOwedScreenModel(listOf(owed, "recovery_phrase.fresh.publish_refused"), null, showTryAgain = true, autoRetryAtMs = null)
+        is PublishOwedReason.Retryable ->
+            PublishOwedScreenModel(listOf(owed), null, showTryAgain = true, autoRetryAtMs = null)
+    }
+}
+
+private const val MILLIS_PER_SECOND: Long = 1000L
+private const val MILLIS_PER_MINUTE: Long = 60_000L
 
 /**
  * The per-account row of [KeyResetOwed]. Plain storage: the attestation is a

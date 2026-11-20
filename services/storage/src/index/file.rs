@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The file-backed blob index: one append-only log file, replayed into
-//! memory at startup and rewritten compactly there and after each sweep.
+//! The file-backed blob and vault index: one append-only log file, replayed
+//! into memory at startup and rewritten compactly there and after each sweep.
 //!
 //! For development, tests and a single instance with no database. It cannot
 //! coordinate two instances (each would replay its own copy).
@@ -16,11 +16,17 @@
 //! t <id hex> <day>
 //! d <id hex>
 //! i <node> <day>
+//! V <vault id hex> <write_pk hex> <node> <created_day>
+//! O <vault id hex> <kind> <chunk_no> <version> <token hex> <size>
+//! X <vault id hex>
 //! ```
 //!
 //! `b` writes a whole row (a line without the idle-days field, written before
 //! ADR-0087, reads as no idle life), `t` raises a row's last access, `d` removes a
-//! row, `i` marks a node's import done. Node names carry no whitespace
+//! row, `i` marks a node's import done. `V` claims a vault, `O` commits a
+//! version of one of its objects, `X` deletes a vault with its objects
+//! ([`vault`]); vault reservations and the write-rate window live in memory
+//! only, so a restart frees every reservation. Node names carry no whitespace
 //! (checked at configuration). Row and removal records are flushed to disk
 //! before the call returns; an access record is not, since losing one only
 //! makes a blob look a day or so older.
@@ -33,12 +39,15 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use super::{is_expired, BlobId, BlobIndex, BlobRow, IndexError, UploadOutcome};
+use super::{is_expired, BlobId, BlobIndex, BlobRow, IndexError, UploadOutcome, VaultId};
+
+mod vault;
 
 /// The index state and its open log.
 struct Inner {
     rows: HashMap<BlobId, BlobRow>,
     imported: HashMap<String, u32>,
+    vaults: HashMap<VaultId, vault::FileVault>,
     log: File,
 }
 
@@ -68,15 +77,20 @@ fn row_line(r: &BlobRow) -> String {
     )
 }
 
-/// The rows and the per-node import days a replay rebuilds.
-type Replayed = (HashMap<BlobId, BlobRow>, HashMap<String, u32>);
+/// The rows, the per-node import days and the vaults a replay rebuilds.
+type Replayed = (
+    HashMap<BlobId, BlobRow>,
+    HashMap<String, u32>,
+    HashMap<VaultId, vault::FileVault>,
+);
 
 fn replay(path: &Path) -> Result<Replayed, IndexError> {
     let mut rows = HashMap::new();
     let mut imported = HashMap::new();
+    let mut vaults = HashMap::new();
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((rows, imported)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((rows, imported, vaults)),
         Err(e) => return Err(e.into()),
     };
     for (n, line) in BufReader::new(file).lines().enumerate() {
@@ -126,10 +140,13 @@ fn replay(path: &Path) -> Result<Replayed, IndexError> {
             ["i", node, day] => {
                 imported.insert((*node).to_string(), day.parse().map_err(|_| bad())?);
             },
+            ["V" | "O" | "X", ..] => {
+                vault::replay_line(&mut vaults, &f).ok_or_else(bad)?;
+            },
             _ => return Err(bad()),
         }
     }
-    Ok((rows, imported))
+    Ok((rows, imported, vaults))
 }
 
 /// Write the compact form of the state to `path` atomically and return the
@@ -138,6 +155,7 @@ fn compact(
     path: &Path,
     rows: &HashMap<BlobId, BlobRow>,
     imported: &HashMap<String, u32>,
+    vaults: &HashMap<VaultId, vault::FileVault>,
 ) -> Result<File, IndexError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::Builder::new()
@@ -151,6 +169,9 @@ fn compact(
         for r in rows.values() {
             w.write_all(row_line(r).as_bytes())?;
         }
+        for v in vaults.values() {
+            w.write_all(v.compact_lines().as_bytes())?;
+        }
         w.sync_data()?;
     }
     tmp.persist(path).map_err(|e| IndexError::Io(e.error))?;
@@ -163,13 +184,14 @@ impl FileIndex {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let (rows, imported) = replay(&path)?;
-        let log = compact(&path, &rows, &imported)?;
+        let (rows, imported, vaults) = replay(&path)?;
+        let log = compact(&path, &rows, &imported, &vaults)?;
         Ok(Self {
             path,
             inner: Mutex::new(Inner {
                 rows,
                 imported,
+                vaults,
                 log,
             }),
         })
@@ -186,7 +208,7 @@ impl FileIndex {
     /// Rewrite the log compactly (after a sweep removed many rows).
     pub(crate) fn compact_now(&self) -> Result<(), IndexError> {
         let mut g = self.lock();
-        let log = compact(&self.path, &g.rows, &g.imported)?;
+        let log = compact(&self.path, &g.rows, &g.imported, &g.vaults)?;
         g.log = log;
         Ok(())
     }

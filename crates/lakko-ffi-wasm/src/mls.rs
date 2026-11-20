@@ -370,6 +370,31 @@ impl Identity {
         key_package::serialize(&kp).map_err(mls_err)
     }
 
+    /// Mint a re-entry KeyPackage for the conversation `groupId`, naming
+    /// `epochLeft`, the `latest_epoch` this device read (ADR-0091 M1), in TLS
+    /// wire form. Record it durably BEFORE sending the request:
+    /// `Group.joinReentry` takes the recorded packages. Keep the last two per
+    /// conversation and `forgetKeyPackage` older ones. Never published.
+    #[wasm_bindgen(js_name = createReentryKeyPackage)]
+    pub fn create_reentry_key_package(
+        &self,
+        group_id: &[u8],
+        epoch_left: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let kp = self
+            .inner
+            .create_reentry_key_package(group_id, epoch_left)
+            .map_err(mls_err)?;
+        key_package::serialize(&kp).map_err(mls_err)
+    }
+
+    /// Delete the private keys of a KeyPackage this identity minted (wire
+    /// form). Persist the snapshot afterwards.
+    #[wasm_bindgen(js_name = forgetKeyPackage)]
+    pub fn forget_key_package(&self, key_package: &[u8]) -> Result<(), JsValue> {
+        self.inner.forget_key_package(key_package).map_err(mls_err)
+    }
+
     /// Create an external-join proposal — the joiner side of ADR-0027 (G-3).
     ///
     /// A non-member crafts an external Add proposal for a group's current
@@ -1040,6 +1065,72 @@ impl From<lakko_mls::GroupKind> for GroupKind {
     }
 }
 
+/// What `Group.reentryRequestTarget` found (ADR-0091 section 4).
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReentryTarget {
+    replaced_leaf: u32,
+    signature_key: Vec<u8>,
+    account_key: Vec<u8>,
+    epoch_left: u64,
+}
+
+#[wasm_bindgen]
+impl ReentryTarget {
+    /// The current leaf the re-entry KeyPackage replaces.
+    #[wasm_bindgen(getter, js_name = replacedLeaf)]
+    #[must_use]
+    pub fn replaced_leaf(&self) -> u32 {
+        self.replaced_leaf
+    }
+
+    /// That leaf's 32-byte signature key.
+    #[wasm_bindgen(getter, js_name = signatureKey)]
+    #[must_use]
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.signature_key.clone()
+    }
+
+    /// The account the leaf belongs to.
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    #[must_use]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account_key.clone()
+    }
+
+    /// The epoch the marker names (this group's current epoch).
+    #[wasm_bindgen(getter, js_name = epochLeft)]
+    #[must_use]
+    pub fn epoch_left(&self) -> u64 {
+        self.epoch_left
+    }
+}
+
+/// The two proposals of a re-entry replacement, in publishing order.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReentryProposals {
+    add: Vec<u8>,
+    remove: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl ReentryProposals {
+    /// The `Add(K)` proposal: publish first.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn add(&self) -> Vec<u8> {
+        self.add.clone()
+    }
+
+    /// The `Remove(L)` proposal: publish second.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn remove(&self) -> Vec<u8> {
+        self.remove.clone()
+    }
+}
+
 /// Lakko MLS conversation group. Mirror of UniFFI's `Group`.
 #[wasm_bindgen]
 pub struct Group {
@@ -1085,6 +1176,52 @@ impl Group {
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// Join a conversation over the stale active group this device holds,
+    /// from the Welcome of the commit that replaced its leaf (ADR-0091 M3).
+    /// `recordedKeyPackages` are the re-entry packages this device recorded
+    /// before sending its requests. Otherwise throws a
+    /// `reentryWelcomeRefused` refusal and nothing changes. Persist the
+    /// snapshot after a join.
+    #[wasm_bindgen(js_name = joinReentry)]
+    pub fn join_reentry(
+        welcome: &[u8],
+        identity: &Identity,
+        recorded_key_packages: Vec<js_sys::Uint8Array>,
+    ) -> Result<Group, JsValue> {
+        let recorded: Vec<Vec<u8>> = recorded_key_packages
+            .into_iter()
+            .map(|a| a.to_vec())
+            .collect();
+        Self::join_reentry_core(welcome, identity, &recorded).map_err(MlsFailure::into_js)
+    }
+
+    /// Check a re-entry request's KeyPackage against this group (ADR-0091
+    /// section 4). Throws a `reentryPairInvalid` refusal when it is not a
+    /// re-entry for this group at this epoch. The rest of the decision is
+    /// `reentryAdmissionVerdict`.
+    #[wasm_bindgen(js_name = reentryRequestTarget)]
+    pub fn reentry_request_target(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryTarget, JsValue> {
+        self.reentry_request_target_core(identity, key_package)
+            .map_err(MlsFailure::into_js)
+    }
+
+    /// Propose the replacement a re-entry request asks for: `Add(K)` then
+    /// `Remove(L)` from this device (ADR-0091 section 4). Publish `add`
+    /// first. Nothing is proposed when it throws.
+    #[wasm_bindgen(js_name = proposeReentryReplacement)]
+    pub fn propose_reentry_replacement(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryProposals, JsValue> {
+        self.propose_reentry_replacement_core(identity, key_package)
+            .map_err(MlsFailure::into_js)
     }
 
     /// Load a previously persisted MLS group from `identity`'s
@@ -2246,6 +2383,50 @@ impl Group {
     }
 
     /// Core of [`Self::delete_locally`].
+    /// Core of [`Self::join_reentry`].
+    fn join_reentry_core(
+        welcome: &[u8],
+        identity: &Identity,
+        recorded: &[Vec<u8>],
+    ) -> Result<Self, MlsFailure> {
+        let inner = MlsGroup::join_reentry(welcome, &identity.inner, recorded)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Core of [`Self::reentry_request_target`].
+    fn reentry_request_target_core(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryTarget, MlsFailure> {
+        let t = self
+            .locked()?
+            .reentry_request_target(&identity.inner, key_package)?;
+        Ok(ReentryTarget {
+            replaced_leaf: t.replaced_leaf,
+            signature_key: t.signature_key,
+            account_key: t.account_key,
+            epoch_left: t.epoch_left,
+        })
+    }
+
+    /// Core of [`Self::propose_reentry_replacement`].
+    fn propose_reentry_replacement_core(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<ReentryProposals, MlsFailure> {
+        let p = self
+            .locked()?
+            .propose_reentry_replacement(&identity.inner, key_package)?;
+        Ok(ReentryProposals {
+            add: p.add,
+            remove: p.remove,
+        })
+    }
+
     fn delete_locally_core(&self, identity: &Identity) -> Result<(), MlsFailure> {
         Ok(self.locked()?.delete(&identity.inner)?)
     }
@@ -2437,66 +2618,217 @@ pub struct PublisherGroup {
     inner: Mutex<MlsPublisherGroup>,
 }
 
+fn lock_pg(
+    m: &Mutex<MlsPublisherGroup>,
+) -> Result<std::sync::MutexGuard<'_, MlsPublisherGroup>, JsValue> {
+    m.lock().map_err(|_| js_error("internal lock poisoned"))
+}
+
+fn seed32(bytes: &[u8], what: &str) -> Result<[u8; 32], JsValue> {
+    bytes
+        .try_into()
+        .map_err(|_| js_error(&format!("{what} must be 32 bytes")))
+}
+
+fn processed_of(result: MlsIncoming) -> ProcessedMessage {
+    match result {
+        MlsIncoming::Application {
+            bytes,
+            sender_leaf,
+            sender_account,
+        } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
+        MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+        MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
+        MlsIncoming::ExternalJoinProposal {
+            joiner_signature_key,
+            retained,
+        } => ProcessedMessage::external_join(joiner_signature_key, retained),
+    }
+}
+
+/// A staged PublisherGroup commit (ADR-0090 section 3): the commit to send
+/// through `POST /ds/group/{hex}/commit` and, when it adds leaves, the
+/// Welcome to deliver once it merged.
+#[wasm_bindgen]
+pub struct PublisherCommit {
+    commit: Vec<u8>,
+    welcome: Option<Vec<u8>>,
+}
+
+#[wasm_bindgen]
+impl PublisherCommit {
+    /// The encoded commit.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn commit(&self) -> Vec<u8> {
+        self.commit.clone()
+    }
+
+    /// The encoded Welcome, `undefined` when the commit adds nobody.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn welcome(&self) -> Option<Vec<u8>> {
+        self.welcome.clone()
+    }
+}
+
+/// What `PublisherGroup.enter` returns (ADR-0064 section 7): the entered
+/// group, HOLDING its entry until the Delivery Service answers, and the
+/// external commit to send. Take the group once with `takeGroup`.
+#[wasm_bindgen]
+pub struct PublisherGroupEntry {
+    group: Option<PublisherGroup>,
+    commit: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl PublisherGroupEntry {
+    /// The external commit, wire-encoded.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn commit(&self) -> Vec<u8> {
+        self.commit.clone()
+    }
+
+    /// The entered group (the UniFFI record's `group`). Throws on a second
+    /// call.
+    #[wasm_bindgen(js_name = takeGroup)]
+    pub fn take_group(&mut self) -> Result<PublisherGroup, JsValue> {
+        self.group
+            .take()
+            .ok_or_else(|| js_error("the entered group was already taken"))
+    }
+}
+
 #[wasm_bindgen]
 impl PublisherGroup {
-    /// Mint a fresh PublisherGroup for `channel_id`. Persists
-    /// the MLS state via the OpenMLS provider; subsequent
-    /// [`PublisherGroup.load`] calls return the same group.
+    /// ADR-0064 section 7 (amendment of 2026-11-14) — an owner device that
+    /// holds no PublisherGroup for `channelId` enters from a GroupInfo
+    /// another owner device saved, by an external commit carrying its
+    /// ExternalInit alone and this device's bound leaf. The group HOLDS the
+    /// entry: `hasStagedCommit` is `true`, `stagedChannelSeed` and
+    /// `dsStagedAccessSigner` answer for the epoch it moves to, `epoch` is the
+    /// epoch it leaves; `channelSeed`, `groupInfo` and every send and receive
+    /// are refused until `mergeStagedCommit` (`201` / `200`).
+    /// `abandonStagedCommit` (`409`) deletes everything the entry wrote. The
+    /// entry rides the storage snapshot (`PublisherGroup.load` opens it still
+    /// held). Refused before anything is written for a device not bound to
+    /// the owner's account, a GroupInfo of another group, one not signed by a
+    /// device of the owner, an owner at 8 devices, a leaf that is not a bound
+    /// device, a device that already holds the group or whose leaf is in it.
     ///
-    /// `channel_id` MUST be exactly 16 bytes (
-    /// [`lakko_mls::CHANNEL_ID_LEN`]).
-    #[wasm_bindgen(constructor)]
-    pub fn new(identity: &Identity, channel_id: &[u8]) -> Result<PublisherGroup, JsValue> {
+    /// G-55: `dsAccessSeed` is the 32-byte Delivery Service access seed saved
+    /// with the GroupInfo (`VaultReentryEpoch.dsAccessSeed`). `commit` comes
+    /// back wrapped under a key derived from it, so the Delivery Service never
+    /// reads the entering leaf's account binding; members open it in
+    /// `processIncomingVerifyingRoles`. Send it as the commit row unchanged.
+    #[wasm_bindgen(js_name = enter)]
+    pub fn enter(
+        identity: &Identity,
+        group_info: &[u8],
+        owner_account_seed: &[u8],
+        channel_id: &[u8],
+        ds_access_seed: &[u8],
+    ) -> Result<PublisherGroupEntry, JsValue> {
         let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
-        let inner = MlsPublisherGroup::create(&identity.inner, &cid).map_err(mls_err)?;
+        let seed = seed32(owner_account_seed, "ownerAccountSeed")?;
+        let access = seed32(ds_access_seed, "dsAccessSeed")?;
+        let entry = MlsPublisherGroup::enter(&identity.inner, group_info, &seed, &cid, &access)
+            .map_err(mls_err)?;
+        Ok(PublisherGroupEntry {
+            group: Some(Self {
+                inner: Mutex::new(entry.group),
+            }),
+            commit: entry.commit,
+        })
+    }
+
+    /// ADR-0064 section 7 — the GroupInfo of the current epoch (wire bytes,
+    /// with the ratchet tree and the external public key): what an owner
+    /// device saves so another owner device can `enter`. Refused while an
+    /// entry awaits its verdict.
+    #[wasm_bindgen(js_name = groupInfo)]
+    pub fn group_info(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        g.group_info(&identity.inner).map_err(mls_err)
+    }
+
+    /// ADR-0064 section 7 — the GroupInfo of the epoch the staged commit
+    /// moves to, `undefined` when nothing is staged: save it BEFORE sending
+    /// the commit.
+    #[wasm_bindgen(js_name = stagedGroupInfo)]
+    pub fn staged_group_info(&self, identity: &Identity) -> Result<Option<Vec<u8>>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        g.staged_group_info(&identity.inner).map_err(mls_err)
+    }
+
+    /// Found the PublisherGroup of `channelId` with `identity` (this device's
+    /// bound identity) as its only leaf (ADR-0090). `ownerAccountSeed` is the
+    /// owner's 32-byte account seed: it derives the group id and the owner's
+    /// account key, and `identity` must be bound to that account. Only
+    /// create-channel and ADR-0090 decision A's re-founding call it; refused
+    /// when this device already holds a group under that id.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        identity: &Identity,
+        owner_account_seed: &[u8],
+        channel_id: &[u8],
+    ) -> Result<PublisherGroup, JsValue> {
+        let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+        let seed = seed32(owner_account_seed, "ownerAccountSeed")?;
+        let inner = MlsPublisherGroup::create(&identity.inner, &seed, &cid).map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
     }
 
-    /// Load the persisted PublisherGroup for `channel_id`.
-    /// Returns `undefined` (`Option<...> -> None`) when no
-    /// group has been minted yet — pair with
-    /// [`PublisherGroup.openOrCreate`] for the load-or-create
-    /// path every composer wants.
+    /// Open the PublisherGroup this OWNER device holds for `channelId`, or
+    /// `undefined` when it holds none (it then waits to be admitted and never
+    /// founds).
     #[wasm_bindgen(js_name = load)]
-    pub fn load(identity: &Identity, channel_id: &[u8]) -> Result<Option<PublisherGroup>, JsValue> {
+    pub fn load(
+        identity: &Identity,
+        owner_account_seed: &[u8],
+        channel_id: &[u8],
+    ) -> Result<Option<PublisherGroup>, JsValue> {
         let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
-        match MlsPublisherGroup::load(&identity.inner, &cid).map_err(mls_err)? {
-            Some(inner) => Ok(Some(Self {
+        let seed = seed32(owner_account_seed, "ownerAccountSeed")?;
+        Ok(MlsPublisherGroup::load(&identity.inner, &seed, &cid)
+            .map_err(mls_err)?
+            .map(|inner| Self {
                 inner: Mutex::new(inner),
-            })),
-            None => Ok(None),
-        }
+            }))
     }
 
-    /// ADR-0028 OQ3 / ADR-0081 amendment (2026-10-19) — join a PublisherGroup
-    /// as a co-publisher from the owner's Welcome. A PublisherGroup carries no
-    /// role table, so `Group.joinFromWelcome` refuses its Welcome
-    /// (`noRoleTable`); this is its entry point. A Welcome for another group
-    /// than `groupId`, or a conversation's Welcome, is refused before anything
-    /// is written. The joined state persists in `identity`'s provider
-    /// (`loadJoined` reopens it).
+    /// ADR-0090 section 2.3 — join a PublisherGroup from an owner device's
+    /// Welcome: an owner device (`groupId` = `publisherGroupIdForSeed`,
+    /// `ownerAccountKey` = `publisherOwnerAccountKey` of its account seed) or
+    /// a co-publisher device (`groupId` from its `/g/` link, `ownerAccountKey`
+    /// the capability's issuer key). A Welcome sent by anyone but a device of
+    /// that account, for another group, or a conversation's, is refused
+    /// before anything is written.
     #[wasm_bindgen(js_name = joinFromWelcome)]
     pub fn join_from_welcome(
         identity: &Identity,
         welcome: &[u8],
         group_id: &[u8],
         channel_id: &[u8],
+        owner_account_key: &[u8],
     ) -> Result<PublisherGroup, JsValue> {
         let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
-        let inner = MlsPublisherGroup::join_from_welcome(&identity.inner, welcome, group_id, &cid)
-            .map_err(mls_err)?;
+        let owner = seed32(owner_account_key, "ownerAccountKey")?;
+        let inner =
+            MlsPublisherGroup::join_from_welcome(&identity.inner, welcome, group_id, &cid, &owner)
+                .map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
     }
 
-    /// ADR-0028 OQ3 / ADR-0078 section 6 — open a PublisherGroup this identity
-    /// JOINED as a co-publisher, under the `group_id` its `/g/` capability
-    /// conveyed and the `channel_id` that link's sealed preview carried (a
-    /// co-publisher cannot derive the owner's id). `undefined` when nothing is
-    /// stored there; never creates.
+    /// Open a PublisherGroup this device joined, by the id it kept (a
+    /// co-publisher's device). `undefined` when nothing is stored there;
+    /// never creates; throws when the owner's account key was never recorded
+    /// beside the group.
     #[wasm_bindgen(js_name = loadJoined)]
     pub fn load_joined(
         identity: &Identity,
@@ -2504,246 +2836,179 @@ impl PublisherGroup {
         channel_id: &[u8],
     ) -> Result<Option<PublisherGroup>, JsValue> {
         let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
-        match MlsPublisherGroup::load_joined(&identity.inner, group_id, &cid).map_err(mls_err)? {
-            Some(inner) => Ok(Some(Self {
-                inner: Mutex::new(inner),
-            })),
-            None => Ok(None),
-        }
+        Ok(
+            MlsPublisherGroup::load_joined(&identity.inner, group_id, &cid)
+                .map_err(mls_err)?
+                .map(|inner| Self {
+                    inner: Mutex::new(inner),
+                }),
+        )
     }
 
-    /// Load-or-create convenience. Returns the persisted
-    /// PublisherGroup for `(identity, channel_id)` if one
-    /// exists; otherwise mints a fresh one and persists it
-    /// as a side effect. Idempotent across consecutive
-    /// calls — the load-bearing invariant that lets
-    /// subscribers' previously-received seed envelopes keep
-    /// decrypting across publisher restarts.
-    #[wasm_bindgen(js_name = openOrCreate)]
-    pub fn open_or_create(
-        identity: &Identity,
-        channel_id: &[u8],
-    ) -> Result<PublisherGroup, JsValue> {
-        if let Some(existing) = Self::load(identity, channel_id)? {
-            return Ok(existing);
-        }
-        Self::new(identity, channel_id)
-    }
-
-    /// 32-byte channel content-key seed from the MLS
-    /// exporter at the current group epoch. Stable across
-    /// process restarts once the group has been persisted —
-    /// hand directly to the channels composer's
-    /// `ChannelPublisherKeys.seed` field.
+    /// 32-byte channel content-key seed at the current epoch.
     #[wasm_bindgen(js_name = channelSeed)]
     pub fn channel_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        let seed = g.channel_seed(&identity.inner).map_err(mls_err)?;
-        Ok(seed.to_vec())
+        let g = lock_pg(&self.inner)?;
+        Ok(g.channel_seed(&identity.inner).map_err(mls_err)?.to_vec())
     }
 
-    /// Channel id this group was minted for. Returned as raw
-    /// bytes (16 elements) so the JS side can compare with
-    /// whatever shape the channel-discovery layer hands it.
+    /// Channel id this group was opened for (16 bytes).
     #[wasm_bindgen(js_name = channelId)]
     pub fn channel_id(&self) -> Result<Vec<u8>, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         Ok(g.channel_id().as_bytes().to_vec())
     }
 
-    /// G4-2-mls-persistence step 4 — rotate the channel
-    /// content-key seed via an MLS self-update commit.
-    /// Mirror of the UniFFI `PublisherGroup.rotate`. Returns
-    /// the wire-encoded commit bytes; the caller broadcasts
-    /// them to every other PublisherGroup member so they
-    /// advance to the same epoch in lock-step.
-    ///
-    /// After `rotate` resolves, the next `channelSeed` call
-    /// returns the **new-epoch** seed. The web composer
-    /// pairs this with `sealSubscriberSeedEnvelope` + the
-    /// services/channels batch fanout to reseal the seed to
-    /// every subscriber under the new epoch id.
-    #[wasm_bindgen(js_name = rotate)]
-    pub fn rotate(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        g.rotate(&identity.inner).map_err(mls_err)
-    }
-
-    // ADR-0028 OQ3 — co-publisher external-join surface. A PublisherGroup is a
-    // vanilla MLS group, so adding a publisher reuses the group join-ticket +
-    // external-join machinery (ADR-0027/0028) verbatim. These delegate to the
-    // inner Group; the owner mints a `/g/` link over `groupId`, applies the
-    // joiner's external-add via `processIncomingVerifyingRoles`, and approves.
-
     /// The ADR-0053 access signer for the publisher journal at the current
-    /// epoch - the same derivation as `Group.dsAccessSigner` over the
-    /// underlying group. Re-derive after every commit (every rotation).
+    /// epoch. Re-derive after every merged commit.
     #[wasm_bindgen(js_name = dsAccessSigner)]
     pub fn ds_access_signer(
         &self,
         identity: &Identity,
     ) -> Result<crate::ds_proof::DsProofSigner, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         crate::ds_proof::group_signer(g.inner(), &identity.inner)
     }
 
+    /// The access signer of the epoch the staged commit moves to (N+1),
+    /// `undefined` when nothing is staged: its `verifyingKey` is the
+    /// `epochKey` of the commit statement.
+    #[wasm_bindgen(js_name = dsStagedAccessSigner)]
+    pub fn ds_staged_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<crate::ds_proof::DsProofSigner>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        crate::ds_proof::staged_group_signer(g.inner(), &identity.inner)
+    }
+
     /// ADR-0081 - the 32-byte access seed of the current epoch, to record
-    /// with a commit before it merges (a rotation, an approve) so a re-send
-    /// after a reload can prove the epoch the commit left
-    /// (`DsProofSigner.forGroup`). Keep it only in the device-key-encrypted
-    /// record of that commit.
+    /// with a staged commit so a re-send after a reload can prove the epoch
+    /// the commit leaves. Keep it only in the device-key-encrypted record.
     #[wasm_bindgen(js_name = dsAccessSeed)]
     pub fn ds_access_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         crate::ds_proof::group_access_seed(g.inner(), &identity.inner)
     }
 
-    /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
-    /// is minted over this; the joiner targets it when crafting its
-    /// external-join proposal.
+    /// ADR-0064 section 7 - the 32-byte access seed of the epoch the staged
+    /// commit (or a held entry) moves to, `undefined` when nothing is staged:
+    /// saved in the channel's vault head with `stagedGroupInfo`, at epoch
+    /// `epoch + 1`. Secret; keep it only in the sealed head. An entering
+    /// device rebuilds a saved epoch's signer with `DsProofSigner.forGroup`.
+    #[wasm_bindgen(js_name = stagedDsAccessSeed)]
+    pub fn staged_ds_access_seed(&self, identity: &Identity) -> Result<Option<Vec<u8>>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        crate::ds_proof::staged_group_access_seed(g.inner(), &identity.inner)
+    }
+
+    /// The underlying MLS `group_id`.
     #[wasm_bindgen(js_name = groupId)]
     pub fn group_id(&self) -> Result<Vec<u8>, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         Ok(g.group_id())
     }
 
-    /// The current MLS epoch (`bigint`). G-50: a PublisherGroup commit's
-    /// durable record names the epoch it moved the group to, and a restart
-    /// compares it with this.
+    /// The current MLS epoch (`bigint`).
     #[wasm_bindgen(js_name = epoch)]
     pub fn epoch(&self) -> Result<u64, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         Ok(g.epoch())
     }
 
-    /// Process one row read from this journal's **knock** queue (ADR-0053).
-    /// Anything that is not a stranger's external-join proposal for this group
-    /// is refused BEFORE it is processed - a knock row is an unauthenticated
-    /// write, and applying a commit or message someone posted there instead of
-    /// the journal would fork the admins who read knocks from everyone else.
-    /// A row that passes is processed exactly like `processIncomingVerifyingRoles`.
+    /// The owner's 32-byte account key this device recorded for the group.
+    #[wasm_bindgen(js_name = ownerAccountKey)]
+    pub fn owner_account_key(&self) -> Result<Vec<u8>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        Ok(g.owner_account_key().to_vec())
+    }
+
+    /// `true` when `ownerAccountSeed` derives this group's id (every owner
+    /// device), `false` for a co-publisher's own seed.
+    #[wasm_bindgen(js_name = isOwnedBy)]
+    pub fn is_owned_by(&self, owner_account_seed: &[u8]) -> Result<bool, JsValue> {
+        let seed = seed32(owner_account_seed, "ownerAccountSeed")?;
+        let g = lock_pg(&self.inner)?;
+        Ok(g.is_owned_by(&seed))
+    }
+
+    /// `true` when `identity` is bound to the owner's account: a device that
+    /// may commit in this group.
+    #[wasm_bindgen(js_name = isOwnerDevice)]
+    pub fn is_owner_device(&self, identity: &Identity) -> Result<bool, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        Ok(g.is_owner_device(&identity.inner))
+    }
+
+    /// Process one row read from this journal's **knock** queue (ADR-0053):
+    /// anything that is not a stranger's external-join proposal for this
+    /// group is refused before it is processed.
     #[wasm_bindgen(js_name = processKnock)]
     pub fn process_knock(
         &self,
         identity: &Identity,
         bytes: &[u8],
     ) -> Result<ProcessedMessage, JsValue> {
-        {
-            let g = self
-                .inner
-                .lock()
-                .map_err(|_| js_error("internal lock poisoned"))?;
-            if !lakko_mls::is_external_join_proposal_for(bytes, &g.group_id()) {
-                return Err(js_error(
-                    "knock row is not an external-join proposal for this group",
-                ));
-            }
-        }
-        self.process_incoming_verifying_roles(identity, bytes)
+        let mut g = lock_pg(&self.inner)?;
+        Ok(processed_of(
+            g.process_knock(&identity.inner, bytes).map_err(mls_err)?,
+        ))
     }
 
-    /// ADR-0028 OQ3 — process an incoming MLS message on the publisher tier,
-    /// role-gated (ADR-0022). Surfaces a non-member's external-join proposal as
-    /// `ProcessedMessage.externalJoinSignatureKey` so the owner can approve a
-    /// co-publisher.
+    /// Process one message read from the PublisherGroup journal. Every
+    /// commit passes the ADR-0090 commit gate before it merges: one whose
+    /// committer is not a device of the owner, that adds a leaf without a
+    /// verifying device binding, that puts more than 8 leaves of one account
+    /// in the roster, or that carries another proposal kind is refused
+    /// (typed `refusalReason`: `notOwner`, `deviceBindingInvalid`,
+    /// `deviceLimitReached`, `unsupportedProposal`) and not merged.
     #[wasm_bindgen(js_name = processIncomingVerifyingRoles)]
     pub fn process_incoming_verifying_roles(
         &self,
         identity: &Identity,
         bytes: &[u8],
     ) -> Result<ProcessedMessage, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        let result = g
-            .inner_mut()
-            .process_incoming_verifying_roles(&identity.inner, bytes)
-            .map_err(mls_err)?;
-        Ok(match result {
-            MlsIncoming::Application {
-                bytes,
-                sender_leaf,
-                sender_account,
-            } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
-            MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
-            MlsIncoming::ExternalJoinProposal {
-                joiner_signature_key,
-                retained,
-            } => ProcessedMessage::external_join(joiner_signature_key, retained),
-        })
+        let mut g = lock_pg(&self.inner)?;
+        Ok(processed_of(
+            g.process_incoming(&identity.inner, bytes)
+                .map_err(mls_err)?,
+        ))
     }
 
-    /// ADR-0087 section 5 — retain a request to join carried as a bare
-    /// KeyPackage (a co-publisher's, opened from the channel's knock with `openKnockRow`);
-    /// approve it with `approveExternalJoin`.
+    /// ADR-0087 section 5 — retain a co-publisher's request to join (a bare
+    /// KeyPackage opened from the channel's knock); approve it with
+    /// `stageApproveExternalJoin`.
     #[wasm_bindgen(js_name = retainJoinRequest)]
     pub fn retain_join_request(
         &self,
         identity: &Identity,
         key_package: &[u8],
     ) -> Result<JoinRequest, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let mut g = lock_pg(&self.inner)?;
         Ok(g.retain_join_request(&identity.inner, key_package)
             .map_err(mls_err)?
             .into())
     }
 
-    /// ADR-0087 section 7 — encrypt an application message for the
-    /// publishers at the current epoch (the admission-seed envelope a channel
-    /// owner hands its co-publishers); read it with
-    /// `processIncomingVerifyingRoles`.
+    /// Encrypt an application message for the publishers at the current
+    /// epoch (hand-over envelopes, device requests, admission marks).
+    /// Allowed while a commit is staged.
     #[wasm_bindgen(js_name = createApplicationMessage)]
     pub fn create_application_message(
         &self,
         identity: &Identity,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        let msg = g
-            .inner_mut()
-            .create_application_message(&identity.inner, plaintext)
-            .map_err(mls_err)?;
-        group::encode_message(&msg).map_err(mls_err)
+        let mut g = lock_pg(&self.inner)?;
+        g.create_application_message(&identity.inner, plaintext)
+            .map_err(mls_err)
     }
 
-    /// ADR-0087 phase B — the publishers at the current epoch, one
-    /// `GroupMember` per leaf with its account key. Same shape as
-    /// `Group.members()`.
+    /// The publishers at the current epoch, one `GroupMember` per leaf
+    /// (device) with its account key; group by `accountKey`.
     #[wasm_bindgen]
     pub fn members(&self) -> Result<Vec<JsValue>, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         Ok(g.members()
             .into_iter()
             .map(|m| {
@@ -2756,119 +3021,233 @@ impl PublisherGroup {
             .collect())
     }
 
-    /// Whether `identity` is the channel's owner (the account whose seed
-    /// this PublisherGroup's id derives from).
-    #[wasm_bindgen(js_name = isOwnedBy)]
-    pub fn is_owned_by(&self, identity: &Identity) -> Result<bool, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        Ok(g.is_owned_by(&identity.inner))
-    }
-
     /// `false` once a commit removed this device's own leaf.
     #[wasm_bindgen(js_name = isActive)]
     pub fn is_active(&self) -> Result<bool, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
+        let g = lock_pg(&self.inner)?;
         Ok(g.is_active())
     }
 
-    /// ADR-0087 section 15 (phase B) — the owner removes a publisher: every
-    /// leaf of `accountKey` in ONE commit, merged here; returns the encoded
-    /// commit. Take the epoch-N access signer before the call, publish
-    /// through the ADR-0081 commit route, then rotate and reseal.
-    #[wasm_bindgen(js_name = removePublisher)]
-    pub fn remove_publisher(
+    /// Stage ONE commit (ADR-0090 section 3) that admits `admit` (wire
+    /// KeyPackages of devices of accounts that already publish here, as an
+    /// array of `Uint8Array`), retires the leaves whose signature keys are
+    /// `retire` (flat-concatenated 32-byte keys), and carries an update path
+    /// when `rotate`. Owner devices only; nothing merges.
+    #[wasm_bindgen(js_name = stageCommit)]
+    pub fn stage_commit(
+        &self,
+        identity: &Identity,
+        admit: Vec<js_sys::Uint8Array>,
+        retire: &[u8],
+        rotate: bool,
+    ) -> Result<PublisherCommit, JsValue> {
+        let admit: Vec<Vec<u8>> = admit.iter().map(js_sys::Uint8Array::to_vec).collect();
+        let admit: Vec<&[u8]> = admit.iter().map(Vec::as_slice).collect();
+        self.stage_commit_inner(identity, &admit, retire, rotate)
+    }
+
+    fn stage_commit_inner(
+        &self,
+        identity: &Identity,
+        admit: &[&[u8]],
+        retire: &[u8],
+        rotate: bool,
+    ) -> Result<PublisherCommit, JsValue> {
+        let retire = flat_keys(retire)?;
+        let mut g = lock_pg(&self.inner)?;
+        let staged = g
+            .stage_commit(&identity.inner, admit, &retire, rotate)
+            .map_err(mls_err)?;
+        Ok(PublisherCommit {
+            commit: staged.commit,
+            welcome: staged.welcome,
+        })
+    }
+
+    /// Stage a rotation (ADR-0090 section 4). Returns the commit.
+    #[wasm_bindgen(js_name = stageRotate)]
+    pub fn stage_rotate(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
+        let mut g = lock_pg(&self.inner)?;
+        g.stage_rotate(&identity.inner).map_err(mls_err)
+    }
+
+    /// Stage the admission of devices of accounts that already publish here
+    /// (ADR-0090 sections 2.1, 2.2). Returns the commit and the Welcome.
+    #[wasm_bindgen(js_name = stageAdmitDevices)]
+    pub fn stage_admit_devices(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<js_sys::Uint8Array>,
+    ) -> Result<AddMember, JsValue> {
+        let kps: Vec<Vec<u8>> = key_packages
+            .iter()
+            .map(js_sys::Uint8Array::to_vec)
+            .collect();
+        let kps: Vec<&[u8]> = kps.iter().map(Vec::as_slice).collect();
+        self.stage_admit_devices_inner(identity, &kps)
+    }
+
+    fn stage_admit_devices_inner(
+        &self,
+        identity: &Identity,
+        kps: &[&[u8]],
+    ) -> Result<AddMember, JsValue> {
+        let mut g = lock_pg(&self.inner)?;
+        let staged = g
+            .stage_admit_devices(&identity.inner, kps)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: staged.commit,
+            welcome_bytes: staged.welcome,
+        })
+    }
+
+    /// Stage the retirement of the leaves whose signature keys are
+    /// `deviceKeys` (flat-concatenated 32-byte keys). Returns the commit.
+    #[wasm_bindgen(js_name = stageRetireDevices)]
+    pub fn stage_retire_devices(
+        &self,
+        identity: &Identity,
+        device_keys: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let keys = flat_keys(device_keys)?;
+        let mut g = lock_pg(&self.inner)?;
+        g.stage_retire_devices(&identity.inner, &keys)
+            .map_err(mls_err)
+    }
+
+    /// Stage the removal of every leaf of the publisher `accountKey`
+    /// (ADR-0087 section 15). Never the owner's account. Returns the commit.
+    #[wasm_bindgen(js_name = stageRemovePublisher)]
+    pub fn stage_remove_publisher(
         &self,
         identity: &Identity,
         account_key: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        g.remove_publisher(&identity.inner, account_key)
+        let mut g = lock_pg(&self.inner)?;
+        g.stage_remove_publisher(&identity.inner, account_key)
             .map_err(mls_err)
     }
 
-    /// ADR-0087 section 15 (phase B) — a co-publisher steps down: an
-    /// encrypted application message the owner's device applies as
-    /// `removePublisher` of the sender's account. Refused for the owner.
-    #[wasm_bindgen(js_name = stepDown)]
-    pub fn step_down(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        g.step_down(&identity.inner).map_err(mls_err)
-    }
-
-    /// ADR-0028 OQ3 — signature keys of the pending co-publisher external-join
-    /// proposals, flat-concatenated 32-byte chunks (the role-table FFI
-    /// convention). Each chunk is a handle for `approveExternalJoin` /
-    /// `rejectExternalJoin`.
-    #[wasm_bindgen(js_name = pendingExternalJoins)]
-    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsValue> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        Ok(g.inner().pending_external_joins().concat())
-    }
-
-    /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns
-    /// the Commit + the joiner's Welcome, as it always has.
-    ///
-    /// **This is the direct approve, and this is the only type it survives on**
-    /// (ADR-0045 S7). A PublisherGroup carries no ADR-0022 role table, so it has
-    /// no committer to sweep a proposal, and ADR-0045 leaves such a group on
-    /// direct commits. The return type is the difference and it is deliberate:
-    /// `Group.approveExternalJoin` hands back proposal bytes and no Welcome,
-    /// this hands back a merged Commit and a Welcome to deliver now, and neither
-    /// can be used where the other is expected.
-    #[wasm_bindgen(js_name = approveExternalJoin)]
-    pub fn approve_external_join(
+    /// Stage the approval of a retained co-publisher request to join; it
+    /// stays retained until the commit merges. Returns the commit and the
+    /// joiner's Welcome.
+    #[wasm_bindgen(js_name = stageApproveExternalJoin)]
+    pub fn stage_approve_external_join(
         &self,
         identity: &Identity,
         proposal_ref: &[u8],
     ) -> Result<AddMember, JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        let MemberAddition { commit, welcome } = g
-            .approve_external_join(&identity.inner, proposal_ref)
+        let mut g = lock_pg(&self.inner)?;
+        let staged = g
+            .stage_approve_external_join(&identity.inner, proposal_ref)
             .map_err(mls_err)?;
         Ok(AddMember {
-            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
-            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+            commit_bytes: staged.commit,
+            welcome_bytes: staged.welcome,
         })
     }
 
-    /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
-    /// no epoch advance).
-    /// `identity` is what the durable copy of the pending set is written
-    /// through (the request set rides the MLS storage snapshot, so a decision
-    /// survives a restart).
+    /// `true` while a commit of this device awaits the Delivery Service.
+    #[wasm_bindgen(js_name = hasStagedCommit)]
+    pub fn has_staged_commit(&self) -> Result<bool, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        Ok(g.has_staged_commit())
+    }
+
+    /// The channel seed of the epoch the staged commit moves to; never seal
+    /// it to a subscriber before `mergeStagedCommit` (C-90).
+    #[wasm_bindgen(js_name = stagedChannelSeed)]
+    pub fn staged_channel_seed(&self, identity: &Identity) -> Result<Option<Vec<u8>>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        Ok(g.staged_channel_seed(&identity.inner)
+            .map_err(mls_err)?
+            .map(|s| s.to_vec()))
+    }
+
+    /// The journal took the staged commit (`201`, or the identical re-send's
+    /// `200`): merge it. `false` when nothing was staged.
+    #[wasm_bindgen(js_name = mergeStagedCommit)]
+    pub fn merge_staged_commit(&self, identity: &Identity) -> Result<bool, JsValue> {
+        let mut g = lock_pg(&self.inner)?;
+        g.merge_staged_commit(&identity.inner).map_err(mls_err)
+    }
+
+    /// The journal took another commit (`409`): discard the staged one; the
+    /// group stays at N to apply the winner.
+    #[wasm_bindgen(js_name = abandonStagedCommit)]
+    pub fn abandon_staged_commit(&self, identity: &Identity) -> Result<bool, JsValue> {
+        let mut g = lock_pg(&self.inner)?;
+        g.abandon_staged_commit(&identity.inner).map_err(mls_err)
+    }
+
+    /// Delete this device's state for the group, active or not (ADR-0090
+    /// section 2.5). This handle is unusable afterwards.
+    #[wasm_bindgen(js_name = deleteLocally)]
+    pub fn delete_locally(&self, identity: &Identity) -> Result<(), JsValue> {
+        let mut g = lock_pg(&self.inner)?;
+        g.delete(&identity.inner).map_err(mls_err)
+    }
+
+    /// A co-publisher steps down: the application message an owner device
+    /// applies as `stageRemovePublisher` of the sender's account.
+    #[wasm_bindgen(js_name = stepDown)]
+    pub fn step_down(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
+        let mut g = lock_pg(&self.inner)?;
+        g.step_down(&identity.inner).map_err(mls_err)
+    }
+
+    /// Signature keys of the retained co-publisher requests to join,
+    /// flat-concatenated 32-byte chunks.
+    #[wasm_bindgen(js_name = pendingExternalJoins)]
+    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsValue> {
+        let g = lock_pg(&self.inner)?;
+        Ok(g.pending_external_joins().concat())
+    }
+
+    /// Drop a retained co-publisher request to join (local, no commit).
     #[wasm_bindgen(js_name = rejectExternalJoin)]
     pub fn reject_external_join(
         &self,
         identity: &Identity,
         proposal_ref: &[u8],
     ) -> Result<(), JsValue> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| js_error("internal lock poisoned"))?;
-        g.inner_mut()
-            .reject_external_join(&identity.inner, proposal_ref)
-            .map_err(mls_err)?;
-        Ok(())
+        let mut g = lock_pg(&self.inner)?;
+        g.reject_external_join(&identity.inner, proposal_ref)
+            .map_err(mls_err)
     }
+}
+
+fn flat_keys(bytes: &[u8]) -> Result<Vec<&[u8]>, JsValue> {
+    if bytes.len() % 32 != 0 {
+        return Err(js_error(
+            "device keys must be flat-concatenated 32-byte keys",
+        ));
+    }
+    Ok(bytes.chunks_exact(32).collect())
+}
+
+/// The owner's account key (the Ed25519 public key of `ownerAccountSeed`).
+#[wasm_bindgen(js_name = publisherOwnerAccountKey)]
+pub fn publisher_owner_account_key(owner_account_seed: &[u8]) -> Result<Vec<u8>, JsValue> {
+    Ok(
+        lakko_mls::publisher_owner_account_key(&seed32(owner_account_seed, "ownerAccountSeed")?)
+            .to_vec(),
+    )
+}
+
+/// The PublisherGroup id the account whose 32-byte seed is
+/// `ownerAccountSeed` derives for `channelId`.
+#[wasm_bindgen(js_name = publisherGroupIdForSeed)]
+pub fn publisher_group_id_for_seed(
+    owner_account_seed: &[u8],
+    channel_id: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+    Ok(
+        lakko_mls::publisher_group_id_for(&seed32(owner_account_seed, "ownerAccountSeed")?, &cid)
+            .to_vec(),
+    )
 }
 
 /// ADR-0087 section 15 (phase B) — whether a decrypted PublisherGroup
@@ -4102,6 +4481,22 @@ impl HistoryAttachmentInput {
         self.media_val.height = height;
     }
 
+    /// ADR-0092 audio title and artist tags (kept on kind `"audio"` only).
+    #[wasm_bindgen(js_name = setAudioTags)]
+    pub fn set_audio_tags(&mut self, title: Option<String>, artist: Option<String>) {
+        self.media_val.title = title;
+        self.media_val.artist = artist;
+    }
+
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes, at most 4096).
+    /// Not a JPEG, over the bound, or on any attachment but the first image
+    /// or video of the message, it is dropped on encode, as for a live
+    /// envelope.
+    #[wasm_bindgen(js_name = setInlineThumb)]
+    pub fn set_inline_thumb(&mut self, inline_thumb: Option<Vec<u8>>) {
+        self.media_val.inline_thumb = inline_thumb;
+    }
+
     /// ADR-0047 poster frame. `blobId` / `key` MUST be 32 bytes, `nonce`
     /// 12 bytes.
     #[wasm_bindgen(js_name = setThumb)]
@@ -4138,6 +4533,9 @@ fn bound_history_media(
         waveform: a.waveform.take(),
         width: a.width,
         height: a.height,
+        title: a.title.take(),
+        artist: a.artist.take(),
+        inline_thumb: a.inline_thumb.take(),
         thumb: a
             .thumb
             .as_ref()
@@ -4154,6 +4552,9 @@ fn bound_history_media(
     a.waveform = raw.waveform;
     a.width = raw.width;
     a.height = raw.height;
+    a.title = raw.title;
+    a.artist = raw.artist;
+    a.inline_thumb = raw.inline_thumb;
     a.thumb = match (a.thumb.take(), raw.thumb) {
         (Some(mut t), Some(bounded)) => {
             t.mime = bounded.mime;
@@ -4164,6 +4565,20 @@ fn bound_history_media(
         _ => None,
     };
     a
+}
+
+/// ADR-0047 section 6: only the first image or video of a message keeps
+/// its micro thumbnail, as on the envelope route.
+fn keep_history_inline_thumb_on_carrier(
+    attachments: &mut [lakko_mls::history_placeholder::HistoryAttachmentPlaceholder],
+) {
+    let carrier =
+        lakko_attachments::inline_thumb_carrier(attachments.iter().map(|a| a.mime.as_deref()));
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb = None;
+        }
+    }
 }
 
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue> {
@@ -4178,16 +4593,83 @@ fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue
     Ok(arr)
 }
 
+/// The card, reply and forward of a history placeholder with the chat
+/// envelope's bounds applied (`lakko-attachments`): a field the live
+/// envelope would have dropped is dropped here too, alone, so a stored row
+/// that somehow exceeds a bound costs that field and never the message.
+#[allow(clippy::type_complexity)]
+fn bounded_history_extras(
+    card: Option<Vec<u8>>,
+    reply: Option<(i64, Option<String>, Option<String>)>,
+    forward: Option<(Option<String>, Option<Vec<u8>>, Option<i64>)>,
+) -> (
+    Option<Vec<u8>>,
+    Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
+    Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
+) {
+    use lakko_mls::history_placeholder as hp;
+    fn snapshot(v: Option<String>, max: usize) -> Option<String> {
+        v.filter(|s| !s.is_empty() && s.len() <= max)
+    }
+    let card = card.filter(|c| !c.is_empty() && c.len() <= hp::MAX_CHANNEL_INVITE_BYTES);
+    let reply = reply.map(|(target, author, excerpt)| hp::HistoryReplyPlaceholder {
+        target,
+        author: snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES),
+        excerpt: snapshot(excerpt, hp::MAX_REPLY_EXCERPT_BYTES),
+    });
+    let forward = forward.and_then(|(author, group, message)| {
+        let author = snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES);
+        let origin = match (group, message) {
+            (Some(group_id), Some(message_id))
+                if !group_id.is_empty() && group_id.len() <= hp::MAX_ORIGIN_GROUP_BYTES =>
+            {
+                Some(hp::HistoryForwardOrigin {
+                    group_id,
+                    message_id,
+                })
+            },
+            _ => None,
+        };
+        (author.is_some() || origin.is_some())
+            .then_some(hp::HistoryForwardPlaceholder { author, origin })
+    });
+    (card, reply, forward)
+}
+
 /// Encode a placeholder to the canonical `payload_bytes` wire
 /// bytes. `direction` is 0 = outgoing, 1 = incoming, 2 = system.
 /// `attachments` is an `Array<HistoryAttachmentInput>`.
+///
+/// The trailing arguments are optional (version 3): `channelInvite` the
+/// channel invitation card bytes (ADR-0087 section 14); `replyTarget` /
+/// `replyAuthor` / `replyExcerpt` a reply (ADR-0052, present when
+/// `replyTarget` is); `forwardedFrom` / `forwardOriginGroup` (raw group id
+/// bytes) / `forwardOriginMessage` a forward (the origin kept only when both
+/// halves are given). A field out of the envelope's bounds is dropped alone.
+///
+/// `content` (ADR-0092) is the `ContentMessage` of a poll / checklist /
+/// location / contact card / article message, or `undefined`.
+///
+/// `authorKey` (version 6, ADR-0091 live walk 3), the last argument, is the
+/// author's 32-byte key as this device stored it, or `undefined`; a key of
+/// any other length is dropped.
 #[wasm_bindgen(js_name = encodeHistoryPlaceholder)]
+#[allow(clippy::too_many_arguments)]
 pub fn encode_history_placeholder(
     message_id: u64,
     direction: u8,
     created_at: &str,
     text: &str,
     attachments: Vec<HistoryAttachmentInput>,
+    channel_invite: Option<Vec<u8>>,
+    reply_target: Option<i64>,
+    reply_author: Option<String>,
+    reply_excerpt: Option<String>,
+    forwarded_from: Option<String>,
+    forward_origin_group: Option<Vec<u8>>,
+    forward_origin_message: Option<i64>,
+    content: Option<crate::content::JsContentMessage>,
+    author_key: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsValue> {
     use lakko_mls::history_placeholder::{
         HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
@@ -4221,14 +4703,42 @@ pub fn encode_history_placeholder(
             width: media.width,
             height: media.height,
             thumb,
+            title: media.title,
+            artist: media.artist,
+            inline_thumb: media.inline_thumb,
         }));
     }
+    keep_history_inline_thumb_on_carrier(&mut atts);
+    let forward = (forwarded_from.is_some()
+        || forward_origin_group.is_some()
+        || forward_origin_message.is_some())
+    .then_some((forwarded_from, forward_origin_group, forward_origin_message));
+    let (channel_invite, reply, forward) = bounded_history_extras(
+        channel_invite,
+        reply_target.map(|t| (t, reply_author, reply_excerpt)),
+        forward,
+    );
+    let content = match content {
+        None => None,
+        Some(c) => crate::content::content_message_from_js(&c)?.map(|(kind, payload, state)| {
+            lakko_mls::history_placeholder::HistoryContentPlaceholder {
+                kind,
+                payload,
+                state,
+            }
+        }),
+    };
     let msg = HistoryMessagePlaceholder {
         message_id,
         direction: dir,
         created_at: created_at.to_string(),
         text: text.to_string(),
         attachments: atts,
+        channel_invite,
+        reply,
+        forward,
+        content,
+        author_key: author_key.and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok()),
     };
     msg.encode().map_err(mls_err)
 }
@@ -4250,6 +4760,9 @@ pub struct OpenedHistoryAttachment {
     width_val: Option<u32>,
     height_val: Option<u32>,
     thumb_val: Option<OpenedHistoryThumb>,
+    title_val: Option<String>,
+    artist_val: Option<String>,
+    inline_thumb_val: Option<Vec<u8>>,
 }
 
 /// A decoded poster frame (ADR-0047) — flat getters.
@@ -4351,6 +4864,22 @@ impl OpenedHistoryAttachment {
     pub fn thumb(&self) -> Option<OpenedHistoryThumb> {
         self.thumb_val.clone()
     }
+    /// ADR-0092 audio title tag.
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        self.title_val.clone()
+    }
+    /// ADR-0092 audio artist tag.
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> {
+        self.artist_val.clone()
+    }
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes), present only on
+    /// the first image or video of the message.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb_val.clone()
+    }
 }
 
 /// A decoded placeholder — flat getters for the JS caller.
@@ -4363,6 +4892,11 @@ pub struct OpenedHistoryPlaceholder {
     created_at_val: String,
     text_val: String,
     attachments_val: Vec<OpenedHistoryAttachment>,
+    channel_invite_val: Option<Vec<u8>>,
+    reply_val: Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
+    forward_val: Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
+    content_val: JsValue,
+    author_key_val: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -4389,6 +4923,60 @@ impl OpenedHistoryPlaceholder {
     pub fn attachments(&self) -> Vec<OpenedHistoryAttachment> {
         self.attachments_val.clone()
     }
+    /// ADR-0087 section 14 — the channel invitation card, when the message
+    /// carried one.
+    #[wasm_bindgen(getter, js_name = channelInvite)]
+    pub fn channel_invite(&self) -> Option<Vec<u8>> {
+        self.channel_invite_val.clone()
+    }
+    /// ADR-0052 — the reply target's DS `messageId`, when this is a reply.
+    #[wasm_bindgen(getter, js_name = replyTarget)]
+    pub fn reply_target(&self) -> Option<i64> {
+        self.reply_val.as_ref().map(|r| r.target)
+    }
+    #[wasm_bindgen(getter, js_name = replyAuthor)]
+    pub fn reply_author(&self) -> Option<String> {
+        self.reply_val.as_ref().and_then(|r| r.author.clone())
+    }
+    #[wasm_bindgen(getter, js_name = replyExcerpt)]
+    pub fn reply_excerpt(&self) -> Option<String> {
+        self.reply_val.as_ref().and_then(|r| r.excerpt.clone())
+    }
+    /// ADR-0052 decision 2 — the forward's original author, a snapshot.
+    #[wasm_bindgen(getter, js_name = forwardedFrom)]
+    pub fn forwarded_from(&self) -> Option<String> {
+        self.forward_val.as_ref().and_then(|f| f.author.clone())
+    }
+    /// The forward's origin group id (raw bytes), when both halves survive.
+    #[wasm_bindgen(getter, js_name = forwardOriginGroup)]
+    pub fn forward_origin_group(&self) -> Option<Vec<u8>> {
+        self.forward_val
+            .as_ref()
+            .and_then(|f| f.origin.as_ref())
+            .map(|o| o.group_id.clone())
+    }
+    #[wasm_bindgen(getter, js_name = forwardOriginMessage)]
+    pub fn forward_origin_message(&self) -> Option<i64> {
+        self.forward_val
+            .as_ref()
+            .and_then(|f| f.origin.as_ref())
+            .map(|o| o.message_id)
+    }
+
+    /// ADR-0092 — the `ContentMessage` of a content message, or
+    /// `undefined` (also when its payload does not decode; a state that does
+    /// not belong to the content is dropped).
+    #[wasm_bindgen(getter, unchecked_return_type = "ContentMessage | undefined")]
+    pub fn content(&self) -> JsValue {
+        self.content_val.clone()
+    }
+
+    /// Version 6 (ADR-0091 live walk 3) — the author's 32-byte key as the
+    /// sending device stored it, or `undefined`.
+    #[wasm_bindgen(getter, js_name = authorKey)]
+    pub fn author_key(&self) -> Option<Vec<u8>> {
+        self.author_key_val.clone()
+    }
 }
 
 /// Decode canonical `payload_bytes` (produced by
@@ -4396,10 +4984,30 @@ impl OpenedHistoryPlaceholder {
 /// [`OpenedHistoryPlaceholder`].
 #[wasm_bindgen(js_name = decodeHistoryPlaceholder)]
 pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsValue> {
-    let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
+    let mut msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
         .map_err(mls_err)?;
+    keep_history_inline_thumb_on_carrier(&mut msg.attachments);
+    let (channel_invite_val, reply_val, forward_val) = bounded_history_extras(
+        msg.channel_invite,
+        msg.reply.map(|r| (r.target, r.author, r.excerpt)),
+        msg.forward.map(|f| {
+            let (group, message) = f
+                .origin
+                .map_or((None, None), |o| (Some(o.group_id), Some(o.message_id)));
+            (f.author, group, message)
+        }),
+    );
+    let mimes: Vec<Option<String>> = msg.attachments.iter().map(|a| a.mime.clone()).collect();
+    let content_val = msg.content.as_ref().map_or(JsValue::UNDEFINED, |c| {
+        crate::content::content_message_to_js(c.kind, &c.payload, &c.state, &mimes)
+    });
     Ok(OpenedHistoryPlaceholder {
+        author_key_val: msg.author_key.map(|k| k.to_vec()),
+        channel_invite_val,
+        reply_val,
+        forward_val,
         message_id_val: msg.message_id,
+        content_val,
         direction_val: msg.direction.tag(),
         created_at_val: msg.created_at,
         text_val: msg.text,
@@ -4428,6 +5036,9 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
                     width_val: t.width,
                     height_val: t.height,
                 }),
+                title_val: a.title,
+                artist_val: a.artist,
+                inline_thumb_val: a.inline_thumb,
             })
             .collect(),
     })
@@ -5727,6 +6338,88 @@ fn key_32(key: &[u8]) -> Result<[u8; 32], JsValue> {
 
 #[cfg(test)]
 mod tests {
+    /// ADR-0047 section 6 — the micro thumbnail rides the history bundle
+    /// under the envelope's rules: a JPEG within its bound, on the first
+    /// image or video only.
+    #[test]
+    fn inline_thumb_survives_the_history_bundle_on_the_first_media_only() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 3];
+        let attachments: Vec<super::HistoryAttachmentInput> = [
+            ("audio/mp4", jpeg.clone()),
+            ("image/jpeg", jpeg.clone()),
+            ("video/mp4", jpeg.clone()),
+            ("image/png", vec![0x89, b'P', b'N', b'G']),
+        ]
+        .into_iter()
+        .map(|(mime, thumb)| {
+            let mut a = super::HistoryAttachmentInput::new(
+                &[1; 32],
+                &[2; 32],
+                &[3; 12],
+                10,
+                Some(mime.into()),
+                None,
+            );
+            a.set_inline_thumb(Some(thumb));
+            a
+        })
+        .collect();
+        let bytes = super::encode_history_placeholder(
+            7,
+            1,
+            "2026-11-19T12:00:00Z",
+            "",
+            attachments,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("encodes");
+        let back = super::decode_history_placeholder(&bytes).expect("decodes");
+        let thumbs: Vec<_> = back
+            .attachments()
+            .iter()
+            .map(super::OpenedHistoryAttachment::inline_thumb)
+            .collect();
+        assert_eq!(thumbs, vec![None, Some(jpeg), None, None]);
+    }
+
+    /// ADR-0091 live walk 3 — a bundled message keeps its author.
+    #[test]
+    fn the_author_key_survives_the_history_bundle() {
+        let encode = |key: Option<Vec<u8>>| {
+            super::encode_history_placeholder(
+                9,
+                1,
+                "2026-11-20T01:07:00Z",
+                "hi",
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                key,
+            )
+            .expect("encodes")
+        };
+        let back =
+            super::decode_history_placeholder(&encode(Some(vec![0x44; 32]))).expect("decodes");
+        assert_eq!(back.author_key(), Some(vec![0x44; 32]));
+        let none =
+            super::decode_history_placeholder(&encode(Some(vec![0x44; 5]))).expect("decodes");
+        assert_eq!(none.author_key(), None);
+    }
+
     #[test]
     fn a_media_state_signal_round_trips() {
         let call_id = [7u8; 16];
@@ -6323,6 +7016,74 @@ mod tests {
     /// names has to reach the failure the JS error is built from: the caller
     /// reads the journal of exactly that group.
     #[test]
+    fn a_behind_device_comes_back_through_the_wasm_surface() {
+        let alice = Identity::from_seed(&[0xA2u8; 64]).unwrap();
+        let bob = Identity::from_seed(&[0xB2u8; 64]).unwrap();
+        let dave = Identity::from_seed(&[0xD2u8; 64]).unwrap();
+        let a = Group::new(&alice, GroupKind::Group).unwrap();
+        let bob_kp = bob.inner.create_key_package().unwrap();
+        let add = a
+            .locked()
+            .unwrap()
+            .add_member(&alice.inner, bob_kp)
+            .unwrap();
+        let b = Group::join_reentry_core(
+            &lakko_mls::group::encode_message(&add.welcome).unwrap(),
+            &bob,
+            &[],
+        );
+        assert_eq!(
+            b.err().and_then(|f| f.reason),
+            Some(lakko_mls::RefusalReason::ReentryWelcomeRefused),
+            "a first join is not a re-entry",
+        );
+        let b = lakko_mls::Group::join_from_welcome(
+            &lakko_mls::group::encode_message(&add.welcome).unwrap(),
+            &bob.inner,
+        )
+        .unwrap();
+        let _ = b;
+        // bob falls behind: alice adds dave and bob never applies it.
+        a.locked()
+            .unwrap()
+            .add_member(&alice.inner, dave.inner.create_key_package().unwrap())
+            .unwrap();
+        let gid = a.locked().unwrap().group_id();
+        let epoch = a.locked().unwrap().epoch();
+        let k = bob
+            .inner
+            .create_reentry_key_package(&gid, epoch)
+            .map(|kp| lakko_mls::key_package::serialize(&kp).unwrap())
+            .unwrap();
+        let target = a.reentry_request_target_core(&alice, &k).unwrap();
+        assert_eq!(target.signature_key, bob.inner.signature_public_key());
+        let wrong = a
+            .reentry_request_target_core(
+                &alice,
+                &bob.inner
+                    .create_key_package()
+                    .map(|kp| lakko_mls::key_package::serialize(&kp).unwrap())
+                    .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            wrong.reason,
+            Some(lakko_mls::RefusalReason::ReentryPairInvalid)
+        );
+        let props = a.propose_reentry_replacement_core(&alice, &k).unwrap();
+        assert!(!props.add.is_empty() && !props.remove.is_empty());
+        let swept = a
+            .locked()
+            .unwrap()
+            .commit_pending_proposals(&alice.inner)
+            .unwrap()
+            .unwrap();
+        let welcome = lakko_mls::group::encode_message(&swept.welcome.unwrap()).unwrap();
+        let b2 = Group::join_reentry_core(&welcome, &bob, &[k]).unwrap();
+        assert_eq!(b2.locked().unwrap().epoch(), a.locked().unwrap().epoch());
+    }
+
+    #[test]
     fn a_group_still_active_refusal_carries_the_group_id() {
         let alice = Identity::from_seed(&[0xE0u8; 64]).unwrap();
         let group = Group::new(&alice, GroupKind::Group).unwrap();
@@ -6894,59 +7655,193 @@ mod tests {
         vec![byte; lakko_mls::CHANNEL_ID_LEN]
     }
 
+    const OWNER_SEED: [u8; 32] = [0x0A; 32];
+    const COPUB_SEED: [u8; 32] = [0x0C; 32];
+
+    fn bound(tag: u8, account: &[u8; 32]) -> Identity {
+        Identity::from_seed_bound(&[tag; 64], account, 1).unwrap()
+    }
+
     #[test]
     fn wasm_publisher_group_create_then_seed_is_stable() {
-        let alice = Identity::new("alice-pub").unwrap();
+        let alice = bound(0xA1, &OWNER_SEED);
         let cid = channel_id_filled(0xAA);
-
-        let pg = PublisherGroup::new(&alice, &cid).unwrap();
+        let pg = PublisherGroup::new(&alice, &OWNER_SEED, &cid).unwrap();
         let s1 = pg.channel_seed(&alice).unwrap();
-        let s2 = pg.channel_seed(&alice).unwrap();
-        assert_eq!(s1, s2);
+        assert_eq!(s1, pg.channel_seed(&alice).unwrap());
         assert_eq!(s1.len(), 32);
         assert_eq!(pg.channel_id().unwrap(), cid);
+        assert!(pg.is_owned_by(&OWNER_SEED).unwrap());
+        assert!(pg.is_owner_device(&alice).unwrap());
+        assert_eq!(
+            pg.group_id().unwrap(),
+            publisher_group_id_for_seed(&OWNER_SEED, &cid).unwrap()
+        );
+        assert!(
+            PublisherGroup::load(&alice, &OWNER_SEED, &channel_id_filled(0xCC))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn wasm_publisher_group_open_or_create_is_idempotent() {
-        // Same load-bearing test as the UniFFI mirror —
-        // proves the throwaway-group bug stays fixed under
-        // the web composer's call shape.
-        let alice = Identity::new("alice-persist").unwrap();
-        let cid = channel_id_filled(0xBB);
-
-        let first = PublisherGroup::open_or_create(&alice, &cid).unwrap();
-        let s1 = first.channel_seed(&alice).unwrap();
-
-        let second = PublisherGroup::open_or_create(&alice, &cid).unwrap();
-        let s2 = second.channel_seed(&alice).unwrap();
-
-        assert_eq!(s1, s2);
-    }
-
-    #[test]
-    fn wasm_publisher_group_load_returns_none_before_create() {
-        let alice = Identity::new("alice-empty").unwrap();
-        let cid = channel_id_filled(0xCC);
-        let loaded = PublisherGroup::load(&alice, &cid).unwrap();
-        assert!(loaded.is_none());
-    }
-
-    #[test]
-    fn wasm_publisher_group_rotate_changes_seed() {
-        // G4-2-mls-persistence step 4 (wasm). Mirror of the
-        // UniFFI rotate test.
-        let alice = Identity::new("alice-rotate").unwrap();
-        let cid = channel_id_filled(0xEE);
-
-        let pg = PublisherGroup::open_or_create(&alice, &cid).unwrap();
+    fn wasm_publisher_group_staged_rotation_changes_seed_on_merge() {
+        let alice = bound(0xA2, &OWNER_SEED);
+        let pg = PublisherGroup::new(&alice, &OWNER_SEED, &channel_id_filled(0xEE)).unwrap();
         let seed_pre = pg.channel_seed(&alice).unwrap();
+        let _commit = pg.stage_rotate(&alice).unwrap();
+        assert!(pg.has_staged_commit().unwrap());
+        assert_eq!(pg.channel_seed(&alice).unwrap(), seed_pre);
+        assert!(pg.merge_staged_commit(&alice).unwrap());
+        assert_ne!(pg.channel_seed(&alice).unwrap(), seed_pre);
+    }
 
-        let _commit = pg.rotate(&alice).unwrap();
-        let seed_post = pg.channel_seed(&alice).unwrap();
+    /// ADR-0064 section 7 (wasm): an owner device enters from the GroupInfo
+    /// another owner device saved; the member applies it; one seed.
+    #[test]
+    fn wasm_an_owner_device_enters_from_a_saved_group_info() {
+        let cid = channel_id_filled(0x5A);
+        let a = bound(0x5B, &OWNER_SEED);
+        let pg_a = PublisherGroup::new(&a, &OWNER_SEED, &cid).unwrap();
+        assert!(pg_a.staged_group_info(&a).unwrap().is_none());
+        let info = pg_a.group_info(&a).unwrap();
+        let access = pg_a.ds_access_seed(&a).unwrap();
+        let b = bound(0x5C, &OWNER_SEED);
+        let mut entry = PublisherGroup::enter(&b, &info, &OWNER_SEED, &cid, &access).unwrap();
+        // G-55: the row is wrapped and names no account.
+        let owner = lakko_mls::publisher_owner_account_key(&OWNER_SEED);
+        assert!(lakko_mls::is_wrapped_entry(&entry.commit()));
+        assert!(!entry.commit().windows(32).any(|w| w == owner.as_slice()));
+        let pg_b = entry.take_group().unwrap();
+        assert!(entry.group.is_none(), "taken once");
+        assert!(pg_b.has_staged_commit().unwrap());
+        assert_eq!(pg_b.epoch().unwrap(), pg_a.epoch().unwrap());
+        let next_seed = pg_b.staged_ds_access_seed(&b).unwrap().expect("seed");
+        let next = pg_b.staged_channel_seed(&b).unwrap().expect("seed");
+        assert_eq!(
+            pg_a.process_incoming_verifying_roles(&a, &entry.commit())
+                .unwrap()
+                .kind(),
+            "Commit"
+        );
+        assert_eq!(pg_a.ds_access_seed(&a).unwrap(), next_seed);
+        assert!(pg_b.merge_staged_commit(&b).unwrap());
+        assert_eq!(pg_b.channel_seed(&b).unwrap(), next);
+        assert_eq!(pg_a.channel_seed(&a).unwrap(), next);
+        // The refusals are pinned in lakko-mls and on the UniFFI surface; a
+        // refusal here builds a JS error, which a host test cannot construct.
+    }
 
-        assert_ne!(seed_pre, seed_post);
-        assert_eq!(seed_post.len(), 32);
+    /// ADR-0090 S3 (wasm): two owner devices both admit a third; the DS
+    /// takes one commit per epoch, the loser abandons and applies the
+    /// winner, and exactly one commit lands.
+    #[test]
+    fn wasm_two_owner_devices_admit_a_third_and_exactly_one_commit_lands() {
+        let cid = channel_id_filled(0x90);
+        let a = bound(0x91, &OWNER_SEED);
+        let pg_a = PublisherGroup::new(&a, &OWNER_SEED, &cid).unwrap();
+        let gid = pg_a.group_id().unwrap();
+        let owner_key = publisher_owner_account_key(&OWNER_SEED).unwrap();
+        let b = bound(0x92, &OWNER_SEED);
+        let kp_b = b.create_key_package().unwrap();
+        let add_b = pg_a.stage_admit_devices_inner(&a, &[&kp_b]).unwrap();
+        assert!(pg_a.merge_staged_commit(&a).unwrap());
+        let pg_b = PublisherGroup::join_from_welcome(&b, &add_b.welcome(), &gid, &cid, &owner_key)
+            .unwrap();
+
+        let c = bound(0x93, &OWNER_SEED);
+        let kp_c = c.create_key_package().unwrap();
+        let epoch = pg_a.epoch().unwrap();
+        let staged_a = pg_a.stage_commit_inner(&a, &[&kp_c], &[], false).unwrap();
+        let _staged_b = pg_b.stage_admit_devices_inner(&b, &[&kp_c]).unwrap();
+        assert!(pg_a.merge_staged_commit(&a).unwrap());
+        assert!(pg_b.abandon_staged_commit(&b).unwrap());
+        assert_eq!(pg_b.epoch().unwrap(), epoch);
+        assert_eq!(
+            pg_b.process_incoming_verifying_roles(&b, &staged_a.commit())
+                .unwrap()
+                .kind(),
+            "Commit"
+        );
+        let pg_c = PublisherGroup::join_from_welcome(
+            &c,
+            &staged_a.welcome().expect("welcome"),
+            &gid,
+            &cid,
+            &owner_key,
+        )
+        .unwrap();
+        for (pg, id) in [(&pg_a, &a), (&pg_b, &b), (&pg_c, &c)] {
+            assert_eq!(pg.epoch().unwrap(), epoch + 1);
+            assert_eq!(lock_pg(&pg.inner).unwrap().members().len(), 3);
+            assert_eq!(pg.channel_seed(id).unwrap(), pg_a.channel_seed(&a).unwrap());
+        }
+    }
+
+    /// ADR-0090 S3 (wasm): a co-publisher's device request crosses the
+    /// boundary and the owner device applies it.
+    #[test]
+    fn wasm_a_co_publisher_device_request_is_applied_by_the_owner() {
+        let cid = channel_id_filled(0x94);
+        let owner = bound(0x95, &OWNER_SEED);
+        let pg_o = PublisherGroup::new(&owner, &OWNER_SEED, &cid).unwrap();
+        let gid = pg_o.group_id().unwrap();
+        let owner_key = publisher_owner_account_key(&OWNER_SEED).unwrap();
+        let c1 = bound(0x96, &COPUB_SEED);
+        pg_o.retain_join_request(&owner, &c1.create_key_package().unwrap())
+            .unwrap();
+        let approved = pg_o
+            .stage_approve_external_join(&owner, &c1.signature_public_key())
+            .unwrap();
+        assert!(pg_o.merge_staged_commit(&owner).unwrap());
+        let pg_c1 =
+            PublisherGroup::join_from_welcome(&c1, &approved.welcome(), &gid, &cid, &owner_key)
+                .unwrap();
+        // A co-publisher commits nothing (refusal covered in lakko-mls; a
+        // refusal builds a JS error, which a host test cannot create).
+        assert!(!pg_c1.is_owner_device(&c1).unwrap());
+
+        let c2 = bound(0x97, &COPUB_SEED);
+        let kp_c2 = c2.create_key_package().unwrap();
+        let request = lakko_contacts::publisher_device_request::compose_publisher_device_request(
+            &lakko_contacts::publisher_device_request::PublisherDeviceRequest {
+                channel_id: cid.clone().try_into().unwrap(),
+                action: lakko_contacts::publisher_device_request::PublisherDeviceAction::Admit {
+                    key_package: kp_c2.clone(),
+                    mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(
+                        &COPUB_SEED,
+                    ),
+                    delegations: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        let wire = pg_c1.create_application_message(&c1, &request).unwrap();
+        let received = pg_o
+            .process_incoming_verifying_roles(&owner, &wire)
+            .unwrap();
+        let data = received.application_data().expect("application");
+        let decoded =
+            crate::publisher_devices::decode_publisher_device_request_envelope(&data).unwrap();
+        assert_eq!(decoded.action(), "admit");
+        let kp = decoded.key_package().expect("admit");
+        assert_eq!(kp, kp_c2);
+        let admitted = pg_o.stage_admit_devices_inner(&owner, &[&kp]).unwrap();
+        assert!(pg_o.merge_staged_commit(&owner).unwrap());
+        assert_eq!(
+            pg_c1
+                .process_incoming_verifying_roles(&c1, &admitted.commit())
+                .unwrap()
+                .kind(),
+            "Commit"
+        );
+        let pg_c2 =
+            PublisherGroup::join_from_welcome(&c2, &admitted.welcome(), &gid, &cid, &owner_key)
+                .unwrap();
+        assert_eq!(
+            pg_c2.channel_seed(&c2).unwrap(),
+            pg_o.channel_seed(&owner).unwrap()
+        );
     }
 
     /// The peer-facing rank — the input `BeaconObservation.rank` needs. It must

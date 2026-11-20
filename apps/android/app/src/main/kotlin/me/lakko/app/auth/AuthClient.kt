@@ -1765,20 +1765,6 @@ public class AuthClient(
         return resp.sealed_entropy_b64?.let { base64Decode(it) }
     }
 
-    /** `DELETE /vault/passkey`: drop the blob stored for a passkey ("Stop
-     *  restoring keys"). [credentialIdB64] is base64url without padding, as
-     *  the credential list gives it. Returns whether a blob was deleted. */
-    public suspend fun passkeyVaultDelete(sessionToken: String, credentialIdB64: String): Boolean {
-        requireSession(sessionToken)
-        val resp: PasskeyVaultDeleteResponse = sendJson(
-            HttpMethod.Delete,
-            "/vault/passkey",
-            PasskeyVaultCredentialRequest(credential_id_b64 = credentialIdB64),
-            bearer = sessionToken,
-        )
-        return resp.deleted
-    }
-
     /** `GET /vault/passkeys`: the credential ids (base64url, no padding) of
      *  the account's passkeys that restore keys. */
     public suspend fun passkeyVaultList(sessionToken: String): List<String> {

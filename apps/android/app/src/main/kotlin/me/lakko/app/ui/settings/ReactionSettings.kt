@@ -53,14 +53,23 @@ internal fun QuickReactionSettingRow(onSet: (String) -> Unit) {
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(t("settings.appearance.quick_reaction"), modifier = Modifier.weight(1f))
+            me.lakko.app.ui.components.LkIcon(
+                me.lakko.app.R.drawable.ic_lk_thumbsup,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = me.lakko.app.ui.components.LkIconSize.Row,
+            )
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(t("settings.appearance.quick_reaction"))
+                Text(
+                    t("settings.appearance.quick_reaction_sub"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(current, style = MaterialTheme.typography.titleLarge)
         }
-        Text(
-            t("settings.appearance.quick_reaction_sub"),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
     if (picking) {
         me.lakko.app.ui.chat.EmojiPickerSheet(

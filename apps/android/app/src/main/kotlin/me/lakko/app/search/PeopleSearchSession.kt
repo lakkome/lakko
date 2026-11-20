@@ -77,7 +77,8 @@ public enum class RowAction {
     /** **Add contact** while the request is going out (not pressable). */
     ADDING,
 
-    /** **Ask again**: a decline is silent, so a request can stand for good. */
+    /** **Ask again**: a decline is silent, so a request can stand for good;
+     *  offered once it has stood unanswered for a day. */
     ASK_AGAIN,
 
     /** Nothing to press. */
@@ -94,15 +95,26 @@ public data class OutgoingRequests(
     /** Those of them added through an invite link: the link is what they
      *  answer, so there is nothing to ask again. */
     val invitedAccountIdsHex: Set<String> = emptySet(),
+    /** When the newest request in the list went out, by recipient key hex
+     *  and by account id hex (unix ms). */
+    val sentAtMsByIdHex: Map<String, Long> = emptyMap(),
 ) {
     /** Whether a request to this person is waiting. By account id too: their
      *  key may have rotated since the request went out. */
     public fun holds(person: PersonResult): Boolean =
         person.keyHex in keysHex || person.accountIdHex?.let { it in accountIdsHex } == true
 
-    /** Whether the row of this person may offer **Ask again**. */
-    public fun canAskAgain(person: PersonResult): Boolean =
-        holds(person) && person.accountIdHex !in invitedAccountIdsHex
+    /** Whether the row of this person may offer **Ask again**: the request
+     *  in the list has stood unanswered for a day (the one ask-again rule,
+     *  [me.lakko.app.chat.requestStillWaiting]). Right after Add contact the
+     *  row reads Request sent and the button goes away
+     *  (`docs/ux/who-can-find-me.md` section 6.1). */
+    public fun canAskAgain(person: PersonResult, nowMs: Long): Boolean {
+        if (!holds(person) || person.accountIdHex in invitedAccountIdsHex) return false
+        val sentAtMs = listOfNotNull(sentAtMsByIdHex[person.keyHex], person.accountIdHex?.let { sentAtMsByIdHex[it] })
+            .maxOrNull() ?: return false
+        return !me.lakko.app.chat.requestStillWaiting(sentAtMs, nowMs)
+    }
 
     public companion object {
         /** Nobody. */
@@ -122,6 +134,13 @@ public data class OutgoingRequests(
                 accountIdsHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientAccountIdB64) } +
                     invited.map { it.accountIdHex },
                 invitedAccountIdsHex = invited.mapTo(HashSet()) { it.accountIdHex },
+                sentAtMsByIdHex = HashMap<String, Long>().also { at ->
+                    for (r in sent) {
+                        for (id in listOfNotNull(hexOfBase64(r.recipientKeyB64), hexOfBase64(r.recipientAccountIdB64))) {
+                            at[id] = maxOf(at[id] ?: Long.MIN_VALUE, r.sentAtMs)
+                        }
+                    }
+                },
             )
 
         private fun hexOfBase64(b64: String?): String? = try {

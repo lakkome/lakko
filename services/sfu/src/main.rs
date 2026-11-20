@@ -18,13 +18,8 @@ use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lakko_svc_sfu::{
-    build_app_with_media_and_peers, build_app_without_media,
-    config::Config,
-    jwks::JwksCache,
-    media,
-    peer::PeerRegistry,
-    prom::{self, MetricsExporter},
-    VERSION,
+    build_app_with_media_and_peers, build_app_without_media, config::Config, jwks::JwksCache,
+    media, peer::PeerRegistry, prom, VERSION,
 };
 
 #[tokio::main]
@@ -47,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     // Install Prometheus recorder BEFORE anything else can
     // emit a metric — `metrics::counter!` calls before
     // recorder install are silently lost.
-    let exporter = MetricsExporter::install()?;
+    let exporter = prom::install()?;
 
     // Fail-fast on the first JWKS fetch.
     let jwks = JwksCache::fetch_initial(&cfg).await?;
@@ -158,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics_exporter = exporter.clone();
     let metrics_bind = cfg.metrics_bind;
     let metrics_task = tokio::spawn(async move {
-        if let Err(e) = prom::serve(metrics_exporter, metrics_bind).await {
+        if let Err(e) = lakko_metrics::serve(metrics_exporter, metrics_bind).await {
             warn!(error = %e, "metrics: server exited with error");
         }
     });

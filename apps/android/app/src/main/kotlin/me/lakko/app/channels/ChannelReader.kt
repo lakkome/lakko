@@ -150,6 +150,21 @@ public class ChannelReader(
             MessageBodyKind.CHAT -> ChannelRowContent.Post(body.text, body.attachments, body.channelInvite)
             MessageBodyKind.EDIT -> body.target?.let { ChannelRowContent.Edit(it, body.text) } ?: ChannelRowContent.Hidden
             MessageBodyKind.DELETE -> body.target?.let { ChannelRowContent.Delete(it) } ?: ChannelRowContent.Hidden
+            // ADR-0092 — content posts, and a publisher's close of a poll with
+            // its frozen tally.
+            MessageBodyKind.POLL,
+            MessageBodyKind.CHECKLIST,
+            MessageBodyKind.LOCATION,
+            MessageBodyKind.CONTACT_CARD,
+            MessageBodyKind.ARTICLE,
+            -> ChannelRowContent.Post(body.text, body.attachments, null, body.content)
+            MessageBodyKind.POLL_CLOSE -> body.target?.let { ChannelRowContent.Close(it, body.pollTally) } ?: ChannelRowContent.Hidden
+            MessageBodyKind.CHECKLIST_TICK -> body.target?.let {
+                ChannelRowContent.ChecklistOp(it, add = false, item = body.checklistItem, done = body.checklistDone ?: false, text = "")
+            } ?: ChannelRowContent.Hidden
+            MessageBodyKind.CHECKLIST_ADD -> body.target?.let {
+                ChannelRowContent.ChecklistOp(it, add = true, item = null, done = false, text = body.text)
+            } ?: ChannelRowContent.Hidden
             // Section 13 — no typing, no read marks, no reply and no
             // in-band reactions in a channel; a service envelope is never
             // a post.
@@ -212,6 +227,26 @@ public class ChannelReader(
 }
 
 /**
+ * Section 12 — the visibility of [channelId] as this device knows it
+ * ([channelIsPublic] over the held metadata record and read key); `null`
+ * when nothing says, which shows no header line.
+ */
+public fun channelVisibilityOf(
+    context: Context,
+    accountIdB64: String?,
+    channel: ChannelHandle?,
+    channelId: String,
+): Boolean? {
+    val record = channel?.sharedMeta()?.fullRecord()
+    val recordPublic = record?.listed ?: channel?.takeIf { it.sharedUpdatedAtMs != null }?.sharedListed
+    return channelIsPublic(
+        handlePublic = record?.handle?.public,
+        recordPublic = recordPublic,
+        holdsReadKey = ChannelReadKeys.get(context, accountIdB64, channelId) != null,
+    )
+}
+
+/**
  * Section 6 — a public channel's read key as the record or a link carried it,
  * per account and channel. Not secret beyond the channel (it is in the public
  * record), so plain preferences.
@@ -237,6 +272,8 @@ public object ChannelReadKeys {
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(key(accountIdB64, channelId), Base64.encodeToString(readKey, Base64.NO_WRAP))
             .apply()
+        // docs/ux/second-device.md section 4a — the register carries it.
+        ChannelSubscriptionSync.noteReadKeyStored()
     }
 
     /** Forget device / Delete account. */

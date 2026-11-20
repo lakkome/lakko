@@ -55,8 +55,15 @@ public class ChannelFeedback(
         val avatar: uniffi.lakko_ffi_uniffi.FfiAvatarRef? = null,
     )
 
-    /** One page of a thread. */
-    public data class CommentPage(val comments: List<Comment>, val nextAfter: Long, val more: Boolean)
+    /** One page of a thread. [rowsRead] is how many rows the service
+     *  returned, opened or not: a row that did not open and a banned
+     *  author's row are left out of [comments] but were read. */
+    public data class CommentPage(
+        val comments: List<Comment>,
+        val nextAfter: Long,
+        val more: Boolean,
+        val rowsRead: Int = comments.size,
+    )
 
     private fun account(): String = state.boundAccount ?: throw IllegalStateException("no account bound")
 
@@ -83,6 +90,7 @@ public class ChannelFeedback(
         if (readable.isEmpty()) return emptyMap()
         val summary = client.reactionSummary(channelId, readable.map { it.toULong() })
         val counts = summary.labels
+        for ((cursor, v) in summary.votes) pollVotes[cursor.toLong()] = v
         for ((cursor, n) in summary.comments) commentCounts[cursor.toLong()] = n
         val acct = account()
         val out = HashMap<Long, List<Chip>>()
@@ -102,6 +110,84 @@ public class ChannelFeedback(
         }
         return out
     }
+
+    // ------------------------------------------------------- ADR-0092 section 4
+
+    /** Per poll post: voters and per-label counts as the last [chips] read them. */
+    private val pollVotes = java.util.concurrent.ConcurrentHashMap<Long, Pair<Long, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>>>()
+
+    /** ADR-0092 section 3.6 — the own-choice register names a channel poll by
+     *  the channel and the post cursor (set version 0: no ring here). */
+    private val channelRef: uniffi.lakko_ffi_uniffi.FolderConversationRef
+        get() = uniffi.lakko_ffi_uniffi.FolderConversationRef(
+            kind = uniffi.lakko_ffi_uniffi.FolderConversationKind.CHANNEL,
+            id = channelBytes,
+        )
+
+    /** This account's choice in the poll at [cursor], from any of its devices. */
+    public fun ownChoice(cursor: Long): ByteArray? =
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.pollChoice(channelRef, cursor)?.choices
+            ?.takeIf { it.isNotEmpty() }
+
+    /** The opaque labels of a poll post's options (the service counts these). */
+    private fun optionLabels(cursor: Long, optionCount: Int): List<ByteArray>? {
+        val epoch = reader.epochOf(cursor) ?: return null
+        val seed = reader.seedFor(epoch) ?: return null
+        return ChannelReactionKey.derive(seed, channelBytes, epoch).use { key ->
+            uniffi.lakko_ffi_uniffi.channelPollOptionLabels(key, cursor.toULong(), optionCount.toUByte())
+        }
+    }
+
+    /**
+     * The card of a channel poll: the frozen tally once a publisher closed it,
+     * else the service's counts resolved through the option labels.
+     */
+    public fun pollView(
+        cursor: Long,
+        body: uniffi.lakko_ffi_uniffi.PollBody,
+        closed: Boolean,
+        frozen: uniffi.lakko_ffi_uniffi.ChannelPollTally?,
+        nowMs: Long,
+    ): me.lakko.app.chat.PollView {
+        val tally = frozen ?: pollVotes[cursor]?.let { (voters, counts) ->
+            runCatching {
+                val labels = optionLabels(cursor, body.options.size) ?: return@runCatching null
+                uniffi.lakko_ffi_uniffi.channelPollTallyFromCounts(labels, counts, voters.toULong())
+            }.getOrNull()
+        }
+        return me.lakko.app.chat.PollView(
+            counts = tally?.counts?.map { it.toInt() } ?: List(body.options.size) { 0 },
+            voters = tally?.voters?.toInt() ?: 0,
+            ownChoices = ownChoice(cursor)?.map { it.toInt() and 0xff }?.toSet() ?: emptySet(),
+            closed = closed || (body.closeAtMs?.let { nowMs >= it } ?: false),
+            closeAtMs = body.closeAtMs,
+        )
+    }
+
+    /**
+     * Vote [choices] (empty = take the vote back) on the poll at [cursor]: one
+     * vote per account through the anonymous credential. Returns whether the
+     * service stored it.
+     */
+    public suspend fun votePoll(cursor: Long, choices: ByteArray, optionCount: Int): Boolean {
+        val creds = ChannelPollCredentials.active ?: return false
+        val labels = optionLabels(cursor, optionCount) ?: return false
+        val chosen = choices.map { labels[it.toInt() and 0xff] }
+        val ok = creds.vote(channelId, channelBytes, cursor.toULong(), chosen)
+        if (ok) {
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.recordPollChoice(channelRef, cursor, choices, 0u)
+        }
+        return ok
+    }
+
+    /** The tally a publisher freezes into the post when it closes the poll. */
+    public fun currentTallyBytes(cursor: Long, optionCount: Int): ByteArray? = runCatching {
+        val (voters, counts) = pollVotes[cursor] ?: return@runCatching null
+        val labels = optionLabels(cursor, optionCount) ?: return@runCatching null
+        uniffi.lakko_ffi_uniffi.encodeChannelPollTally(
+            uniffi.lakko_ffi_uniffi.channelPollTallyFromCounts(labels, counts, voters.toULong()),
+        )
+    }.getOrNull()
 
     /** Comment counts the service maintains, per post, as the last
      *  [chips] read them. */
@@ -251,7 +337,7 @@ public class ChannelFeedback(
                 avatar = opened.comment.avatar,
             )
         }
-        return CommentPage(out, page.nextAfter, page.rows.size >= COMMENT_PAGE_LEN)
+        return CommentPage(out, page.nextAfter, page.rows.size >= COMMENT_PAGE_LEN, rowsRead = page.rows.size)
     }
 
     /** Write a comment under the post at [cursor]. Returns its cursor. */

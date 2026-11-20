@@ -17,10 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -70,6 +66,9 @@ import uniffi.lakko_ffi_uniffi.FolderConversationRef
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The folder editor, `docs/ux/chat-folders.md` section 3: the name, what is
@@ -147,7 +146,7 @@ public fun FolderEditorScreen(
                 title = { Text(if (original == null) t("folders.new") else t("folders.edit")) },
                 navigationIcon = {
                     IconButton(onClick = leave) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
                 actions = {
@@ -391,7 +390,7 @@ private fun HandRow(row: ConversationListRow, onRemove: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         ConversationRowBody(row = row, modifier = Modifier.weight(1f))
         IconButton(onClick = onRemove) {
-            Icon(Icons.Filled.Close, contentDescription = t("folders.editor.remove_chat_a11y", mapOf("name" to row.title)))
+            LkIcon(R.drawable.ic_lk_minus_circle_fill, contentDescription = t("folders.editor.remove_chat_a11y", mapOf("name" to row.title)), tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
         }
         Spacer(Modifier.width(4.dp))
     }
@@ -406,7 +405,7 @@ private fun ActionRow(label: String, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
-        Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        LkIcon(R.drawable.ic_lk_plus, contentDescription = null, tint = MaterialTheme.colorScheme.primary, size = LkIconSize.Row)
         Spacer(Modifier.width(16.dp))
         Text(label, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge)
     }
@@ -444,7 +443,7 @@ private fun ChatPicker(
                     title = { Text(title) },
                     navigationIcon = {
                         IconButton(onClick = onDismiss) {
-                            Icon(Icons.Filled.Close, contentDescription = t("common.close"))
+                            LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("common.close"))
                         }
                     },
                     actions = {

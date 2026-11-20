@@ -220,6 +220,22 @@ class KeyRotationKeptTest {
     }
 
     @Test
+    fun `a superseded device whose own key the directory still serves is still a reset`() {
+        // Base scenario 4b: a second reset elsewhere whose publish is owed
+        // leaves this device's key at the directory. That key is no pending
+        // envelope's, so it adopts nothing and decides nothing.
+        val ownKey = ByteArray(32) { 5 }
+        assertEquals(
+            KeptDeviceVerdict.ReadJournalOnce,
+            keptDeviceVerdict(emptyList(), publishedKey = ownKey, superseded = true, journalRead = false),
+        )
+        assertEquals(
+            KeptDeviceVerdict.TreatAsReset,
+            keptDeviceVerdict(emptyList(), publishedKey = ownKey, superseded = true, journalRead = true),
+        )
+    }
+
+    @Test
     fun `a published key that matches no envelope is not yet a reset`() {
         // The directory upload trails the commit: the server's answer to the
         // upgrade decides, not the directory.

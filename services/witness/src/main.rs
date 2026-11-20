@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod handlers;
+mod metrics;
 mod service_auth;
 mod store;
 mod witness_key;
@@ -73,6 +74,13 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(debug_assertions)]
     let _ = dotenvy::dotenv();
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "witness",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_WITNESS_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
@@ -95,6 +103,10 @@ async fn main() -> anyhow::Result<()> {
         .context("connect to MariaDB")?;
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let pool_for_gauge = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (pool_for_gauge.size(), pool_for_gauge.num_idle()));
 
     let witness = witness_key::load_or_init_witness_key(&pool)
         .await
@@ -169,6 +181,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
 
     open.merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("witness"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

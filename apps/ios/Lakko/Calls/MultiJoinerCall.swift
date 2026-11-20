@@ -811,7 +811,8 @@ final class MultiJoinerCall {
             // GROUP JOURNAL (opened in `ContactsRepository`), never the SFU
             // signal-relay. Out of place here — drop.
             break
-        case .channelReadKey, .channelEpochSeeds, .channelRotateRequest:
+        case .channelReadKey, .channelEpochSeeds, .channelRotateRequest,
+             .publisherDeviceRequest, .channelAdmissionMark:
             // ADR-0087 sections 6, 7 and 15 — a channel read key, a new
             // publisher's earlier epoch seeds and a co-publisher's rotate
             // request ride a PublisherGroup journal, never the SFU
@@ -857,6 +858,15 @@ final class MultiJoinerCall {
         case .conversationHandle, .knockSeed, .admissionSeed, .groupPhoto, .groupReactions:
             // ADR-0087 — group and channel settings ride the conversation's
             // journal, never the SFU signal-relay. Out of place here — drop.
+            break
+        case .openItems, .pollBallots:
+            // ADR-0092 — the open-items hand-over and old ballot rows ride the
+            // group journal, never the SFU signal-relay; dropped.
+            break
+        case .conversationReentry, .knockKey:
+            // ADR-0091 phase 2 — a re-entry request rides the DeviceGroup, a
+            // mailbox or a knock queue, and the knock key the group journal;
+            // never the SFU signal-relay. Dropped.
             break
         }
     }

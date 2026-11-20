@@ -67,7 +67,7 @@ public struct DevicesScreen: View {
                     // list below shows this device alone).
                     Section {
                         HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "info.circle")
+                            LkIconView(.infoCircle, size: 20)
                                 .foregroundStyle(Color.lakkoAccent)
                             Text(l10n.t("settings.devices.reset_note"))
                                 .font(.subheadline)
@@ -75,8 +75,7 @@ public struct DevicesScreen: View {
                             Button {
                                 resetNoteDismissed = true
                             } label: {
-                                Image(systemName: "xmark")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.xmark, size: 20, relativeTo: .footnote)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(l10n.t("common.dismiss"))
@@ -98,7 +97,7 @@ public struct DevicesScreen: View {
                     // could not hand over the keys: said under the list until
                     // `Add a device` is pressed again.
                     Section {
-                        Label(l10n.t("device_link.keys_not_sent"), systemImage: "exclamationmark.circle")
+                        Label(l10n.t("device_link.keys_not_sent"), icon: .exclamationCircle)
                             .foregroundStyle(Color.lakkoWarning)
                             .font(.footnote)
                     }
@@ -108,7 +107,7 @@ public struct DevicesScreen: View {
                         scanNotice.addDevicePressed()
                         onAddDevice()
                     }) {
-                        Label(l10n.t("devices.add.title"), systemImage: "plus")
+                        Label(l10n.t("devices.add.title"), icon: .plus)
                     }
                 } footer: {
                     Text(l10n.t("settings.devices.add.lede"))
@@ -339,13 +338,13 @@ private struct PairView: View {
                 ProgressView(l10n.t("devices.add.joining"))
 
             case .done:
-                Label(l10n.t("devices.add.linked"), systemImage: "checkmark.circle.fill")
+                Label(l10n.t("devices.add.linked"), icon: .checkmarkCircleFill)
                 .foregroundStyle(.green)
                 .font(.footnote)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, icon: .warningFill)
                         .foregroundStyle(.red)
                         .font(.footnote)
                     Button(l10n.t("common.try_again"), action: { state = .idle })
@@ -556,7 +555,7 @@ private struct ScanView: View {
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, icon: .warningFill)
                         .foregroundStyle(.red)
                         .font(.footnote)
                     Button(l10n.t("common.try_again"), action: { state = .idle })
@@ -787,13 +786,13 @@ private struct DevicesListView: View {
         }
     }
 
-    private static func iconName(_ kind: DeviceCards.IconKind) -> String {
+    private static func icon(_ kind: DeviceCards.IconKind) -> LkIcon {
         switch kind {
-        case .phone: return "iphone"
-        case .tablet: return "ipad"
-        case .computer: return "laptopcomputer"
-        case .browser: return "globe"
-        case .unknown: return "laptopcomputer.and.iphone"
+        case .phone: return .smartphone
+        case .tablet: return .tablet
+        case .computer: return .laptop
+        case .browser: return .globe
+        case .unknown: return .devices
         }
     }
 
@@ -807,7 +806,7 @@ private struct DevicesListView: View {
             let run = rowRun[input.keyHex]
             let highlighted = notice.isHighlighted(signaturePublicKey: device.signaturePublicKey)
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: Self.iconName(view.icon))
+                LkIconView(Self.icon(view.icon), size: 20)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 2) {
@@ -964,7 +963,7 @@ private struct DevicesListView: View {
             case .error(let message):
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                        Label(message.text, icon: .warningFill)
                             .foregroundStyle(Color.lakkoDanger)
                             .font(.footnote)
                         Button(l10n.t("common.try_again")) { refresh() }
@@ -1208,7 +1207,7 @@ struct TotpEnrollView: View {
                 .disabled(busy)
 
             case .done:
-                Label(l10n.t("settings.recovery.totp.done"), systemImage: "checkmark.circle.fill")
+                Label(l10n.t("settings.recovery.totp.done"), icon: .checkmarkCircleFill)
                 .foregroundStyle(.green)
                 .font(.footnote)
 

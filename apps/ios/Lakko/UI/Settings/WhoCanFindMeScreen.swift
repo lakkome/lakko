@@ -189,8 +189,7 @@ struct WhoCanFindMeScreen: View {
                                 HStack {
                                     Text(l10n.t("who_can_find_me.list.choose_contacts"))
                                     Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.footnote.weight(.semibold))
+                                    LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                             }
@@ -220,8 +219,7 @@ struct WhoCanFindMeScreen: View {
                                 HStack {
                                     Text(l10n.t("who_can_find_me.list.choose"))
                                     Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.footnote.weight(.semibold))
+                                    LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                             }

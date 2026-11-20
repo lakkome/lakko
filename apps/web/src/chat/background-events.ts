@@ -287,6 +287,11 @@ export function planBackgroundEvents(
         // An unrecognised `lakko/…` service envelope: dropped at receipt by
         // the chat client; a stray one is dropped here, never rendered.
         break;
+      case "contentOp":
+      case "openItems":
+        // ADR-0092 — filed at receipt by the chat client (`attach/`), never
+        // handed on; a stray one is dropped here.
+        break;
       default: {
         const unhandled: never = e;
         throw new Error(

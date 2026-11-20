@@ -198,7 +198,8 @@ final class UsernameDirectoryTests: XCTestCase {
             persistence: persistence,
             nowMs: { 1_000_000 },
             accountDirectory: directory,
-            restoreDirectory: OfflineRestoreDirectory()
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 

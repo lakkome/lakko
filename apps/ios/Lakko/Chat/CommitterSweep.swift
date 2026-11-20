@@ -1075,7 +1075,17 @@ private func adjudicate(
         // (the DS id and timestamp are what let the adapter build a timeline
         // event). Before that, a row applied here was consumed for MLS and
         // silently dropped from the chat timeline.
-        try? group.applyIncoming(row)
+        //
+        // ADR-0091 phase 1 — the skip is logged (no identifier), never held:
+        // since ADR-0081 the verdict is the DS's answer to the commit route,
+        // and a registered commit cannot sit below this device's own one.
+        let localEpoch = try? group.epoch()
+        do {
+            try group.applyIncoming(row)
+        } catch {
+            RegisteredCommitLog.skipped(
+                error: error, payload: row.payload, localEpoch: localEpoch, latestEpoch: nil)
+        }
         lastApplied = row.id
     }
     if lastApplied != cursorBefore {

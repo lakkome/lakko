@@ -88,7 +88,7 @@ pub const KNOCK_MAX_KEY_PACKAGE_LEN: usize = crate::call_invite::MAX_KEY_PACKAGE
 /// Longest capability a knock carries: the plaintext `/g/` capability.
 pub const KNOCK_MAX_CAPABILITY_LEN: usize = crate::group_invite::MAX_WIRE_LEN;
 
-const SEAL_LABELS: SealLabels = SealLabels {
+pub(crate) const SEAL_LABELS: SealLabels = SealLabels {
     key: b"lakko/group/knock/v1/key",
     nonce: b"lakko/group/knock/v1/nonce",
 };

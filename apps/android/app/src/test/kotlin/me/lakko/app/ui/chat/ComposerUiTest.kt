@@ -27,6 +27,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +49,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
-import uniffi.lakko_ffi_uniffi.AttachmentRef
 
 /**
  * `docs/ux/client-redesign.md` UX 5.2 — the composer row: "attach, text field
@@ -102,6 +102,7 @@ class ComposerUiTest {
     private var pickerOpens = 0
     private var attachMenuPicks = 0
     private var cancelReplies = 0
+    private val pasted = mutableListOf<me.lakko.app.chat.PastedMedia>()
 
     @Before
     fun setUp() {
@@ -135,6 +136,7 @@ class ComposerUiTest {
         draft: String,
         draftRevision: Int = 0,
         replyStrip: me.lakko.app.chat.ReplyArmed? = null,
+        takesMedia: Boolean = true,
     ) {
         MaterialTheme {
             Surface {
@@ -150,18 +152,16 @@ class ComposerUiTest {
                         draftRevision = draftRevision,
                         sending = false,
                         sendError = null,
-                        pendingAttachments = emptyList<AttachmentRef>(),
-                        uploading = false,
-                        inFlightUploads = emptyList(),
-                        pendingPreviews = emptyMap(),
+                        tray = ComposerTray(),
                         onDraftChange = {},
                         onSendClicked = { sendClicks += 1 },
                         onFocusChanged = {},
-                        onPickMedia = { attachMenuPicks += 1 },
+                        onPickMedia = {},
                         onAttachClicked = { attachMenuPicks += 1 },
-                        onRemoveAttachment = {},
+                        onRemoveTrayItem = {},
                         replyStrip = replyStrip,
                         onCancelReply = { cancelReplies += 1 },
+                        onPasteMedia = if (takesMedia) { items -> pasted += items } else null,
                     )
                 }
             }
@@ -312,20 +312,16 @@ class ComposerUiTest {
     }
 
     @Test
-    fun theAttachButtonOffersPhotoOrVideoAndFile() {
-        // UX spec §10 — one tap, two destinations, because a person who wants
-        // to send a photo and a person who wants to send a PDF press the same
-        // thing. Both items have to be THERE: an attach button that only ever
-        // opened the document picker is how a photo became a file attachment.
+    fun theAttachButtonOpensTheAttachmentMenu() {
+        // ADR-0092 / docs/ux/attachments.md section 2 — the paperclip opens the
+        // one attachment menu (a LakkoMenu sheet the chat screen owns), never a
+        // stock dropdown in the composer: one tap, handed up once.
         compose.setContent { ComposerUnderTest(draft = "") }
 
         compose.onNodeWithContentDescription(ATTACH).performClick()
 
-        compose.onNodeWithText(PHOTO_OR_VIDEO).assertExists()
-        compose.onNodeWithText(FILE).assertExists()
-
-        compose.onNodeWithText(PHOTO_OR_VIDEO).performClick()
-        assertEquals("the gallery item is not wired to anything", 1, attachMenuPicks)
+        assertEquals("the paperclip is not wired to the menu", 1, attachMenuPicks)
+        compose.onNodeWithText(PHOTO_OR_VIDEO).assertDoesNotExist()
     }
 
     // ----- 3. the field grows, and then stops ------------------------------
@@ -402,6 +398,77 @@ class ComposerUiTest {
         compose.onNodeWithText(PLACEHOLDER).assertExists()
         compose.onNodeWithText(SLIDE_TO_CANCEL, substring = true).assertDoesNotExist()
         compose.onNodeWithContentDescription(ATTACH).assertExists()
+    }
+
+    // ----- 5. docs/ux/attachments.md 2.5: a pasted photo attaches ----------
+
+    private fun putOnClipboard(clip: android.content.ClipData) {
+        val clipboard = compose.activity.getSystemService(android.content.ClipboardManager::class.java)
+        clipboard.setPrimaryClip(clip)
+    }
+
+    @Test
+    fun aPastedPhotoAttachesAndLeavesTheFieldEmpty() {
+        compose.setContent { ComposerUnderTest(draft = "") }
+        putOnClipboard(
+            android.content.ClipData(
+                "",
+                arrayOf("image/png"),
+                android.content.ClipData.Item(android.net.Uri.parse("content://me.lakko.test/pic")),
+            ),
+        )
+        compose.onNode(hasSetTextAction())
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.PasteText)
+        compose.waitForIdle()
+
+        assertEquals(1, pasted.size)
+        assertEquals("image/png", pasted.single().mime)
+        assertEquals("content://me.lakko.test/pic", pasted.single().uri.toString())
+        compose.onNode(hasSetTextAction()).assert(hasText(""))
+    }
+
+    @Test
+    fun pastedTextStaysText() {
+        compose.setContent { ComposerUnderTest(draft = "") }
+        putOnClipboard(android.content.ClipData.newPlainText("", "hello there"))
+        compose.onNode(hasSetTextAction())
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.PasteText)
+        compose.waitForIdle()
+
+        assertTrue("plain text was taken as media", pasted.isEmpty())
+        compose.onNode(hasSetTextAction()).assert(hasText("hello there"))
+    }
+
+    @Test
+    fun withoutAMediaHandlerAPastedPhotoIsNotTaken() {
+        // A channel subscriber's case: nothing there can attach, so a copied
+        // photo does not paste and does not open anything.
+        compose.setContent { ComposerUnderTest(draft = "", takesMedia = false) }
+        putOnClipboard(
+            android.content.ClipData(
+                "",
+                arrayOf("image/png"),
+                android.content.ClipData.Item(android.net.Uri.parse("content://me.lakko.test/pic")),
+            ),
+        )
+        val field = compose.onNode(hasSetTextAction())
+        runCatching { field.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.PasteText) }
+        compose.waitForIdle()
+
+        assertTrue("a photo was taken where nothing can attach", pasted.isEmpty())
+        field.assert(hasText(""))
+    }
+
+    @Test
+    fun withoutAMediaHandlerTextStillPastes() {
+        compose.setContent { ComposerUnderTest(draft = "", takesMedia = false) }
+        putOnClipboard(android.content.ClipData.newPlainText("", "plain words"))
+        compose.onNode(hasSetTextAction())
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.PasteText)
+        compose.waitForIdle()
+
+        assertTrue(pasted.isEmpty())
+        compose.onNode(hasSetTextAction()).assert(hasText("plain words"))
     }
 
     private companion object {

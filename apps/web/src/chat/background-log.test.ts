@@ -106,6 +106,22 @@ describe("summarizeGroupSlot (the chat list row)", () => {
     expect(summarizeGroupSlot(slot, null).unread).toBe(0);
   });
 
+  it("treats a row this account sent from another device as its own", () => {
+    // Base scenario 33: the list read "Ada Two: ..." and counted the line as
+    // unread, while the timeline drew it as the person's own.
+    const own = "b3duLWFjY291bnQta2V5";
+    const fromOtherDevice: PersistedMessage = { ...msg(2, "incoming", "from my laptop"), authorKeyB64: own };
+    const slot: PersistedGroup = { cursor: "2", messages: [msg(1), fromOtherDevice] };
+    const s = summarizeGroupSlot(slot, 1n, own);
+    expect(s.unread).toBe(0);
+    expect(s.previewIsOwn).toBe(true);
+    expect(s.lastAuthorKeyB64).toBeNull();
+    // Without the key the old reading stands: someone else's, unread.
+    const before = summarizeGroupSlot(slot, 1n);
+    expect(before.unread).toBe(1);
+    expect(before.previewIsOwn).toBe(false);
+  });
+
   it("previews the newest non-system message on one line", () => {
     const slot: PersistedGroup = {
       cursor: "3",
@@ -151,6 +167,8 @@ describe("summarizeGroupSlot (the chat list row)", () => {
       previewIsOwn: true,
       lastAt: photo.createdAt,
       lastAuthorKeyB64: null,
+      // docs/ux/media-messages.md section 11 — the row's thumbnail.
+      previewMedia: { thumb: null, video: false, count: 1 },
     });
     const long = msg(2, "incoming", "x".repeat(200));
     const p = summarizeGroupSlot({ cursor: "2", messages: [long] }, null).preview ?? "";

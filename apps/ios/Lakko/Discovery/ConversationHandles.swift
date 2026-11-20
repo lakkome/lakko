@@ -100,7 +100,10 @@ enum ConversationHandles {
         let leaseUntilMs: UInt64
     }
 
-    /// Take `handle` (create, or a lapsed name).
+    /// Take `handle` (create, or a lapsed name). A claim by the key that
+    /// holds the current row answers as the first one (fresh certificate,
+    /// lease renewed), so a retry of a failed create under the same journal
+    /// takes its own name back; a retired name is not claimed again.
     static func claim(
         discovery: DiscoveryClient, accountSeed: Data, journalId: Data,
         handle typed: String, isPublic: Bool, facts: PublicFacts?
@@ -108,6 +111,55 @@ enum ConversationHandles {
         try await write(
             route: .claim, discovery: discovery, accountSeed: accountSeed, journalId: journalId,
             handle: typed, isPublic: isPublic, facts: facts)
+    }
+
+    /// A retry of a New group: move the name from the key of an earlier
+    /// attempt's group (`fromJournalId`) to this attempt's group (the `rekey`
+    /// statement, signed by the earlier key). The caller then writes this
+    /// group's content with ``update(discovery:accountSeed:journalId:handle:isPublic:facts:)``.
+    static func move(
+        discovery: DiscoveryClient, accountSeed: Data, fromJournalId: Data, toJournalId: Data,
+        handle typed: String
+    ) async throws {
+        let name = canonical(typed)
+        let pair = try await evaluateOwn(discovery: discovery, names: [name], facts: nil).names[0]
+        var old = try seed(accountSeed: accountSeed, journalId: fromJournalId)
+        defer { RootHandover.wipe(&old) }
+        var new = try seed(accountSeed: accountSeed, journalId: toJournalId)
+        defer { RootHandover.wipe(&new) }
+        let statement = try signHandleStatement(
+            handleSeed: old, lookupKey: pair.lookupKey,
+            body: .rekey(newWritePk: try handleWritePublicKey(handleSeed: new)))
+        guard try await discovery.handleWrite(route: .rekey, statementB64: statement) != nil else {
+            throw DiscoveryClientError.http(status: 200, endpoint: "/discovery/handle/rekey", body: "no certificate")
+        }
+    }
+
+    /// Take a New group's `@name` for the group this attempt founded
+    /// (ADR-0087 section 3, note of 2026-11-14). With no earlier attempt, a
+    /// plain claim. Otherwise, for each earlier attempt newest first, move the
+    /// name from that attempt's key (`rekeyFrom`) and write this group's
+    /// content under the new key (`update`): `404` (no row: no earlier claim
+    /// landed) is a plain claim; `401` (another key's row) tries the next
+    /// earlier attempt; every one refused is `409 name-taken`.
+    static func claimOrTakeBack<T>(
+        earlier: [Data],
+        claim: () async throws -> T,
+        rekeyFrom: (Data) async throws -> Void,
+        update: () async throws -> T
+    ) async throws -> T {
+        if earlier.isEmpty { return try await claim() }
+        for id in earlier {
+            do {
+                try await rekeyFrom(id)
+            } catch let refusal as DiscoveryClient.HandleWriteError where refusal.status == 404 {
+                return try await claim()
+            } catch let refusal as DiscoveryClient.HandleWriteError where refusal.status == 401 {
+                continue
+            }
+            return try await update()
+        }
+        throw DiscoveryClient.HandleWriteError(status: 409, code: "name-taken")
     }
 
     /// Flip public / private, or republish the record and renew the lease.
@@ -547,5 +599,74 @@ enum ChannelLineage {
     static func readKey(accountIdB64: String?, currentSeed: Data?, channelId: Data) -> Data? {
         guard let lineage = identity(accountIdB64: accountIdB64, currentSeed: currentSeed) else { return nil }
         return try? channelReadKey(ownerAccountIdentity: lineage, channelId: channelId)
+    }
+}
+
+/// The group ids New group attempts claimed an `@name` with, newest first,
+/// kept per account until the group exists (ADR-0087 section 3, note of
+/// 2026-11-14). Every attempt founds a new group, so its handle write key is
+/// new; a retry moves the name from an earlier attempt's key
+/// (``ConversationHandles/claimOrTakeBack(earlier:claim:rekeyFrom:update:)``).
+///
+/// Per account, in `UserDefaults`: a name and group ids, no secret. Removed by
+/// ``AccountLocalDataWipe``.
+public enum PendingGroupHandleStore {
+
+    static let keyPrefix = "lakko.groups.pending-handles.v1."
+
+    /// How many attempts are kept per name. Chosen, not measured.
+    static let maxAttempts = 8
+
+    private static func key(_ accountIdB64: String) -> String { keyPrefix + accountIdB64 }
+
+    private static func normalized(_ handle: String) -> String {
+        String(handle.trimmingCharacters(in: .whitespaces).drop(while: { $0 == "@" })).lowercased()
+    }
+
+    private static func load(_ accountIdB64: String, _ defaults: UserDefaults) -> [String: [String]] {
+        defaults.data(forKey: key(accountIdB64))
+            .flatMap { try? JSONDecoder().decode([String: [String]].self, from: $0) } ?? [:]
+    }
+
+    private static func save(_ held: [String: [String]], _ accountIdB64: String, _ defaults: UserDefaults) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        if held.isEmpty {
+            defaults.removeObject(forKey: key(accountIdB64))
+        } else if let data = try? JSONEncoder().encode(held) {
+            defaults.set(data, forKey: key(accountIdB64))
+        }
+    }
+
+    /// The group ids (hex) earlier attempts claimed `handle` with, newest first.
+    public static func groupIds(
+        forHandle handle: String, accountIdB64: String, defaults: UserDefaults = .standard
+    ) -> [String] {
+        load(accountIdB64, defaults)[normalized(handle)] ?? []
+    }
+
+    /// Keep this attempt's group id for `handle`, before any request about the
+    /// name goes out. Returns the earlier attempts, newest first.
+    @discardableResult
+    public static func keep(
+        handle: String, groupIdHex: String, accountIdB64: String, defaults: UserDefaults = .standard
+    ) -> [String] {
+        var held = load(accountIdB64, defaults)
+        let name = normalized(handle)
+        let earlier = (held[name] ?? []).filter { $0 != groupIdHex }
+        held[name] = Array(([groupIdHex] + earlier).prefix(maxAttempts))
+        save(held, accountIdB64, defaults)
+        return earlier
+    }
+
+    /// The group exists, or the name turned out to be someone else's.
+    public static func forget(handle: String, accountIdB64: String, defaults: UserDefaults = .standard) {
+        var held = load(accountIdB64, defaults)
+        guard held.removeValue(forKey: normalized(handle)) != nil else { return }
+        save(held, accountIdB64, defaults)
+    }
+
+    public static func clear(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(accountIdB64))
     }
 }

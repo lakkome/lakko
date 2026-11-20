@@ -83,6 +83,36 @@ class DsJournalSignerTest {
         assertEquals(1uL, registry.previous("g/d")!!.epoch)
     }
 
+    /** ADR-0081 third amendment, seen on a Pixel 2026-11-11: a device whose
+     *  DeviceGroup was founded again elsewhere rejoins at the same epoch
+     *  NUMBER it held on the old chain (old chain 0 -> 1, new chain 0 -> 1).
+     *  The cached old epoch-1 signer was kept because only the epoch was
+     *  compared, every read was refused, and the device claimed and rejoined
+     *  in a loop. */
+    @Test
+    fun `after a rejoin at the same epoch number the device reads with the joined chain's key`() {
+        val registry = DsSignerRegistry()
+        val oldChain = ByteArray(32) { 0x11 }
+        val newChain = ByteArray(32) { 0x22 }
+        var held: DsJournalSigner = FakeJournalSigner(0uL, ByteArray(32) { 0x10 })
+        val source = object : DsSignerSource {
+            override fun epoch(): ULong? = null
+            override val epochReadable: Boolean get() = false
+            override fun derive(): DsJournalSigner = held
+        }
+        registry.install("g/devices", source)
+        registry.current("g/devices")
+        held = FakeJournalSigner(1uL, oldChain)
+        assertTrue(registry.current("g/devices")!!.verifyingKey.contentEquals(oldChain))
+        // Rejoined: the same journal id, epoch 1 of the new chain.
+        held = FakeJournalSigner(1uL, newChain)
+        registry.install("g/devices", source)
+        val current = registry.current("g/devices")!!
+        assertEquals(1uL, current.epoch)
+        assertTrue("signs with the joined chain's key", current.verifyingKey.contentEquals(newChain))
+        assertNull("nothing of the old chain stands in as previous", registry.previous("g/devices"))
+    }
+
     @Test
     fun `a replaced source keeps the cached previous signer`() {
         val registry = DsSignerRegistry()

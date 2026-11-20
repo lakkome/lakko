@@ -69,7 +69,10 @@ final class PinPublisher {
                 try await ports.send(groupIdHex, bytes)
                 anySent = true
             } catch {
-                NSLog("ADR-0052 pin re-send failed: \(error)")
+                // ADR-0091 section 2 — refused while behind: not a failure.
+                if !ConversationReentryRules.isBehindRefusal(error) {
+                    NSLog("ADR-0052 pin re-send failed: \(error)")
+                }
             }
         }
         if anySent { notePublished(groupIdHex: groupIdHex) }

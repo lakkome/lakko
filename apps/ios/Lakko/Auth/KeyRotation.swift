@@ -56,6 +56,15 @@ public protocol OwnPredecessorStoring {
     /// it could not have adopted itself.
     func replace(_ seeds: [Data], accountIdB64: String) throws
     func clear(accountIdB64: String)
+    /// The stored seeds, or a throw when the slot exists and cannot be read
+    /// (G-56: "cannot be read" is not "none"; the confirming device of a
+    /// pairing then publishes no recovery row).
+    func loadChecked(accountIdB64: String) throws -> [Data]
+}
+
+public extension OwnPredecessorStoring {
+    /// A store that cannot fail to read answers what it holds.
+    func loadChecked(accountIdB64: String) throws -> [Data] { load(accountIdB64: accountIdB64) }
 }
 
 /// The production store: one generic-password Keychain item per account,
@@ -72,6 +81,13 @@ public struct KeychainOwnPredecessorStore: OwnPredecessorStoring {
         guard let data = KeychainJSONItem.read(service: Self.serviceTag, account: accountIdB64),
               let seeds = try? JSONDecoder().decode([Data].self, from: data) else { return [] }
         return seeds.filter { !$0.isEmpty }
+    }
+
+    public func loadChecked(accountIdB64: String) throws -> [Data] {
+        guard let data = try KeychainJSONItem.readChecked(service: Self.serviceTag, account: accountIdB64) else {
+            return []
+        }
+        return try JSONDecoder().decode([Data].self, from: data).filter { !$0.isEmpty }
     }
 
     public func add(_ seed: Data, accountIdB64: String) throws {
@@ -163,40 +179,9 @@ public enum OwnAccountKeys {
         }
     }
 
-    /// What to do with a device's stored conversation binding.
-    public enum BindingVerdict: Equatable {
-        /// The binding is this account's and is kept.
-        case keep
-        /// No usable binding, or one naming a key that is not this
-        /// account's: mint one under the conversation key.
-        case mint
-        /// The binding names the CURRENT key although the account has
-        /// predecessors (it was minted before the pairing state bundle
-        /// brought them) and this device holds no conversation yet: mint it
-        /// again under the conversation key, before any KeyPackage naming
-        /// the current key admits this device anywhere.
-        case remint
-        /// The same, but this device already holds conversations whose
-        /// leaves carry the current-key binding: it is kept (a re-mint would
-        /// split this device between two account keys). Such a device is not
-        /// admitted to the account's older conversations.
-        case keepUnderCurrentKey
-    }
-
-    /// - Parameters:
-    ///   - boundKey: the account key the stored binding names; `nil` when
-    ///     there is none or it did not verify.
-    ///   - predecessorKeys: the own predecessor keys, oldest first.
-    ///   - holdsConversations: whether this device is in any conversation.
-    public static func bindingVerdict(
-        boundKey: Data?, currentKey: Data, predecessorKeys: [Data], holdsConversations: Bool
-    ) -> BindingVerdict {
-        guard let boundKey else { return .mint }
-        if predecessorKeys.contains(boundKey) { return .keep }
-        guard boundKey == currentKey else { return .mint }
-        if predecessorKeys.isEmpty { return .keep }
-        return holdsConversations ? .keepUnderCurrentKey : .remint
-    }
+    // The binding verdict is the core's since G-56 (`ownBindingVerdict`,
+    // ``EarlierKeysGate/verdict(_:link:)``): it gained `wait`, and the old
+    // `remint` is `mint` with a stored binding under the current key.
 
     /// ADR-0074 part 3 — whether a KeyPackage of THIS account names the
     /// wrong account key for a conversation: its binding is under one of the
@@ -571,6 +556,25 @@ enum KeychainJSONItem {
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
         return result as? Data
+    }
+
+    /// ``read(service:account:)`` that tells "no item" (`nil`) from an item
+    /// that cannot be read (a throw).
+    static func readChecked(service: String, account: String) throws -> Data? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw KeychainJSONItemError.keychain(status)
+        }
+        return data
     }
 
     static func write(_ data: Data, service: String, account: String) throws {

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# The monitoring host's own node_exporter (ADR-0096). Installed by
+# infra/monitoring/setup-monitoring.sh only on a dedicated monitoring host:
+# when monitoring runs on a Lakko host (LAKKO_MONITORING_COLOCATED=1), that
+# host's node_exporter is already scraped by the `host` job.
+- targets: ['127.0.0.1:9100']
+  labels: {stack: monitoring, host: monitoring, exporter: node}

@@ -205,7 +205,7 @@ struct VoiceBubble: View {
                 if media.loadingKeys.contains(mediaKey) {
                     ProgressView().tint(incoming ? Color.lakkoSurfaceSunken : Color.lakkoAccent)
                 } else {
-                    Image(systemName: active?.playing == true ? "pause.fill" : "play.fill")
+                    LkIconView(active?.playing == true ? .pauseFill : .playFill, size: 20, relativeTo: nil)
                         .foregroundStyle(incoming ? Color.lakkoSurfaceSunken : Color.lakkoAccent)
                 }
                 if case .uploading(let fraction) = upload {
@@ -599,15 +599,13 @@ struct VideoNoteBubble: View {
                                 .padding(18)
                                 .background(Circle().fill(Color.black.opacity(0.45)))
                         } else if model.mode == .poster || (model.mode == .sound && model.paused) {
-                            Image(systemName: "play.fill")
-                                .font(.title)
+                            LkIconView(.playFill, size: 33, relativeTo: .title)
                                 .foregroundStyle(.white)
                                 .padding(18)
                                 .background(Circle().fill(Color.black.opacity(0.45)))
                         }
                         if model.mode == .muted {
-                            Image(systemName: "speaker.slash.fill")
-                                .font(.caption)
+                            LkIconView(.speakerSlashFill, size: 14, relativeTo: .caption)
                                 .foregroundStyle(.white)
                                 .padding(6)
                                 .background(Circle().fill(Color.black.opacity(0.45)))

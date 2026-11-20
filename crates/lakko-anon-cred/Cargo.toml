@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-anon-cred"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Keyed-verification anonymous credential for channel polls (ADR-0092 section 4): a CMZ14 algebraic MAC on Ristretto255, issuance against a registered commitment, and a presentation carrying a per-poll tag"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Ristretto255 points and scalars, constant-time arithmetic and the
+# variable-time multiscalar multiplication the verifiers use. Already in the
+# tree (4.1.3, through ed25519-dalek, x25519-dalek and voprf); ADR-0092
+# section 4.7 names it. Default features (alloc, precomputed-tables,
+# zeroize).
+curve25519-dalek = "4.1.3"
+
+# The hash behind hash-to-group, the Fiat-Shamir transcript, the key
+# derivation and the derivation of the credential secret. Already in the tree
+# through lakko-crypto.
+blake3 = "1"
+
+# Constant-time comparison of the Fiat-Shamir challenge. Already in the tree.
+subtle = "2"
+
+# Wipe secret scalars and the master secret on drop. Already in the tree.
+zeroize = "1"
+
+# `OsRng` for the proof nonces and the issuer / presentation randomness.
+# Already in the tree through lakko-crypto.
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rand_core`'s `getrandom` needs its WebCrypto backend on wasm32 (the same
+# pin lakko-anon-token carries).
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+proptest = "1"

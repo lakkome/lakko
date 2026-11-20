@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -38,6 +36,9 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /** The grid's column count for the current window (3 on a phone, 4 from
  *  [PHRASE_GRID_WIDE_MIN_DP] up). */
@@ -143,7 +144,7 @@ public fun RecoveryPhraseEntryGrid(
                     if (text.isNotBlank()) update(slotsFromPasted(text))
                 },
             ) {
-                Icon(Icons.Filled.ContentPaste, contentDescription = null)
+                LkIcon(R.drawable.ic_lk_paste, contentDescription = null, size = LkIconSize.Row)
                 Text("  " + t("common.paste"))
             }
         }

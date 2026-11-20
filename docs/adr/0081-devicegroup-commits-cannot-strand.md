@@ -607,6 +607,22 @@ failures, 1 skipped (from the XML reports); iOS `xcodebuild
 build-for-testing` succeeded (tests not run). The fuzz target was compiled,
 not run. Nothing was walked live and nothing was deployed.
 
+**Note (2026-11-14, G-55): the rejoin knock is sealed.** The knock posted
+the pairing payload (login handle, KeyPackage with its account binding) to
+the DeviceGroup knock queue in the clear, so the Delivery Service read the
+account key next to the DeviceGroup journal id ADR-0078 phase 6 derives to
+hide. `pairing::encode_rejoin_knock` now takes the lineage seed (the seed
+the DeviceGroup id derives from) and returns `"lakko/rejoin-knock/v1\0" ‖
+0x01 ‖ nonce(12) ‖ ChaCha20-Poly1305(len(4 BE) ‖ payload ‖ zeros)` under
+`BLAKE3-derive-key("lakko/device-group/knock-wrap/v1", lineage_seed)`, AAD
+binding the DeviceGroup id, padded to 1024-byte steps (one size, 1075 bytes,
+for the payloads measured); the self-removal proof becomes optional so the
+knock to an unclaimed journal is sealed the same way; a sibling opens it with
+`open_rejoin_knock` and then runs the unchanged `decode`. Flag day, no plain
+fallback. FFI `buildRejoinKnock` / `encodeRejoinKnock` take the lineage
+`accountIdentity`; new `openRejoinKnock`. All three clients' knock senders and
+readers moved; host-tested only. See `docs/security/known-gaps.md` G-55.
+
 ## Amendment (2026-10-19, second): a conversation is joined only from a Welcome with a role table and a kind, and the clients' direct-commit paths are gone
 
 Decided by the maintainer on 2026-10-19 (option (b): close the core gap
@@ -741,6 +757,96 @@ integration tests joined a table-less group through `join_from_welcome` and
 now join through `DeviceGroup::join_welcome_before_account`; one lib test
 (`a_table_less_group_refuses_the_proposal_approve_and_keeps_the_direct_one`)
 now joins through the crate's table-less entry point. Nothing was walked live and nothing was deployed.
+
+## Amendment (2026-11-11, third): a restored device does not wait for a device that is not there
+
+**Decided by the maintainer 2026-11-11.** Found walking a restore on the
+test stack (web): an account restored on a new device with a passkey, its
+only other device gone (lost, or its browser data cleared), never started.
+Decision 4 makes a device with no DeviceGroup state rejoin "while the
+account's directory lists another own device", and the gone device's
+directory row stays until someone removes it, so the new device knocked
+every 30 s for good. Nothing synced ran in the meantime: the username, pins
+and folders the backup had restored never reached the screen ("?",
+"Choose a username first"). The rule was written to keep two live devices
+from splitting the account; it did not consider that the listed devices may
+all be gone, which is the common case of a restore.
+
+The maintainer's rule: the new device asks the devices in the list; a device
+that answers at once (within ordinary network delay) is online; if none
+answers, the new device founds the DeviceGroup itself and works.
+
+1. **Every running device listens for knocks.** A device holding the
+   DeviceGroup keeps a long poll on its DeviceGroup knocks while it is in
+   the foreground (`GET .../knocks?wait=`; the DS already wakes a waiting
+   read when a knock is posted), in place of reading them every
+   `KNOCK_CHECK_INTERVAL_MS`. A device in the background, or not running,
+   does not answer and counts as offline.
+2. **A running device answers at once.** On a knock whose payload names this
+   account's login handle it first posts a presence note to the knock's
+   rendezvous (`lakko_contacts::rejoin_present`, a fixed 25-byte
+   `"lakko/rejoin-present/v1\0" || 0x01`, no fields), before any directory
+   lookup, so the answer costs one round trip; then it runs the admission
+   checks of decision 4 and admits. The designated-admitter rule and
+   `FALLBACK_ADMIT_AFTER_MS` are removed: every running device that passes
+   the checks admits at once, and the DS commit route (decision 1) lets
+   exactly one commit take the epoch; the others get `409` and drop theirs.
+3. **The new device waits only as long as an answer takes.** It opens its
+   long poll on the rendezvous before posting the knock, measures the knock
+   request's own round trip `rtt`, and waits for a presence note or a
+   Welcome for `max(4 x rtt, 1 s)` (chosen, not measured: the answer is a
+   DS wake, one read and one write on the sibling, and the new device's
+   read; every client logs the time the answer actually took). A presence
+   note means a device is online: it then waits for the Welcome with no
+   deadline, as before (re-knocking after `REKNOCK_AFTER_MS`).
+4. **No answer: found.** With no presence note and no Welcome in that time,
+   the new device founds the DeviceGroup (the founding path a device with no
+   listed sibling already takes; the journal is claimed under the same root,
+   so it is a root reset that drops the old epoch chain) and starts at once;
+   the backup's synced state is then live.
+5. **A device that comes back joins the new group.** A device whose
+   DeviceGroup journal was reset under it (its signed read refused, or the
+   DS naming an epoch chain it does not hold) is lost in the sense of
+   decision 4 and rejoins by knocking; the founder, now running, answers and
+   admits it. The account does not split: there is one DeviceGroup, and the
+   returning device's chats keep their leaves (ADR-0050).
+6. **A device that knows no login handle neither knocks nor founds**
+   (correction of 2026-11-15, found on an iPhone; built on web, iOS and
+   Android, host-tested only). The three clients founded at once when the
+   device knew no username of the account (no session name, no own-username
+   register), on the ground that nobody could match its knock. That breaks
+   point 5: a rejoin runs only while another device is listed, and a
+   founder that knows no handle cannot admit the returning device's knock,
+   so the returning device founds again in turn and each founding resets
+   the journal under the other. Seen after a passkey sign-in with no name
+   typed whose backup did not open (so no register): the iPhone founded a
+   second DeviceGroup while the account's web device was running. Now the
+   pass ends without a knock and without a founding, and the device looks
+   for the handle again every 30 s (the session's name, the stored session
+   record on iOS, the own-username register); it knocks once one is known.
+   Unbuilt: a way for the person to give the name when none of these ever
+   holds it; until then such a device stays outside the DeviceGroup (its
+   chats are unaffected).
+   **Closed 2026-11-15 (maintainer):** the person gives the name. When a
+   session lands with no username, the device first takes the name the
+   backup's own profile or the stored own-username register names, if auth
+   confirms it is this account's (`POST /auth/login-handle/check` answers
+   `same`); otherwise it asks once with a username prompt over the app
+   (`docs/ux/identity-recovery.md` section 8b), checks the typed name the
+   same way, and keeps it as after a sign-in by name. The waiting rejoin is
+   woken and knocks at once. "I don't remember" leaves the device waiting
+   as above, and the next start asks again. Built on web 2026-11-15
+   (`auth/username-prompt.ts`, `auth/UsernamePrompt.tsx`), host-tested only;
+   iOS and Android in the same change.
+
+Costs, stated. A device that was merely asleep or in the background at the
+moment of the restore is cut off from the DeviceGroup until it next runs,
+and then rejoins as in point 5; the maintainer accepts this. The presence
+note is not authenticated: a malicious DS can forge one (the new device then
+waits for a Welcome that never comes, which it could also cause by dropping
+the knock) or withhold every answer (the new device founds, which it could
+also cause by refusing the old devices' reads); neither reaches message
+keys.
 
 ## Documentation this ADR implies
 

@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Alert rules for the hosts and MariaDB (node_exporter, mysqld_exporter).
+#
+# Thresholds are first guesses, to be tuned on the test stack.
+
+groups:
+  - name: lakko_host
+    interval: 30s
+    rules:
+      - alert: LakkoExporterDown
+        expr: up{job=~"host|coturn|monitoring_host", exporter!=""} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.exporter }} exporter on {{ $labels.host }} ({{ $labels.stack }}) is unreachable"
+
+      # blackbox_exporter on the monitoring host. When it is down every probe
+      # series disappears, and LakkoProbeFailing and the certificate alert
+      # cannot fire.
+      - alert: LakkoBlackboxDown
+        expr: up{job=~"blackbox_.*"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "blackbox_exporter on the monitoring host is unreachable; public probes are not running"
+
+      - alert: LakkoUnitFailed
+        expr: node_systemd_unit_state{state="failed", name=~"lakko.*|coturn.*"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.name }} on {{ $labels.host }} ({{ $labels.stack }}) has failed"
+
+      - alert: LakkoDiskAlmostFull
+        expr: |
+          1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            > 0.85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.host }} is {{ $value | humanizePercentage }} full"
+
+      - alert: LakkoCpuHigh
+        expr: |
+          1 - avg by (stack, host) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU on {{ $labels.host }} ({{ $labels.stack }}) is {{ $value | humanizePercentage }} busy"
+
+      - alert: LakkoMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} ({{ $labels.stack }}) has {{ $value | humanizePercentage }} memory available"
+
+      - alert: LakkoMariadbDown
+        expr: mysql_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MariaDB on {{ $labels.host }} ({{ $labels.stack }}) is down"

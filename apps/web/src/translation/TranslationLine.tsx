@@ -97,6 +97,20 @@ export function TranslationLine(props: {
               </>
             )}
           </Match>
+          <Match when={props.view.phase === "detected" ? props.view : null}>
+            {(v) => (
+              <>
+                <span>{name(v().source)}</span>
+                <Show when={v().canTranslate}>
+                  {SEP}
+                  <LineButton
+                    label={t("translate.line.translate")}
+                    onClick={() => c().translate(props.slot, props.messageRef, props.text)}
+                  />
+                </Show>
+              </>
+            )}
+          </Match>
           <Match when={props.view.phase === "failed" ? props.view : null}>
             {(v) => (
               <>

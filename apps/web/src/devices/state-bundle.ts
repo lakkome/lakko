@@ -44,9 +44,18 @@
  * exporter, so its names are trusted like the contacts it carries: the
  * ADR-0051 owner/admin check of the in-group path does not apply.
  *
- * Channel subscriptions are NOT here yet: the channel list does not survive a
- * reload on this device either (`docs/PRODUCT-READINESS.md`), so there is
- * nothing durable to carry until that lands.
+ * v4 (2026-11-13, flag day: v3 refused, no dual accept) adds `channelSeeds`:
+ * the newest epoch seeds this device holds (at most 32 per channel, the
+ * oldest dropped first while the bundle is over its size cap: 32, 16, 8, 4,
+ * then none) of every channel the account's channel-subscription register
+ * holds live. The channel list itself, the account's one subscriber key per
+ * channel and its read key are NOT here: they travel in that register (a
+ * `lakko-sync` envelope over the DeviceGroup, also in the backup), which
+ * reaches every device of the account whenever it subscribes, not only at a
+ * pairing. The seeds are here because they change at every rotation and the
+ * channels service keeps only the newest four per subscriber key; with
+ * them the new device opens the older posts the confirming device could.
+ * A receiver never replaces a seed it holds for an epoch.
  */
 import type { DeviceCipher } from "../auth/device-cipher";
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
@@ -161,10 +170,36 @@ export const MAX_CARRIED_GROUP_NAMES = 1000;
 export const MAX_CARRIED_PROFILES = 2000;
 export const MAX_CARRIED_PENDING_CONTACTS = 500;
 export const MAX_CARRIED_HELD_MESSAGES = 200;
+/** v4: at most this many channels in `channelSeeds`, and this many seeds per
+ *  channel (the newest held). Chosen with the register's client limit and
+ *  the 30 days of posts at a rotation a day. */
+export const MAX_CARRIED_SEED_CHANNELS = 1000;
+export const MAX_CARRIED_SEEDS_PER_CHANNEL = 32;
+/** The per-channel seed counts tried, in order, while the bundle is over its
+ *  size cap; the same count for every channel at once. */
+const SEED_LADDER = [32, 16, 8, 4, 0] as const;
+const CHANNEL_ID_LENGTH = 16;
+const CHANNEL_SEED_LENGTH = 32;
+const MAX_EPOCH = 4_294_967_295;
+
+/** One epoch seed of a channel (v4). Key material: never logged. */
+export interface CarriedEpochSeed {
+  readonly epoch: number;
+  /** Standard base64 (with padding) of the 32-byte seed. */
+  readonly seedB64: string;
+}
+
+/** The newest seeds a device holds for one channel (v4). */
+export interface CarriedChannelSeeds {
+  /** Standard base64 (with padding) of the 16-byte channel id. */
+  readonly channelIdB64: string;
+  /** 1..=32 seeds, strictly ascending by epoch. */
+  readonly seeds: readonly CarriedEpochSeed[];
+}
 
 /** The bundle. `v` is the only version there is. */
-export interface StateBundleV3 {
-  readonly v: 3;
+export interface StateBundle {
+  readonly v: 4;
   readonly contacts: readonly AcceptedContact[];
   readonly pins: readonly CarriedPin[];
   /** base64 group ids the old device holds; the new device counts the ones
@@ -179,6 +214,8 @@ export interface StateBundleV3 {
   readonly profiles: readonly CarriedProfile[];
   /** At most one per account id. */
   readonly pendingContacts: readonly CarriedPendingContact[];
+  /** v4: at most one entry per channel, ascending by channel-id bytes. */
+  readonly channelSeeds: readonly CarriedChannelSeeds[];
 }
 
 /** What the sending device adds beside the localStorage state (read from its
@@ -187,6 +224,9 @@ export interface CarriedExtras {
   readonly groupNames?: readonly CarriedGroupName[];
   readonly profiles?: readonly CarriedProfile[];
   readonly pendingContacts?: readonly CarriedPendingContact[];
+  /** v4: every epoch seed this device holds, per channel (hex id ->
+   *  epoch -> seed), for the channels with a LIVE register; trimmed here. */
+  readonly channelSeeds?: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>;
 }
 
 /** Read the account's contacts, pins and the given group ids into a bundle.
@@ -200,7 +240,7 @@ export function buildStateBundle(
   ownerAccountIdB64: string,
   ownPredecessors: readonly CarriedOwnPredecessor[] = [],
   extras: CarriedExtras = {},
-): StateBundleV3 {
+): StateBundle {
   const contacts = loadAccepted(ownerAccountIdB64);
   const pins: CarriedPin[] = [];
   for (const c of contacts) {
@@ -215,8 +255,9 @@ export function buildStateBundle(
       provenPredecessorsB64: carriedKeys(pin.provenPredecessorsB64 ?? []),
     });
   }
+  const seedsByChannel = extras.channelSeeds ?? new Map<string, ReadonlyMap<number, Uint8Array>>();
   return fitToSizeCap({
-    v: 3,
+    v: 4,
     contacts,
     pins,
     knownGroupIdsB64: [...knownGroupIdsB64],
@@ -224,7 +265,41 @@ export function buildStateBundle(
     groupNames: carriedGroupNames(extras.groupNames ?? [], knownGroupIdsB64),
     profiles: carriedProfiles(extras.profiles ?? []),
     pendingContacts: carriedPending(extras.pendingContacts ?? []),
-  });
+    channelSeeds: carriedChannelSeeds(seedsByChannel, MAX_CARRIED_SEEDS_PER_CHANNEL),
+  }, seedsByChannel);
+}
+
+/** v4: per channel the newest `perChannel` seeds held, ascending by epoch;
+ *  channels ascending by id bytes (lower-case hex sorts the same), bounded.
+ *  Pure. */
+export function carriedChannelSeeds(
+  seeds: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+  perChannel: number,
+): CarriedChannelSeeds[] {
+  if (perChannel <= 0) return [];
+  const out: CarriedChannelSeeds[] = [];
+  const ids = [...seeds.keys()].map((h) => h.toLowerCase()).filter((h) => /^[0-9a-f]{32}$/.test(h)).sort();
+  for (const idHex of ids) {
+    const inner = seeds.get(idHex);
+    if (inner === undefined) continue;
+    const epochs = [...inner.keys()]
+      .filter((e) => Number.isSafeInteger(e) && e >= 0 && e <= MAX_EPOCH && inner.get(e)?.length === CHANNEL_SEED_LENGTH)
+      .sort((a, b) => a - b);
+    const kept = epochs.slice(Math.max(0, epochs.length - Math.min(perChannel, MAX_CARRIED_SEEDS_PER_CHANNEL)));
+    if (kept.length === 0) continue;
+    out.push({
+      channelIdB64: base64Encode(hexBytes(idHex)),
+      seeds: kept.map((epoch) => ({ epoch, seedB64: base64Encode(inner.get(epoch) as Uint8Array) })),
+    });
+    if (out.length === MAX_CARRIED_SEED_CHANNELS) break;
+  }
+  return out;
+}
+
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
 /** One name per KNOWN group, in the known-group order, bounded. */
@@ -281,10 +356,24 @@ function carriedPending(list: readonly CarriedPendingContact[]): CarriedPendingC
  * key order), then the group names (from the end of the known-group
  * order), then the held messages of the pending contacts. Contacts, pins and keys are never trimmed. Pure.
  */
-function fitToSizeCap(bundle: StateBundleV3): StateBundleV3 {
-  const size = (b: StateBundleV3): number => encodeStateBundle(b).length;
+function fitToSizeCap(
+  bundle: StateBundle,
+  seeds: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>> = new Map(),
+): StateBundle {
+  const size = (b: StateBundle): number => encodeStateBundle(b).length;
   let b = bundle;
   if (size(b) <= MAX_BUNDLE_BYTES) return b;
+  // v4: the seeds never push out another array. The other arrays are fitted
+  // with no seeds, then the per-channel seed count goes down the ladder for
+  // every channel at once until the bundle fits.
+  if (b.channelSeeds.length > 0) {
+    const fitted = fitToSizeCap({ ...b, channelSeeds: [] });
+    for (const perChannel of SEED_LADDER) {
+      const withSeeds: StateBundle = { ...fitted, channelSeeds: carriedChannelSeeds(seeds, perChannel) };
+      if (size(withSeeds) <= MAX_BUNDLE_BYTES) return withSeeds;
+    }
+    return fitted;
+  }
   const entryBytes = (x: unknown): number => new TextEncoder().encode(JSON.stringify(x)).length + 1;
   let over = size(b) - MAX_BUNDLE_BYTES;
   const profiles = [...b.profiles];
@@ -373,14 +462,14 @@ export function boundedOwnPredecessors(
   return first === undefined ? newest : [first, ...newest];
 }
 
-export function encodeStateBundle(bundle: StateBundleV3): Uint8Array {
+export function encodeStateBundle(bundle: StateBundle): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(bundle));
 }
 
 /** Decode a bundle, refusing anything that is not the shape above. A refused
  *  bundle is `null` — the joiner then lands without contacts, as before.
  *  A bundle of any other version is refused (no dual accept). */
-export function decodeStateBundle(bytes: Uint8Array): StateBundleV3 | null {
+export function decodeStateBundle(bytes: Uint8Array): StateBundle | null {
   if (bytes.length === 0 || bytes.length > MAX_BUNDLE_BYTES) return null;
   let parsed: unknown;
   try {
@@ -390,12 +479,13 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV3 | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o["v"] !== 3) return null;
+  if (o["v"] !== 4) return null;
   if (!Array.isArray(o["contacts"]) || !Array.isArray(o["pins"])) return null;
   if (!Array.isArray(o["knownGroupIdsB64"])) return null;
   if (!Array.isArray(o["ownPredecessors"])) return null;
   if (!Array.isArray(o["groupNames"]) || !Array.isArray(o["profiles"])) return null;
   if (!Array.isArray(o["pendingContacts"])) return null;
+  if (!Array.isArray(o["channelSeeds"])) return null;
   const contacts: AcceptedContact[] = [];
   for (const c of o["contacts"] as unknown[]) {
     if (typeof c !== "object" || c === null) return null;
@@ -503,8 +593,10 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV3 | null {
       })),
     });
   }
+  const channelSeeds = decodeChannelSeeds(o["channelSeeds"] as unknown[]);
+  if (channelSeeds === null) return null;
   return {
-    v: 3,
+    v: 4,
     contacts,
     pins,
     knownGroupIdsB64,
@@ -512,7 +604,62 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV3 | null {
     groupNames,
     profiles,
     pendingContacts,
+    channelSeeds,
   };
+}
+
+/** v4: the `channelSeeds` array, or `null` (the whole bundle is refused) on
+ *  any violation: more than 1000 entries, a channel id twice or not 16 bytes,
+ *  `seeds` empty or over 32, an epoch not an integer in 0..=4294967295 or not
+ *  strictly ascending, a seed not 32 bytes. */
+function decodeChannelSeeds(raw: readonly unknown[]): CarriedChannelSeeds[] | null {
+  if (raw.length > MAX_CARRIED_SEED_CHANNELS) return null;
+  const out: CarriedChannelSeeds[] = [];
+  const seen = new Set<string>();
+  for (const e of raw) {
+    if (typeof e !== "object" || e === null) return null;
+    const r = e as Record<string, unknown>;
+    const channelIdB64 = r["channelIdB64"];
+    if (typeof channelIdB64 !== "string" || !decodesTo(channelIdB64, CHANNEL_ID_LENGTH)) return null;
+    const idKey = bytesHex(base64Decode(channelIdB64));
+    if (seen.has(idKey)) return null;
+    seen.add(idKey);
+    const list = r["seeds"];
+    if (!Array.isArray(list) || list.length === 0 || list.length > MAX_CARRIED_SEEDS_PER_CHANNEL) return null;
+    const seeds: CarriedEpochSeed[] = [];
+    let last = -1;
+    for (const s of list as unknown[]) {
+      if (typeof s !== "object" || s === null) return null;
+      const sr = s as Record<string, unknown>;
+      const epoch = sr["epoch"];
+      const seedB64 = sr["seedB64"];
+      if (typeof epoch !== "number" || !Number.isInteger(epoch) || epoch < 0 || epoch > MAX_EPOCH) return null;
+      if (epoch <= last) return null;
+      if (typeof seedB64 !== "string" || !decodesTo(seedB64, CHANNEL_SEED_LENGTH)) return null;
+      last = epoch;
+      seeds.push({ epoch, seedB64 });
+    }
+    out.push({ channelIdB64, seeds });
+  }
+  return out;
+}
+
+function bytesHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/** v4, receiving device: the carried seeds per channel (hex id -> epoch ->
+ *  seed). Pure. */
+export function carriedSeedsOf(bundle: Pick<StateBundle, "channelSeeds">): Map<string, Map<number, Uint8Array>> {
+  const out = new Map<string, Map<number, Uint8Array>>();
+  for (const c of bundle.channelSeeds) {
+    const inner = new Map<number, Uint8Array>();
+    for (const s of c.seeds) inner.set(s.epoch, base64Decode(s.seedB64));
+    out.set(bytesHex(base64Decode(c.channelIdB64)), inner);
+  }
+  return out;
 }
 
 /** Merge a bundle into this browser, into the list of `ownerAccountIdB64`
@@ -521,7 +668,7 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV3 | null {
  *  new device may run this before its session lands, so the account is
  *  named, not taken from the binding. */
 export function applyStateBundle(
-  bundle: StateBundleV3,
+  bundle: StateBundle,
   ownerAccountIdB64: string,
 ): { contacts: number; pins: number } {
   const have = new Set(loadAccepted(ownerAccountIdB64).map((c) => c.signaturePubkeyB64));
@@ -642,7 +789,7 @@ export async function collectOwnPredecessors(
  * install them again before any KeyPackage is published.
  */
 export async function applyOwnPredecessors(
-  bundle: Pick<StateBundleV3, "ownPredecessors">,
+  bundle: Pick<StateBundle, "ownPredecessors">,
   accountIdB64: string,
   deviceKey: DeviceCipher,
   keyHexOfSeed: (seed: Uint8Array) => string,

@@ -44,7 +44,12 @@ export type PostDecode =
        *  (handle, photo, allowed reactions, flag) from it. */
       readonly plaintext?: Uint8Array;
     }
-  | { readonly kind: "dropped" };
+  | { readonly kind: "dropped" }
+  /** ADR-0092 — a poll, checklist, location, contact card or article post. */
+  | { readonly kind: "content"; readonly body: Extract<ParsedBodyResult, { kind: "content" }> }
+  /** ADR-0092 — an op on an earlier content post (a publisher's close with
+   *  its frozen tally, an article edit); never a card. */
+  | { readonly kind: "content-op"; readonly body: Extract<ParsedBodyResult, { kind: "content-op" }> };
 
 /** The one wasm export the classification needs, structurally
  *  (`classifyChannelPostPlaintext`). */
@@ -100,6 +105,8 @@ export function toPostDecode(
     const body = parseBody(bytes);
     if (body.kind === "chat") return { kind: "text", text: body.text, body };
     if (body.kind === "edit" || body.kind === "delete") return { kind: "op", body };
+    if (body.kind === "content") return { kind: "content", body };
+    if (body.kind === "content-op") return { kind: "content-op", body };
     // Reactions, typing, receipts and service envelopes have no place in a
     // channel: a post carries none of them.
     return { kind: "dropped" };
@@ -116,7 +123,11 @@ export function toPostDecode(
 export function isHiddenPostDecode(decoded: PostDecode | undefined): boolean {
   return (
     decoded !== undefined &&
-    (decoded.kind === "meta" || decoded.kind === "dropped" || decoded.kind === "op" || decoded.kind === "ban-list")
+    (decoded.kind === "meta" ||
+      decoded.kind === "dropped" ||
+      decoded.kind === "op" ||
+      decoded.kind === "content-op" ||
+      decoded.kind === "ban-list")
   );
 }
 

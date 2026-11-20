@@ -296,6 +296,31 @@ export async function rekeyGroupHandle(args: {
   }
 }
 
+/** A retry of a New group: move the name from the key of an earlier attempt's
+ *  group to this attempt's group (the `rekey` statement, signed by the earlier
+ *  key). The caller then writes this group's content with
+ *  {@link updateGroupHandle}. */
+export async function moveGroupHandle(args: {
+  readonly wasm: Wasm;
+  readonly accountIdentity: WasmIdentity;
+  readonly fromGroupId: Uint8Array;
+  readonly toGroupId: Uint8Array;
+  readonly handle: string;
+}): Promise<void> {
+  const { wasm } = args;
+  const pair = await namePair(args.handle);
+  const oldSeed = groupHandleSeed(wasm, args.accountIdentity, args.fromGroupId);
+  const seed = groupHandleSeed(wasm, args.accountIdentity, args.toGroupId);
+  try {
+    const statement = wasm.signHandleRekey(oldSeed, pair.lookupKey, wasm.handleWritePublicKey(seed));
+    const result = await handleWrite("rekey", statement);
+    if (result === null) throw new Error("handle rekey answered no certificate");
+  } finally {
+    oldSeed.fill(0);
+    seed.fill(0);
+  }
+}
+
 /** Retire the name (Delete group, section 11). */
 export async function retireGroupHandle(args: {
   readonly wasm: Wasm;

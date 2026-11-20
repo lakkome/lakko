@@ -17,6 +17,14 @@
 # Then it keeps 7 daily, 4 weekly and 3 monthly snapshots and prunes the
 # rest, so a deleted account leaves the backups within about three months.
 #
+# Heartbeat (ADR-0096): on success the script writes
+#   lakko_job_last_success_timestamp_seconds{task="backup_db"|"backup_blobs"}
+# to node_exporter's textfile collector ($LAKKO_BACKUP_TEXTFILE_DIR, default
+# /var/lib/node_exporter/textfile_collector, set it empty to skip). A failed
+# run writes nothing, so LakkoBackupStale (infra/prometheus/rules/
+# services.yml) fires once the last success is too old. One nightly run
+# saves both, so both heartbeats move together.
+#
 # Configuration: /etc/lakko/backup.env (see infra/etc-lakko/backup.env.example).
 # Every path below can be overridden there, which is also how the local
 # test (infra/scripts/backup-test.sh) runs it.
@@ -52,6 +60,7 @@ DB_PATTERN="${LAKKO_BACKUP_DB_PATTERN:-lakko_%}"
 DB_EXCLUDE="${LAKKO_BACKUP_DB_EXCLUDE:-lakko\\_test\\_%}"
 KEEP="${LAKKO_BACKUP_KEEP:---keep-daily 7 --keep-weekly 4 --keep-monthly 3}"
 STATUS_FILE="${LAKKO_BACKUP_STATUS_FILE:-$STAGE/last-success}"
+TEXTFILE_DIR="${LAKKO_BACKUP_TEXTFILE_DIR-/var/lib/node_exporter/textfile_collector}"
 
 DUMP=$(command -v mariadb-dump || command -v mysqldump)
 CLIENT=$(command -v mariadb || command -v mysql)
@@ -100,4 +109,24 @@ restic check
 log "OK repository check"
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$STATUS_FILE"
+
+# The ADR-0096 heartbeat: one file per task, written atomically.
+heartbeat() {
+    local task="$1" file tmp
+    file="$TEXTFILE_DIR/lakko_${task}.prom"
+    tmp="$file.$$"
+    {
+        echo "# HELP lakko_job_last_success_timestamp_seconds Unix time of a background job's last successful run"
+        echo "# TYPE lakko_job_last_success_timestamp_seconds gauge"
+        echo "lakko_job_last_success_timestamp_seconds{task=\"${task}\"} $(date -u +%s)"
+    } > "$tmp"
+    chmod 0644 "$tmp"
+    mv "$tmp" "$file"
+}
+if [[ -n "$TEXTFILE_DIR" ]]; then
+    mkdir -p "$TEXTFILE_DIR"
+    heartbeat backup_db
+    heartbeat backup_blobs
+    log "OK heartbeat written to $TEXTFILE_DIR"
+fi
 log "OK done"

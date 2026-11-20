@@ -32,12 +32,12 @@ import type { CarriedCopy } from "../contacts/carried-copies";
 import type { PendingContact } from "../contacts/pending-contacts";
 import type { ProfileDecoder, ReceivedProfile } from "../profile/profile-envelope";
 import { sniffProfile } from "../profile/profile-envelope";
-import type { CarriedPendingContact, StateBundleV3 } from "./state-bundle";
+import type { CarriedPendingContact, StateBundle } from "./state-bundle";
 
 /** The group names a bundle carries, decoded. An entry that does not decode
  *  is skipped, never the bundle. Pure over the decoder. */
 export function carriedGroupNamesOf(
-  bundle: Pick<StateBundleV3, "groupNames">,
+  bundle: Pick<StateBundle, "groupNames">,
   decoder: GroupNameDecoder,
 ): Map<string, StoredGroupName> {
   const out = new Map<string, StoredGroupName>();
@@ -58,7 +58,7 @@ export function carriedGroupNamesOf(
  *  entry that does not decode is skipped; a key `isOwnKey` names is never
  *  returned. Pure over the decoder. */
 export function carriedProfilesOf(
-  bundle: Pick<StateBundleV3, "profiles">,
+  bundle: Pick<StateBundle, "profiles">,
   decoder: ProfileDecoder,
   isOwnKey: (keyB64: string) => boolean,
 ): Map<string, ReceivedProfile> {

@@ -42,8 +42,8 @@ struct QuietIncomingCallPanel: View {
             HStack(spacing: 10) {
                 InitialsAvatar(
                     name: call.callerName ?? "", identity: call.callerName ?? "lakko.call", size: 36,
-                    placeholderSymbol: "person.fill", photo: call.callerKey.map(AvatarPhoto.person))
-                Image(systemName: call.video ? "video.fill" : "phone.fill")
+                    placeholderIcon: .personFill, photo: call.callerKey.map(AvatarPhoto.person))
+                LkIconView(call.video ? .videoFill : .phoneFill, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {

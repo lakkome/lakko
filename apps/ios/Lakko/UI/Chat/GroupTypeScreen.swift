@@ -81,7 +81,7 @@ struct GroupTypeScreen: View {
         List {
             Section {
                 LakkoPicker(
-                    l10n.t("group_type.who_can_join"), systemImage: "person.2",
+                    l10n.t("group_type.who_can_join"), icon: .person2,
                     selection: $isPublic,
                     options: [
                         LakkoPickerOption(value: false, label: l10n.t("group_type.private")),

@@ -44,5 +44,16 @@ rand = "0.8"
 # the rest of the crypto surface uses.
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
+# ADR-0092: the display-name, display-text (`Cf` table) and canonical
+# username rules for poll / checklist / location / contact-card / article
+# text, so a poll question is refused for the same characters a profile
+# name is. lakko-contacts depends only on lakko-crypto, so no cycle.
+lakko-contacts.workspace = true
+
+[dev-dependencies]
+# ADR-0092: round trip, canonical re-encode, bounds and hostile input for
+# every new codec.
+proptest = "1"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

@@ -13,8 +13,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,6 +39,7 @@ import me.lakko.app.ui.chat.initialsOf
 import me.lakko.app.ui.theme.avatarTintFor
 import me.lakko.app.ui.theme.isLakkoDark
 import java.io.File
+import me.lakko.app.R
 
 /**
  * The one avatar circle of the client (design system section 2; UX
@@ -109,11 +108,11 @@ public fun LakkoAvatar(
         // (`chat.group.fallback_name`), so the glyph keys on that, not on
         // the English word.
         if (groupGlyph || (group && name == LocalStrings.current["chat.group.fallback_name"])) {
-            Icon(
-                Icons.Filled.Groups,
+            LkIcon(
+                R.drawable.ic_lk_person_3_fill,
                 contentDescription = null,
                 tint = tint.foreground,
-                modifier = Modifier.size(size * 0.55f),
+                size = size * 0.55f,
             )
         } else {
             Text(

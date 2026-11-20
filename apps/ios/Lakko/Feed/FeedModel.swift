@@ -70,13 +70,15 @@ struct FeedMessage: Equatable {
     let replyTarget: Int64?
     /// One label per attachment ("Photo", "Voice message", ...).
     let attachmentLabels: [String]
-    /// The attachments themselves, for the media bubbles. Empty for a channel
-    /// post, which carries none yet.
+    /// The attachments themselves, for the media bubbles (a channel post's
+    /// from the references its log entry keeps).
     let attachments: [AttachmentRef]
     let edited: Bool
     let deleted: Bool
     /// The original author's name when forwarded.
     let forwardAuthor: String?
+    /// ADR-0092 — the content of a content message or post, `nil` for none.
+    let content: PersistedContent?
 
     init(
         messageId: Int64,
@@ -90,8 +92,10 @@ struct FeedMessage: Equatable {
         attachments: [AttachmentRef] = [],
         edited: Bool = false,
         deleted: Bool = false,
-        forwardAuthor: String? = nil
+        forwardAuthor: String? = nil,
+        content: PersistedContent? = nil
     ) {
+        self.content = content
         self.messageId = messageId
         self.direction = direction
         self.text = text
@@ -117,6 +121,7 @@ struct FeedMessage: Equatable {
             && lhs.attachments == rhs.attachments
             && lhs.edited == rhs.edited && lhs.deleted == rhs.deleted
             && lhs.forwardAuthor == rhs.forwardAuthor
+            && lhs.content == rhs.content
     }
 }
 
@@ -240,7 +245,14 @@ enum FeedModel {
                 continue
             }
             let id = Int64(p.cursor)
-            let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(p.text, $0) } == true
+            // A post shows its words and its attachments, as a group's
+            // message does (`docs/ux/feed.md` section 3, base scenario 32).
+            // Its stored line names a caption-less photo for the Chats row;
+            // here the bubble says it, so the text is the caption alone. A
+            // content post (ADR-0092) keeps its feed line.
+            let attachments = p.attachmentRefs
+            let text = attachments.isEmpty || p.contentEnvelopeB64 != nil ? p.text : (p.caption ?? "")
+            let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(text, $0) } == true
             candidates.append(
                 FeedCandidate(
                     conversation: conversation,
@@ -252,8 +264,8 @@ enum FeedModel {
                     mentionsMe: mentionsMe,
                     repliesToMe: false,
                     reactionsDistinct: 0,
-                    hasMedia: false,
-                    text: p.text
+                    hasMedia: !attachments.isEmpty,
+                    text: text
                 ))
             refs.append(
                 FeedCandidateRef(
@@ -261,8 +273,13 @@ enum FeedModel {
                     message: FeedMessage(
                         messageId: id,
                         direction: fromSelf ? .outgoing : .incoming,
-                        text: p.text,
-                        timeMs: p.serverTsMs),
+                        text: text,
+                        timeMs: p.serverTsMs,
+                        attachmentLabels: attachments.map {
+                            ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
+                        },
+                        attachments: attachments,
+                        content: p.content),
                     mentionsMe: mentionsMe,
                     repliesToMe: false))
         }
@@ -331,6 +348,11 @@ enum FeedCopy {
 
     /// What stands in for text when a message carries only attachments.
     static func attachmentLine(_ message: FeedMessage) -> String? {
+        // ADR-0092 — a content message with no text says what it is.
+        if let content = message.content, message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let line = ContentPreview.line(content: ContentModel.content(content)) {
+            return line
+        }
         let n = message.attachmentLabels.count
         if n == 0 { return nil }
         if n > 1 { return Localization.text("feed.attachments.count", counts: ["count": UInt64(n)]) }
@@ -365,6 +387,7 @@ enum FeedCopy {
     ) -> String {
         let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { return message.text }
+        if message.content != nil { return attachmentLine(message) ?? "" }
         if mediaRefs(message, allowlist: allowlist).isEmpty { return attachmentLine(message) ?? "" }
         let files = zip(message.attachments, message.attachmentLabels)
             .filter { InlineMedia.decision(for: $0.0, allowlist: allowlist).bubble == .file }

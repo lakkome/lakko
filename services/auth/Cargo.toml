@@ -24,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 # ADR-0078 section 11: the request span that records the route template.
 lakko-log-hygiene.workspace = true
+lakko-metrics.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -68,6 +69,11 @@ lakko-pow-server.workspace = true
 # (`lakko-discovery-client`, `services/discovery`); no new third-party crate.
 lakko-anon-token.workspace = true
 lakko-anon-token-server.workspace = true
+# ADR-0092 section 4.2 — the channel-poll anonymous credential (CMZ14 MAC on
+# Ristretto255): commitment registration and per-period issuance. Its
+# dependencies (curve25519-dalek, blake3, subtle, zeroize, rand_core) are
+# already in this service's tree.
+lakko-anon-cred.workspace = true
 
 # Equix (LGPL-3.0-only — AGPL-compatible). Memory-hard PoW from the Tor
 # Project. The server-side verify now lives in `lakko-pow-server`; auth still
@@ -115,6 +121,10 @@ lakko-call-jwt.workspace = true
 # `webauthn_states` table between the two-step request pair —
 # webauthn-rs's defaults assume in-memory state which doesn't
 # survive across axum requests.
+# The option types webauthn-rs builds (already in the tree through it, same
+# version): passkey registration asks for a discoverable credential, which
+# webauthn-rs's passkey builder does not (see `require_discoverable`).
+webauthn-rs-proto = "=0.5.5"
 webauthn-rs = { version = "0.5", features = [
     # Park PasskeyRegistration / PasskeyAuthentication state in the
     # `webauthn_states` row between /start and /finish. Required

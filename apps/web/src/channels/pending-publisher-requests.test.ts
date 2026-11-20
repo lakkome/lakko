@@ -36,7 +36,7 @@ describe("pending publisher requests (UX 15.2.2)", () => {
     expect(r?.linkDead).toBe(true);
   });
 
-  it("an Ask again that went out replaces the record and restarts the 7 days", () => {
+  it("an Ask again that went out replaces the record and restarts the day", () => {
     recordPendingPublisherRequest("acct", record(100));
     recordPendingPublisherRequest("acct", record(900));
     const list = loadPendingPublisherRequests("acct");

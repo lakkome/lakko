@@ -129,6 +129,7 @@ impl EncryptedAttachment {
 /// r.kind = "voice";
 /// r.durationMs = 4200;
 /// r.waveform = amplitudes; // Uint8Array, 1..=128 bytes
+/// photo.inlineThumb = jpeg; // ADR-0047 section 6: <= 4096 bytes, JPEG
 /// ```
 ///
 /// Out-of-bound values are not errors: `EnvelopeBuilder.build` drops them,
@@ -148,6 +149,9 @@ pub struct AttachmentRef {
     width: Option<u32>,
     height: Option<u32>,
     thumb: Option<ThumbRef>,
+    title: Option<String>,
+    artist: Option<String>,
+    inline_thumb: Option<Vec<u8>>,
 }
 
 /// ADR-0047 — a poster-frame blob attached to an [`AttachmentRef`]: its
@@ -298,7 +302,53 @@ impl AttachmentRef {
             width: None,
             height: None,
             thumb: None,
+            title: None,
+            artist: None,
+            inline_thumb: None,
         }
+    }
+
+    /// ADR-0047 section 6 — the micro thumbnail: raw JPEG bytes (starting
+    /// `FF D8 FF`), at most 4096, carried inside the message so a
+    /// notification or a list row needs no download. Present on parse only
+    /// on the first attachment whose MIME is an inline image or video;
+    /// `undefined` otherwise.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb.clone()
+    }
+
+    /// Set (or clear with `undefined`) the micro thumbnail. Not a JPEG, over
+    /// 4096 bytes, or on any ref but the first image or video of the
+    /// message, `EnvelopeBuilder.build` drops it, as every receiver would.
+    #[wasm_bindgen(setter, js_name = inlineThumb)]
+    pub fn set_inline_thumb(&mut self, inline_thumb: Option<Vec<u8>>) {
+        self.inline_thumb = inline_thumb;
+    }
+
+    /// ADR-0092 — an `audio` attachment's title tag (<= 255 bytes); kept on
+    /// the wire only on kind `"audio"`.
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        self.title.clone()
+    }
+
+    /// Set the audio title tag.
+    #[wasm_bindgen(setter)]
+    pub fn set_title(&mut self, title: Option<String>) {
+        self.title = title;
+    }
+
+    /// ADR-0092 — an `audio` attachment's artist tag (<= 255 bytes).
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> {
+        self.artist.clone()
+    }
+
+    /// Set the audio artist tag.
+    #[wasm_bindgen(setter)]
+    pub fn set_artist(&mut self, artist: Option<String>) {
+        self.artist = artist;
     }
 
     /// ADR-0047 — `"voice"`, `"video_note"`, `"gif"`, another (unknown)
@@ -753,10 +803,115 @@ pub struct ParsedBody {
     reaction_action: Option<&'static str>,
     reaction_target_author: Option<Vec<u8>>,
     channel_invite: Option<Vec<u8>>,
+    content: Option<inner::Content>,
+    poll_choices: Option<Vec<u8>>,
+    checklist_item: Option<inner::ChecklistItemRef>,
+    checklist_done: Option<bool>,
+    poll_tally: Option<crate::channel_poll::ChannelPollTally>,
+    inline_thumb: Option<Vec<u8>>,
+}
+
+impl ParsedBody {
+    const fn empty(kind: &'static str) -> Self {
+        Self {
+            kind,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
+            emoji: None,
+            is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
+            content: None,
+            poll_choices: None,
+            checklist_item: None,
+            checklist_done: None,
+            poll_tally: None,
+            inline_thumb: None,
+        }
+    }
+
+    fn with_reply_forward(
+        mut self,
+        reply: Option<inner::Reply>,
+        forward: Option<inner::Forward>,
+    ) -> Self {
+        self.reply_to = reply.as_ref().map(|r| r.target);
+        self.reply_author = reply.as_ref().and_then(|r| r.author.clone());
+        self.reply_excerpt = reply.and_then(|r| r.excerpt);
+        self.forwarded_from = forward.as_ref().and_then(|f| f.author.clone());
+        self.forward_origin_group_b64 = forward
+            .as_ref()
+            .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone()));
+        self.forward_origin_message_id = forward.and_then(|f| f.origin.map(|o| o.message_id));
+        self
+    }
+
+    fn with_content(mut self, content: inner::Content) -> Self {
+        self.content = Some(content);
+        self
+    }
 }
 
 #[wasm_bindgen]
 impl ParsedBody {
+    /// ADR-0047 section 6 — the picture of a `"chat"` message's first photo
+    /// or video: the micro thumbnail carried inside the envelope (raw JPEG
+    /// bytes, at most 4096), `undefined` when none. What a notification or a
+    /// list row draws, with no download.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        self.inline_thumb.clone()
+    }
+
+    /// ADR-0092 — the `MessageContent` object of a `"poll"` / `"checklist"`
+    /// / `"location"` / `"contact-card"` / `"article"` message, or the
+    /// replacement of an `"edit-checklist"` / `"edit-article"`; otherwise
+    /// `undefined`. Byte fields inside are standard base64.
+    #[wasm_bindgen(getter, unchecked_return_type = "MessageContent | undefined")]
+    pub fn content(&self) -> JsValue {
+        self.content
+            .as_ref()
+            .map_or(JsValue::UNDEFINED, crate::content::content_to_js)
+    }
+
+    /// ADR-0092 — a `"poll-vote"`'s choices (empty = retract).
+    #[wasm_bindgen(getter, js_name = pollChoices)]
+    pub fn poll_choices(&self) -> Option<Vec<u8>> {
+        self.poll_choices.clone()
+    }
+
+    /// ADR-0092 — the `ChecklistItemRef` a `"checklist-tick"` names.
+    #[wasm_bindgen(getter, js_name = checklistItem, unchecked_return_type = "ChecklistItemRef | undefined")]
+    pub fn checklist_item(&self) -> JsValue {
+        self.checklist_item.map_or(JsValue::UNDEFINED, |i| {
+            crate::content::to_js(&crate::content::WItemRef::from(i)).unwrap_or(JsValue::UNDEFINED)
+        })
+    }
+
+    /// ADR-0092 section 4.3 — a channel poll's frozen tally on a
+    /// `"poll-close"`, decoded; `undefined` in a group, or when absent or not
+    /// decodable (the close stands).
+    #[wasm_bindgen(getter, js_name = pollTally)]
+    pub fn poll_tally(&self) -> Option<crate::channel_poll::ChannelPollTally> {
+        self.poll_tally.clone()
+    }
+
+    /// ADR-0092 — a `"checklist-tick"`'s done state.
+    #[wasm_bindgen(getter, js_name = checklistDone)]
+    pub fn checklist_done(&self) -> Option<bool> {
+        self.checklist_done
+    }
+
     /// UX reactions-and-emoji section 17: `"add"` or `"remove"`, set only
     /// on `kind == "reaction"`.
     #[wasm_bindgen(getter, js_name = reactionAction)]
@@ -838,7 +993,11 @@ impl ParsedBody {
     }
 
     /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt" |
-    /// "service-envelope" | "unsupported"`. `"service-envelope"` is never
+    /// "service-envelope" | "unsupported"`, and since ADR-0092 `"poll" |
+    /// "checklist" | "location" | "contact-card" | "article"` (the value in
+    /// `content`), `"poll-vote" | "poll-close" | "checklist-tick" |
+    /// "checklist-add"` (ops on `target`, never a bubble) and
+    /// `"edit-checklist" | "edit-article"` (the replacement in `content`). `"service-envelope"` is never
     /// rendered; `"unsupported"` (ADR-0061 section 6) is a chat envelope from
     /// a newer wire version, rendered with the client's own catalog sentence
     /// (its `text` is empty — no core prose).
@@ -1006,180 +1165,154 @@ pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, JsError> {
 /// ambiguous op degrades to `"chat"`.
 #[wasm_bindgen(js_name = parseBodyEnvelope)]
 #[must_use]
-#[allow(clippy::too_many_lines)] // one struct literal per body kind
+#[allow(clippy::too_many_lines)] // one arm per body kind
 pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
+    use inner::MessageBody as B;
     match inner::parse_body(bytes) {
-        inner::MessageBody::Chat {
+        B::Chat {
             text,
             attachments,
             reply,
             forward,
             resend,
             channel_invite,
-        } => ParsedBody {
-            kind: "chat",
-            text,
-            attachments: refs_to_wasm(attachments),
-            target: None,
-            emoji: None,
-            is_typing: None,
-            reply_to: reply.as_ref().map(|r| r.target),
-            reply_author: reply.as_ref().and_then(|r| r.author.clone()),
-            reply_excerpt: reply.and_then(|r| r.excerpt),
-            forwarded_from: forward.as_ref().and_then(|f| f.author.clone()),
-            forward_origin_group_b64: forward
-                .as_ref()
-                .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone())),
-            forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
-            resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
-            resend_origin_message_id: resend.map(|r| r.message_id),
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite,
+        } => {
+            let mut p = ParsedBody::empty("chat").with_reply_forward(reply, forward);
+            p.text = text;
+            p.inline_thumb = inner::first_inline_thumb(&attachments);
+            p.attachments = refs_to_wasm(attachments);
+            p.resend_origin_group_b64 = resend.as_ref().map(|r| r.group_id_b64.clone());
+            p.resend_origin_message_id = resend.map(|r| r.message_id);
+            p.channel_invite = channel_invite;
+            p
         },
-        inner::MessageBody::Edit { target, text } => ParsedBody {
-            kind: "edit",
-            text,
-            attachments: Vec::new(),
-            target: Some(target),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Edit { target, text } => {
+            let mut p = ParsedBody::empty("edit");
+            p.text = text;
+            p.target = Some(target);
+            p
         },
-        inner::MessageBody::Delete { target } => ParsedBody {
-            kind: "delete",
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(target),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Delete { target } => {
+            let mut p = ParsedBody::empty("delete");
+            p.target = Some(target);
+            p
         },
-        inner::MessageBody::Reaction {
+        B::Reaction {
             target,
             emoji,
             action,
             target_author,
-        } => ParsedBody {
-            kind: "reaction",
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(target),
-            emoji: Some(emoji),
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: Some(match action {
+        } => {
+            let mut p = ParsedBody::empty("reaction");
+            p.target = Some(target);
+            p.emoji = Some(emoji);
+            p.reaction_action = Some(match action {
                 inner::ReactionAction::Add => "add",
                 inner::ReactionAction::Remove => "remove",
-            }),
-            reaction_target_author: target_author.map(|k| k.to_vec()),
-            channel_invite: None,
+            });
+            p.reaction_target_author = target_author.map(|k| k.to_vec());
+            p
         },
-        inner::MessageBody::Typing { is_typing } => ParsedBody {
-            kind: "typing",
-            text: String::new(),
-            attachments: Vec::new(),
-            target: None,
-            emoji: None,
-            is_typing: Some(is_typing),
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Typing { is_typing } => {
+            let mut p = ParsedBody::empty("typing");
+            p.is_typing = Some(is_typing);
+            p
         },
-        inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
-            kind: "read-receipt",
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(up_to),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::ReadReceipt { up_to } => {
+            let mut p = ParsedBody::empty("read-receipt");
+            p.target = Some(up_to);
+            p
         },
         // ADR-0061 section 6: a newer wire version; the client renders its
         // own sentence. The version rides `target`, as on UniFFI.
-        inner::MessageBody::Unsupported { version } => ParsedBody {
-            kind: "unsupported",
-            text: String::new(),
-            attachments: Vec::new(),
-            target: Some(i64::from(version)),
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::Unsupported { version } => {
+            let mut p = ParsedBody::empty("unsupported");
+            p.target = Some(i64::from(version));
+            p
         },
         // A Lakko service envelope this build did not recognise: never render.
-        inner::MessageBody::ServiceEnvelope => ParsedBody {
-            kind: "service-envelope",
-            text: String::new(),
-            attachments: Vec::new(),
-            target: None,
-            emoji: None,
-            is_typing: None,
-            reply_to: None,
-            reply_author: None,
-            reply_excerpt: None,
-            forwarded_from: None,
-            forward_origin_group_b64: None,
-            forward_origin_message_id: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-            reaction_action: None,
-            reaction_target_author: None,
-            channel_invite: None,
+        B::ServiceEnvelope => ParsedBody::empty("service-envelope"),
+        B::Poll {
+            poll,
+            reply,
+            forward,
+        } => ParsedBody::empty("poll")
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::Poll(poll)),
+        B::Checklist {
+            checklist,
+            reply,
+            forward,
+        } => ParsedBody::empty("checklist")
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::Checklist(checklist)),
+        B::Location {
+            location,
+            reply,
+            forward,
+        } => ParsedBody::empty("location")
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::Location(location)),
+        B::ContactCard {
+            card,
+            reply,
+            forward,
+        } => ParsedBody::empty("contact-card")
+            .with_reply_forward(reply, forward)
+            .with_content(inner::Content::ContactCard(card)),
+        B::Article {
+            article,
+            attachments,
+            reply,
+            forward,
+        } => {
+            let mut p = ParsedBody::empty("article")
+                .with_reply_forward(reply, forward)
+                .with_content(inner::Content::Article(article));
+            p.attachments = refs_to_wasm(attachments);
+            p
+        },
+        B::PollVote { target, choices } => {
+            let mut p = ParsedBody::empty("poll-vote");
+            p.target = Some(target);
+            p.poll_choices = Some(choices);
+            p
+        },
+        B::PollClose { target, tally } => {
+            let mut p = ParsedBody::empty("poll-close");
+            p.target = Some(target);
+            p.poll_tally = tally.and_then(|t| crate::channel_poll::decode_close_tally(&t));
+            p
+        },
+        B::ChecklistTick { target, item, done } => {
+            let mut p = ParsedBody::empty("checklist-tick");
+            p.target = Some(target);
+            p.checklist_item = Some(item);
+            p.checklist_done = Some(done);
+            p
+        },
+        B::ChecklistAdd { target, text } => {
+            let mut p = ParsedBody::empty("checklist-add");
+            p.target = Some(target);
+            p.text = text;
+            p
+        },
+        B::EditChecklist { target, checklist } => {
+            let mut p = ParsedBody::empty("edit-checklist")
+                .with_content(inner::Content::Checklist(checklist));
+            p.target = Some(target);
+            p
+        },
+        B::EditArticle {
+            target,
+            article,
+            attachments,
+        } => {
+            let mut p =
+                ParsedBody::empty("edit-article").with_content(inner::Content::Article(article));
+            p.target = Some(target);
+            p.attachments = refs_to_wasm(attachments);
+            p
         },
     }
 }
@@ -1199,6 +1332,7 @@ fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             // ADR-0047 media fields arrive already bounded by the core
             // parser; a thumb that still fails to decode is dropped alone.
             let waveform = r.decode_waveform();
+            let inline_thumb = r.decode_inline_thumb();
             let thumb = r.thumb.as_ref().and_then(thumb_to_wasm);
             Some(AttachmentRef {
                 blob_id: blob_id.to_vec(),
@@ -1213,6 +1347,9 @@ fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 width: r.width,
                 height: r.height,
                 thumb,
+                title: r.title,
+                artist: r.artist,
+                inline_thumb,
             })
         })
         .collect()
@@ -1263,7 +1400,15 @@ fn ref_to_inner(r: &AttachmentRef) -> Result<inner::AttachmentRef, JsError> {
         width: r.width,
         height: r.height,
         thumb,
+        title: r.title.clone(),
+        artist: r.artist.clone(),
+        inline_thumb: r.inline_thumb.as_ref().map(|t| B64.encode(t)),
     })
+}
+
+/// Convert wasm refs to core wire refs (the content composers' input).
+pub(crate) fn refs_to_inner(refs: &[AttachmentRef]) -> Result<Vec<inner::AttachmentRef>, JsError> {
+    refs.iter().map(ref_to_inner).collect()
 }
 
 fn check_byte_fields(
@@ -1470,6 +1615,52 @@ mod tests {
         assert_eq!((got.duration_ms(), got.waveform()), (None, None));
         assert_eq!((got.width(), got.height()), (None, Some(4096)));
         assert!(got.thumb().is_none());
+    }
+
+    /// ADR-0047 section 6 — the micro thumbnail crosses the binding both
+    /// ways, stays only on the first image or video, and `ParsedBody`
+    /// hands it out for a notification.
+    #[test]
+    fn inline_thumb_crosses_the_binding_on_the_first_media_only() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 7, 7];
+        let mut builder = EnvelopeBuilder::new(String::new());
+        for mime in ["application/pdf", "image/jpeg", "video/mp4"] {
+            let enc = encrypt_attachment(b"media").unwrap();
+            let mut r = AttachmentRef::new(
+                enc.blob_id(),
+                enc.key(),
+                enc.nonce(),
+                Some(mime.to_string()),
+                5,
+                None,
+            );
+            r.set_inline_thumb(Some(jpeg.clone()));
+            builder.add(&r).unwrap();
+        }
+        let bytes = builder.build().unwrap();
+        let body = parse_body_envelope(&bytes);
+        assert_eq!(body.inline_thumb(), Some(jpeg.clone()));
+        let thumbs: Vec<_> = (0..3)
+            .map(|i| body.attachment(i).unwrap().inline_thumb())
+            .collect();
+        assert_eq!(thumbs, vec![None, Some(jpeg), None]);
+
+        // Not a JPEG: dropped at build, the attachment survives.
+        let enc = encrypt_attachment(b"media").unwrap();
+        let mut r = AttachmentRef::new(
+            enc.blob_id(),
+            enc.key(),
+            enc.nonce(),
+            Some("image/png".to_string()),
+            5,
+            None,
+        );
+        r.set_inline_thumb(Some(vec![0x89, b'P', b'N', b'G']));
+        let mut builder = EnvelopeBuilder::new("c".to_string());
+        builder.add(&r).unwrap();
+        let body = parse_body_envelope(&builder.build().unwrap());
+        assert_eq!(body.inline_thumb(), None);
+        assert_eq!(body.attachment(0).unwrap().inline_thumb(), None);
     }
 
     #[test]

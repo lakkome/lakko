@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import AuthenticationServices
 import XCTest
 import LakkoCore
 @testable import Lakko
 
 /// A passkey that restores keys: the pure rules, the core's seal / open run
-/// for real, and the "Turn on" sequence of the keys choice.
+/// for real, storing the keys for a passkey (after it is added, and the
+/// "Restore keys with this passkey" repair).
 final class PasskeyVaultTests: XCTestCase {
 
     private func bytes(_ count: Int) -> Data {
@@ -59,12 +61,63 @@ final class PasskeyVaultTests: XCTestCase {
 
     // MARK: - After adding a passkey
 
-    func testTheChoiceFollowsOnlyWhenThePlatformCanProtectKeys() {
-        XCTAssertEqual(PasskeyVault.addOutcome(prfOutput: true, prfSupported: nil), .offerKeysChoice)
-        XCTAssertEqual(PasskeyVault.addOutcome(prfOutput: false, prfSupported: true), .offerKeysChoice)
-        XCTAssertEqual(PasskeyVault.addOutcome(prfOutput: false, prfSupported: false), .signInOnly)
-        // Nothing reported: a platform older than iOS 18.
-        XCTAssertEqual(PasskeyVault.addOutcome(prfOutput: false, prfSupported: nil), .signInOnly)
+    func testStoringTheKeysFollowsOnlyWhenThePlatformCanProtectKeys() {
+        XCTAssertTrue(PasskeyVault.canCarryKeys(prfOutput: true, prfSupported: nil))
+        XCTAssertTrue(PasskeyVault.canCarryKeys(prfOutput: false, prfSupported: true))
+        // Only an explicit "cannot" skips the second sheet.
+        XCTAssertFalse(PasskeyVault.canCarryKeys(prfOutput: false, prfSupported: false))
+        // Nothing said: the second sheet runs.
+        XCTAssertTrue(PasskeyVault.canCarryKeys(prfOutput: false, prfSupported: nil))
+    }
+
+    func testASystemWithoutThePrfApiReportsThatItCannotCarryKeys() {
+        XCTAssertEqual(PasskeyVault.reportedPrfSupport(registrationReported: nil, prfApiAvailable: false), false)
+        XCTAssertEqual(PasskeyVault.reportedPrfSupport(registrationReported: true, prfApiAvailable: false), false)
+        XCTAssertNil(PasskeyVault.reportedPrfSupport(registrationReported: nil, prfApiAvailable: true))
+        XCTAssertEqual(PasskeyVault.reportedPrfSupport(registrationReported: false, prfApiAvailable: true), false)
+        XCTAssertEqual(PasskeyVault.reportedPrfSupport(registrationReported: true, prfApiAvailable: true), true)
+    }
+
+    func testPasskeysFoundToCarryNoKeysAreRememberedPerAccount() throws {
+        let suite = "lakko.tests.passkeys-no-prf.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = PasskeyNoPrfStore(defaults: defaults)
+        store.insert("one", accountIdB64: "accountA")
+        store.insert("two", accountIdB64: "accountA")
+        store.insert("one", accountIdB64: "accountA")
+        XCTAssertEqual(store.load(accountIdB64: "accountA"), ["one", "two"])
+        XCTAssertEqual(PasskeyNoPrfStore(defaults: defaults).load(accountIdB64: "accountA"), ["one", "two"],
+                       "a new store reads what was written: it survives a restart")
+        XCTAssertTrue(store.load(accountIdB64: "accountB").isEmpty)
+        store.clear(accountIdB64: "accountA")
+        XCTAssertTrue(store.load(accountIdB64: "accountA").isEmpty)
+    }
+
+    func testARowRepairAnsweredByAnotherPasskeySaysChooseThisPasskey() {
+        XCTAssertEqual(
+            PasskeyKeysRepair.refusalKey("settings.passkeys.keys_choice.error.other_passkey"),
+            "settings.passkeys.keys.error.other_passkey")
+        XCTAssertEqual(
+            PasskeyKeysRepair.refusalKey("settings.passkeys.keys_choice.error.phrase_mismatch"),
+            "settings.passkeys.keys_choice.error.phrase_mismatch")
+    }
+
+    // MARK: - A refused registration
+
+    func testAMatchedExcludedCredentialReadsAsAlreadyExisting() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("the refusal has its own code from iOS 18") }
+        let refused = WebauthnRegistration.registrationError(for: ASAuthorizationError(.matchedExcludedCredential))
+        guard case .alreadyExists = refused else { return XCTFail("got \(refused)") }
+    }
+
+    func testOtherRegistrationFailuresKeepTheirMeaning() {
+        let cancelled = WebauthnRegistration.registrationError(for: ASAuthorizationError(.canceled))
+        guard case .cancelled = cancelled else { return XCTFail("got \(cancelled)") }
+        let failed = WebauthnRegistration.registrationError(for: ASAuthorizationError(.failed))
+        guard case .underlying = failed else { return XCTFail("got \(failed)") }
+        let other = WebauthnRegistration.registrationError(for: URLError(.notConnectedToInternet))
+        guard case .underlying = other else { return XCTFail("got \(other)") }
     }
 
     // MARK: - Settings labels and the restore prompt's row
@@ -113,7 +166,7 @@ final class PasskeyVaultTests: XCTestCase {
         XCTAssertThrowsError(try passkeyVaultOpen(prfOutput: prf, sealed: changed))
     }
 
-    // MARK: - "Turn on"
+    // MARK: - Storing the keys for a passkey
 
     /// The enrollment over recorded ports.
     private final class Ports {
@@ -125,6 +178,7 @@ final class PasskeyVaultTests: XCTestCase {
         private(set) var prfAsked: [String] = []
         private(set) var stored: [(credentialId: Data, sealed: Data)] = []
         private(set) var remembered: [String] = []
+        private(set) var noPrf: [String] = []
 
         var enrollment: PasskeyKeysEnrollment {
             PasskeyKeysEnrollment(
@@ -139,7 +193,8 @@ final class PasskeyVaultTests: XCTestCase {
                     self.stored.append((id, sealed))
                     return self.storeResult
                 },
-                rememberPhrase: { self.remembered.append($0) }
+                rememberPhrase: { self.remembered.append($0) },
+                rememberNoPrf: { self.noPrf.append($0) }
             )
         }
     }
@@ -233,10 +288,123 @@ final class PasskeyVaultTests: XCTestCase {
         XCTAssertEqual(ports.remembered, [mine.phrase()], "the device keeps the phrase it just proved")
     }
 
-    func testTheResultLines() {
-        XCTAssertEqual(KeysChoiceResult.stored.messageKey, "settings.passkeys.keys_choice.done")
-        XCTAssertEqual(KeysChoiceResult.noPrf.messageKey, "settings.passkeys.keys_choice.no_prf")
-        XCTAssertEqual(KeysChoiceResult.unavailable.messageKey, "settings.passkeys.keys_choice.unavailable")
-        XCTAssertNil(KeysChoiceResult.signInOnly.messageKey)
+    // MARK: - After adding a passkey: stored with nothing to choose
+
+    private func added(prfOutput: Data?, prfSupported: Bool?) -> AddedPasskey {
+        AddedPasskey(
+            credentialIdB64: credentialIdB64, nickname: "Phone",
+            prfOutput: prfOutput, prfSupported: prfSupported)
+    }
+
+    func testANewPasskeyWithTheRegistrationsOutputIsStoredWithNoSecondSheet() async throws {
+        let mnemonic = RecoveryMnemonic.generate()
+        let ports = Ports()
+        ports.devicePhrase = mnemonic.phrase()
+        let prf = bytes(32)
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: prf, prfSupported: true))
+        XCTAssertEqual(outcome, .stored)
+        XCTAssertTrue(ports.prfAsked.isEmpty)
+        XCTAssertEqual(ports.stored.count, 1)
+        XCTAssertEqual(
+            try passkeyVaultOpen(prfOutput: prf, sealed: ports.stored[0].sealed).phrase(), mnemonic.phrase())
+        XCTAssertEqual(outcome.messageKey, "settings.passkeys.added_restores")
+        XCTAssertFalse(outcome.isError)
+    }
+
+    func testANewPasskeyWithoutARegistrationOutputIsAskedOnceForItself() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.prf = (credentialId, bytes(32))
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: true))
+        XCTAssertEqual(outcome, .stored)
+        XCTAssertEqual(ports.prfAsked, [credentialIdB64])
+        XCTAssertEqual(ports.stored.count, 1)
+    }
+
+    func testANewPasskeyThePlatformSaysCannotCarryKeysAsksNothing() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: false))
+        XCTAssertEqual(outcome, .noPrf)
+        XCTAssertTrue(ports.prfAsked.isEmpty, "no second sheet when the platform said no")
+        XCTAssertTrue(ports.stored.isEmpty)
+        XCTAssertEqual(ports.noPrf, [credentialIdB64], "remembered, so its row offers no repair")
+        XCTAssertEqual(PasskeyKeysAddOutcome.noPrf.messageKey, "settings.passkeys.added_no_keys")
+        XCTAssertFalse(PasskeyKeysAddOutcome.noPrf.isError)
+    }
+
+    func testANewPasskeyWhoseSecondSheetGivesNoSecretLogsInOnly() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.prf = (credentialId, nil)
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: true))
+        XCTAssertEqual(outcome, .noPrf)
+        XCTAssertTrue(ports.stored.isEmpty)
+        XCTAssertEqual(ports.noPrf, [credentialIdB64])
+    }
+
+    func testWhenCreationSaidNothingTheSecondSheetRuns() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.prf = (credentialId, bytes(32))
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: nil))
+        XCTAssertEqual(outcome, .stored)
+        XCTAssertEqual(ports.prfAsked, [credentialIdB64])
+        XCTAssertTrue(ports.noPrf.isEmpty)
+    }
+
+    func testWithoutThePhraseOnTheDeviceANewPasskeyIsAddedForLoggingInOnly() async throws {
+        let ports = Ports()
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: bytes(32), prfSupported: true))
+        XCTAssertEqual(outcome, .phraseMissing)
+        XCTAssertTrue(ports.prfAsked.isEmpty)
+        XCTAssertTrue(ports.stored.isEmpty)
+        XCTAssertEqual(outcome.messageKey, "settings.passkeys.added")
+        XCTAssertFalse(outcome.isError)
+    }
+
+    func testCancellingTheSecondSheetStoresNothing() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.prfError = WebauthnAssertion.AssertionError.cancelled
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: true))
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertTrue(ports.stored.isEmpty)
+        XCTAssertEqual(outcome.messageKey, "settings.passkeys.keys_choice.cancelled")
+        XCTAssertTrue(outcome.isError)
+    }
+
+    func testADifferentPasskeyAnsweringTheSecondSheetStoresNothing() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.prf = (Data([0x09]), bytes(32))
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: true))
+        XCTAssertEqual(outcome, .otherPasskey)
+        XCTAssertTrue(ports.stored.isEmpty)
+        XCTAssertEqual(outcome.messageKey, "settings.passkeys.keys_choice.error.other_passkey")
+    }
+
+    func testAServerWithoutAVaultKeyMakesANewPasskeyUnavailable() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.storeResult = false
+        let outcome = await ports.enrollment.storeAfterAdd(added(prfOutput: bytes(32), prfSupported: true))
+        XCTAssertEqual(outcome, .unavailable)
+        XCTAssertEqual(outcome.messageKey, "settings.passkeys.keys_choice.unavailable")
+    }
+
+    func testOfflineAndOtherFailuresWhileStoring() async throws {
+        let ports = Ports()
+        ports.devicePhrase = RecoveryMnemonic.generate().phrase()
+        ports.prfError = WebauthnClientError.network(endpoint: "/auth/action/start", underlying: URLError(.notConnectedToInternet))
+        let offline = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: true))
+        XCTAssertEqual(offline, .keysFailed)
+        XCTAssertEqual(offline.messageKey, "settings.passkeys.added_keys_failed")
+
+        ports.prfError = WebauthnClientError.http(status: 500, endpoint: "/auth/action/start", body: "")
+        let failed = await ports.enrollment.storeAfterAdd(added(prfOutput: nil, prfSupported: true))
+        XCTAssertEqual(failed, .keysFailed)
+        XCTAssertTrue(ports.stored.isEmpty)
+        XCTAssertTrue(ports.noPrf.isEmpty, "a failure is not a passkey that cannot carry keys")
     }
 }

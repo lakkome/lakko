@@ -43,10 +43,27 @@ export interface PreparedRotation {
   readonly proofExpiresAtSecs: number;
 }
 
+/** ADR-0074 "Joining after a rotation": what this device last read of the
+ *  account's own conversation link (`own-conversation-key-store.ts`). */
+export interface OwnLinkRecord {
+  /** The conversation key the verified link named, standard base64; `null`
+   *  when the bundle carried no link (or one that did not verify). */
+  readonly conversationKeyB64: string | null;
+  readonly readAtMs: number;
+}
+
 export interface KeyRotationState {
   readonly predecessorSeedsB64: readonly string[];
   readonly pending: readonly PendingRotation[];
   readonly prepared: PreparedRotation | null;
+  /** Absent until the device first read its own bundle's link. */
+  readonly ownLink?: OwnLinkRecord;
+  /** G-56 — the id of the DeviceGroup this device joined by pairing (32
+   *  bytes, standard base64). A device parked for the account's earlier keys
+   *  cannot derive the id (it is a function of the earlier key); a pairing
+   *  again from the parked screen names it (`devices/joined-device-group-id.ts`).
+   *  Absent when this device never joined by pairing. */
+  readonly joinedDeviceGroupIdB64?: string;
 }
 
 export const EMPTY_KEY_ROTATION_STATE: KeyRotationState = {
@@ -108,7 +125,37 @@ export function decodeKeyRotationState(json: string): KeyRotationState {
     : [];
   const pending = Array.isArray(p["pending"]) ? p["pending"].filter(isPending) : [];
   const prepared = isPrepared(p["prepared"]) ? p["prepared"] : null;
-  return { predecessorSeedsB64: seeds, pending, prepared };
+  const ownLink = isOwnLinkRecord(p["ownLink"]) ? p["ownLink"] : undefined;
+  const joined = isGroupIdB64(p["joinedDeviceGroupIdB64"]) ? p["joinedDeviceGroupIdB64"] : undefined;
+  return {
+    predecessorSeedsB64: seeds,
+    pending,
+    prepared,
+    ...(ownLink !== undefined ? { ownLink } : {}),
+    ...(joined !== undefined ? { joinedDeviceGroupIdB64: joined } : {}),
+  };
+}
+
+function isGroupIdB64(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return base64Decode(value).length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function isOwnLinkRecord(value: unknown): value is OwnLinkRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const r = value as Partial<OwnLinkRecord>;
+  if (typeof r.readAtMs !== "number" || !Number.isFinite(r.readAtMs)) return false;
+  if (r.conversationKeyB64 === null) return true;
+  if (typeof r.conversationKeyB64 !== "string") return false;
+  try {
+    return base64Decode(r.conversationKeyB64).length === 32;
+  } catch {
+    return false;
+  }
 }
 
 export function encodeKeyRotationState(state: KeyRotationState): string {
@@ -117,6 +164,10 @@ export function encodeKeyRotationState(state: KeyRotationState): string {
     predecessorSeedsB64: state.predecessorSeedsB64,
     pending: state.pending,
     prepared: state.prepared,
+    ...(state.ownLink !== undefined ? { ownLink: state.ownLink } : {}),
+    ...(state.joinedDeviceGroupIdB64 !== undefined
+      ? { joinedDeviceGroupIdB64: state.joinedDeviceGroupIdB64 }
+      : {}),
   });
 }
 

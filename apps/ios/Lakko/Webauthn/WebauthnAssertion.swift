@@ -127,6 +127,28 @@ private final class ControllerBridge: NSObject,
 
     func attach(controller: ASAuthorizationController) {
         self.retainedController = controller
+        Self.keepAlive(self)
+    }
+
+    /// The bridges whose sheet is still open. `ASAuthorizationController`
+    /// holds its delegate and presentation context provider weakly, and
+    /// nothing else holds the bridge once `run` has called
+    /// `performRequests`, so without this it was released at once and
+    /// the sheet's answer resumed nothing ("Adding..." forever, a leaked
+    /// continuation; seen on an iPhone 2026-11-11).
+    private static let liveLock = NSLock()
+    nonisolated(unsafe) private static var live: [ObjectIdentifier: ControllerBridge] = [:]
+
+    private static func keepAlive(_ bridge: ControllerBridge) {
+        liveLock.lock()
+        live[ObjectIdentifier(bridge)] = bridge
+        liveLock.unlock()
+    }
+
+    private static func letGo(_ bridge: ControllerBridge) {
+        liveLock.lock()
+        live[ObjectIdentifier(bridge)] = nil
+        liveLock.unlock()
     }
 
     func presentationAnchor(
@@ -142,6 +164,7 @@ private final class ControllerBridge: NSObject,
         defer {
             self.continuation = nil
             self.retainedController = nil
+            Self.letGo(self)
         }
         guard
             let assertion = authorization.credential
@@ -184,6 +207,7 @@ private final class ControllerBridge: NSObject,
         defer {
             self.continuation = nil
             self.retainedController = nil
+            Self.letGo(self)
         }
         if let asError = error as? ASAuthorizationError {
             switch asError.code {

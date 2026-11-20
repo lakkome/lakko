@@ -99,10 +99,16 @@ function epochSeeds(): Uint8Array {
 
 const rotateRequest = (): Uint8Array => realWasm.composeChannelRotateRequestEnvelope(CHANNEL);
 
+/** ADR-0090: a co-publisher device's retire request and the admission mark. */
+const deviceRequest = (): Uint8Array => realWasm.composePublisherDeviceRetire(CHANNEL, new Uint8Array(32).fill(7));
+const admissionMark = (): Uint8Array => realWasm.composeChannelAdmissionMarkEnvelope(CHANNEL, 12n);
+
 describe("the background path never previews the publisher hand-over messages", () => {
   for (const [name, make] of [
     ["the earlier seeds", epochSeeds],
     ["a rotate request", rotateRequest],
+    ["a device request", deviceRequest],
+    ["an admission mark", admissionMark],
   ] as const) {
     it(`returns null for ${name} alone`, async () => {
       const { deps: d } = deps([raw(42, make())]);

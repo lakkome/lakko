@@ -242,7 +242,7 @@ export function ConversationCard(props: {
                     disabled={state().kind === "sending"}
                     onClick={() => void request()}
                   >
-                    <Icon name="plus" size={16} />
+                    <Icon name="plus" size={20} />
                     {t("search.conversation.request")}
                   </button>
                 </Show>

@@ -33,11 +33,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -100,6 +95,9 @@ import me.lakko.app.ui.chat.formatClockTime
 import me.lakko.app.ui.components.MessageLinkText
 import me.lakko.app.ui.components.submitOnHardwareEnter
 import me.lakko.app.ui.theme.LakkoDark
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The chat of a group call — `docs/ux/calls.md` section 4.1.4. What is shown
@@ -176,8 +174,8 @@ internal fun CallChatPanel(
             }
             val closeLabel = t("call.chat.close_a11y")
             IconButton(onClick = onClose, modifier = Modifier.semantics { contentDescription = closeLabel }) {
-                Icon(
-                    imageVector = if (column) Icons.Filled.Close else Icons.Filled.ExpandMore,
+                LkIcon(
+                    icon = if (column) R.drawable.ic_lk_xmark else R.drawable.ic_lk_chevron_down,
                     contentDescription = null,
                     tint = LakkoDark.text,
                 )
@@ -452,12 +450,12 @@ private fun ChatComposer(rule: CallChatTextRule, onSend: (String) -> Unit) {
             }
             Spacer(Modifier.width(8.dp))
             val sendLabel = t("call.chat.send_a11y")
+            // The compact composer's send: the bare arrow-in-circle glyph,
+            // accent when sendable and muted when not, as on iOS and web.
             Box(
                 modifier = Modifier
-                    .size(40.dp)
-                    .alpha(if (canSend) 1f else 0.4f)
+                    .size(44.dp)
                     .clip(CircleShape)
-                    .background(LakkoDark.accent)
                     .clickable(enabled = canSend, onClick = send)
                     .semantics {
                         contentDescription = sendLabel
@@ -466,11 +464,11 @@ private fun ChatComposer(rule: CallChatTextRule, onSend: (String) -> Unit) {
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Send,
+                LkIcon(
+                    icon = R.drawable.ic_lk_arrow_up_circle_fill,
                     contentDescription = null,
-                    tint = LakkoDark.accentFg,
-                    modifier = Modifier.size(20.dp),
+                    tint = if (canSend) LakkoDark.accent else LakkoDark.textMuted,
+                    size = 36.dp,
                 )
             }
         }
@@ -509,11 +507,12 @@ private fun ChatMuteButton(control: CallControl, onToggle: () -> Unit) {
                 .background(control.emphasis.fill()),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = control.icon(),
+            LkIcon(
+                icon = control.icon(),
                 contentDescription = null,
                 tint = control.emphasis.foreground(),
-                modifier = Modifier.size(20.dp).clearAndSetSemantics { },
+                modifier = Modifier.clearAndSetSemantics { },
+                size = LkIconSize.Row,
             )
         }
     }
@@ -537,7 +536,7 @@ private fun ChatCopySheet(text: String, onDismiss: () -> Unit) {
                 .padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.ContentCopy, contentDescription = null, tint = LakkoDark.text)
+            LkIcon(R.drawable.ic_lk_copy, contentDescription = null, tint = LakkoDark.text, size = LkIconSize.Row)
             Spacer(Modifier.width(16.dp))
             Text(t("common.copy"), color = LakkoDark.text, fontSize = 15.sp)
         }

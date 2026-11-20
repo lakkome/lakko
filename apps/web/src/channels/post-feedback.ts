@@ -88,6 +88,11 @@ const [rawCounts, setRawCounts] = createSignal<ReadonlyMap<string, ReadonlyMap<n
  *  (ADR-0087 phase B: the service's maintained counter, never a count of
  *  rows this device read). */
 const [commentCounts, setCommentCounts] = createSignal<ReadonlyMap<string, number>>(new Map());
+/** `${channel}:${cursor}` -> a channel poll's voters and votes per opaque
+ *  option label as last fetched (ADR-0092 section 4). */
+const [voteCounts, setVoteCounts] = createSignal<
+  ReadonlyMap<string, { readonly voters: number; readonly labels: ReadonlyMap<string, number> }>
+>(new Map());
 /** `${channel}:${cursor}` -> emoji -> delta of this person's writes the last
  *  counts do not show yet. */
 const [overlays, setOverlays] = createSignal<ReadonlyMap<string, ReadonlyMap<string, number>>>(new Map());
@@ -113,6 +118,14 @@ export function postLabelCounts(idHex: string, cursor: number): ReadonlyMap<stri
  *  Reactive. */
 export function postCommentCount(idHex: string, cursor: number): number | undefined {
   return commentCounts().get(overlayKey(idHex, cursor));
+}
+
+/** A channel poll's vote counts as last fetched, or `undefined`. Reactive. */
+export function postVoteCounts(
+  idHex: string,
+  cursor: number,
+): { readonly voters: number; readonly labels: ReadonlyMap<string, number> } | undefined {
+  return voteCounts().get(overlayKey(idHex, cursor));
 }
 
 /** This person's not-yet-counted writes on one post. Reactive. */
@@ -168,6 +181,13 @@ async function fetchBatch(idHex: string, cursors: number[]): Promise<void> {
     const out = new Map(m);
     for (const p of answer) {
       if (p.comments !== undefined) out.set(overlayKey(idHex, p.cursor), p.comments);
+    }
+    return out;
+  });
+  setVoteCounts((m) => {
+    const out = new Map(m);
+    for (const p of answer) {
+      if (p.votes !== undefined) out.set(overlayKey(idHex, p.cursor), p.votes);
     }
     return out;
   });

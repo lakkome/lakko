@@ -181,7 +181,7 @@ Facts (2026-11-19, file:line in this repository; re-check before publishing):
 - Operator can read names of people in Everyone: docs/adr/0060-scoped-discovery.md:599-604.
 - Backups 7 daily / 4 weekly / 3 monthly: infra/scripts/backup.sh.
 - Account deletion: services/auth/src/webauthn.rs (delete_account queues account_purges,
-  migration 0039), services/auth/src/purge.rs (worker to discovery and storage internal
-  routes), migration 0038 (backup-head rows cascade); clients unsubscribe push and delete
+  migration 0040), services/auth/src/purge.rs (worker to discovery and storage internal
+  routes), migration 0039 (backup-head rows cascade); clients unsubscribe push and delete
   the backup after the auth delete (2026-11-19).
 -->

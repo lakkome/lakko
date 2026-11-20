@@ -698,6 +698,18 @@ deployed or walked.
   journal row is wrapped under a group transport key the re-entering device
   holds from its vault head, so the account key in the leaf node is never in
   the clear on the DS.
+- **Built 2026-11-14 (G-55), host-tested only.** The owner-device channel
+  entry is wrapped under `BLAKE3-derive-key("lakko/ds/entry-wrap/v1",
+  ds_access_seed_N)`, the ADR-0053 access seed of the epoch the commit leaves
+  (the entering device takes it from the vault head beside the GroupInfo;
+  members derive it), with the group id and N in the AAD and N in the clear
+  (`lakko-mls` `entry_wrap`); a member opens it before the unchanged
+  PublisherGroup gate, and an unwrapped external commit is refused. The
+  DeviceGroup rejoin knock (ADR-0081 amendment), which this section did not
+  name and which also posted the pairing payload in the clear, is sealed under
+  `BLAKE3-derive-key("lakko/device-group/knock-wrap/v1", lineage_account_seed)`
+  and padded to 1024-byte steps (`pairing::encode_rejoin_knock` /
+  `open_rejoin_knock`). Details in `docs/security/known-gaps.md` G-55.
 
 ### 5. Welcome timing decoupled (finding 6)
 

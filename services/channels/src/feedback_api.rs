@@ -7,7 +7,7 @@
 //! |---|---|---|---|
 //! | `POST` | `/v1/channels/:id/posts/:cursor/reactions` | write proof by the reaction's key, then one `channel-react` token | Add the row `{writer_key_hex, label_hex}`. `201 {"added": true}`, or `200 {"added": false}` when the row was there. |
 //! | `DELETE` | `/v1/channels/:id/posts/:cursor/reactions/:writer_key_hex/:label_hex` | write proof by that key | Take the reaction off. `204` whether or not it was there. |
-//! | `GET` | `/v1/channels/:id/reactions?posts=<c1>,<c2>,...` | none | Label counts and the comment count of up to 50 posts, `{"posts": [{"cursor", "labels": [{"label_hex", "count"}], "comments"}]}`, at most 64 labels a post, the most counted first; `comments` is the post's maintained comment count (2026-11-05). `Cache-Control: public, max-age=15`. |
+//! | `GET` | `/v1/channels/:id/reactions?posts=<c1>,<c2>,...` | none | Label counts and the comment count of up to 50 posts, `{"posts": [{"cursor", "labels": [{"label_hex", "count"}], "comments"}]}`, at most 64 labels a post, the most counted first; `comments` is the post's maintained comment count (2026-11-05); `votes: {"voters", "labels": [{"label_hex", "count"}]}` the channel poll votes (ADR-0092 section 4.3). `Cache-Control: public, max-age=15`. |
 //! | `POST` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions` | write proof by the reaction's key (op `0x05`), then one `channel-react` token | Add a reaction on the comment `{writer_key_hex, label_hex}` (a `CommentReactionKey` label). `201 {"added": true}` / `200 {"added": false}`; `404 unknown-comment`. |
 //! | `DELETE` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions/:writer_key_hex/:label_hex` | write proof by that key (op `0x06`) | Take it off. `204`. |
 //! | `GET` | `/v1/channels/:id/posts/:cursor/comment-reactions?comments=<c1>,...` | none | Label counts of up to 50 comments under the post, `{"comments": [{"cursor", "labels": [{"label_hex", "count"}]}]}`. `Cache-Control: public, max-age=15`. |
@@ -65,11 +65,12 @@ use lakko_channels::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::api::{err, unix_ms, AppState};
+use crate::api::{err, unix_ms, AppState, ErrJson};
 use crate::feedback::{
     Label, WriterKey, COMMENT_PAGE_LEN, COMMENT_SEALED_MAX_LEN, COMMENT_SEALED_MIN_LEN,
     MAX_COUNT_COMMENTS, MAX_COUNT_POSTS,
 };
+use crate::metrics::{proof_refused, ProofKind, RefusalReason};
 use crate::owner_auth::require_publisher;
 use crate::storage::{ChannelId, StorageError};
 
@@ -138,6 +139,17 @@ pub struct PostCountsView {
     pub labels: Vec<LabelCountView>,
     /// How many comments the post has (the maintained count).
     pub comments: u64,
+    /// Channel poll votes under the post (ADR-0092 section 4.3).
+    pub votes: VoteCountsView,
+}
+
+/// The vote counts of one post.
+#[derive(Serialize)]
+pub struct VoteCountsView {
+    /// Tags with a counted vote.
+    pub voters: u64,
+    /// Votes per opaque option label, most counted first, at most 64.
+    pub labels: Vec<LabelCountView>,
 }
 
 /// The reaction counts of one comment.
@@ -205,13 +217,13 @@ pub struct CommentsResponse {
 }
 
 fn bad(code: &'static str, detail: &'static str) -> Response {
-    (StatusCode::BAD_REQUEST, Json(err(code, detail))).into_response()
+    (StatusCode::BAD_REQUEST, ErrJson(err(code, detail))).into_response()
 }
 
 fn proof_required() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(err(
+        ErrJson(err(
             "write-proof-required",
             "this write needs a valid write proof",
         )),
@@ -223,7 +235,7 @@ fn internal(e: &StorageError) -> Response {
     tracing::error!(error = %e, "comments and reactions store failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(err("internal", "unexpected error")),
+        ErrJson(err("internal", "unexpected error")),
     )
         .into_response()
 }
@@ -231,7 +243,7 @@ fn internal(e: &StorageError) -> Response {
 fn unknown_post() -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(err(
+        ErrJson(err(
             "unknown-post",
             "the channel holds no post at this cursor",
         )),
@@ -283,15 +295,20 @@ async fn check_write_proof(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| OwnerProof::parse(v).ok())
     else {
+        proof_refused(ProofKind::Write, RefusalReason::Malformed);
         return Err(proof_required());
     };
     let now = unix_ms();
     if verify_write_proof(&proof, statement, now).is_err() {
+        proof_refused(ProofKind::Write, RefusalReason::Invalid);
         return Err(proof_required());
     }
     match state.store.consume_write_nonce(proof.nonce, now).await {
         Ok(true) => Ok(()),
-        Ok(false) => Err(proof_required()),
+        Ok(false) => {
+            proof_refused(ProofKind::Write, RefusalReason::Replayed);
+            Err(proof_required())
+        },
         Err(e) => Err(internal(&e)),
     }
 }
@@ -408,16 +425,25 @@ async fn reaction_counts(
         Ok(c) => c,
         Err(e) => return internal(&e),
     };
+    let vote_counts = match state.store.vote_counts(channel, &cursors).await {
+        Ok(c) => c,
+        Err(e) => return internal(&e),
+    };
     match state.store.reaction_counts(channel, &cursors).await {
         Ok(counts) => {
             let body = CountsResponse {
                 posts: counts
                     .into_iter()
                     .zip(comment_counts)
-                    .map(|(p, (_, comments))| PostCountsView {
+                    .zip(vote_counts)
+                    .map(|((p, (_, comments)), v)| PostCountsView {
                         cursor: p.post_cursor,
                         labels: label_views(p.labels),
                         comments,
+                        votes: VoteCountsView {
+                            voters: v.voters,
+                            labels: label_views(v.labels),
+                        },
                     })
                     .collect(),
             };
@@ -777,7 +803,7 @@ async fn delete_comment(
 fn unknown_comment() -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(err("unknown-comment", "no such comment under this post")),
+        ErrJson(err("unknown-comment", "no such comment under this post")),
     )
         .into_response()
 }

@@ -159,15 +159,15 @@ export function standaloneCallTitle(): string {
 
 /** The direction glyph at the row's leading edge: out, in, or missed (a
  *  missed, declined or failed call). */
-export function callHistoryRowIcon(entry: CallLogEntry): "incoming" | "outgoing" | "missed" {
+export function callHistoryRowIcon(entry: CallLogEntry): "phone-incoming" | "phone-outgoing" | "phone-down" {
   switch (entry.outcome) {
     case "missed":
     case "declined":
     case "failed":
-      return "missed";
+      return "phone-down";
     case "incoming":
-      return "incoming";
+      return "phone-incoming";
     case "outgoing":
-      return "outgoing";
+      return "phone-outgoing";
   }
 }

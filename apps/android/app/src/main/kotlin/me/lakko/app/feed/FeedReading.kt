@@ -212,11 +212,36 @@ public fun seedChannelRead(r: FeedReading, channelIdHex: String, newestHeld: Lon
     return r.copy(channelRead = next)
 }
 
+/**
+ * After a channel-post log of an older version is dropped and fetched again
+ * ([droppedLogCursors]): every channel's marker is raised to at least how far
+ * the old log had looked, so posts that log had already passed (and that a
+ * format change now files) are not counted as new. A marker never moves
+ * backwards; a channel with none gets the floor as its start.
+ */
+public fun readFloorAfterDrop(r: FeedReading, dropped: Map<String, Long>): FeedReading =
+    dropped.entries.fold(r) { acc, (id, cursor) -> advanceChannelRead(acc, id, cursor) }
+
 /** Where a channel's marker starts (as web's `seedChannelReads`): its
  *  slot's cursor, never below its newest post, never below zero. The slot
  *  cursor also covers posts passed over unread, so they never count as new. */
 public fun channelReadSeed(slotCursor: Long, postCursors: List<Long>): Long =
     maxOf(slotCursor, postCursors.maxOrNull() ?: 0L, 0L)
+
+/**
+ * Mark all read in Chats (`docs/ux/chat-folders.md` 2.2) on channels: each of
+ * [channelIds] is read through the newest post this device holds of it
+ * ([channelReadSeed] of its slot in [slots]), as opening it to its newest end
+ * would. A channel with no slot is left as it is.
+ */
+public fun markChannelsRead(
+    r: FeedReading,
+    channelIds: Collection<String>,
+    slots: Map<String, ChannelPostSlot>,
+): FeedReading = channelIds.fold(r) { acc, id ->
+    val slot = slots[id] ?: return@fold acc
+    advanceChannelRead(acc, id, channelReadSeed(slot.cursor, slot.posts.map { it.cursor }))
+}
 
 /** `true` when the post at [cursor] is still new for the channel. */
 public fun isChannelPostUnread(r: FeedReading, channelIdHex: String, cursor: Long, own: Boolean): Boolean =

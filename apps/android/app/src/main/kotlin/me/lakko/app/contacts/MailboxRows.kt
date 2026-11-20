@@ -43,6 +43,9 @@ public enum class MailboxRowKind {
 
     /** A signed link refusal (ADR-0079 amendment of 2026-10-19). */
     LINK_REFUSAL,
+
+    /** A conversation re-entry request (ADR-0091 phase 2, route 2). */
+    CONVERSATION_REENTRY,
     ;
 
     /** The core's kind. */
@@ -52,6 +55,7 @@ public enum class MailboxRowKind {
         CONTACT_ACK -> FfiMailboxKind.CONTACT_ACK
         WELCOME_RENDEZVOUS -> FfiMailboxKind.WELCOME_RENDEZVOUS
         LINK_REFUSAL -> FfiMailboxKind.LINK_REFUSAL
+        CONVERSATION_REENTRY -> FfiMailboxKind.CONVERSATION_REENTRY
     }
 
     public companion object {
@@ -62,6 +66,7 @@ public enum class MailboxRowKind {
             FfiMailboxKind.CONTACT_ACK -> CONTACT_ACK
             FfiMailboxKind.WELCOME_RENDEZVOUS -> WELCOME_RENDEZVOUS
             FfiMailboxKind.LINK_REFUSAL -> LINK_REFUSAL
+            FfiMailboxKind.CONVERSATION_REENTRY -> CONVERSATION_REENTRY
         }
     }
 }

@@ -15,7 +15,6 @@ import {
   isPhraseProtected,
   newWordsShown,
   protectBannerKeys,
-  publishOwedTextKey,
   isProtectStepOwed,
   markProtectStepOwed,
   parseRecoveryEmailStatus,
@@ -256,18 +255,6 @@ describe("new words after the keys changed (alignment I)", () => {
     // With a phrase saved, an email without a vault is the normal state.
     expect(emailNeedsAddingAgain(status({ enabled: true, phraseSaved: true }))).toBe(false);
     expect(emailNeedsAddingAgain(status({ enabled: true, vault: true }))).toBe(false);
-  });
-});
-
-describe("the publish-owed screen after a reset or a take-back (alignment P)", () => {
-  it("speaks of no words to an account that is not phrase-protected", () => {
-    expect(publishOwedTextKey(false)).toBe("account.keys_changed.finishing");
-    expect(t(publishOwedTextKey(false))).toBe("Your account has new keys. We are finishing the change.");
-    expect(/phrase|word/i.test(t(publishOwedTextKey(false)))).toBe(false);
-  });
-
-  it("keeps its existing text for a phrase-protected account", () => {
-    expect(publishOwedTextKey(true)).toBe("recovery_phrase.fresh.publish_owed");
   });
 });
 

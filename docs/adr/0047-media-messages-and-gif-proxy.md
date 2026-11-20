@@ -141,6 +141,44 @@ came back as a plain file.
   carries unit tests for the new fields and a property test that any placeholder within
   the caps round-trips byte-stably; the existing `history_placeholder` fuzz target already
   asserts decode/encode round-trip stability over arbitrary input.
+- **Version 3 (2026-11-13):** the placeholder also carries the channel invitation card
+  (ADR-0087 section 14, opaque, 1 to 2048 bytes), the reply (ADR-0052: target `messageId`,
+  author and excerpt snapshot) and the forward (author snapshot, origin group id of 1 to
+  96 bytes and `messageId`); version 2 is refused. Seen live: a second device restored an
+  invitation as its bare `/g/` link.
+
+### 6. A micro thumbnail inside the message (added 2026-11-19, maintainer)
+
+A notification must show the picture of a photo or video message on every platform, and
+the background paths that draw notifications (the iOS notification extension, the web
+service worker, Android's background decrypt in a process the wake started, the desktop
+host) cannot fetch the `thumb` blob: a blob read needs a read pass bought with an anonymous
+token (ADR-0065), and those paths hold no token and may not spend one (C-59). So the
+**first** photo or video of a message also carries its picture **inside the envelope**:
+
+- `inline_thumb`: an optional lenient field on that `AttachmentRef` (no wire-version
+  bump), standard base64 of a JPEG whose longest side is at most 96 px, at most 4096 bytes
+  decoded (`MAX_INLINE_THUMB_BYTES`; size and pixel limit chosen, not measured). Set only on
+  the first photo or video of a message; a ref carrying it anywhere else, or a value that
+  is not a JPEG (starts `FF D8 FF`) within the bound, has the field dropped alone, as every
+  ADR-0047 field is. Composed by the sender from the same decode that makes `thumb`.
+- It is end-to-end encrypted with the rest of the message (MLS application message); the
+  server sees nothing new. The message grows by at most about 5.5 KB of base64.
+- Uses: the notification picture on every platform; the chat list row's 20 px thumbnail
+  (no fetch at all); the placeholder of the first mosaic tile until `thumb` arrives.
+- The notification shows the picture exactly when it shows the text. iOS and macOS take a
+  notification picture only as a file: the iOS extension and the desktop host write it to a
+  temporary file inside their own container, hand it to the system, and delete their copy
+  once the system has taken it (iOS moves it into its notification store; the desktop host
+  deletes after delivery and sweeps its temporary folder at launch). Android and web pass
+  the bytes in memory.
+- History bundles (section 5) and the conversation vault carry the field like the others:
+  `lakko_mls::history_placeholder` version 5 and the `lakko-vault` record version 3 add it
+  per attachment (opaque, at most 4096 bytes; flag day, the earlier versions are refused),
+  and the FFI crates apply the JPEG check and the first-image-or-video rule on both routes
+  (`lakko_attachments::inline_thumb_carrier`). On the FFI it is `inline_thumb` /
+  `inlineThumb` on the attachment record, and the notification extension's `ParsedBody`
+  carries the first media's bytes as `inline_thumb` (built 2026-11-19, host-tested only).
 
 ## Alternatives
 

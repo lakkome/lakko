@@ -160,15 +160,6 @@ export function protectBannerShown(
 }
 
 /**
- * The text of the publish-owed / retry screen after a key reset or a
- * take-back: the existing one for a phrase-protected account (it speaks of
- * the new words), and one with no mention of words for any other.
- */
-export function publishOwedTextKey(wordsShown: boolean): string {
-  return wordsShown ? "recovery_phrase.fresh.publish_owed" : "account.keys_changed.finishing";
-}
-
-/**
  * Whether a "three words from your phrase" surface is shown (ADR-0075
  * section 11): only on a device of a phrase-protected account. The other
  * conditions (the device holds the phrase and the keys) are

@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -37,6 +35,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.lakko.app.l10n.listPositions
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The guided recovery-phrase step (docs/ux/client-redesign.md section 5.6):
@@ -153,7 +154,7 @@ private fun CopyPhraseButton(phrase: String) {
         },
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+        LkIcon(R.drawable.ic_lk_copy, contentDescription = null, size = LkIconSize.Row)
         Spacer(Modifier.width(8.dp))
         Text(if (copied) t("common.copied") else t("common.copy"))
     }

@@ -137,9 +137,15 @@ public class RecoverViewModel(
         val target = mutableState.value.deviceRestoreTarget
         if (target == null) {
             outcome.phraseEntropy.fill(0)
+            outcome.predecessors.forEach { it.seed.fill(0) }
             throw AuthClientArgError("Enter your username first.", UiText("recovery.username_required"))
         }
-        val done = deviceRestoreCompletion(target, outcome)
+        val done = try {
+            deviceRestoreCompletion(target, outcome)
+        } catch (cause: Throwable) {
+            outcome.predecessors.forEach { it.seed.fill(0) }
+            throw cause
+        }
         repo.completeFromDeviceRestore(
             accountIdBytes = done.accountIdBytes,
             accountIdB64 = done.accountIdB64,
@@ -154,6 +160,9 @@ public class RecoverViewModel(
             // session lands.
             forgotPassword = true,
             flowWipes = outcome.wipes,
+            // G-56: the account's own earlier keys the row carried, stored
+            // before anything else.
+            predecessors = outcome.predecessors,
         )
     }
 

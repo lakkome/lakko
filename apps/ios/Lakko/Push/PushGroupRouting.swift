@@ -1496,10 +1496,12 @@ public final class PushGroupRouting {
         } catch {
             store.markPending(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
-            NSLog(
-                "push-routing secret \(what) failed (secret marked "
-                    + "undistributed; this device re-broadcasts on the next "
-                    + "provision): \(error)")
+            if !ConversationReentryRules.isBehindRefusal(error) {
+                NSLog(
+                    "push-routing secret \(what) failed (secret marked "
+                        + "undistributed; this device re-broadcasts on the next "
+                        + "provision): \(error)")
+            }
         }
     }
 

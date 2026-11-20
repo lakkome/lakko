@@ -893,3 +893,89 @@ async fn over_s3_the_sweep_deletes_the_object() {
         None
     );
 }
+
+/// ADR-0096: the blob routes move their counters, and a coded refusal
+/// carries its code as the request counter's `code` label.
+#[tokio::test]
+async fn the_routes_count_their_answers_and_label_refusals_with_their_code() {
+    use crate::metrics::tests::value_of;
+    use crate::metrics::{
+        DELETES_TOTAL, DOWNLOADS_TOTAL, EXTRA_LABELS, KEEPS_TOTAL, PASSES_ISSUED_TOTAL,
+        UPLOADS_TOTAL,
+    };
+    let metrics = lakko_metrics::install("storage", "0.0.0").unwrap();
+    let before = metrics.render();
+
+    let (state, _tmp) = state();
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let read = take(&app, "read", TokenContext::BlobRead).await;
+    let payload = b"counted ciphertext";
+    let (_, hex) = sha256(payload);
+    assert_eq!(
+        send(&app, put_req(&hex, None, payload)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app, get_req("GET", &hex, &read)).await.0,
+        StatusCode::OK
+    );
+    let keep = Request::post("/blob/keep")
+        .header(PASS_HEADER, &read)
+        .body(Body::from(format!(r#"{{"ids":["{hex}"]}}"#)))
+        .unwrap();
+    assert_eq!(send(&app, keep).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        send(&app, delete_req(&hex, Some(&[0x55; 32]))).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(&app, delete_req(&hex, Some(&DELETE_SEED))).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send(&app, get_req("GET", &hex, &read)).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    let after = metrics.render();
+    lakko_metrics::exposition::assert_clean(&after, EXTRA_LABELS, &[]);
+    for (name, labels) in [
+        (UPLOADS_TOTAL, [("outcome", "refused")]),
+        (UPLOADS_TOTAL, [("outcome", "created")]),
+        (UPLOADS_TOTAL, [("outcome", "existed")]),
+        (DOWNLOADS_TOTAL, [("outcome", "ok")]),
+        (DOWNLOADS_TOTAL, [("outcome", "not_found")]),
+        (KEEPS_TOTAL, [("outcome", "ok")]),
+        (DELETES_TOTAL, [("outcome", "refused")]),
+        (DELETES_TOTAL, [("outcome", "deleted")]),
+        (PASSES_ISSUED_TOTAL, [("kind", "upload")]),
+        (PASSES_ISSUED_TOTAL, [("kind", "read")]),
+    ] {
+        assert!(
+            value_of(&after, name, &labels) >= value_of(&before, name, &labels) + 1.0,
+            "{name} {labels:?}"
+        );
+    }
+    for code in [
+        "blob-pass-required",
+        "blob-delete-refused",
+        "blob-not-found",
+    ] {
+        assert!(
+            after
+                .lines()
+                .any(|l| l.starts_with("lakko_http_requests_total{")
+                    && l.contains(&format!("code=\"{code}\""))),
+            "no request counted with code {code}"
+        );
+    }
+}

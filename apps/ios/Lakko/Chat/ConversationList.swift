@@ -29,6 +29,44 @@ import LakkoCore
 /// local one wins name resolution, so the shared one is always spelled out.
 public typealias ConversationListKind = LakkoCore.ConversationKind
 
+/// Section 11 — what the row's thumbnail draws: the first photo or video's
+/// sent thumb, whether it is a video (a small play glyph), and how many
+/// photos and videos the message holds (one stacked edge for two, two for
+/// three or more).
+public struct ConversationPreviewMedia: Equatable {
+    public let thumb: ThumbRef?
+    public let isVideo: Bool
+    public let count: Int
+    /// ADR-0047 section 6 — the micro thumbnail the message carries inside
+    /// its envelope. Drawn first, with no fetch; ``thumb`` is fetched only
+    /// when the message has none.
+    public let inlineThumb: Data?
+
+    public init(thumb: ThumbRef?, isVideo: Bool, count: Int, inlineThumb: Data? = nil) {
+        self.thumb = thumb
+        self.isVideo = isVideo
+        self.count = count
+        self.inlineThumb = inlineThumb
+    }
+
+    /// What the row draws, in order of preference: the inline bytes, else
+    /// the sent thumb to fetch.
+    public enum Source: Equatable {
+        case inline(Data)
+        case fetch(ThumbRef)
+        case none
+    }
+
+    public var source: Source {
+        if let inlineThumb { return .inline(inlineThumb) }
+        if let thumb { return .fetch(thumb) }
+        return .none
+    }
+
+    /// Section 11 — the offset edges behind the thumbnail.
+    public var stackedEdges: Int { min(2, max(0, count - 1)) }
+}
+
 /// One row of the merged list, as iOS draws it.
 ///
 /// **The row says nothing about which kind it is** (spec section 2.1): `kind`
@@ -73,6 +111,10 @@ public struct ConversationListRow: Identifiable, Equatable {
     /// Reactions-and-emoji spec section 12 — others reacted to this person's
     /// messages and those messages have not been on screen since.
     public let hasUnseenReactions: Bool
+    /// `docs/ux/media-messages.md` section 11 — the first photo or video of
+    /// the last message, drawn as a 20 pt thumbnail (a stack for several) at
+    /// the start of the second line. `nil` when it carries none.
+    public let previewMedia: ConversationPreviewMedia?
 
     public init(
         id: String,
@@ -88,8 +130,10 @@ public struct ConversationListRow: Identifiable, Equatable {
         markedUnread: Bool = false,
         personKey: Data? = nil,
         photoGroupIdHex: String? = nil,
-        hasUnseenReactions: Bool = false
+        hasUnseenReactions: Bool = false,
+        previewMedia: ConversationPreviewMedia? = nil
     ) {
+        self.previewMedia = previewMedia
         self.personKey = personKey
         self.photoGroupIdHex = photoGroupIdHex
         self.hasUnseenReactions = hasUnseenReactions

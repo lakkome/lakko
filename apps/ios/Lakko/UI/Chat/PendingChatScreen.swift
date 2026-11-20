@@ -46,7 +46,7 @@ struct PendingChatScreen: View {
                         HStack(alignment: .bottom, spacing: 6) {
                             SwiftUI.Group {
                                 if entry.text.isEmpty {
-                                    Image(systemName: "paperclip")
+                                    LkIconView(.paperclip, size: 20)
                                 } else {
                                     Text(entry.text)
                                 }
@@ -55,10 +55,9 @@ struct PendingChatScreen: View {
                                 .padding(.vertical, 8)
                                 .background(Color.lakkoAccentSoft)
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            Image(systemName: "clock")
-                                .font(.caption2)
+                            LkIconView(.clock, size: 14, relativeTo: .caption2,
+                                       label: l10n.t("chat.pending.waiting", texts: ["name": name]))
                                 .foregroundStyle(Color.lakkoTextMuted)
-                                .accessibilityLabel(l10n.t("chat.pending.waiting", texts: ["name": name]))
                         }
                     }
                 }
@@ -92,14 +91,12 @@ struct PendingChatScreen: View {
                 // Disabled until the inviter's app answers; a tap on the
                 // disabled control shows the hint (a disabled Button takes no
                 // tap, so the hint rides a gesture on its label).
-                Image(systemName: "phone")
+                LkIconView(.phone, size: 24, label: l10n.t("chat.pending.call_disabled", texts: ["name": name]))
                     .foregroundStyle(Color.lakkoTextMuted)
                     .onTapGesture { callHintShown = true }
-                    .accessibilityLabel(l10n.t("chat.pending.call_disabled", texts: ["name": name]))
-                Image(systemName: "video")
+                LkIconView(.video, size: 24, label: l10n.t("chat.pending.call_disabled", texts: ["name": name]))
                     .foregroundStyle(Color.lakkoTextMuted)
                     .onTapGesture { callHintShown = true }
-                    .accessibilityLabel(l10n.t("chat.pending.call_disabled", texts: ["name": name]))
             }
         }
         .onAppear {
@@ -117,8 +114,9 @@ struct PendingChatScreen: View {
             Button {
                 send()
             } label: {
-                Image(systemName: "arrow.up.circle.fill").font(.title2)
+                LkIconView(.arrowUpCircleFill, size: 26, relativeTo: .title2)
             }
+            .accessibilityLabel(l10n.t("chat.composer.send"))
             .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || contact == nil)
         }
         .padding(12)

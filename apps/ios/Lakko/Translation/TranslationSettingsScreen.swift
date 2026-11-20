@@ -92,7 +92,7 @@ struct TranslationSettingsScreen: View {
                         // The interface language is always read.
                         if !sameLanguage(a: tag, b: settings.interfaceLanguage) {
                             Button { settings.removeReading(tag) } label: {
-                                Image(systemName: "minus.circle").foregroundStyle(Color.lakkoTextMuted)
+                                LkIconView(.minusCircle, size: 20).foregroundStyle(Color.lakkoTextMuted)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(l10n.t(

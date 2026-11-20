@@ -15,3 +15,5 @@
 "NSFaceIDUsageDescription" = "Lakko پیش از نمایش عبارت بازیابی، با Face ID تأیید می‌کند که خودتان هستید.";
 
 "NSSpeechRecognitionUsageDescription" = "Lakko پیام‌های صوتی و پیام‌های ویدیویی را وقتی بخواهید به متن تبدیل می‌کند. این کار روی دستگاه شما انجام می‌شود و ضبط‌ها هرگز برای تبدیل به متن به جایی فرستاده نمی‌شوند.";
+
+"NSLocationWhenInUseUsageDescription" = "Lakko uses your location only when you choose to send where you are in a conversation. Nothing is sent before you tap Send.";

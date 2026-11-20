@@ -120,7 +120,7 @@ ssh root@monitor.lakko.me '
   apt-get update && apt-get install -y prometheus grafana alertmanager
 '
 scp infra/prometheus/prometheus.yml root@monitor.lakko.me:/etc/prometheus/
-scp infra/prometheus/rules/calls.yml root@monitor.lakko.me:/etc/prometheus/rules/
+scp infra/prometheus/rules/*.yml root@monitor.lakko.me:/etc/prometheus/rules/
 ssh root@monitor.lakko.me 'systemctl reload prometheus'
 
 # 7. Smoke test. From your laptop:

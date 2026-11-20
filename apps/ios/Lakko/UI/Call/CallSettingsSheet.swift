@@ -115,8 +115,7 @@ struct CallSettingsSheet: View {
                                 .truncationMode(.tail)
                             Spacer(minLength: 0)
                             if option.selected {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
+                                LkIconView(.checkmark, size: 20)
                                     .foregroundColor(Color.lakkoAccent)
                             }
                         }

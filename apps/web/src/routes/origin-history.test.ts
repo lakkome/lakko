@@ -68,6 +68,36 @@ describe("origin-history", () => {
 
   let env: ReturnType<typeof fakeWindow>;
 
+  describe("a public page", () => {
+    beforeEach(() => {
+      env = fakeWindow("/donations");
+      (globalThis as { window?: unknown }).window = env.win;
+    });
+
+    it("keeps its own address on entry, on navigation and on a reload", async () => {
+      const h = await load();
+      h.installOriginHistory();
+      expect(env.current().url).toBe("/donations");
+      expect(h.currentInternalPath()).toBe("/donations");
+      h.originHistory.set({ value: "/chat/abc", replace: false, scroll: false });
+      expect(env.current().url).toBe("/");
+      h.originHistory.set({ value: "/donations", replace: false, scroll: false });
+      expect(env.current().url).toBe("/donations");
+      const reloaded = await load();
+      reloaded.installOriginHistory();
+      expect(reloaded.currentInternalPath()).toBe("/donations");
+      expect(env.current().url).toBe("/donations");
+    });
+
+    it("shows nothing but the origin for the same path with a query or fragment", async () => {
+      const h = await load();
+      expect(h.addressFor("/donations")).toBe("/donations");
+      expect(h.addressFor("/donations?x=1")).toBe("/");
+      expect(h.addressFor("/donations#a")).toBe("/");
+      expect(h.addressFor("/g/AbCdEfGh#secret")).toBe("/");
+    });
+  });
+
   describe("entry from an invite link", () => {
     beforeEach(() => {
       env = fakeWindow("/g/AbCdEfGh#secret16charsxxxxx");

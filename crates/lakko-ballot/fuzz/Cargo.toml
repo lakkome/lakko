@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-ballot-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace - cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-ballot = { path = ".." }
+
+# ADR-0092 section 10: a ballot row any member (or the Delivery Service) can
+# post to a group journal. The row split, AEAD refusal, padding and ballot
+# parser, and proof verification under a fixed ring nobody holds a key of.
+[[bin]]
+name = "ballot_open"
+path = "fuzz_targets/ballot_open.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0092 section 3.9: the ring encoding the open-items hand-over carries,
+# written by the admitting committer.
+[[bin]]
+name = "ring_decode"
+path = "fuzz_targets/ring_decode.rs"
+test = false
+doc = false
+bench = false

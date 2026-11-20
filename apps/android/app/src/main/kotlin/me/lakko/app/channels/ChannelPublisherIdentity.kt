@@ -86,6 +86,13 @@ public class ChannelPublisherIdentity(
         public fun deleteOnDeviceSnapshot(context: Context, accountIdB64: String) {
             IdentitySnapshotStore.deleteSnapshot(context.applicationContext, accountIdB64 + SNAPSHOT_SCOPE_SUFFIX)
         }
+
+        /** ADR-0090 - where PublisherGroups live: this device's bound
+         *  identity and its provider (the chat repository's). Set by the
+         *  session shell; `null` before it, in which case no channel path
+         *  reaches a PublisherGroup (the device reads). */
+        @Volatile
+        public var devicePort: ChannelDevicePort? = null
     }
 
     /** Thrown by [withIdentity] before [bind] has run (or after [unbind]). */
@@ -164,7 +171,7 @@ public class ChannelPublisherIdentity(
                 current.close()
                 ChannelOwnerSuccession.clear()
             } else {
-                ChannelOwnerSuccession.install(boundKey, current)
+                ChannelOwnerSuccession.install(boundKey, current, currentAccountSeed)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "channel owner succession not applied", e)
@@ -192,6 +199,31 @@ public class ChannelPublisherIdentity(
                 result
             }
         }
+
+    /**
+     * ADR-0090 - run [block] with both identities a channel publisher path
+     * acts as ([ChannelIdentity]): the account identity, and this device's
+     * bound identity through which every PublisherGroup call goes. Serialised
+     * with [withIdentity] by the same mutex (never nest the two). Throws
+     * [NoChannelDeviceException] while the device identity is not ready.
+     */
+    public suspend fun <T> withChannel(block: suspend (ChannelIdentity) -> T): T =
+        withContext(Dispatchers.Default) {
+            mutex.withLock {
+                MainThreadGuard.assertOffMain("ChannelPublisherIdentity.withChannel")
+                val account = identity ?: throw NotBoundException()
+                val acct = boundAccountIdB64 ?: throw NotBoundException()
+                val port = devicePort ?: throw NoChannelDeviceException()
+                val device = port.deviceFor(acct) ?: throw NoChannelDeviceException()
+                block(ChannelIdentity(account, device, port))
+            }
+        }
+
+    /** Whether [withChannel] can run now (a device identity is bound). */
+    public fun hasDevice(): Boolean {
+        val acct = boundAccountIdB64 ?: return false
+        return devicePort?.deviceFor(acct) != null
+    }
 
     /**
      * [withIdentity] for a block that publishes something whose private keys

@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-anon-cred-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace - cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-anon-cred = { path = ".." }
+
+# A stored credential read back from the client's own storage: bounded,
+# canonical decode; whatever decodes re-encodes byte for byte.
+[[bin]]
+name = "credential_decode"
+path = "fuzz_targets/credential_decode.rs"
+test = false
+doc = false
+bench = false
+
+# The presentation a vote request carries, attacker-controlled and verified
+# by services/channels before any state is consulted. Under a fixed key,
+# scope, message and period nothing the fuzzer produces may verify.
+[[bin]]
+name = "presentation_verify"
+path = "fuzz_targets/presentation_verify.rs"
+test = false
+doc = false
+bench = false
+
+# The issuance request (and the registration and response shapes) auth and
+# the client decode. Bounded decode, canonical round trip, and no proof the
+# fuzzer built may verify.
+[[bin]]
+name = "issuance_request_decode"
+path = "fuzz_targets/issuance_request_decode.rs"
+test = false
+doc = false
+bench = false

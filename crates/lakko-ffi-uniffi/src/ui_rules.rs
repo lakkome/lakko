@@ -73,6 +73,9 @@ use lakko_ui_rules::layer_display::{
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
+use lakko_ui_rules::media_mosaic::{
+    media_mosaic as rust_media_mosaic, MediaSize as RustMediaSize, MOSAIC_GAP, MOSAIC_MAX_ITEMS,
+};
 
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
@@ -277,6 +280,252 @@ pub fn guest_name(random: u64) -> String {
 #[must_use]
 pub fn avatar_initials(name: String) -> String {
     lakko_ui_rules::initials::avatar_initials(&name)
+}
+
+/// What follows the first comments under a collapsed channel post
+/// (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of comments
+/// this reader hides. See [`lakko_ui_rules::comments`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CollapsedComments {
+    /// Nothing about the count (first page not read, or all shown).
+    Nothing,
+    /// `Show {n} more comments`.
+    Count {
+        /// How many more, at least 1.
+        n: u32,
+    },
+    /// `Show more comments`: rows remain and the service gave no count.
+    Unknown,
+    /// The quiet `Comment` link: there are none.
+    Comment,
+}
+
+/// The collapsed comment line. `visible`: the comments read that this reader
+/// shows; `rows_read`: every row the service returned; `first_page_read`;
+/// `more_rows`: the last page was full; `server_count`: the service's count,
+/// `None` before it answered.
+#[uniffi::export]
+#[must_use]
+pub fn collapsed_comments(
+    visible: u32,
+    rows_read: u32,
+    first_page_read: bool,
+    more_rows: bool,
+    server_count: Option<u64>,
+) -> CollapsedComments {
+    use lakko_ui_rules::comments::CollapsedComments as Rust;
+    match lakko_ui_rules::comments::collapsed_comments(
+        visible,
+        rows_read,
+        first_page_read,
+        more_rows,
+        server_count,
+    ) {
+        Rust::Nothing => CollapsedComments::Nothing,
+        Rust::Count(n) => CollapsedComments::Count { n },
+        Rust::Unknown => CollapsedComments::Unknown,
+        Rust::Comment => CollapsedComments::Comment,
+    }
+}
+
+/// What kind of channel read produced the records
+/// (`docs/ux/channel-notifications.md` section 2). See
+/// [`lakko_ui_rules::channel_notify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChannelReadKind {
+    /// An ordinary read of posts that arrived since the last one.
+    Ongoing,
+    /// The first read after subscribing: its newest post may notify while it
+    /// is less than an hour old, nothing else.
+    FirstAfterSubscribe,
+    /// Any other history refetch (joined as a publisher, a dropped or
+    /// restored post log): nothing notifies.
+    History,
+}
+
+impl From<ChannelReadKind> for lakko_ui_rules::channel_notify::ChannelReadKind {
+    fn from(k: ChannelReadKind) -> Self {
+        match k {
+            ChannelReadKind::Ongoing => Self::Ongoing,
+            ChannelReadKind::FirstAfterSubscribe => Self::FirstAfterSubscribe,
+            ChannelReadKind::History => Self::History,
+        }
+    }
+}
+
+/// The channel as this device holds it when the records were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelNotifyContext {
+    /// The channel is muted.
+    pub muted: bool,
+    /// The channel is open and visible on this device.
+    pub open_and_visible: bool,
+    /// The newest post cursor read; `0` when none.
+    pub read_marker: u64,
+    /// The cursor this device stored after its last read; `0` when none.
+    pub last_notified: u64,
+    /// What kind of read this is.
+    pub read_kind: ChannelReadKind,
+    /// Now, unix milliseconds.
+    pub now_ms: u64,
+}
+
+impl From<ChannelNotifyContext> for lakko_ui_rules::channel_notify::ChannelNotifyContext {
+    fn from(c: ChannelNotifyContext) -> Self {
+        Self {
+            muted: c.muted,
+            open_and_visible: c.open_and_visible,
+            read_marker: c.read_marker,
+            last_notified: c.last_notified,
+            read_kind: c.read_kind.into(),
+            now_ms: c.now_ms,
+        }
+    }
+}
+
+/// One record read from a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelPostCandidate {
+    /// The server's per-channel cursor.
+    pub cursor: u64,
+    /// The record is a post that opened (not a metadata record, a ban list
+    /// or a rotation).
+    pub is_post: bool,
+    /// The post is this account's own.
+    pub own: bool,
+    /// The server's receive time, unix milliseconds.
+    pub server_ts_ms: u64,
+}
+
+impl From<ChannelPostCandidate> for lakko_ui_rules::channel_notify::ChannelPostCandidate {
+    fn from(p: ChannelPostCandidate) -> Self {
+        Self {
+            cursor: p.cursor,
+            is_post: p.is_post,
+            own: p.own,
+            server_ts_ms: p.server_ts_ms,
+        }
+    }
+}
+
+/// Which records of a read notify, and the cursor to store.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelNotifyBatch {
+    /// Indices into the records passed, ascending by cursor, each cursor at
+    /// most once; show the last one (one notification per channel).
+    pub notify: Vec<u32>,
+    /// The last-notified cursor to store, per device, never synced.
+    pub last_notified: u64,
+}
+
+/// Whether one channel record notifies. `newest_of_read`: it is the newest
+/// post of the read it came in (matters on the first read after subscribing
+/// only). See [`lakko_ui_rules::channel_notify`].
+#[uniffi::export]
+#[must_use]
+pub fn channel_post_notifies(
+    context: ChannelNotifyContext,
+    post: ChannelPostCandidate,
+    newest_of_read: bool,
+) -> bool {
+    lakko_ui_rules::channel_notify::channel_post_notifies(
+        &context.into(),
+        &post.into(),
+        newest_of_read,
+    )
+}
+
+/// The channel notification rule over the records of one read: which notify
+/// and the last-notified cursor to store afterwards.
+#[uniffi::export]
+#[must_use]
+pub fn channel_posts_to_notify(
+    context: ChannelNotifyContext,
+    posts: Vec<ChannelPostCandidate>,
+) -> ChannelNotifyBatch {
+    let posts: Vec<lakko_ui_rules::channel_notify::ChannelPostCandidate> =
+        posts.into_iter().map(Into::into).collect();
+    let batch = lakko_ui_rules::channel_notify::channel_posts_to_notify(&context.into(), &posts);
+    ChannelNotifyBatch {
+        notify: batch.notify,
+        last_notified: batch.last_notified,
+    }
+}
+
+/// One member card the viewer could open, for [`channel_subscriber_list`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelSubscriberCard {
+    /// The subscriber key the card is stored under (hex).
+    pub subscriber_key: String,
+    /// The account the card is bound to (any stable text); empty stands
+    /// alone.
+    pub person_key: String,
+    /// The card carries a display name, or a username the viewer may show.
+    pub named: bool,
+    /// The card is the viewer's own account.
+    pub is_self: bool,
+}
+
+/// One person shown by name in a channel's subscriber list.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelSubscriberPerson {
+    /// Indices into the cards passed, every card of this person; the first
+    /// is the one to draw the row from.
+    pub cards: Vec<u32>,
+    /// `Remove` on this row removes the subscriber key of every card.
+    pub removable: bool,
+}
+
+/// A channel's subscriber list as a person sees it
+/// (`docs/ux/group-and-channel-privacy.md` 15.1, 7.3).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelSubscriberList {
+    /// The people shown by name, in the order of their first card.
+    pub people: Vec<ChannelSubscriberPerson>,
+    /// Indices into the listed keys passed: the others listed one row each,
+    /// never a key of a person shown by name.
+    pub others: Vec<u32>,
+    /// The number in "{n} others."; `0` says nothing.
+    pub others_count: u64,
+}
+
+/// The subscriber list: a nameless card is not a named row, a named person
+/// is never listed again among the others, and in a private channel the
+/// owner and publishers (`can_remove`) may remove every row but their own.
+/// `listed_keys`: every registered key read (private channel, owner and
+/// publishers), else empty; `count`: the subscriber count. See
+/// [`lakko_ui_rules::subscribers`].
+#[uniffi::export]
+#[must_use]
+pub fn channel_subscriber_list(
+    cards: Vec<ChannelSubscriberCard>,
+    listed_keys: Vec<String>,
+    count: Option<u64>,
+    can_remove: bool,
+) -> ChannelSubscriberList {
+    use lakko_ui_rules::subscribers::{subscriber_list, SubscriberCard};
+    let cards: Vec<SubscriberCard> = cards
+        .into_iter()
+        .map(|c| SubscriberCard {
+            subscriber_key: c.subscriber_key,
+            person_key: c.person_key,
+            named: c.named,
+            is_self: c.is_self,
+        })
+        .collect();
+    let list = subscriber_list(&cards, &listed_keys, count, can_remove);
+    ChannelSubscriberList {
+        people: list
+            .people
+            .into_iter()
+            .map(|p| ChannelSubscriberPerson {
+                cards: p.cards,
+                removable: p.removable,
+            })
+            .collect(),
+        others: list.others,
+        others_count: list.others_count,
+    }
 }
 
 /// One run of a message's text: `docs/ux/message-links.md`.
@@ -924,6 +1173,90 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
         per_page: grid.per_page,
         pages: grid.pages,
     }
+}
+
+/// The pixel size of one photo or video of a message
+/// (`docs/ux/media-messages.md` section 11). `0` in either field means
+/// unknown; the item is then laid out as 4:3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct MediaSize {
+    /// Width in pixels; `0` when unknown.
+    pub width: u32,
+    /// Height in pixels; `0` when unknown.
+    pub height: u32,
+}
+
+/// Where one tile of a message's media mosaic goes. `x` is measured from
+/// the START edge: a right-to-left layout places the tile at
+/// `mosaic.width - x - width`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct MosaicTile {
+    /// Distance from the start edge.
+    pub x: u32,
+    /// Distance from the top edge.
+    pub y: u32,
+    /// Tile width.
+    pub width: u32,
+    /// Tile height.
+    pub height: u32,
+}
+
+/// The laid-out media mosaic of one message.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MediaMosaic {
+    /// One tile per item, in input order, for the first ten items; empty
+    /// when there is nothing to lay out or the width cannot hold the tiles.
+    pub tiles: Vec<MosaicTile>,
+    /// Width of the mosaic: the bubble width, or less for one narrow item.
+    pub width: u32,
+    /// Total height, gaps included.
+    pub height: u32,
+}
+
+/// Lay out the photos and videos of one message in a bubble `bubble_width`
+/// wide with `gap` between tiles (`docs/ux/media-messages.md` section 11).
+/// Every tile is drawn cropped to fill.
+#[uniffi::export]
+#[must_use]
+pub fn media_mosaic(bubble_width: u32, gap: u32, items: Vec<MediaSize>) -> MediaMosaic {
+    let items: Vec<RustMediaSize> = items
+        .into_iter()
+        .map(|s| RustMediaSize {
+            width: s.width,
+            height: s.height,
+        })
+        .collect();
+    let mosaic = rust_media_mosaic(bubble_width, gap, &items);
+    MediaMosaic {
+        tiles: mosaic
+            .tiles
+            .into_iter()
+            .map(|t| MosaicTile {
+                x: t.x,
+                y: t.y,
+                width: t.width,
+                height: t.height,
+            })
+            .collect(),
+        width: mosaic.width,
+        height: mosaic.height,
+    }
+}
+
+/// The gap the spec draws between mosaic tiles. Chosen.
+#[uniffi::export]
+#[must_use]
+pub fn media_mosaic_gap() -> u32 {
+    MOSAIC_GAP
+}
+
+/// The most photos and videos one message carries and its mosaic shows.
+/// Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn media_mosaic_max_items() -> u32 {
+    // Ten; a const that fits in u32 by construction.
+    u32::try_from(MOSAIC_MAX_ITEMS).unwrap_or(u32::MAX)
 }
 
 /// One person, as the stage rule sees them.
@@ -1911,9 +2244,174 @@ pub fn suggest_handle(name: String, kind: HandleKind, private: bool, random: u64
     rust_suggest_handle(&name, kind, private, random)
 }
 
+// ============================================================================
+// ADR-0092 — the paperclip menu and the poll editor's anonymity switch
+// ============================================================================
+
+/// One row of the paperclip menu, in UX order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AttachmentMenuItem {
+    /// The system photo picker.
+    PhotoOrVideo,
+    /// Lakko's capture screen.
+    Camera,
+    /// The system document picker.
+    File,
+    /// The document picker filtered to audio.
+    Audio,
+    /// The poll editor.
+    Poll,
+    /// The checklist editor.
+    Checklist,
+    /// The location screen.
+    Location,
+    /// The contact picker.
+    Contact,
+    /// The article editor.
+    Article,
+}
+
+/// Why a menu row is shown disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AttachmentMenuDisabled {
+    /// `No camera on this device`.
+    NoCamera,
+    /// `Unavailable during a call`.
+    CameraInCall,
+    /// `Location isn't available on this device`.
+    NoLocation,
+}
+
+/// One menu row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentMenuRow {
+    /// Which row.
+    pub item: AttachmentMenuItem,
+    /// Its group (0 files, 1 things people answer, 2 things people share,
+    /// 3 long text); a separator goes between rows whose sections differ.
+    pub section: u8,
+    /// Shown disabled with this reason, or enabled when `None`.
+    pub disabled: Option<AttachmentMenuDisabled>,
+}
+
+/// The paperclip menu (`docs/ux/attachments.md` section 2.4). Empty means
+/// no paperclip (a channel subscriber).
+#[uniffi::export]
+#[must_use]
+pub fn attachment_menu(
+    kind: ConversationKind,
+    role: ConversationRole,
+    has_camera: bool,
+    has_location: bool,
+    call_holds_camera: bool,
+) -> Vec<AttachmentMenuRow> {
+    use lakko_ui_rules::attachment_menu as am;
+    let role = match role {
+        ConversationRole::Owner => RustConversationRole::Owner,
+        ConversationRole::Admin => RustConversationRole::Admin,
+        ConversationRole::Member => RustConversationRole::Member,
+    };
+    am::attachment_menu(
+        kind.into(),
+        role,
+        has_camera,
+        has_location,
+        call_holds_camera,
+    )
+    .into_iter()
+    .map(|r| AttachmentMenuRow {
+        item: match r.item {
+            am::AttachmentMenuItem::PhotoOrVideo => AttachmentMenuItem::PhotoOrVideo,
+            am::AttachmentMenuItem::Camera => AttachmentMenuItem::Camera,
+            am::AttachmentMenuItem::File => AttachmentMenuItem::File,
+            am::AttachmentMenuItem::Audio => AttachmentMenuItem::Audio,
+            am::AttachmentMenuItem::Poll => AttachmentMenuItem::Poll,
+            am::AttachmentMenuItem::Checklist => AttachmentMenuItem::Checklist,
+            am::AttachmentMenuItem::Location => AttachmentMenuItem::Location,
+            am::AttachmentMenuItem::Contact => AttachmentMenuItem::Contact,
+            am::AttachmentMenuItem::Article => AttachmentMenuItem::Article,
+        },
+        section: r.item.section(),
+        disabled: r.disabled.map(|d| match d {
+            am::AttachmentMenuDisabled::NoCamera => AttachmentMenuDisabled::NoCamera,
+            am::AttachmentMenuDisabled::CameraInCall => AttachmentMenuDisabled::CameraInCall,
+            am::AttachmentMenuDisabled::NoLocation => AttachmentMenuDisabled::NoLocation,
+        }),
+    })
+    .collect()
+}
+
+/// What the poll editor shows for anonymity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PollAnonymity {
+    /// No switch; not anonymous.
+    NotOffered,
+    /// The switch, on by default.
+    SwitchDefaultOn,
+    /// No switch; always anonymous (a channel).
+    AlwaysAnonymous,
+}
+
+/// The anonymity a poll editor offers in a conversation of `kind` with
+/// `accounts` distinct accounts (account keys, not leaves).
+#[uniffi::export]
+#[must_use]
+pub fn poll_anonymity(kind: ConversationKind, accounts: u32) -> PollAnonymity {
+    use lakko_ui_rules::attachment_menu as am;
+    match am::poll_anonymity(kind.into(), accounts as usize) {
+        am::PollAnonymity::NotOffered => PollAnonymity::NotOffered,
+        am::PollAnonymity::SwitchDefaultOn => PollAnonymity::SwitchDefaultOn,
+        am::PollAnonymity::AlwaysAnonymous => PollAnonymity::AlwaysAnonymous,
+    }
+}
+
+/// A sent photo's longest side at most, pixels.
+#[uniffi::export]
+#[must_use]
+pub fn photo_max_longest_side_px() -> u32 {
+    lakko_ui_rules::attachment_menu::PHOTO_MAX_LONGEST_SIDE_PX
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_media_mosaic_crosses_the_boundary_intact() {
+        let m = media_mosaic(
+            320,
+            media_mosaic_gap(),
+            vec![
+                MediaSize {
+                    width: 1000,
+                    height: 1000,
+                },
+                MediaSize {
+                    width: 1600,
+                    height: 900,
+                },
+            ],
+        );
+        assert_eq!((m.width, m.height), (320, 89));
+        assert_eq!(
+            m.tiles,
+            vec![
+                MosaicTile {
+                    x: 0,
+                    y: 0,
+                    width: 159,
+                    height: 89
+                },
+                MosaicTile {
+                    x: 161,
+                    y: 0,
+                    width: 159,
+                    height: 89
+                },
+            ]
+        );
+        assert_eq!(media_mosaic_max_items(), 10);
+    }
 
     #[test]
     fn the_av_alignment_crosses_the_boundary_intact() {
@@ -2290,6 +2788,99 @@ mod tests {
     #[test]
     fn the_guest_name_crosses_the_boundary_intact() {
         assert_eq!(guest_name(0), "Calm Dog");
+    }
+
+    #[test]
+    fn the_subscriber_list_crosses_the_boundary_intact() {
+        let card = |pk: &str, person: &str, named: bool| ChannelSubscriberCard {
+            subscriber_key: pk.to_owned(),
+            person_key: person.to_owned(),
+            named,
+            is_self: false,
+        };
+        let list = channel_subscriber_list(
+            vec![card("bb02", "pixel", true), card("aa01", "iphone", false)],
+            vec!["aa01".to_owned(), "bb02".to_owned()],
+            Some(2),
+            true,
+        );
+        assert_eq!(
+            list.people,
+            vec![ChannelSubscriberPerson {
+                cards: vec![0],
+                removable: true
+            }]
+        );
+        assert_eq!(list.others, vec![0]);
+        assert_eq!(list.others_count, 1);
+    }
+
+    #[test]
+    fn the_collapsed_comment_line_crosses_the_boundary_intact() {
+        assert_eq!(
+            collapsed_comments(0, 2, true, false, Some(2)),
+            CollapsedComments::Comment
+        );
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, Some(30)),
+            CollapsedComments::Count { n: 13 }
+        );
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, None),
+            CollapsedComments::Unknown
+        );
+        assert_eq!(
+            collapsed_comments(0, 0, false, false, Some(2)),
+            CollapsedComments::Nothing
+        );
+    }
+
+    #[test]
+    fn the_channel_notification_rule_crosses_the_boundary_intact() {
+        let now = 1_800_000_000_000;
+        let post = |cursor: u64, age: u64| ChannelPostCandidate {
+            cursor,
+            is_post: true,
+            own: false,
+            server_ts_ms: now - age,
+        };
+        let context = ChannelNotifyContext {
+            muted: false,
+            open_and_visible: false,
+            read_marker: 3,
+            last_notified: 4,
+            read_kind: ChannelReadKind::Ongoing,
+            now_ms: now,
+        };
+        let batch = channel_posts_to_notify(context, vec![post(6, 0), post(4, 0), post(5, 0)]);
+        assert_eq!(batch.notify, vec![2, 0]);
+        assert_eq!(batch.last_notified, 6);
+        assert!(!channel_post_notifies(
+            ChannelNotifyContext {
+                muted: true,
+                ..context
+            },
+            post(9, 0),
+            true
+        ));
+        let first = ChannelNotifyContext {
+            read_kind: ChannelReadKind::FirstAfterSubscribe,
+            read_marker: 0,
+            last_notified: 0,
+            ..context
+        };
+        assert_eq!(
+            channel_posts_to_notify(first, vec![post(1, 0), post(2, 0)]).notify,
+            vec![1]
+        );
+        assert!(!channel_post_notifies(first, post(2, 3_600_000), true));
+        let history = ChannelNotifyContext {
+            read_kind: ChannelReadKind::History,
+            ..first
+        };
+        assert!(channel_posts_to_notify(history, vec![post(1, 0)])
+            .notify
+            .is_empty());
     }
 
     #[test]

@@ -52,6 +52,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
 use crate::index::{today, BlobId, BlobRow, IndexError, UploadOutcome};
+use crate::metrics::{self as m, Outcome};
 use crate::pass::{Pass, PassError, PassKind, PASS_HEADER};
 use crate::store::StoreError;
 use crate::AppState;
@@ -175,12 +176,24 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status(),
             Json(serde_json::json!({ "error": self.code() })),
         )
-            .into_response()
+            .into_response();
+        // The `code` label of the request counter (ADR-0096).
+        response
+            .extensions_mut()
+            .insert(lakko_metrics::ErrorCode(self.code()));
+        response
     }
+}
+
+/// The outcome `result` is counted under, `ok` when it succeeded.
+fn outcome_of<T>(result: &Result<T, ApiError>, ok: Outcome) -> Outcome {
+    result
+        .as_ref()
+        .map_or_else(|e| Outcome::of_error(*e), |_| ok)
 }
 
 impl From<IndexError> for ApiError {
@@ -262,6 +275,7 @@ async fn issue_pass(state: &AppState, headers: &HeaderMap, kind: PassKind) -> Re
     }
     let expires_at = now_unix_secs().saturating_add(state.limits.ttl_secs);
     let (_, value) = secret.issue(kind, expires_at);
+    m::pass_issued(kind);
     let budget = match kind {
         PassKind::Upload => serde_json::json!({
             "files": state.limits.upload_files,
@@ -401,13 +415,33 @@ pub(crate) async fn put_blob(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
+    let result = store_blob(&state, &hex, &headers, body).await;
+    let counted = match result {
+        Ok(UploadOutcome::Created) => Outcome::Created,
+        Ok(UploadOutcome::Existed) => Outcome::Existed,
+        Err(e) => Outcome::of_error(e),
+    };
+    m::upload(counted);
+    let status = match result? {
+        UploadOutcome::Created => StatusCode::CREATED,
+        UploadOutcome::Existed => StatusCode::OK,
+    };
+    Ok(status.into_response())
+}
+
+async fn store_blob(
+    state: &AppState,
+    hex: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<UploadOutcome, ApiError> {
     // Pass shape and expiry first, so nothing below is reachable without one;
     // the charge follows the request checks, which cost the client nothing.
-    take_pass(&state, &headers, PassKind::Upload, 0, 0)?;
-    let id = parse_id(&hex)?;
-    let key = delete_key(&headers)?;
-    let idle = idle_days(&headers)?;
-    let declared = content_length(&headers)?;
+    take_pass(state, headers, PassKind::Upload, 0, 0)?;
+    let id = parse_id(hex)?;
+    let key = delete_key(headers)?;
+    let idle = idle_days(headers)?;
+    let declared = content_length(headers)?;
     if declared > crate::MAX_BLOB_BYTES as u64 {
         return Err(ApiError::TooLarge);
     }
@@ -415,7 +449,7 @@ pub(crate) async fn put_blob(
     if !crate::disk::check(&state.blob_root, declared, state.limits.min_free_bytes).await {
         return Err(ApiError::StorageFull);
     }
-    take_pass(&state, &headers, PassKind::Upload, 1, declared)?;
+    take_pass(state, headers, PassKind::Upload, 1, declared)?;
 
     let parent = state.store.temp_dir(&id);
     tokio::fs::create_dir_all(&parent)
@@ -459,11 +493,10 @@ pub(crate) async fn put_blob(
             idle_days: idle,
         })
         .await?;
-    let status = match outcome {
-        UploadOutcome::Created => StatusCode::CREATED,
-        UploadOutcome::Existed => StatusCode::OK,
-    };
-    Ok(status.into_response())
+    if outcome == UploadOutcome::Created {
+        m::bytes_added(written);
+    }
+    Ok(outcome)
 }
 
 // ============================================================================
@@ -481,10 +514,15 @@ async fn local_row(state: &AppState, id: &BlobId) -> Result<BlobRow, ApiError> {
 
 /// A row whose bytes are gone is removed, so the blob reads as not found from
 /// then on rather than failing every time.
-async fn file_missing(state: &AppState, id: &BlobId) -> ApiError {
+async fn file_missing(state: &AppState, id: &BlobId, size: u64) -> ApiError {
     tracing::warn!("blob row without its bytes; removing the row");
     match state.index.remove(id).await {
-        Ok(_) => ApiError::NotFound,
+        Ok(removed) => {
+            if removed {
+                m::bytes_removed(size);
+            }
+            ApiError::NotFound
+        },
         Err(e) => ApiError::from(e),
     }
 }
@@ -496,10 +534,20 @@ pub(crate) async fn get_blob(
     AxumPath(hex): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
-    let id = parse_id(&hex)?;
-    take_pass(&state, &headers, PassKind::Read, 1, 0)?;
-    let row = local_row(&state, &id).await?;
+    let result = download_blob(&state, &hex, &headers).await;
+    m::download(outcome_of(&result, Outcome::Ok));
+    result
+}
+
+async fn download_blob(
+    state: &AppState,
+    hex: &str,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    take_pass(state, headers, PassKind::Read, 0, 0)?;
+    let id = parse_id(hex)?;
+    take_pass(state, headers, PassKind::Read, 1, 0)?;
+    let row = local_row(state, &id).await?;
 
     let Some((len, stream)) = state
         .store
@@ -507,7 +555,7 @@ pub(crate) async fn get_blob(
         .await
         .map_err(|e| internal_store("open blob", &e))?
     else {
-        return Err(file_missing(&state, &id).await);
+        return Err(file_missing(state, &id, row.size).await);
     };
     let day = today();
     if row.last_access_day < day {
@@ -561,8 +609,14 @@ pub(crate) async fn keep_blobs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
-    let parsed: KeepBody = serde_json::from_slice(&body).map_err(|_| ApiError::KeepMalformed)?;
+    let result = keep(&state, &headers, &body).await;
+    m::keep(outcome_of(&result, Outcome::Ok));
+    result
+}
+
+async fn keep(state: &AppState, headers: &HeaderMap, body: &[u8]) -> Result<Response, ApiError> {
+    take_pass(state, headers, PassKind::Read, 0, 0)?;
+    let parsed: KeepBody = serde_json::from_slice(body).map_err(|_| ApiError::KeepMalformed)?;
     if parsed.ids.is_empty() || parsed.ids.len() > MAX_KEEP_IDS {
         return Err(ApiError::KeepMalformed);
     }
@@ -572,7 +626,7 @@ pub(crate) async fn keep_blobs(
         .map(|h| parse_id(h).map_err(|_| ApiError::KeepMalformed))
         .collect::<Result<Vec<_>, _>>()?;
     let count = u64::try_from(ids.len()).unwrap_or(u64::MAX);
-    take_pass(&state, &headers, PassKind::Read, 0, count)?;
+    take_pass(state, headers, PassKind::Read, 0, count)?;
     state.index.touch(&ids, today()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -591,7 +645,17 @@ pub(crate) async fn delete_blob(
     AxumPath(hex): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let id = parse_id(&hex).map_err(|_| ApiError::DeleteRefused)?;
+    let result = remove_blob(&state, &hex, &headers).await;
+    m::delete(outcome_of(&result, Outcome::Deleted));
+    result
+}
+
+async fn remove_blob(
+    state: &AppState,
+    hex: &str,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(hex).map_err(|_| ApiError::DeleteRefused)?;
     let proof = headers
         .get(lakko_vault::proof::PROOF_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
@@ -604,7 +668,9 @@ pub(crate) async fn delete_blob(
     if row.node != *state.node {
         return Err(ApiError::NodeUnavailable);
     }
-    state.index.remove(&id).await?;
+    if state.index.remove(&id).await? {
+        m::bytes_removed(row.size);
+    }
     if let Err(e) = state.store.delete(&id).await {
         // The row is gone, so the blob is already unreachable; the bytes are
         // an orphan in the store.

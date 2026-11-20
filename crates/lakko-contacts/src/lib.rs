@@ -117,6 +117,7 @@ pub mod avatar;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
+pub mod channel_admission_mark;
 pub mod channel_epoch_seeds;
 pub mod channel_read_key;
 pub mod channel_rotate_request;
@@ -124,6 +125,7 @@ pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
 pub mod conversation_handle;
+pub mod conversation_reentry;
 pub mod device_card;
 pub mod envelope;
 pub mod error;
@@ -142,6 +144,7 @@ pub mod invite;
 pub mod journal_epoch;
 pub mod key_rotation;
 pub mod knock;
+pub mod knock_key;
 pub mod knock_seed;
 pub mod link_claim;
 pub mod link_founded;
@@ -149,14 +152,19 @@ pub mod link_refusal;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
+pub mod open_items;
+pub mod own_binding;
 pub mod pin;
+pub mod poll_ballots;
 pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
+pub mod publisher_device_request;
 pub mod push_routing;
 pub mod push_wake;
 pub mod reach;
 pub mod registrar_seed;
+pub mod rejoin_present;
 pub mod request;
 pub mod safety;
 pub mod shared_channels;
@@ -192,6 +200,11 @@ pub use call_kp_forward::{
 pub use call_welcome::{
     try_unwrap_call_welcome, wrap_call_welcome, CallWelcomeError, CALL_WELCOME_ENVELOPE_DOMAIN_V1,
     CALL_WELCOME_MIN_PAYLOAD_LEN,
+};
+pub use channel_admission_mark::{
+    compose_channel_admission_mark, decode_channel_admission_mark,
+    try_unwrap_channel_admission_mark, ChannelAdmissionMark, ChannelAdmissionMarkError,
+    CHANNEL_ADMISSION_MARK_ENVELOPE_DOMAIN_V1, CHANNEL_ADMISSION_MARK_ENVELOPE_LEN,
 };
 pub use channel_epoch_seeds::{
     channel_epoch_seeds_envelope_len, compose_channel_epoch_seeds, decode_channel_epoch_seeds,
@@ -234,6 +247,13 @@ pub use conversation_handle::{
     CONVERSATION_HANDLE_CERT_LEN, CONVERSATION_HANDLE_ENVELOPE_DOMAIN_V1,
     CONVERSATION_HANDLE_ENVELOPE_MAX_LEN, CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
     CONVERSATION_HANDLE_VERSION_V1,
+};
+pub use conversation_reentry::{
+    compose_conversation_reentry, decode_conversation_reentry, open_reentry_knock,
+    seal_reentry_knock, try_unwrap_conversation_reentry, ConversationReentry,
+    ConversationReentryError, CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1,
+    CONVERSATION_REENTRY_ENVELOPE_MAX_LEN, CONVERSATION_REENTRY_ENVELOPE_MIN_LEN,
+    CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN,
 };
 pub use device_card::{
     compose_device_card, decode_device_card, device_card_is_newer, try_unwrap_device_card,
@@ -325,6 +345,10 @@ pub use knock::{
     is_knock_row_len, knock_public_key, knock_row_version, knock_seed, open_knock, seal_knock,
     KnockError, KnockRequest, KNOCK_LARGE_ROW_LEN, KNOCK_SMALL_ROW_LEN,
 };
+pub use knock_key::{
+    compose_knock_key, decode_knock_key, knock_key_is_newer, try_unwrap_knock_key, KnockKey,
+    KnockKeyError, KNOCK_KEY_ENVELOPE_DOMAIN_V1, KNOCK_KEY_ENVELOPE_LEN,
+};
 pub use knock_seed::{
     compose_knock_seed, decode_knock_seed, try_unwrap_knock_seed, KnockSeedEnvelope,
     KnockSeedError, KNOCK_SEED_ENVELOPE_DOMAIN_V1, KNOCK_SEED_ENVELOPE_LEN, KNOCK_SEED_VERSION_V1,
@@ -359,9 +383,25 @@ pub use media_state::{
     MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_FLAG_CAMERA, MEDIA_STATE_FLAG_MICROPHONE,
     MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V2,
 };
+pub use open_items::{
+    assemble_open_items, compose_open_items, decode_open_items, is_open_items_envelope,
+    open_items_handover_due, open_items_sender_trusted, plan_open_items_rows,
+    try_unwrap_open_items, AssembledContent, AssembledItem, HandoverAdded, HandoverItemRef,
+    HandoverTick, HandoverVote, OpenItem, OpenItemContent, OpenItemEntry, OpenItemHeader,
+    OpenItemPart, OpenItems, OpenItemsError, ReceivedOpenItems, OPEN_ITEMS_ENVELOPE_DOMAIN_V1,
+    OPEN_ITEMS_ENVELOPE_MAX_LEN, OPEN_ITEMS_ENVELOPE_MIN_LEN, OPEN_ITEMS_MAX_BODY_LEN,
+    OPEN_ITEMS_MAX_ITEMS, OPEN_ITEMS_VERSION_V1,
+};
 pub use pin::{
     compose_pin, decode_pin, pin_is_newer, try_unwrap_pin, PinAction, PinError, PinOp,
     PIN_ENVELOPE_DOMAIN_V1, PIN_ENVELOPE_LEN, PIN_VERSION_V1,
+};
+pub use poll_ballots::{
+    ballot_needs_handover, compose_poll_ballots, decode_poll_ballots, is_poll_ballots_envelope,
+    plan_poll_ballots_rows, try_unwrap_poll_ballots, PollBallots, PollBallotsError,
+    BALLOT_HANDOVER_MARGIN_MS, JOURNAL_RETENTION_MS, POLL_BALLOTS_ENVELOPE_DOMAIN_V1,
+    POLL_BALLOTS_ENVELOPE_MAX_LEN, POLL_BALLOTS_ENVELOPE_MIN_LEN, POLL_BALLOTS_MAX_ROW_LEN,
+    POLL_BALLOTS_VERSION_V1,
 };
 pub use profile::{
     check_display_name, compose_profile, decode_profile, is_format_char, is_profile_grant_class,
@@ -378,6 +418,12 @@ pub use profile_request::{
     PROFILE_REQUEST_MIN_INTERVAL_MS, PROFILE_REQUEST_PAYLOAD_LEN, PROFILE_REQUEST_VERSION_V1,
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
+pub use publisher_device_request::{
+    compose_publisher_device_request, decode_publisher_device_request,
+    try_unwrap_publisher_device_request, PublisherDeviceAction, PublisherDeviceRequest,
+    PublisherDeviceRequestError, PUBLISHER_DEVICE_REQUEST_ENVELOPE_DOMAIN_V1,
+    PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN,
+};
 pub use push_routing::{
     compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
     derive_push_wake_public_key, derive_push_wake_signing_seed, derive_push_wake_unlock_key,
@@ -595,6 +641,61 @@ pub mod fuzz_api {
         Some(recomposed && within && dispatched)
     }
 
+    /// `None` when `bytes` is not a well-formed open-items envelope
+    /// (ADR-0092 section 3.9); else `Some(true)` when it re-composes to
+    /// exactly `bytes` within the length bounds, the dispatcher classifies it
+    /// the same, and assembling it never panics; `Some(false)` on a
+    /// disagreement (a bug).
+    #[must_use]
+    pub fn open_items_decode(bytes: &[u8]) -> Option<bool> {
+        let items = crate::open_items::decode_open_items(bytes).ok()?;
+        let recomposed = crate::open_items::compose_open_items(&items)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::open_items::OPEN_ITEMS_ENVELOPE_MIN_LEN
+            ..=crate::open_items::OPEN_ITEMS_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::OpenItems(ref d)) if *d == items
+        );
+        let received = [crate::open_items::ReceivedOpenItems {
+            sender_account_key: [1; 32],
+            items: &items,
+        }];
+        let assembled =
+            crate::open_items::assemble_open_items(&received, &std::collections::BTreeSet::new());
+        let refs_known = assembled.iter().all(|a| {
+            items
+                .items
+                .iter()
+                .any(|e| e.header.poll_ref == a.header.poll_ref)
+        });
+        Some(recomposed && within && dispatched && refs_known)
+    }
+
+    /// `None` when `bytes` is not a well-formed poll-ballots envelope
+    /// (ADR-0092 section 3.9); else `Some(true)` when it re-composes to
+    /// exactly `bytes` within the bounds and the dispatcher classifies it
+    /// the same, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn poll_ballots_decode(bytes: &[u8]) -> Option<bool> {
+        let ballots = crate::poll_ballots::decode_poll_ballots(bytes).ok()?;
+        let recomposed = crate::poll_ballots::compose_poll_ballots(&ballots)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::poll_ballots::POLL_BALLOTS_ENVELOPE_MIN_LEN
+            ..=crate::poll_ballots::POLL_BALLOTS_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::PollBallots(ref d)) if *d == ballots
+        );
+        Some(recomposed && within && dispatched)
+    }
+
     /// Decode `bytes` as a handle statement (ADR-0087 section 3). `None`
     /// when the decoder refuses; `Some(true)` when what decoded re-encodes
     /// to the same bytes (and verifying it never panicked).
@@ -654,6 +755,37 @@ pub mod fuzz_api {
         Some(ok && dispatched)
     }
 
+    /// Decode `bytes` as a conversation re-entry request (ADR-0091 phase 2)
+    /// and check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-composes to the same bytes within the
+    /// advertised bounds and dispatches as the same request. The opened
+    /// knock-row plaintext parser is driven on the same bytes.
+    #[must_use]
+    pub fn conversation_reentry_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::conversation_reentry::fuzz_decode(bytes)?;
+        let request = crate::conversation_reentry::decode_conversation_reentry(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ConversationReentry(r)) if r == request
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a knock-key envelope (ADR-0091 phase 2, route 3)
+    /// and check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-composes to the same bytes at the fixed length
+    /// and dispatches as the same key.
+    #[must_use]
+    pub fn knock_key_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::knock_key::fuzz_decode(bytes)?;
+        let key = crate::knock_key::decode_knock_key(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::KnockKey(k)) if k == key
+        );
+        Some(ok && dispatched)
+    }
+
     /// Decode `bytes` as a channel rotate-request envelope (ADR-0087 section
     /// 15, amended 2026-11-08) and check the dispatcher agrees. `None` when
     /// the decoder refuses; `Some(true)` when it re-composes to the same
@@ -665,6 +797,37 @@ pub mod fuzz_api {
         let dispatched = matches!(
             crate::incoming_envelope::dispatch_incoming_envelope(bytes),
             Ok(crate::incoming_envelope::IncomingEnvelope::ChannelRotateRequest(c)) if c == channel
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a publisher device-request envelope (ADR-0090
+    /// section 2.2) and check the dispatcher agrees. `None` when the decoder
+    /// refuses; `Some(true)` when it re-composes to the same bytes within the
+    /// advertised bounds and dispatches as the same request.
+    #[must_use]
+    pub fn publisher_device_request_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::publisher_device_request::fuzz_decode(bytes)?;
+        let request =
+            crate::publisher_device_request::decode_publisher_device_request(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::PublisherDeviceRequest(r)) if r == request
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a channel admission-mark envelope (ADR-0090 section
+    /// 6) and check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-composes to the same bytes at the fixed length
+    /// and dispatches as the same mark.
+    #[must_use]
+    pub fn channel_admission_mark_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::channel_admission_mark::fuzz_decode(bytes)?;
+        let mark = crate::channel_admission_mark::decode_channel_admission_mark(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ChannelAdmissionMark(m)) if m == mark
         );
         Some(ok && dispatched)
     }

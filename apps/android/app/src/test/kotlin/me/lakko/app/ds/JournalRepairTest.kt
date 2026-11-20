@@ -33,6 +33,9 @@ class JournalRepairTest {
         var pollError: Throwable? = null
         var moveOnPoll: ULong? = null
         var putError: Throwable? = null
+        var knownAbove: (ULong) -> Boolean = { false }
+
+        override fun registeredCommitKnownAbove(groupIdHex: String, epoch: ULong): Boolean = knownAbove(epoch)
 
         override suspend fun rank(groupIdHex: String): JournalRepairRank = rank
 
@@ -110,6 +113,32 @@ class JournalRepairTest {
         assertEquals(RepairOutcome.POLL_FAILED, JournalRepair(this, server).check(group, journal, 5uL))
         assertTrue(offline.signer.calls.isEmpty())
         assertTrue(server.signer.calls.isEmpty())
+    }
+
+    @Test
+    fun `ADR-0091 - no replace while a registered commit is held or this device is behind`() = runTest {
+        // The hold tracker is what the repository consults: a held row, or a
+        // behind mark at or above the noted epoch, blocks the Replace.
+        val holds = me.lakko.app.chat.RegisteredCommitHoldTracker(clock = { 0L })
+        val ports = Ports().apply { knownAbove = { epoch -> holds.repairBlocked(group, epoch) } }
+        val repair = JournalRepair(this, ports)
+
+        holds.recordFailure(group, rowId = 10L, localEpoch = 5uL)
+        assertEquals(RepairOutcome.BEHIND, repair.check(group, journal, 5uL))
+        assertTrue("no Replace while held", ports.signer.calls.isEmpty())
+
+        // Exhausted: the hold becomes a behind mark at epoch 5.
+        repeat(me.lakko.app.chat.REGISTERED_COMMIT_MAX_ATTEMPTS - 1) {
+            holds.recordFailure(group, rowId = 10L, localEpoch = 5uL)
+        }
+        assertEquals(null, holds.hold(group))
+        assertEquals(RepairOutcome.BEHIND, repair.check(group, journal, 5uL))
+        assertTrue(ports.signer.calls.isEmpty())
+
+        // A behind mark below the noted epoch does not block.
+        ports.epoch = 6uL
+        assertEquals(RepairOutcome.REPLACED, repair.check(group, journal, 6uL))
+        assertEquals(listOf("replace@6"), ports.signer.calls)
     }
 
     @Test

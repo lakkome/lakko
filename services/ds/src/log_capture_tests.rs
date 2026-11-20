@@ -26,10 +26,13 @@ const ALLOW: &[&str] = &[];
 
 #[tokio::test]
 async fn no_identifier_reaches_the_log_on_journal_and_mailbox_routes() {
-    let Some((app, _pool)) = app().await else {
+    let Some((app, pool)) = app().await else {
         return;
     };
     let (capture, _guard) = Capture::install();
+    // ADR-0096 section 1.5: the same routes must leave no identifier in
+    // /metrics either.
+    let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
 
     // A circle directory: the claim, a read under the current key, and the
     // refusal of a read under no key.
@@ -146,5 +149,35 @@ async fn no_identifier_reaches_the_log_on_journal_and_mailbox_routes() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
+    // One pruner pass (it deletes only rows past the retention windows).
+    assert!(
+        crate::journal::prune_once(&pool).await,
+        "a pruner pass failed"
+    );
+
     capture.assert_no_identifiers(ALLOW);
+    let text = metrics.render();
+    // `context` is the anonymous-token spend counter's (the shared gate).
+    let mut labels = crate::metrics::EXTRA_LABELS.to_vec();
+    labels.push("context");
+    lakko_metrics::exposition::assert_clean(&text, &labels, ALLOW);
+    assert!(
+        text.contains(r#"lakko_http_requests_total{service="ds",route="/"#),
+        "the routes driven above are counted:\n{text}"
+    );
+    // The domain counters the routes above moved (ADR-0096 section 3). The
+    // recorder is shared by every test in this binary, so presence is
+    // asserted, not a value.
+    for series in [
+        r#"lakko_ds_appends_total{queue="group",outcome="stored"}"#,
+        r#"lakko_ds_appends_total{queue="knock",outcome="stored"}"#,
+        r#"lakko_ds_appends_total{queue="mailbox",outcome="stored"}"#,
+        r#"lakko_ds_proof_refusals_total{reason="missing"}"#,
+        r#"lakko_ds_proof_refusals_total{reason="bad_signature"}"#,
+        r#"lakko_ds_pruned_rows_total{kind="group_messages"}"#,
+        r#"lakko_ds_pruned_rows_total{kind="epoch_keys"}"#,
+        r#"lakko_ds_pruned_rows_total{kind="delegation_nonces"}"#,
+    ] {
+        assert!(text.contains(series), "missing {series}:\n{text}");
+    }
 }

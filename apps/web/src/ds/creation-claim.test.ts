@@ -32,7 +32,14 @@ import type { DiscoveryClient } from "../discovery/client";
 import type { DsClient } from "./client";
 import { dsAccess } from "./access";
 import { ensureDeviceGroup } from "../devices/lifecycle";
-import { openOrFoundPublisherGroup, type UnconfirmedFoundingStorage } from "../channels/composer";
+import {
+  foundOrReuseForNewChannel,
+  KeptChannelIdLiveError,
+  foundPublisherGroup,
+  openHeldPublisherGroup,
+  type UnconfirmedFoundingStorage,
+} from "../channels/composer";
+import { installPublisherDeviceSource } from "../channels/publisher-device";
 import { AccountStoresSealedError } from "../auth/account-store-gate";
 import { durableSnapshotHook } from "../chat/persist-hooks";
 
@@ -307,21 +314,29 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
   const ACCOUNT = "Y2FyYS1hY2NvdW50LTAwMDA=";
   const OTHER_ACCOUNT = "ZXZlLWFjY291bnQtMDAwMDA=";
 
+  /** ADR-0090: the group's leaf is this DEVICE, bound to the owner's account. */
+  function ownerWithDevice(fill: number): { owner: wasm.Identity; uninstall: () => void } {
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(fill));
+    const device = wasm.Identity.fromSeedBound(new Uint8Array(64).fill(fill + 0x80), owner.ed25519Seed, 1_700_000_000n);
+    const uninstall = installPublisherDeviceSource(() => device);
+    return { owner, uninstall };
+  }
+
   it("a failed claim throws; the unconfirmed founding makes the next open claim again", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x41));
+    const { owner, uninstall } = ownerWithDevice(0x41);
     const channelId = new Uint8Array(16).fill(0x42);
     const st = mem();
     try {
       const failing = vi.fn(async () => new Response("{}", { status: 500 }));
       vi.stubGlobal("fetch", failing);
-      await expect(openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
+      await expect(foundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
       expect(st.data.size).toBe(1);
 
       // The group now exists locally; the next open still claims.
       const ok = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", ok);
-      const handle = await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT);
+      const handle = await openHeldPublisherGroup(wasm, owner, channelId, st, ACCOUNT);
       expect(ok).toHaveBeenCalledTimes(1);
       expect(st.data.size).toBe(0);
       handle.free();
@@ -329,9 +344,10 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
       // Claimed and confirmed: a later open claims nothing.
       const later = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", later);
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
+      (await openHeldPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
       expect(later).not.toHaveBeenCalled();
     } finally {
+      uninstall();
       owner.free();
       warn.mockRestore();
     }
@@ -339,14 +355,12 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
 
   it("the marker is the account's: another account on the browser neither reads nor clears it", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x51));
+    const { owner, uninstall } = ownerWithDevice(0x51);
     const channelId = new Uint8Array(16).fill(0x52);
     const st = mem();
     try {
       vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
-      await expect(
-        openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT),
-      ).rejects.toBeDefined();
+      await expect(foundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
       expect([...st.data.keys()]).toEqual([
         expect.stringContaining(`lakko/publisher-group-unclaimed/v2/${ACCOUNT}/`),
       ]);
@@ -354,17 +368,18 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
       // Another account's open does not see the first account's marker.
       const other = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", other);
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, OTHER_ACCOUNT)).free();
+      (await openHeldPublisherGroup(wasm, owner, channelId, st, OTHER_ACCOUNT)).free();
       expect(other).not.toHaveBeenCalled();
       expect(st.data.size).toBe(1);
 
       // The first account still owes its claim.
       const again = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", again);
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
+      (await openHeldPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
       expect(again).toHaveBeenCalledTimes(1);
       expect(st.data.size).toBe(0);
     } finally {
+      uninstall();
       owner.free();
       warn.mockRestore();
     }
@@ -372,17 +387,120 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
 
   it("with no account nothing is written and every open claims again", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x61));
+    const { owner, uninstall } = ownerWithDevice(0x61);
     const channelId = new Uint8Array(16).fill(0x62);
     const st = mem();
     try {
       const ok = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", ok);
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, null)).free();
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, null)).free();
+      (await foundPublisherGroup(wasm, owner, channelId, st, null)).free();
+      (await openHeldPublisherGroup(wasm, owner, channelId, st, null)).free();
       expect(ok).toHaveBeenCalledTimes(2);
       expect(st.data.size).toBe(0);
     } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("a New channel retry under the kept id reuses the group the first attempt founded", async () => {
+    // Seen live 2026-11-14: the first attempt founded the group, claimed the
+    // journal and the @name, then failed at the channels service; the retry
+    // under the same channel id refused to found again before any request.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x65);
+    const channelId = new Uint8Array(16).fill(0x66);
+    const st = mem();
+    try {
+      const first = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", first);
+      const founded = await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT);
+      const groupId = founded.groupId();
+      const device = wasm.Identity.fromSeedBound(new Uint8Array(64).fill(0x65 + 0x80), owner.ed25519Seed, 1_700_000_000n);
+      const seed = founded.channelSeed(device);
+      founded.free();
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(st.data.size).toBe(0);
+
+      // The retry: the same group, no second founding, no second claim (the
+      // first was confirmed).
+      const retry = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", retry);
+      const reused = await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT);
+      expect(reused.groupId()).toEqual(groupId);
+      expect(reused.channelSeed(device)).toEqual(seed);
+      expect(reused.isActive()).toBe(true);
+      reused.free();
+      device.free();
+      expect(retry).not.toHaveBeenCalled();
+    } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("F5: a New channel retry never reuses or founds over a group whose channel the account knows", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x69);
+    const channelId = new Uint8Array(16).fill(0x6a);
+    const st = mem();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+      const founded = await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT);
+      const groupId = founded.groupId();
+      founded.free();
+      // The create finished (the account's register names the channel): the
+      // retry under its id is refused, nothing is claimed or deleted.
+      const after = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", after);
+      await expect(
+        foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT, () => true),
+      ).rejects.toBeInstanceOf(KeptChannelIdLiveError);
+      expect(after).not.toHaveBeenCalled();
+      const still = await openHeldPublisherGroup(wasm, owner, channelId, st, ACCOUNT);
+      expect(still.groupId()).toEqual(groupId);
+      still.free();
+    } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("a New channel retry whose first journal claim failed claims again on the reused group", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x67);
+    const channelId = new Uint8Array(16).fill(0x68);
+    const st = mem();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+      await expect(foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
+      expect(st.data.size).toBe(1);
+      const ok = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", ok);
+      (await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT)).free();
+      expect(ok).toHaveBeenCalledTimes(1);
+      expect(st.data.size).toBe(0);
+    } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("ADR-0090: founding refuses where this device already holds the group (delete first)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x63);
+    const channelId = new Uint8Array(16).fill(0x64);
+    const st = mem();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+      (await foundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
+      await expect(foundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
+    } finally {
+      uninstall();
       owner.free();
       warn.mockRestore();
     }

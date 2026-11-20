@@ -141,8 +141,10 @@ internal class IntroPublicationOps(
     val composeOffer: (ByteArray) -> ByteArray,
     val composeBundle: (List<ByteArray>, ULong) -> ByteArray,
     val maxBundleRecords: Int,
-    /** Send one envelope into a one-to-one conversation. Throws on failure. */
-    val send: suspend (groupHex: String, envelope: ByteArray) -> Unit,
+    /** Send one envelope into a one-to-one conversation. Throws on failure;
+     *  `false` when the send was held (ADR-0091 walk 3, W3-R2: the device
+     *  may be behind there), so it is not recorded and goes at the next run. */
+    val send: suspend (groupHex: String, envelope: ByteArray) -> Boolean,
     /** Persist the state after every step that changed it. */
     val save: suspend (IntroPublicationState) -> Unit,
     /** The own name's terms at once (`POST /discovery/oprf/batch`, one
@@ -269,7 +271,7 @@ internal suspend fun publishIntroductions(
             if (record != null) {
                 val envelope = ops.composeOffer(record)
                 for (g in targets) {
-                    ops.send(g, envelope)
+                    if (!ops.send(g, envelope)) continue
                     save(state.copy(offerSentTo = state.offerSentTo + (g to offer.key)))
                 }
             }
@@ -287,7 +289,7 @@ internal suspend fun publishIntroductions(
             val wires = records.mapNotNull(::reachUnhex).take(ops.maxBundleRecords.coerceAtLeast(0))
             val bundle = ops.composeBundle(wires, inputs.nowMs.coerceAtLeast(0L).toULong())
             for (g in targets) {
-                ops.send(g, bundle)
+                if (!ops.send(g, bundle)) continue
                 save(state.copy(bundleSentTo = state.bundleSentTo + (g to digest)))
             }
         }

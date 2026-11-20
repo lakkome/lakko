@@ -94,7 +94,7 @@ export const ModalLayer: Component<ModalLayerProps> = (props) => {
               aria-label={t("common.close")}
               onClick={() => props.onClose()}
             >
-              <Icon name="close" size={20} />
+              <Icon name="xmark" size={20} />
             </button>
           </header>
           <div class="lk-layer-body">{props.children}</div>

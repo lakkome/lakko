@@ -19,7 +19,7 @@ import {
 } from "./access-test-doubles";
 import { NoJournalAuthorityError, isCommitConflict } from "./ownership";
 import { fakeTokenPool } from "../tokens/anon-token-test-doubles";
-import { DsClient, DsClientArgError, DsHttpError, journalQuery } from "./client";
+import { DsClient, DsClientArgError, DsHttpError, journalQuery, redactedEndpoint } from "./client";
 
 const GID = new Uint8Array(32).fill(0xab);
 const GID_HEX = "ab".repeat(32);
@@ -557,5 +557,16 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
     const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
     await ds.publishMailbox(GID, new Uint8Array([1]));
     expect(sent[0]?.wake).toBeUndefined();
+  });
+});
+
+describe("redactedEndpoint", () => {
+  it("drops the query and every journal id from an error message", () => {
+    const id = "ab".repeat(32);
+    const err = new DsHttpError(401, `/ds/group/${id}/messages?after=17`, "{}");
+    expect(err.message).toBe("ds /ds/group/:id/messages → 401: {}");
+    expect(err.message).not.toContain(id);
+    expect(err.endpoint).toContain(id);
+    expect(redactedEndpoint("/ds/mailbox/0123456789abcdef0123")).toBe("/ds/mailbox/:id");
   });
 });

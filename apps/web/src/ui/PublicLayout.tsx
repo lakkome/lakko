@@ -19,3 +19,22 @@ export function PublicLayout(props: { children: JSX.Element }): JSX.Element {
     </div>
   );
 }
+
+/**
+ * The frame for a public page that reads like a page of the app rather than
+ * one card (`/donations`): the app's page ground, the logo, then the content
+ * at the app's wide page width (about 1040 px), left-aligned.
+ */
+export function PublicWideLayout(props: { children: JSX.Element }): JSX.Element {
+  return (
+    <div class="public-wide">
+      <div class="public-wide-page">
+        <div class="public-brand" aria-hidden="true">
+          <img src="/icon-192.png" alt="" width="40" height="40" />
+          <span>Lakko</span>
+        </div>
+        {props.children}
+      </div>
+    </div>
+  );
+}

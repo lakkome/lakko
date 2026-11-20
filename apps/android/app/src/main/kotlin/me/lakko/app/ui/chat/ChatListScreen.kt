@@ -3,7 +3,6 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,22 +26,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.Campaign
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CreateNewFolder
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.FolderOff
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Groups
-import androidx.compose.material.icons.filled.NotificationsOff
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -73,7 +56,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -86,6 +68,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import me.lakko.app.calls.quietOffer
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.withChannelFlags
 import me.lakko.app.chat.ChatFolder
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.FolderActions
@@ -96,6 +79,7 @@ import me.lakko.app.chat.membershipToggleBlocked
 import me.lakko.app.chat.rowsMatching
 import me.lakko.app.chat.searchFoundNoRow
 import me.lakko.app.chat.selectedTabIndex
+import me.lakko.app.chat.toAttachmentRef
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.ConversationListRow
@@ -120,6 +104,9 @@ import me.lakko.app.ui.components.LakkoAvatar
 import uniffi.lakko_ffi_uniffi.FolderView
 import java.time.ZoneId
 import java.util.Locale
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Every conversation in one list: one-to-one chats, groups and channels.
@@ -296,6 +283,11 @@ public fun ChatListScreen(
     // The pending contacts the text matches: rows of the list, so the people
     // half leaves them out (`docs/ux/who-can-find-me.md` section 6.1).
     val visibleInvited = remember(invited, query) { me.lakko.app.contacts.PendingContacts.matching(invited, query) }
+    // ADR-0087 section 5 — the groups and channels standing as rows above:
+    // the network half draws no second row for them.
+    val visibleConversationIds = remember(visible) {
+        visible.filter { it.kind != ConversationRowKind.CHAT }.mapTo(HashSet()) { it.id.lowercase() }
+    }
     val visibleInvitedKeys = remember(visibleInvited) { visibleInvited.mapTo(HashSet()) { it.signaturePubkeyB64 } }
     val foundNoRow = searchFoundNoRow(visible.size, visibleInvited.size)
     val synchronizing = remember(state) { repository.isSynchronizing() }
@@ -348,7 +340,9 @@ public fun ChatListScreen(
             toggleFlag(
                 sync = deviceGroupSync,
                 groupIdHex = row.id,
-                current = flagsMap[row.id],
+                // A chat's or group's conversation id, or a channel's id
+                // (`ChannelFlags`): the synced flags take either.
+                current = flagsMap[row.id.lowercase()],
                 field = field,
                 scope = scope,
             )
@@ -375,7 +369,7 @@ public fun ChatListScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { createMenuOpen = true }) {
-                            Icon(Icons.Filled.Edit, contentDescription = t("chats.compose"))
+                            LkIcon(R.drawable.ic_lk_compose, contentDescription = t("chats.compose"))
                         }
                         CreateMenu(
                             expanded = createMenuOpen,
@@ -424,14 +418,6 @@ public fun ChatListScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
-                if (restoredChats == me.lakko.app.backup.RestoredChatsHint.BANNER) {
-                    Text(
-                        t("chats.restored.banner_other_devices"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                }
                 // group-and-channel-privacy section 6.2 — `Requests sent`,
                 // above the list while one is open.
                 val requestsSentFlow = remember(repository) { repository.requestsSent() }
@@ -451,7 +437,12 @@ public fun ChatListScreen(
                         selectedIndex = pagerState.currentPage,
                         onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
                         onEditFolder = { onEditFolder(it.idHex) },
-                        onMarkAllRead = { tabRows -> scope.launch { actions?.markAllRead(tabRows) } },
+                        onMarkAllRead = { tabRows ->
+                            scope.launch {
+                                actions?.markAllRead(tabRows)
+                                markChannelRowsRead(context, repository.currentAccountIdB64(), tabRows)
+                            }
+                        },
                         onReorder = onOpenFolderSettings,
                         onDelete = { deletingFolder = it },
                         onEditFolders = onOpenFolderSettings,
@@ -530,6 +521,7 @@ public fun ChatListScreen(
                                     },
                                     excludeKeysB64 = visibleInvitedKeys,
                                     chatPeersB64 = visibleChatPeers,
+                                    listedConversationIdsHex = visibleConversationIds,
                                     conversations = conversationSearch,
                                 )
                             }
@@ -637,7 +629,8 @@ internal fun rememberConversationRows(
 
     // Chats and groups. They were already one store split by a filter, so they
     // merge by dropping it.
-    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings) {
+    val bareLinkOpenings by me.lakko.app.ui.channels.BareGroupLinks.openings.collectAsStateWithLifecycle()
+    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings, bareLinkOpenings) {
         threadConversationRows(
             context = context,
             repository = repository,
@@ -651,6 +644,10 @@ internal fun rememberConversationRows(
             use24h = use24h,
             locale = locale,
             strings = strings,
+            bareLinkOpenings = bareLinkOpenings,
+            // The message log is seeded before the repository says it is
+            // bootstrapped; until then an empty thread is not known to be empty.
+            messagesKnown = state.bootstrapped,
         )
     }
 
@@ -687,12 +684,15 @@ internal fun rememberConversationRows(
     // ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on this
     // device carry their own secondary line.
     val orphanedChannels = channels?.orphaned?.collectAsStateWithLifecycle()?.value ?: emptySet()
-    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostLog, reading.channelRead, strings, orphanedChannels) {
+    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostLog, reading.channelRead, strings, orphanedChannels, flagsMap) {
         val now = System.currentTimeMillis()
         channelHandles.map { channel ->
             val model = channelRowModel(
                 channel = channel,
-                posts = channelPosts[channel.id],
+                // The row's time and order come from the newest real post
+                // below, never from the raw server rows, which include ban
+                // lists and metadata records (seen live 2026-11-12).
+                posts = null,
                 subscriberCount = null,
                 // The owner reads "Your channel", a publisher who is not
                 // the owner "Publisher" (ADR-0087 section 15).
@@ -710,7 +710,11 @@ internal fun rememberConversationRows(
             // newest post this device can read, the time its time; the
             // @name (the model's subtitle) only when there is none.
             val newest = channelLastPost(channelPostLog[channel.id])
-            val newestMs = maxOf(newest?.serverTsMs ?: 0L, model.sortMs)
+            val newestMs = channelRowActivityMs(newest, channel.addedAtMs.toLong())
+            val newestLine = newest?.let { channelRowPreviewLine(it, strings) }
+            // UX group-and-channel-privacy 12 — pinned, muted and archived like
+            // a group's row, through the same synced flags, keyed on the
+            // channel id (`ChannelFlags`).
             ConversationListRow(
                 id = channel.id,
                 kind = ConversationRowKind.CHANNEL,
@@ -718,24 +722,27 @@ internal fun rememberConversationRows(
                 preview = if (me.lakko.app.channels.channelIsOrphaned(channel.id, orphanedChannels)) {
                     strings["channels.keys_reset.row_sub"]
                 } else {
-                    newest?.text ?: model.subtitle
+                    newestLine ?: model.subtitle
                 },
-                time = if (newest != null && newest.serverTsMs >= model.sortMs) {
+                // The newest post's own time, as a group row's; the time the
+                // channel was added never stands for a post's.
+                time = if (newest != null) {
                     formatListTime(newest.serverTsMs, now, zone, use24h, locale)
                 } else {
                     model.time
                 },
                 lastActivityMs = newestMs,
-                // Pinned, muted and archived are keyed on a conversation id a
-                // channel does not carry, so a channel row shows none of them
-                // (section 6.1). Its count is the feed's channel read state.
+                // Its count is the feed's channel read state.
                 unread = me.lakko.app.feed.channelUnreadCount(
                     postCursors = channelPostCursors[channel.id].orEmpty(),
                     readThrough = reading.channelRead[channel.id],
                     own = channelKeys.containsKey(channel.id),
                 ),
                 handle = channel.handle,
-            )
+                previewThumb = newest?.takeIf { newestLine != null }?.let { post ->
+                    me.lakko.app.chat.previewThumbOf(post.media.mapNotNull { m -> m.ref?.toAttachmentRef() })
+                },
+            ).withChannelFlags(me.lakko.app.channels.ChannelFlags.of(flagsMap, channel.id))
         }
     }
     return remember(threadRows, channelRows) { threadRows + channelRows }
@@ -831,11 +838,9 @@ private fun ConversationList(
         items(items = rows, key = { "${it.kind}:${it.id}" }) { row ->
             val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
             if (row.kind == ConversationRowKind.CHANNEL) {
-                // Same avatar, same title, same second line as every other
-                // row. What it does NOT have is the badge, the glyphs and the
-                // flag items — all keyed on a conversation id a channel does
-                // not carry. Its menu holds only the folder items.
-                ChannelRow(row = row, menu = menu, onClick = { handlers.onOpenChannel(row.id) })
+                // UX group-and-channel-privacy 12 — the same row as a group's:
+                // the same glyphs, swipes and menu; a tap opens the channel.
+                SwipeableThreadRow(row = row, menu = menu, onClick = { handlers.onOpenChannel(row.id) })
             } else {
                 SwipeableThreadRow(
                     row = row,
@@ -900,24 +905,6 @@ private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClic
     }
 }
 
-/** A channel row: tap opens it, long press opens the folder items. */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ChannelRow(row: ConversationListRow, menu: RowMenuModel, onClick: () -> Unit) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Box {
-        ConversationRowBody(
-            row = row,
-            modifier = Modifier.combinedClickable(
-                onClick = onClick,
-                onLongClick = { if (menu.hasItems) menuOpen = true },
-            ),
-            hoverPlaysVideo = true,
-        )
-        RowMenu(expanded = menuOpen, onDismiss = { menuOpen = false }, model = menu)
-    }
-}
-
 /**
  * The three ways to start something, `docs/ux/navigation.md` section 3.
  *
@@ -938,25 +925,46 @@ private fun CreateMenu(
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
             text = { Text(t("chats.create.chat")) },
-            leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_chat, contentDescription = null, size = LkIconSize.Row) },
             onClick = { onDismiss(); onNewChat() },
         )
         DropdownMenuItem(
             text = { Text(t("chats.create.group")) },
-            leadingIcon = { Icon(Icons.Filled.Groups, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_person_3, contentDescription = null, size = LkIconSize.Row) },
             onClick = { onDismiss(); onCreateGroup() },
         )
         DropdownMenuItem(
             text = { Text(t("chats.create.channel")) },
-            leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_megaphone, contentDescription = null, size = LkIconSize.Row) },
             onClick = { onDismiss(); onCreateChannel() },
         )
         if (onOpenSaved != null) {
             DropdownMenuItem(
                 text = { Text(t("saved.title")) },
-                leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                leadingIcon = { LkIcon(R.drawable.ic_lk_bookmark, contentDescription = null, size = LkIconSize.Row) },
                 onClick = { onDismiss(); onOpenSaved() },
             )
+        }
+    }
+}
+
+/**
+ * Mark all read on the tab's channel rows with new posts (UX
+ * `chat-folders.md` 2.2; channels are rows like any other): each is read
+ * through the newest post this device holds, as opening it would.
+ */
+private suspend fun markChannelRowsRead(
+    context: android.content.Context,
+    accountIdB64: String?,
+    rows: List<ConversationListRow>,
+) {
+    val account = accountIdB64 ?: return
+    val ids = rows.filter { it.kind == ConversationRowKind.CHANNEL && it.unread > 0 }.map { it.id }
+    if (ids.isEmpty()) return
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val slots = me.lakko.app.feed.FeedSealedStore.loadChannelPostLog(context, account).channels
+        me.lakko.app.feed.FeedReadingStore.update(context, account) {
+            me.lakko.app.feed.markChannelsRead(it, ids, slots)
         }
     }
 }
@@ -1015,6 +1023,12 @@ internal fun threadConversationRows(
     use24h: Boolean,
     locale: Locale,
     strings: Strings = Localization.strings.value,
+    /** Ledger openings of bare `/g/` links (`BareGroupLinks`), for a row
+     *  whose last message is one. */
+    bareLinkOpenings: Map<String, me.lakko.app.ui.channels.BareLinkOpening> = emptyMap(),
+    /** Whether this device's message log has been read into the threads; see
+     *  [rowPreview]. */
+    messagesKnown: Boolean = true,
 ): List<ConversationListRow> = threads.map { thread ->
     val kind = conversationKind(repository, thread.groupIdHex)
     val last = previewSourceRow(thread.messages)
@@ -1040,6 +1054,8 @@ internal fun threadConversationRows(
             isGroup = kind == ConversationKind.Group,
             senderName = senderName,
             strings = strings,
+            bareLinkOpenings = bareLinkOpenings,
+            messagesKnown = messagesKnown,
         ),
         time = activityMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         lastActivityMs = activityMs,
@@ -1060,6 +1076,10 @@ internal fun threadConversationRows(
         } else {
             null
         },
+        // media-messages section 11 — the first photo or video's thumbnail.
+        previewThumb = last?.takeIf {
+            !it.deleted && it.content == null && it.direction != Direction.System && !thread.membershipEnded
+        }?.let { me.lakko.app.chat.previewThumbOf(it.attachments) },
         // ADR-0087 — a group's verified @name, so the local search finds it.
         handle = if (kind == ConversationKind.Group) {
             runCatching {
@@ -1098,6 +1118,14 @@ internal fun rowPreview(
     isGroup: Boolean,
     senderName: String?,
     strings: Strings = Localization.strings.value,
+    bareLinkOpenings: Map<String, me.lakko.app.ui.channels.BareLinkOpening> = emptyMap(),
+    ownOrigin: String = me.lakko.app.config.ApiEndpoints.webOrigin,
+    /** Whether the message log has been read into [thread]. Until it has, a
+     *  thread with no message is not known to be empty: the line stays blank
+     *  rather than saying `No messages yet` (on a cold start every row said it
+     *  for a moment before the previews arrived; seen on desktop 2026-11-18,
+     *  the same order here: threads are published before the log is seeded). */
+    messagesKnown: Boolean = true,
 ): String {
     val endedLine = me.lakko.app.chat.chatListLine(
         me.lakko.app.chat.membershipState(
@@ -1109,7 +1137,7 @@ internal fun rowPreview(
     // ADR-0087 UX 9.4 — the row stays until the leave lands, and says so.
     if (thread.leaveWaiting) return strings["chat.members.pending.waiting_leave"]
     val noMessages = strings["chats.row.no_messages"]
-    if (last == null) return noMessages
+    if (last == null) return if (messagesKnown) noMessages else ""
     if (last.direction == Direction.System) {
         // Only a row this build can render: an unreadable bookkeeping row is
         // never shown raw.
@@ -1120,9 +1148,28 @@ internal fun rowPreview(
     val inviteText = last.channelInvite?.takeIf { !last.deleted }
         ?.let { me.lakko.app.ui.channels.channelInviteSummary(it) }
         ?.let { me.lakko.app.ui.channels.channelInvitePreviewText(it, strings) }
+    // ADR-0092 section 1 — a poll, checklist, location, contact card or
+    // article reads as one line (`Poll: {question}`), never its attachments.
+    val contentText = last.content?.takeIf { !last.deleted }?.let { c ->
+        val (key, args) = me.lakko.app.chat.contentSummary(c)
+        strings.format(key, args)
+    }
+    // A bare `/g/` link with no card (an older message): never its secret
+    // (`BareGroupLink.kt`; seen live 2026-11-13). The opening starts here and
+    // its outcome redraws the row.
+    val bareLinkText = if (contentText == null && inviteText == null && !last.deleted &&
+        (last.channelInvite?.isEmpty() != false)
+    ) {
+        me.lakko.app.ui.channels.bareGroupLinkOf(last.text, ownOrigin)?.let { link ->
+            me.lakko.app.ui.channels.BareGroupLinks.start(link)
+            me.lakko.app.ui.channels.bareGroupLinkRowLine(last.text, bareLinkOpenings[link], ownOrigin, strings)
+        }
+    } else {
+        null
+    }
     val line = previewLine(
-        text = inviteText ?: last.text,
-        attachments = last.attachments.map { PreviewAttachment(it.kind, it.mime) },
+        text = contentText ?: inviteText ?: bareLinkText ?: last.text,
+        attachments = if (contentText != null) emptyList() else last.attachments.map { PreviewAttachment(it.kind, it.mime) },
         deleted = last.deleted,
         author = previewPrefix(last.direction, isGroup, senderName),
         strings = strings,
@@ -1202,11 +1249,11 @@ internal fun SearchField(query: String, onQueryChange: (String) -> Unit) {
         onValueChange = onQueryChange,
         placeholder = { Text(t("chats.search.placeholder")) },
         singleLine = true,
-        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+        leadingIcon = { LkIcon(R.drawable.ic_lk_search, contentDescription = null, size = LkIconSize.Row) },
         trailingIcon = if (query.isNotEmpty()) {
             {
                 IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Filled.Clear, contentDescription = t("chats.search.clear"))
+                    LkIcon(R.drawable.ic_lk_xmark_circle_fill, contentDescription = t("chats.search.clear"), size = LkIconSize.Row)
                 }
             }
         } else {
@@ -1257,11 +1304,11 @@ private fun SwipeableThreadRow(
         backgroundContent = {
             val towardsEnd = dismissState.dismissDirection == SwipeToDismissBoxValue.StartToEnd
             val icon = if (towardsEnd) {
-                Icons.Filled.PushPin
+                if (row.pinned) R.drawable.ic_lk_pin_slash else R.drawable.ic_lk_pin
             } else if (row.archived) {
-                Icons.Filled.Unarchive
+                R.drawable.ic_lk_unarchive
             } else {
-                Icons.Filled.Archive
+                R.drawable.ic_lk_archive
             }
             val label = if (towardsEnd) {
                 t(if (row.pinned) "chats.action.unpin" else "chats.action.pin")
@@ -1276,10 +1323,11 @@ private fun SwipeableThreadRow(
                 contentAlignment = if (towardsEnd) Alignment.CenterStart else Alignment.CenterEnd,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
+                    LkIcon(
                         icon,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
@@ -1353,11 +1401,10 @@ internal class RowMenuModel(
     val folder: ChatFolder?,
     private val handlers: RowHandlers,
 ) {
-    private val isChannel = row.kind == ConversationRowKind.CHANNEL
-
-    /** Pin / Unpin shows for a chat or group everywhere, and for a channel
-     *  inside a folder (a folder's pins name any conversation). */
-    val showPin: Boolean = folder != null || !isChannel
+    /** Pin / Unpin shows on every row: inside a folder it acts on the
+     *  folder's own pins, in All chats on the synced pin. A channel's row
+     *  offers what a group's does (UX group-and-channel-privacy 12). */
+    val showPin: Boolean = true
 
     /** Pinned in the pin set this tab uses. */
     val pinned: Boolean = row.pinned
@@ -1365,7 +1412,7 @@ internal class RowMenuModel(
     /** UX spec 3.4 — ten pins per folder. */
     val pinEnabled: Boolean = folder == null || pinned || folder.pinned.size < FolderLimits.MAX_PINS
 
-    val showFlags: Boolean = !isChannel
+    val showFlags: Boolean = true
     val showFolderItems: Boolean = handlers.foldersEnabled
     val folders: List<ChatFolder> = handlers.folders
     val canCreateFolder: Boolean = handlers.folders.size < FolderLimits.MAX_FOLDERS
@@ -1377,7 +1424,7 @@ internal class RowMenuModel(
     }
 
     fun onFlag(field: FlagField) {
-        if (!isChannel) handlers.onToggleFlag(row, field)
+        handlers.onToggleFlag(row, field)
     }
 
     fun isIn(f: ChatFolder): Boolean = handlers.inFolder(f, row)
@@ -1410,7 +1457,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             if (model.showPin) {
                 DropdownMenuItem(
                     text = { Text(t(if (model.pinned) "chats.action.unpin" else "chats.action.pin")) },
-                    leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
+                    leadingIcon = { LkIcon(if (model.pinned) R.drawable.ic_lk_pin_slash else R.drawable.ic_lk_pin, contentDescription = null, size = LkIconSize.Row) },
                     enabled = model.pinEnabled,
                     onClick = { close(); model.onPin() },
                 )
@@ -1421,15 +1468,16 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             if (model.showFlags) {
                 DropdownMenuItem(
                     text = { Text(t(if (model.row.muted) "chats.action.unmute" else "chats.action.mute")) },
-                    leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
+                    leadingIcon = { LkIcon(if (model.row.muted) R.drawable.ic_lk_bell else R.drawable.ic_lk_bell_slash, contentDescription = null, size = LkIconSize.Row) },
                     onClick = { close(); model.onFlag(FlagField.Mute) },
                 )
                 DropdownMenuItem(
                     text = { Text(t(if (model.row.archived) "chats.action.unarchive" else "chats.action.archive")) },
                     leadingIcon = {
-                        Icon(
-                            if (model.row.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                        LkIcon(
+                            if (model.row.archived) R.drawable.ic_lk_unarchive else R.drawable.ic_lk_archive,
                             contentDescription = null,
+                            size = LkIconSize.Row,
                         )
                     },
                     onClick = { close(); model.onFlag(FlagField.Archive) },
@@ -1438,7 +1486,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             if (model.showFolderItems) {
                 DropdownMenuItem(
                     text = { Text(t("folders.add_to_folder")) },
-                    leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                    leadingIcon = { LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, size = LkIconSize.Row) },
                     // With no folders yet it goes straight to the editor, as
                     // "New folder..." would.
                     enabled = model.folders.isNotEmpty() || model.canCreateFolder,
@@ -1455,7 +1503,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                 if (tab != null) {
                     DropdownMenuItem(
                         text = { Text(t("folders.remove_from_folder")) },
-                        leadingIcon = { Icon(Icons.Filled.FolderOff, contentDescription = null) },
+                        leadingIcon = { LkIcon(R.drawable.ic_lk_folder_minus, contentDescription = null, size = LkIconSize.Row) },
                         onClick = { close(); model.toggle(tab) },
                     )
                 }
@@ -1468,9 +1516,9 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                     text = { Text(f.name) },
                     leadingIcon = {
                         if (checked) {
-                            Icon(Icons.Filled.Check, contentDescription = t("folders.in_folder_a11y"))
+                            LkIcon(R.drawable.ic_lk_checkmark, contentDescription = t("folders.in_folder_a11y"), size = LkIconSize.Row)
                         } else {
-                            Spacer(Modifier.size(24.dp))
+                            Spacer(Modifier.size(LkIconSize.Row))
                         }
                     },
                     enabled = !blocked,
@@ -1479,7 +1527,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             }
             DropdownMenuItem(
                 text = { Text(t("folders.new_ellipsis")) },
-                leadingIcon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
+                leadingIcon = { LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, size = LkIconSize.Row) },
                 enabled = model.canCreateFolder,
                 onClick = { close(); model.newFolder() },
             )
@@ -1504,7 +1552,8 @@ private fun MenuHelperLine(text: String) {
  * The one row shape, drawn identically for all three kinds
  * (`docs/ux/navigation.md` section 2.1): same avatar treatment, same title,
  * same second line, same trailing column. Nothing here says which kind a row
- * is — a channel simply has no flags and no badge to draw.
+ * is: a channel's flags are the synced flags under its channel id and its
+ * badge is its count of new posts.
  */
 @Composable
 internal fun ConversationRowBody(
@@ -1559,6 +1608,10 @@ internal fun ConversationRowBody(
             }
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                row.previewThumb?.let { thumb ->
+                    RowPreviewThumb(thumb)
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(
                     text = row.preview,
                     style = MaterialTheme.typography.bodyMedium,
@@ -1569,20 +1622,29 @@ internal fun ConversationRowBody(
                 )
                 if (row.muted) {
                     Spacer(Modifier.width(6.dp))
-                    Icon(
-                        Icons.Filled.NotificationsOff,
+                    LkIcon(
+                        R.drawable.ic_lk_bell_slash_fill,
                         contentDescription = t("chats.row.muted"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
+                        size = LkIconSize.Mark,
                     )
                 }
                 if (row.pinned) {
                     Spacer(Modifier.width(6.dp))
-                    Icon(
-                        Icons.Filled.PushPin,
+                    LkIcon(
+                        R.drawable.ic_lk_pin_fill,
                         contentDescription = t("chats.row.pinned"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
+                        size = LkIconSize.Mark,
+                    )
+                }
+                if (row.archived) {
+                    Spacer(Modifier.width(6.dp))
+                    LkIcon(
+                        R.drawable.ic_lk_archive_fill,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        size = LkIconSize.Mark,
                     )
                 }
                 // reactions-and-emoji section 12 — a small heart beside the
@@ -1593,11 +1655,11 @@ internal fun ConversationRowBody(
                 }
                 if (unseen) {
                     Spacer(Modifier.width(6.dp))
-                    val heartLabel = t("chats.row.unseen_reactions")
-                    Text(
-                        text = "\u2764\uFE0F",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.semanticsLabel(heartLabel),
+                    LkIcon(
+                        R.drawable.ic_lk_heart_fill,
+                        contentDescription = t("chats.row.unseen_reactions"),
+                        tint = MaterialTheme.colorScheme.primary,
+                        size = LkIconSize.Mark,
                     )
                 }
                 if (row.unread > 0) {
@@ -1646,6 +1708,13 @@ private fun EmptyPanel(onStart: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            LkIcon(
+                R.drawable.ic_lk_bubbles,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Empty,
+            )
+            Spacer(Modifier.height(12.dp))
             Text(
                 text = t("chats.empty.title"),
                 style = MaterialTheme.typography.titleMedium,
@@ -1695,14 +1764,32 @@ private fun NoMatchPanel() {
     }
 }
 
-/** A plain spoken label on a decorative glyph. */
-private fun Modifier.semanticsLabel(label: String): Modifier =
-    this.semantics { contentDescription = label }
-
-/** The newest post of a channel's log that has text to show, as one line;
- *  `null` when the device holds none (docs/ux/navigation.md section 2). */
+/** The newest post of a channel's log, its text cut to its first non-blank
+ *  line; `null` when the device holds none, or the newest has neither text
+ *  nor attachments (docs/ux/navigation.md section 2). */
 internal fun channelLastPost(slot: me.lakko.app.feed.ChannelPostSlot?): me.lakko.app.feed.PersistedChannelPost? {
     val newest = slot?.posts?.maxByOrNull { it.cursor } ?: return null
-    val line = newest.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return null
+    val line = newest.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
+    if (line.isEmpty() && newest.media.isEmpty()) return null
     return newest.copy(text = line)
 }
+
+/** When a channel row stands in the list: its newest real post's time (the
+ *  channel-post log holds text posts only), else when the channel was added.
+ *  Never a raw server row's, which may be a ban list or a metadata record. */
+internal fun channelRowActivityMs(newest: me.lakko.app.feed.PersistedChannelPost?, addedAtMs: Long): Long =
+    newest?.serverTsMs ?: addedAtMs
+
+/** A channel row's second line for its newest post, in a group row's words:
+ *  the text, else the attachment's kind ("Photo", "File", "GIF", "Voice
+ *  message", "Video message", "Photo and 2 more"); `null` when it has none. */
+internal fun channelRowPreviewLine(
+    post: me.lakko.app.feed.PersistedChannelPost,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+): String? = previewLine(
+    text = post.text,
+    attachments = post.media.map { PreviewAttachment(it.kind, it.mime) },
+    deleted = false,
+    author = null,
+    strings = strings,
+).takeIf { it.isNotEmpty() }

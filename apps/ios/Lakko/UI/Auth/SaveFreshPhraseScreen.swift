@@ -14,7 +14,10 @@ import SwiftUI
 /// keys did not finish (offline, a limit). Until that is done the contacts
 /// and the other devices cannot find the new keys, so they are NOT shown.
 /// The screen says what happened and offers "Try again", which repeats only
-/// the publish (it never resets again), plus "Log out". The debt is also
+/// the publish (it never resets again), plus "Log out". While the
+/// directory's cool-down runs (a second reset within its hour) it says how
+/// many minutes are left instead, shows no Try again, and publishes by
+/// itself when the time is up. The debt is also
 /// recorded on the device and retried when a session next lands there. If
 /// the reset is older than 30 days when the retry runs, the screen asks for
 /// a sign-in first.
@@ -75,33 +78,72 @@ public struct SaveFreshPhraseScreen: View {
     }
 
     private var publishPending: some View {
+        // Rendered once a second so the minutes of the directory's
+        // cool-down count down (UX 15.4); the task retries when it is over,
+        // while this screen is open.
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            publishPendingBody(display(at: context.date))
+        }
+        .task(id: authRepository.keyResetPublishWait) { await retryWhenTheWaitIsOver() }
+    }
+
+    private func display(at date: Date) -> PublishOwedDisplay {
+        let wait = authRepository.keyResetPublishWait
+        let accountIdB64 = authRepository.signedInAccountIdB64
+        return PublishOwedDisplay.decide(
+            copyKey: KeysChangedCopy.publishOwedKey(
+                showsWords: authRepository.freshShowsWords,
+                needsSignIn: authRepository.freshPublishNeedsSignIn),
+            showsWords: authRepository.freshShowsWords,
+            waitUntilMs: wait?.accountIdB64 == accountIdB64 ? wait?.untilMs : nil,
+            needsSignIn: authRepository.freshPublishNeedsSignIn,
+            nowMs: Int64(date.timeIntervalSince1970 * 1000))
+    }
+
+    @ViewBuilder
+    private func publishPendingBody(_ display: PublishOwedDisplay) -> some View {
         AuthScreen {
             if authRepository.freshShowsWords {
                 AuthTitle(title: l10n.t("recovery_phrase.fresh.title"))
             }
-            AuthHint(
-                text: l10n.t(KeysChangedCopy.publishOwedKey(
-                    showsWords: authRepository.freshShowsWords,
-                    needsSignIn: authRepository.freshPublishNeedsSignIn)),
-                isError: true
-            )
-            if let retryError {
-                AuthHint(text: retryError.text, isError: true)
+            switch display.message {
+            case .copy(let key):
+                AuthHint(text: l10n.t(key), isError: true)
+                if let retryError {
+                    AuthHint(text: retryError.text, isError: true)
+                }
+                WaitNotice(countdown: wait)
+            case .waiting(let key, let minutes):
+                AuthHint(text: l10n.t(key, counts: ["minutes": UInt64(minutes)]))
             }
-            WaitNotice(countdown: wait)
-            AuthPrimaryButton(
-                title: l10n.t("common.try_again"),
-                busy: retryBusy,
-                busyTitle: l10n.t("common.checking"),
-                disabled: wait.waiting || authRepository.freshPublishNeedsSignIn,
-                action: retry
-            )
+            if display.showsTryAgain {
+                AuthPrimaryButton(
+                    title: l10n.t("common.try_again"),
+                    busy: retryBusy,
+                    busyTitle: l10n.t("common.checking"),
+                    disabled: wait.waiting || authRepository.freshPublishNeedsSignIn,
+                    action: retry
+                )
+            }
             AuthLinkRow(
                 title: l10n.t("restore_identity.log_out"),
                 disabled: retryBusy,
                 action: { authRepository.logout() }
             )
         }
+    }
+
+    /// Sleep until the directory's cool-down is over, then publish once. A
+    /// new refusal names a new time, which restarts this task.
+    private func retryWhenTheWaitIsOver() async {
+        guard let pending = authRepository.keyResetPublishWait else { return }
+        let dueMs = pending.untilMs + PublishOwedDisplay.retryMarginMs
+        let delayMs = dueMs - Int64(Date().timeIntervalSince1970 * 1000)
+        if delayMs > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+        }
+        guard !Task.isCancelled, authRepository.keyResetPublishWait == pending else { return }
+        retry()
     }
 
     private func retry() {
@@ -113,7 +155,10 @@ public struct SaveFreshPhraseScreen: View {
                 try await authRepository.retryFreshPublish()
             } catch {
                 let cause = (error as? KeyResetPublishFailed)?.underlying ?? error
-                if let secs = RetryCountdown.attemptsRetryAfterSecs(cause) {
+                if authRepository.keyResetPublishWait != nil {
+                    // The directory's cool-down: the waiting copy says it.
+                    retryError = nil
+                } else if let secs = RetryCountdown.attemptsRetryAfterSecs(cause) {
                     wait.start(forSecs: secs)
                 } else if case .network = cause as? AuthClientError {
                     retryError = .key("common.error.offline")

@@ -248,6 +248,11 @@ const IOS_INFOPLIST_KEYS: &[(&str, &str)] = &[
         "NSSpeechRecognitionUsageDescription",
         "ios.permission.speech_recognition",
     ),
+    // ADR-0092 — the location screen (one fix, while it is open).
+    (
+        "NSLocationWhenInUseUsageDescription",
+        "ios.permission.location",
+    ),
 ];
 
 fn cmd_ios_infoplist(args: &[String]) -> Result<(), String> {

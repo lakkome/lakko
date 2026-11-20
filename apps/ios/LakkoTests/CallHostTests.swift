@@ -55,6 +55,8 @@ final class CallHostTests: XCTestCase {
         var mutedGroups: Set<String> = []
         /// The repository refuses the publish (a closed one-to-one).
         var publishFails = false
+        /// ADR-0091 — this device is behind in the chat.
+        var behind = false
         init(nowMs: Int64) { self.nowMs = nowMs }
 
         @MainActor
@@ -87,10 +89,25 @@ final class CallHostTests: XCTestCase {
             peerName: { _ in "Alice" },
             mintCallId: { Data(repeating: 0x0C, count: 16) },
             recordCall: { call in h.recorded.append(call) },
+            behindHeld: { _ in h.behind },
             isMuted: { h.mutedGroups.contains($0) },
             hasCamera: { h.hasCamera },
             placeCall: { _, audio, video in h.placed.append((audio, video)) }
         ))
+    }
+
+    /// ADR-0091 (2026-11-20) — a 1x1 call in a chat this device is behind in
+    /// fails with the ordinary text, placing and signalling nothing.
+    func testACallInABehindChatFailsTheOrdinaryWayAndPublishesNothing() async throws {
+        let h = Harness(nowMs: t0)
+        h.behind = true
+        let host = makeHost(h)
+        host.startOutgoingCall(groupIdHex: groupA, button: .voice)
+        XCTAssertEqual(host.callError?.text, Localization.text("call.error.unavailable"))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(h.published.isEmpty, "nothing is signalled")
+        XCTAssertTrue(h.placed.isEmpty, "no call is placed")
+        XCTAssertNil(host.activeCall)
     }
 
     private func dsTime(_ ms: Int64) -> String {

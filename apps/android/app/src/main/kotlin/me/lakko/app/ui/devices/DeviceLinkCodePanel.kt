@@ -65,6 +65,8 @@ internal fun DeviceLinkCodePanel(
      *  second-device.md section 2.1); settled when the code is sealed. */
     place: DeviceCardCenter.PairingPlace,
     modifier: Modifier = Modifier,
+    /** G-56 — see [RestoreViaDevicePanel]. */
+    rejoinsHeldLeaf: Boolean = false,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -91,11 +93,12 @@ internal fun DeviceLinkCodePanel(
             // The payload is sealed after the code is typed; its card takes
             // the place that has arrived by then, so nothing is built with a
             // card here.
-            val js = session ?: PairingOrchestrator.prepareJoinFlow(
+            val js = session ?: PairingOrchestrator.preparePairingFlow(
                 context = context,
                 loginHandle = loginHandle,
                 known = known,
                 deviceCardEnvelope = null,
+                rejoinsHeldLeaf = rejoinsHeldLeaf,
             ).also { session = it }
             val l = NewDeviceLink(
                 api = AuthClientDeviceLinkApi(),

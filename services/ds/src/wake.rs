@@ -65,6 +65,7 @@ use lakko_contacts::push_wake::{PUSH_WAKE_HEADER_LEN, PUSH_WAKE_LEN, PUSH_WAKE_V
 use tokio::sync::Semaphore;
 
 use crate::journal::PSEUDONYM_LEN;
+use crate::metrics::{self, WakeOutcome};
 
 /// The request header a publisher asks for a wake with.
 pub(crate) const WAKE_HEADER: &str = "x-lakko-wake";
@@ -448,14 +449,17 @@ impl Waker {
             .unwrap_or_else(PoisonError::into_inner)
             .push(wake.blob.clone());
         if !self.admit_at(journal, Instant::now()) {
+            metrics::wake(WakeOutcome::Capped);
             tracing::debug!(outcome = "journal-capped", "wake dropped");
             return;
         }
         let Some(forward) = &self.forward else {
+            metrics::wake(WakeOutcome::Dormant);
             tracing::debug!(outcome = "dormant", "wake dropped");
             return;
         };
         let Ok(permit) = Arc::clone(&forward.slots).try_acquire_owned() else {
+            metrics::wake(WakeOutcome::Busy);
             tracing::warn!(
                 outcome = "busy",
                 "wake dropped: forwards in flight at limit"
@@ -474,14 +478,17 @@ impl Waker {
             let _permit = permit;
             match request.send().await {
                 Ok(resp) if resp.status().is_success() => {
+                    metrics::wake(WakeOutcome::Forwarded);
                     tracing::debug!(outcome = "forwarded", "wake forwarded");
                 },
                 Ok(resp) => {
+                    metrics::wake(WakeOutcome::Refused);
                     // push-gw refuses a wake it cannot open, an unsigned or
                     // replayed one, or one over its per-group cap.
                     tracing::debug!(status = resp.status().as_u16(), "wake refused by push-gw");
                 },
                 Err(e) => {
+                    metrics::wake(WakeOutcome::Failed);
                     // The error's own text can carry the URL, never the blob
                     // (it rides in the body).
                     tracing::warn!(timeout = e.is_timeout(), "wake forward failed");

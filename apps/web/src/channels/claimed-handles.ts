@@ -7,9 +7,10 @@
  *
  * A handle is claimed at discovery before the channel exists on the channels
  * service. When that second step fails the handle stands claimed, and only
- * the id it was claimed with may claim it again, so the id has to outlive the
- * attempt: a fresh id on the retry read as "already taken" for the person who
- * took it, and the name stayed burned.
+ * the id it was claimed with may claim it again (the same id is the same
+ * handle write key, whose claim discovery answers as the first one), so the
+ * id has to outlive the attempt: a fresh id on the retry read as "already
+ * taken" for the person who took it, and the name stayed burned.
  *
  * `localStorage`, keyed by the account; handles and channel ids of channels
  * this account is creating, which it sends to discovery only as OPRF lookups.
@@ -62,6 +63,16 @@ function write(
   } catch {
     // Storage blocked: a failed create burns the handle, as it did.
   }
+}
+
+/** Whether a create on this account claimed `handle` and has not finished:
+ *  the name is this account's to take back, not "taken". */
+export function isClaimedHandle(
+  accountIdB64: string,
+  handle: string,
+  storage: ClaimedHandleStorage | null = defaultStorage(),
+): boolean {
+  return read(storage, accountIdB64)[canonical(handle)] !== undefined;
 }
 
 /** The id to create a channel under `handle` with: the one an earlier attempt

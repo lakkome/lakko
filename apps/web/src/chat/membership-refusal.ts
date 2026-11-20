@@ -340,6 +340,10 @@ export const COLLAPSED_TO_FALLBACK: ReadonlySet<string> = new Set([
   // ADR-0045: a Welcome for a group this device still holds. It is the answer
   // to no action of the person's, and the client holds the Welcome.
   "groupStillActive",
+  // ADR-0091: the re-entry refusals answer no action of the person's either:
+  // the re-admitter and the device that came back log them and wait.
+  "reentryPairInvalid",
+  "reentryWelcomeRefused",
 ]);
 
 /** The reasons {@link TABLE} gives a sentence of their own. Exported for the

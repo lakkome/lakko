@@ -126,3 +126,29 @@ export function updateTranslationSettings(
     // A full or blocked storage keeps the choice for this tab only.
   }
 }
+
+/**
+ * The `Language packs on this device` list: the packs Lakko asked for, and
+ * the ones the operating system reports holding (`Engines.systemPacks`), one
+ * row per language. `same` decides when two tags name one language (the
+ * shared rule); `canonical` puts a system's tag in the form the rest of the
+ * screen uses. Sorted by `name`.
+ */
+export function packList(
+  recorded: readonly PackRecord[],
+  system: { readonly translation: readonly string[]; readonly transcription: readonly string[] } | null,
+  same: (a: string, b: string) => boolean,
+  canonical: (tag: string) => string,
+  name: (tag: string) => string,
+): PackRecord[] {
+  const out: { language: string; uses: PackUse[] }[] = [];
+  const add = (language: string, use: PackUse): void => {
+    const known = out.find((p) => same(p.language, language));
+    if (known === undefined) out.push({ language, uses: [use] });
+    else if (!known.uses.includes(use)) known.uses.push(use);
+  };
+  for (const p of recorded) for (const u of p.uses) add(p.language, u);
+  for (const tag of system?.translation ?? []) add(canonical(tag), "translation");
+  for (const tag of system?.transcription ?? []) add(canonical(tag), "transcription");
+  return out.sort((a, b) => name(a.language).localeCompare(name(b.language)));
+}

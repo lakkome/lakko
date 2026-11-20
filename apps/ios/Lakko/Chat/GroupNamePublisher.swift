@@ -69,6 +69,8 @@ final class GroupNamePublisher {
             try await ports.send(groupIdHex, bytes)
             notePublished(groupIdHex: groupIdHex)
         } catch {
+            // ADR-0091 section 2 — refused while behind: not a failure.
+            guard !ConversationReentryRules.isBehindRefusal(error) else { return }
             NSLog("ADR-0051 group name re-send failed: \(error)")
         }
     }

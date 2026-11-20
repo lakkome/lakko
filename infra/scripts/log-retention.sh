@@ -6,8 +6,8 @@
 # (`just log-retention`).
 # Idempotent; run as root. The privacy policy states the same period.
 #
-# - journald: 7 days, at most 2G, no copy forwarded to rsyslog
-#   (infra/journald/lakko-retention.conf);
+# - journald: 7 days, at most 1G, no copy forwarded to rsyslog
+#   (infra/journald/lakko.conf, the drop-in setup-metrics.sh also installs);
 # - nginx error log (critical errors only, they can carry the client
 #   address): rotated daily, 7 kept;
 # - what is older than 7 days is removed now, not at the next rotation.
@@ -21,8 +21,10 @@ log() { echo "[log-retention] $*"; }
 [[ $EUID -eq 0 ]] || { echo "ERR run as root" >&2; exit 1; }
 
 install -d -m 755 /etc/systemd/journald.conf.d
-install -m 644 "$INFRA_DIR/journald/lakko-retention.conf" \
-    /etc/systemd/journald.conf.d/lakko-retention.conf
+install -m 644 "$INFRA_DIR/journald/lakko.conf" \
+    /etc/systemd/journald.conf.d/lakko.conf
+# The earlier name of the same drop-in.
+rm -f /etc/systemd/journald.conf.d/lakko-retention.conf
 if [[ "${LAKKO_LOG_RETENTION_NO_RESTART:-0}" != 1 ]]; then
     systemctl restart systemd-journald
     journalctl --vacuum-time="${DAYS}d" >/dev/null

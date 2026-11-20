@@ -40,3 +40,14 @@ path = "fuzz_targets/email_vault_open.rs"
 test = false
 doc = false
 bench = false
+
+# The another-device recovery payload v3 (ADR-0074, "Joining after a
+# rotation"): the plaintext a joining device opens carries the grant, the
+# phrase entropy and up to eight predecessor seeds; the row tag is read before
+# any key. Bounded, exact-length, canonical.
+[[bin]]
+name = "recovery_payload_decode"
+path = "fuzz_targets/recovery_payload_decode.rs"
+test = false
+doc = false
+bench = false

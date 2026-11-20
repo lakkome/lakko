@@ -382,7 +382,9 @@ impl ParsedBackupPayload {
     }
 
     /// The ADR-0058 folded synced state, as `SyncedState.toBytes()` wrote
-    /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held.
+    /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held, or
+    /// the backup's state was of a version this build cannot read (dropped
+    /// by the parser; everything else in the payload is still restored).
     #[wasm_bindgen(getter, js_name = syncedState)]
     pub fn synced_state(&self) -> Vec<u8> {
         self.inner.synced_state.clone()
@@ -958,6 +960,39 @@ mod tests {
         assert_eq!(parsed.known_group_ids(), ids);
         assert_eq!(parsed.synced_state(), state);
         assert_eq!(parsed.contacts().len(), 1);
+    }
+
+    #[test]
+    fn a_synced_state_of_another_version_parses_as_absent() {
+        let ids = vec![0x11u8; 32];
+        let state = sample_synced_state_bytes();
+        let mut wire = build_backup_payload(
+            &[0xA1u8; 16],
+            7,
+            &[0x42u8; 32],
+            Vec::new(),
+            &ids,
+            Some(state.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // version, account id, created at, seed, contact count, group count,
+        // one group (length + id), the state's length: then its version byte.
+        let at = 1 + 16 + 8 + 32 + 4 + 4 + 4 + 32 + 4;
+        assert_eq!(wire[at], state[0]);
+        for version in [state[0] - 1, state[0] + 1] {
+            wire[at] = version;
+            let parsed = parse_backup_payload(&wire).unwrap();
+            assert!(parsed.synced_state().is_empty(), "version {version}");
+            assert_eq!(parsed.known_group_ids(), ids);
+            assert_eq!(parsed.ed25519_seed(), [0x42u8; 32].to_vec());
+        }
+        wire[at] = state[0];
+        assert_eq!(parse_backup_payload(&wire).unwrap().synced_state(), state);
     }
 
     #[test]

@@ -61,7 +61,14 @@ import { saveFileOnHost } from "../platform/host";
 import { loadWasm } from "../wasm";
 import { t } from "../l10n";
 import { StorageClient } from "../storage/client";
-import type { AttachmentRef as WasmAttachmentRef } from "../../wasm/lakko_ffi_wasm";
+import type {
+  Article,
+  AttachmentRef as WasmAttachmentRef,
+  ChecklistItemRef,
+  ContentEnvelopeParts,
+  MessageContent,
+  SignedChecklist,
+} from "../../wasm/lakko_ffi_wasm";
 import { displayLocale } from "../l10n/display-locale";
 
 /** Per-attachment ceiling — must match the
@@ -105,6 +112,14 @@ export interface AttachmentRefBytes {
   readonly height?: number | undefined;
   /** ADR-0047 — a video note's poster frame, its own encrypted blob. */
   readonly thumb?: ThumbRefBytes | undefined;
+  /** ADR-0092 section 2 — an `audio` attachment's title and artist tags,
+   *  read on the sender's device. */
+  readonly title?: string | undefined;
+  readonly artist?: string | undefined;
+  /** ADR-0047 section 6 — the micro thumbnail carried inside the message: a
+   *  JPEG of at most 4096 bytes, longest side at most 96. Kept by the core on
+   *  the first photo or video of a message only. */
+  readonly inlineThumb?: Uint8Array | undefined;
 }
 
 /** ADR-0047 — the poster-frame reference inside an [`AttachmentRefBytes`]. */
@@ -343,7 +358,7 @@ export async function reencryptAttachmentRef(
     };
   }
   const bytes = await downloadAndDecryptRef(ref, storage);
-  return encryptAndUploadBytes(
+  const fresh = await encryptAndUploadBytes(
     bytes,
     { mime: ref.mime, name: ref.name },
     {
@@ -356,6 +371,10 @@ export async function reencryptAttachmentRef(
     },
     storage,
   );
+  // ADR-0047 section 6 — the micro thumbnail is bytes inside the message,
+  // not a blob: it travels with the forward as it is (the core keeps it on
+  // the forwarded message's first photo or video only).
+  return ref.inlineThumb === undefined ? fresh : { ...fresh, inlineThumb: ref.inlineThumb };
 }
 
 /**
@@ -549,6 +568,9 @@ function addRefsToBuilder(
       if (r.waveform !== undefined) wasmRef.waveform = r.waveform;
       if (r.width !== undefined) wasmRef.width = r.width;
       if (r.height !== undefined) wasmRef.height = r.height;
+      if (r.title !== undefined) wasmRef.title = r.title;
+      if (r.artist !== undefined) wasmRef.artist = r.artist;
+      if (r.inlineThumb !== undefined) wasmRef.inlineThumb = r.inlineThumb;
       if (r.thumb !== undefined) {
         wasmThumb = new wasm.ThumbRef(
           r.thumb.blobId,
@@ -575,6 +597,7 @@ function addRefsToBuilder(
  * returns a fresh handle, which is freed here.
  */
 function fromWasmRef(wasmRef: WasmAttachmentRef): AttachmentRefBytes {
+  const inlineThumb = wasmRef.inlineThumb;
   const thumbHandle = wasmRef.thumb;
   let thumb: ThumbRefBytes | undefined;
   if (thumbHandle !== undefined) {
@@ -605,6 +628,9 @@ function fromWasmRef(wasmRef: WasmAttachmentRef): AttachmentRefBytes {
     width: wasmRef.width,
     height: wasmRef.height,
     thumb,
+    ...(wasmRef.title === undefined ? {} : { title: wasmRef.title }),
+    ...(wasmRef.artist === undefined ? {} : { artist: wasmRef.artist }),
+    ...(inlineThumb === undefined ? {} : { inlineThumb }),
   };
 }
 
@@ -690,6 +716,12 @@ export type ParsedBodyResult =
        *  one-to-one: where it was originally sent. Never drawn
        *  (`resend-marker.ts`). */
       resendOrigin?: ForwardOrigin;
+      /** ADR-0087 section 14 — the channel invitation card the envelope
+       *  carries beside its text (the `/g/` link): opened on this device
+       *  (`openChannelInviteCard`) and kept with the message, so the bubble
+       *  and the Chats row read the invitation even once the link is used
+       *  up. Never drawn as bytes. */
+      channelInvite?: Uint8Array;
     }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
@@ -721,7 +753,138 @@ export type ParsedBodyResult =
   // in the timeline, but its words come from the catalog
   // (`chat.message.unsupported`), never from the core: the core's legacy
   // "[unsupported vN message]" text is English and must not reach a screen.
-  | { kind: "unsupported"; version: number };
+  | { kind: "unsupported"; version: number }
+  // ADR-0092 — a poll, checklist, location, contact card or article. A bubble
+  // of its own; an article's images are its attachments.
+  | {
+      kind: "content";
+      content: MessageContent;
+      attachments: AttachmentRefBytes[];
+      reply?: ReplyRef;
+      forward?: ForwardRef;
+    }
+  // ADR-0092 — an op on a poll or checklist; never a bubble.
+  | { kind: "content-op"; op: ContentOp };
+
+/** ADR-0092 — the ops a poll or checklist message receives, by DS `messageId`
+ *  of the target. */
+export type ContentOp =
+  | { readonly op: "poll-vote"; readonly target: number; readonly choices: readonly number[] }
+  | {
+      readonly op: "poll-close";
+      readonly target: number;
+      /** A channel poll's frozen tally, when the closing post carries one. */
+      readonly tally?: { readonly voters: number; readonly counts: readonly number[] };
+    }
+  | {
+      readonly op: "checklist-tick";
+      readonly target: number;
+      readonly item: ChecklistItemRef;
+      readonly done: boolean;
+    }
+  | { readonly op: "checklist-add"; readonly target: number; readonly text: string }
+  | { readonly op: "edit-checklist"; readonly target: number; readonly checklist: SignedChecklist }
+  | {
+      readonly op: "edit-article";
+      readonly target: number;
+      readonly article: Article;
+      readonly attachments: readonly AttachmentRefBytes[];
+    };
+
+/** ADR-0092 — the content kinds `parseBodyEnvelope` names. */
+const CONTENT_KINDS = new Set(["poll", "checklist", "location", "contact-card", "article"]);
+
+/**
+ * ADR-0092 — compose a content message (poll, checklist, location, contact
+ * card, article). `refs` are the article's images; empty for the others.
+ */
+export async function composeContentEnvelope(
+  content: MessageContent,
+  refs: readonly AttachmentRefBytes[] = [],
+  parts?: ContentEnvelopeParts,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const handles = refs.map((r) => toWasmRef(wasm, r));
+  try {
+    return wasm.composeContentEnvelope(content, handles, parts);
+  } finally {
+    freeUnmoved(handles);
+  }
+}
+
+/** ADR-0052 decision 2 / UX `attachments.md` section 11a — the forward
+ *  attribution as the content envelope carries it. */
+export function contentPartsOfForward(forward: ForwardRef): ContentEnvelopeParts {
+  return {
+    ...(forward.author === undefined ? {} : { forwardedFrom: forward.author }),
+    ...(forward.origin === undefined
+      ? {}
+      : { forwardOriginGroupB64: forward.origin.groupIdB64, forwardOriginMessageId: forward.origin.messageId }),
+  };
+}
+
+/** ADR-0092 — compose an article edit: the whole article replaced. */
+export async function composeArticleEditEnvelope(
+  target: number,
+  article: Article,
+  refs: readonly AttachmentRefBytes[],
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const handles = refs.map((r) => toWasmRef(wasm, r));
+  try {
+    return wasm.composeArticleEditEnvelope(BigInt(target), article, handles);
+  } finally {
+    freeUnmoved(handles);
+  }
+}
+
+/** Free the handles a compose did not take: the content composers take
+ *  their `AttachmentRef[]` by value (moved into the envelope), and freeing a
+ *  moved handle throws ("null pointer passed to rust"), which failed every
+ *  article sent with images. */
+function freeUnmoved(handles: readonly WasmAttachmentRef[]): void {
+  for (const h of handles) {
+    try {
+      h.free();
+    } catch {
+      /* moved */
+    }
+  }
+}
+
+/** One wasm `AttachmentRef` handle for `r`, metadata included; the caller
+ *  frees it. */
+function toWasmRef(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  r: AttachmentRefBytes,
+): WasmAttachmentRef {
+  const wasmRef = new wasm.AttachmentRef(r.blobId, r.key, r.nonce, r.mime, BigInt(r.size), r.name);
+  if (r.kind !== undefined) wasmRef.kind = r.kind;
+  if (r.durationMs !== undefined) wasmRef.durationMs = r.durationMs;
+  if (r.waveform !== undefined) wasmRef.waveform = r.waveform;
+  if (r.width !== undefined) wasmRef.width = r.width;
+  if (r.height !== undefined) wasmRef.height = r.height;
+  if (r.title !== undefined) wasmRef.title = r.title;
+  if (r.artist !== undefined) wasmRef.artist = r.artist;
+  if (r.inlineThumb !== undefined) wasmRef.inlineThumb = r.inlineThumb;
+  if (r.thumb !== undefined) {
+    const thumb = new wasm.ThumbRef(
+      r.thumb.blobId,
+      r.thumb.key,
+      r.thumb.nonce,
+      r.thumb.mime,
+      BigInt(r.thumb.size),
+      r.thumb.width,
+      r.thumb.height,
+    );
+    try {
+      wasmRef.setThumb(thumb);
+    } finally {
+      thumb.free();
+    }
+  }
+  return wasmRef;
+}
 
 /**
  * Parse an incoming MLS Application-message body into the
@@ -793,6 +956,78 @@ export function parseBodyEnvelopeWith(
     if (kind === "unsupported") {
       return { kind: "unsupported", version: unsupportedVersionOf(parsed) };
     }
+    // ADR-0092 — the ops on a poll or checklist.
+    if (kind === "poll-vote") {
+      return {
+        kind: "content-op",
+        op: { op: "poll-vote", target: Number(parsed.target ?? 0n), choices: Array.from(parsed.pollChoices ?? []) },
+      };
+    }
+    if (kind === "poll-close") {
+      // The frozen tally of a channel poll's close (a wasm handle, copied
+      // out and freed here).
+      const handle = parsed.pollTally;
+      let tally: { voters: number; counts: number[] } | undefined;
+      if (handle !== undefined && handle !== null) {
+        try {
+          tally = { voters: Number(handle.voters), counts: Array.from(handle.counts, (c) => Number(c)) };
+        } finally {
+          handle.free();
+        }
+      }
+      return {
+        kind: "content-op",
+        op: {
+          op: "poll-close",
+          target: Number(parsed.target ?? 0n),
+          ...(tally === undefined ? {} : { tally }),
+        },
+      };
+    }
+    if (kind === "checklist-tick") {
+      const item = parsed.checklistItem;
+      if (item === undefined) return { kind: "service-envelope" };
+      return {
+        kind: "content-op",
+        op: {
+          op: "checklist-tick",
+          target: Number(parsed.target ?? 0n),
+          item,
+          done: parsed.checklistDone === true,
+        },
+      };
+    }
+    if (kind === "checklist-add") {
+      return { kind: "content-op", op: { op: "checklist-add", target: Number(parsed.target ?? 0n), text: parsed.text } };
+    }
+    if (kind === "edit-checklist" || kind === "edit-article") {
+      const content = parsed.content;
+      const target = Number(parsed.target ?? 0n);
+      if (content?.kind === "checklist" && kind === "edit-checklist") {
+        return { kind: "content-op", op: { op: "edit-checklist", target, checklist: content.checklist } };
+      }
+      if (content?.kind === "article" && kind === "edit-article") {
+        return {
+          kind: "content-op",
+          op: { op: "edit-article", target, article: content.article, attachments: attachmentsOf(parsed) },
+        };
+      }
+      return { kind: "service-envelope" };
+    }
+    if (CONTENT_KINDS.has(kind)) {
+      const content = parsed.content;
+      // A content kind whose payload did not decode reads as a message this
+      // build cannot show, never as JSON or text.
+      if (content === undefined) return { kind: "unsupported", version: 1 };
+      const { reply, forward } = replyForwardOf(parsed);
+      return {
+        kind: "content",
+        content,
+        attachments: attachmentsOf(parsed),
+        ...(reply === undefined ? {} : { reply }),
+        ...(forward === undefined ? {} : { forward }),
+      };
+    }
     // "chat" (and any unexpected discriminator) — surface text +
     // attachments. The same memory dance parseEnvelope runs.
     const count = parsed.attachmentCount;
@@ -843,6 +1078,8 @@ export function parseBodyEnvelopeWith(
       resendGroup === undefined || resendMessage === undefined
         ? undefined
         : { groupIdB64: resendGroup, messageId: Number(resendMessage) };
+    // ADR-0087 section 14 — the invitation card, when the envelope has one.
+    const card = parsed.channelInvite;
     return {
       kind: "chat",
       text: parsed.text,
@@ -850,10 +1087,55 @@ export function parseBodyEnvelopeWith(
       ...(reply === undefined ? {} : { reply }),
       ...(forward === undefined ? {} : { forward }),
       ...(resendOrigin === undefined ? {} : { resendOrigin }),
+      ...(card === undefined || card.length === 0 ? {} : { channelInvite: card }),
     };
   } finally {
     parsed.free();
   }
+}
+
+type WasmParsedBody = ReturnType<Awaited<ReturnType<typeof loadWasm>>["parseBodyEnvelope"]>;
+
+/** The attachments of a parsed body, as plain data; each handle freed. */
+function attachmentsOf(parsed: WasmParsedBody): AttachmentRefBytes[] {
+  const out: AttachmentRefBytes[] = [];
+  for (let i = 0; i < parsed.attachmentCount; i++) {
+    const wasmRef: WasmAttachmentRef = parsed.attachment(i);
+    try {
+      out.push(fromWasmRef(wasmRef));
+    } finally {
+      wasmRef.free();
+    }
+  }
+  return out;
+}
+
+/** ADR-0052 — the reply and forward parts of a parsed body (chat or content). */
+function replyForwardOf(parsed: WasmParsedBody): { reply?: ReplyRef; forward?: ForwardRef } {
+  const replyTo = parsed.replyTo;
+  let reply: ReplyRef | undefined;
+  if (replyTo !== undefined) {
+    const author = parsed.replyAuthor;
+    const excerpt = parsed.replyExcerpt;
+    reply = {
+      target: Number(replyTo),
+      ...(author === undefined ? {} : { author }),
+      ...(excerpt === undefined ? {} : { excerpt }),
+    };
+  }
+  const forwardedFrom = parsed.forwardedFrom;
+  const originGroup = parsed.forwardOriginGroupB64;
+  const originMessage = parsed.forwardOriginMessageId;
+  let forward: ForwardRef | undefined;
+  if (forwardedFrom !== undefined || (originGroup !== undefined && originMessage !== undefined)) {
+    forward = {
+      ...(forwardedFrom === undefined ? {} : { author: forwardedFrom }),
+      ...(originGroup === undefined || originMessage === undefined
+        ? {}
+        : { origin: { groupIdB64: originGroup, messageId: Number(originMessage) } }),
+    };
+  }
+  return { ...(reply === undefined ? {} : { reply }), ...(forward === undefined ? {} : { forward }) };
 }
 
 /** The wire version of an `"unsupported"` body, `0` when the core gave none. */

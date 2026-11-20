@@ -14,12 +14,12 @@
  * phrase and hands it to the ordinary phrase path, which checks it against
  * the account's published identity (fail-closed).
  *
- * Storing the blob is OPT-IN per passkey: key safety then also rests on
- * whoever syncs the passkey (Apple, Google, a password manager), so the
- * person decides, on the informed-trust screen of
- * docs/ux/identity-recovery.md section 10.2. Nothing here enrolls on its
- * own. The PRF output never leaves this device: `webauthn-client.ts` strips
- * it from what the server receives.
+ * Every passkey stores the blob wherever the platform gives a PRF output
+ * (docs/ux/identity-recovery.md section 10.2, amended 2026-11-11: there is
+ * no choice any more); the cost, that key safety then also rests on whoever
+ * syncs the passkey, is stated in ADR-0072 decision 6. The store itself is
+ * `auth/passkey-keys-store.ts`. The PRF output never leaves this device:
+ * `webauthn-client.ts` strips it from what the server receives.
  *
  * Authenticator support for PRF is uneven. No PRF output means the passkey
  * signs in only, and the UI says so.
@@ -33,9 +33,8 @@ import type { Wasm } from "../wasm";
  *  fetched before the login that needs it. */
 export const PASSKEY_PRF_SALT = new TextEncoder().encode("lakko/passkey-vault/prf/v1");
 
-/** Seal `phrase` under the PRF output and store it for `credentialId`: the
- *  "Turn on" of the informed-trust screen. Returns false when the server
- *  has no vault key. */
+/** Seal `phrase` under the PRF output and store it for `credentialId`.
+ *  Returns false when the server has no vault key. */
 export async function enrollPasskeyVault(args: {
   readonly wasm: Wasm;
   readonly client: AuthClient;
@@ -139,23 +138,25 @@ export function passkeyKeysOutcome(args: {
   return args.opened && args.matched ? "restored" : "unusable";
 }
 
-/** What follows creating a passkey (UX spec 10.2, step 2). */
+/** What follows creating a passkey (UX spec 10.2, steps 2 and 3). */
 export type PasskeyAddOutcome =
-  /** The platform can protect keys with this passkey: show the choice. */
-  | "offer-keys-choice"
+  /** The platform can protect keys with this passkey: store them for it. */
+  | "store-keys"
   /** It cannot: the passkey signs in only, and the result line says so. */
   | "signin-only";
 
 /**
- * Whether the choice screen follows a registration. `prfOutput` is whether
+ * Whether storing the keys follows a registration. `prfOutput` is whether
  * the registration already yielded the PRF output; `prfEnabled` is what the
  * browser reported for the new credential (`true`: supported, the output
- * comes when the passkey is next used; `false` or `null`: not supported, or
- * the browser said nothing).
+ * comes when the passkey is next used; `false`: not supported; `null`: the
+ * browser said nothing). The second passkey prompt is skipped only on an
+ * explicit `false` (UX spec 10.2, amended 2026-11-11): when the browser
+ * said nothing, the prompt runs and its answer decides.
  */
 export function passkeyAddOutcome(args: {
   readonly prfOutput: boolean;
   readonly prfEnabled: boolean | null;
 }): PasskeyAddOutcome {
-  return args.prfOutput || args.prfEnabled === true ? "offer-keys-choice" : "signin-only";
+  return args.prfOutput || args.prfEnabled !== false ? "store-keys" : "signin-only";
 }

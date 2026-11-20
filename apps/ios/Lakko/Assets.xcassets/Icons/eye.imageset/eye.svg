@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+  <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+  <path d="M2.75 12C4.95 7.75 8.3 5.25 12 5.25C15.7 5.25 19.05 7.75 21.25 12C19.05 16.25 15.7 18.75 12 18.75C8.3 18.75 4.95 16.25 2.75 12Z" fill="none" stroke="#000000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M12 8.75A3.25 3.25 0 0 1 12 15.25A3.25 3.25 0 0 1 12 8.75Z" fill="none" stroke="#000000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

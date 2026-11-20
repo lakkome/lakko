@@ -237,6 +237,7 @@ import {
   putGroupRouting,
 } from "./group-routing-store";
 import { base64Encode } from "../auth/account-id";
+import { ConversationBehindError } from "../chat/client";
 
 // ---- helpers -------------------------------------------------------------
 
@@ -590,6 +591,33 @@ describe("distribution durability — a failed broadcast must not strand the gro
     // Pass 3 — now that it is distributed, nothing more is sent.
     await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
     expect(b.sent.length).toBe(2);
+  });
+
+  it("a broadcast refused while this device is behind (ADR-0091) leaves the secret PENDING; it goes out once back", async () => {
+    // Live walk 2026-11-19 — on web the behind refusal is an ERROR
+    // (`ChatClient.broadcastControl` throws `ConversationBehindError`,
+    // pinned in `chat/client.behind.test.ts`), so it takes the failed-publish
+    // path and is never recorded as a send.
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    let behind = true;
+    const sent: Uint8Array[] = [];
+    const fn = async (b: Uint8Array): Promise<void> => {
+      if (behind) throw new ConversationBehindError();
+      sent.push(b);
+    };
+
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, fn);
+    expect(sent.length).toBe(0);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    await expect(redistributeSecretToGroup(ACCT, group, fn)).rejects.toBeInstanceOf(ConversationBehindError);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    behind = false;
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, fn);
+    expect(sent.length).toBe(1);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
   });
 
   it("keeps retrying while the broadcast keeps failing (not a one-shot repair)", async () => {

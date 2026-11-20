@@ -2871,6 +2871,14 @@ zeroed, custom-cadence policy round-trip. FFI mirrors at
 Web orchestration `tsc --noEmit` clean at
 `apps/web/src/channels/rotation-cron.ts`.
 
+**Note (2026-11-14):** the policy decided correctly, but no rotation with
+subscribers had ever completed. The staged fanout's stage entry (ADR-0030)
+sent `subscriber_pubkey_hex` where the channels service requires
+`subscriber_id`, and the sealed envelope as standard base64 where it requires
+base64url without padding, so every stage call was refused on all three
+clients since the staged rotation was built. Found on the ADR-0090 walk and
+fixed on all three; stage and commit then answered `200` on web.
+
 ### C-55: SFU multi-party media is SFrame-sealed end-to-end on every client; the AEAD AAD is the cross-platform wire header, not host RTP metadata
 
 The SFU multi-party call arc wires three independent clients
@@ -5646,7 +5654,10 @@ one-commit replacement `Group::replace_member` /
 `DeviceGroup::replace_device_at` (`replaceDeviceAt` on UniFFI and wasm); the
 knock field `self_removal_proof = 16` of `PairingQr`
 (`buildRejoinKnock` / `encodeRejoinKnock`, decoded as exactly 0 or 137 bytes;
-the device reads the epoch with an empty knock, a probe);
+the device reads the epoch with an empty knock, a probe; since 2026-11-14,
+G-55, the knock is sealed under `BLAKE3-derive-key("lakko/device-group/knock-wrap/v1",
+lineage_seed)` with the DeviceGroup id in the AAD, padded to 1024-byte steps,
+and opened with `openRejoinKnock`);
 the sibling's check before it builds (`deviceGroupSelfRemovalCovers`) and its
 answered-knock check (`containsLeafOfKeyPackage`). Clients: web
 `devices/device-group-rejoin.ts` and `devices/sync/DeviceGroupSyncContext.tsx`;
@@ -5715,6 +5726,157 @@ on one if it were reached. It changes nothing for a PublisherGroup or a
 DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
 and **#4** (refuse, never fall back); **#2** and **#5** untouched.
 
+
+## A PublisherGroup commit merges only where the journal took it, and only devices of the owner commit (C-90, C-91)
+
+[ADR-0090](../adr/0090-publisher-group-device-leaves.md), built 2026-11-14 in
+`lakko-mls`, `lakko-contacts`, `lakko-sync`, both FFI surfaces and web, iOS and
+Android; unit-tested on all three; walked on web only (an owner's second web
+device admitted by the first and posting); `lakko-security` not run.
+
+### C-90: a device merges no PublisherGroup commit the journal did not take, and a channel seed reaches subscribers only from a merged commit
+
+**The rule.** Every PublisherGroup commit (rotate, admit or retire a device,
+remove a publisher, approve a publisher) is staged at epoch N, recorded with
+the snapshot carrying it and the epoch-N access seed, and sent through the
+ADR-0081 commit route (`POST /ds/group/{hex}/commit`). Only a `201`, or a `200`
+for the identical re-send, merges it (`merge_staged_commit`); a `409` abandons
+it (`abandon_staged_commit`) and the device reads the journal and applies the
+winner; an unanswered commit stays owed and is re-sent. The new channel seed
+is sealed to subscribers only after the merge: while a commit is staged,
+`channel_seed` is still epoch N and posts go on under it.
+
+**Why it is indexed.** Since ADR-0090 several owner devices may commit to one
+PublisherGroup, and two of them rotating on one epoch is the normal case, not
+an accident. Before it, a lost commit race still resealed the losing seed to
+every subscriber (the G-50 `journalLost` path), so subscribers could hold a
+seed no publisher would post under.
+
+**Where it is enforced.** `crates/lakko-mls/src/publisher_group.rs`
+(`stage_commit` and its wrappers, `merge_staged_commit`,
+`abandon_staged_commit`, `staged_channel_seed`); `services/ds` commit route
+(C-80, one commit per epoch); the clients' staged-commit paths (web
+`apps/web/src/channels/rotation-cron.ts`, `copublisher.ts`; iOS
+`apps/ios/Lakko/Channels/ChannelPublisherCommits.swift`; Android
+`apps/android/app/src/main/kotlin/me/lakko/app/channels/CoPublisher.kt`).
+Pinned by `an_abandoned_admission_leaves_the_group_at_n_and_other_groups_untouched`
+and the proptest `two_owner_devices_rotating_on_one_epoch_converge` in
+`crates/lakko-mls/tests/publisher_group_devices.rs`, the DB-gated
+`commit::tests::two_owner_devices_get_one_commit_per_epoch_and_a_reset_drops_the_chain`
+in `services/ds`, and the FFI test
+`two_owner_devices_admit_a_third_and_exactly_one_commit_lands` on UniFFI and
+wasm.
+
+**What this does NOT do.** It does not clean up the staged reseal rows a
+refused second reseal leaves on the channels service (they wait for the
+ADR-0030 staging GC, unbuilt). Invariants **#3** / **#4**.
+
+### C-91: a PublisherGroup leaf is a bound device, only a device of the owner's account commits, and a device joins only for an account that already publishes and vouches for it
+
+**The rule.** Every PublisherGroup leaf carries an ADR-0050 device binding that
+verifies; no account holds more than 8 leaves; a commit's committer must
+resolve to the owner's account key, recorded beside the group; a commit carries
+only Add and Remove. Every peer runs `check_publisher_commit` before it merges
+and refuses otherwise (`NotOwner`, `UnsupportedProposal`,
+`DeviceBindingInvalid`, `DeviceLimitReached`). An owner device admits a device
+of its own account only when the device's leaf key is in the account's
+DeviceGroup roster and its KeyPackage binds to the owner's account; it admits
+a co-publisher's device only on a `publisher_device_request` that arrived on
+that channel's PublisherGroup from a current publisher account whose
+KeyPackage binding is that same account. A co-publisher's device accepts a
+PublisherGroup Welcome only from a device of the owner account key recorded in
+its `lakko-sync` channel-subscription register, written from the issuer of the
+`/g/` capability it verified, never from the Welcome itself.
+
+**Why it is indexed.** A leaf that is a device rather than the account key lets
+several devices publish, and it also means "who is in the group" is no longer
+"which accounts publish": without the binding, the cap and the committer rule,
+any member device could add leaves of its own choosing or commit in the
+owner's place.
+
+**Where it is enforced.** `crates/lakko-mls/src/publisher_group.rs`
+(`check_publisher_commit`, `process_incoming`, `join_from_welcome`,
+`stage_admit_devices`); `crates/lakko-contacts/src/publisher_device_request.rs`;
+`crates/lakko-sync` channel-subscription register (`owner_account_key`); the
+clients' reconcile and request handling. Pinned by
+`bad_admissions_are_refused_locally`,
+`a_co_publishers_commit_is_refused_by_every_peer`,
+`an_unbound_leaf_is_refused_by_every_peer`,
+`a_ninth_leaf_is_refused_by_every_peer`,
+`a_welcome_from_anyone_but_the_owner_is_refused` and the proptest
+`remove_publisher_never_removes_an_owner_leaf` in
+`crates/lakko-mls/tests/publisher_group_devices.rs`, the FFI test
+`a_co_publisher_device_request_is_applied_by_the_owner`, and the fuzz target
+`publisher_device_request_decode`.
+
+**The external-entry arm (ADR-0064 section 7, amendment of 2026-11-14; built
+2026-11-14 in `lakko-mls` and both FFI surfaces, host-tested only, no client
+calls it yet).** One arm of `check_publisher_commit` admits a committer that is
+not a member: an external commit carrying exactly one `ExternalInit` and no
+other proposal, whose update-path leaf carries a device binding that verifies
+and names the owner's account, while that account holds fewer than 8 leaves.
+Every other external commit is refused by every peer (`UnsupportedProposal` for
+anything beside the `ExternalInit`, including the `Remove` OpenMLS adds when
+the entering key is already a leaf; `NotOwner` for another account's device;
+`DeviceBindingInvalid` for an unbound leaf; `DeviceLimitReached` for a ninth
+owner leaf); before this arm the same commit was refused as `NotOwner`, since a
+non-member committer resolved to no account. The gate also refuses, for every
+PublisherGroup commit, one that changes the GroupContext extensions. The
+entering side (`PublisherGroup::enter`) refuses locally, before writing
+anything, a GroupInfo of another group, a conversation's, one with a leaf that
+is not a bound device, one not signed by a device of the owner, an owner at 8
+devices, a device that already holds the group and a device whose leaf is still
+in the tree; it builds in a throwaway provider and holds the entry (a provider
+row, `lakko/external-entry/v1\0`) until the Delivery Service answers, because
+OpenMLS 0.8.1 merges an external commit while building it. It skips OpenMLS's
+check of leaf lifetimes in the GroupInfo's tree (ADR-0064 residual 9: a
+co-publisher leaf never commits and keeps its KeyPackage lifetime forever).
+Pinned by the proptest `peers_refuse_every_external_commit_but_an_owner_entry`,
+`a_ninth_owner_device_is_refused_by_the_peer_and_locally` and
+`an_entry_is_not_stopped_by_an_expired_co_publisher_leaf` in
+`publisher_group.rs`, and `an_owner_device_enters_from_a_saved_group_info`,
+`two_entries_at_one_epoch_only_one_merges`,
+`an_entry_from_a_stale_group_info_is_refused`,
+`enter_refuses_what_it_must_before_writing`, `a_held_entry_survives_a_restart`
+in `tests/publisher_group_devices.rs`. An external commit is a `PublicMessage`
+(RFC 9420), so its entering leaf's device binding names the owner's account
+key. **Since 2026-11-14 (G-55) the row is wrapped** (`lakko-mls`
+`entry_wrap.rs`): `"lakko/wrapped-entry/v1\0" ‖ 0x01 ‖ epoch(8 BE) ‖ nonce(12)
+‖ ChaCha20-Poly1305(commit)` under `BLAKE3-derive-key("lakko/ds/entry-wrap/v1",
+ds_access_seed_N)`, AAD = magic, version, group id, N. `enter` takes the saved
+epoch-N access seed; `process_incoming` opens a wrapped row under its current
+epoch's seed, requires a `PublicMessage` commit from a `NewMemberCommit` sender
+for this group and epoch (on the framing, before decryption), then runs the
+gate; a row that does not open is an error and an unwrapped external commit
+is refused. The Delivery Service reads the epoch (in the clear, as in every
+other row) but not the binding. Pinned by
+`a_wrapped_entry_opens_only_under_this_groups_epoch_key`,
+`a_wrapped_row_that_holds_no_entry_is_refused`,
+`a_wrapped_member_commit_is_refused`, the account-key check in
+`an_owner_device_enters_from_a_saved_group_info`, and fuzz
+`wrapped_entry_open`. The saved head carries, per
+epoch, the Delivery Service access seed with the GroupInfo (`lakko-vault`
+`ReentryEpoch.ds_access_seed`, amendment item 8), sealed under the owner's vault
+key, so the entering device proves the epoch it leaves without a server change;
+anyone holding that seed can read and write the journal at that epoch, which is
+what every owner device can already do.
+
+**What this does NOT do.** It does not make "only the owner adds a publisher" a
+peer rule (no role table in a PublisherGroup, ADR-0090 open question 3), and
+the gate does not compare a committer's update-path leaf node with its old
+leaf. It does not stop a device removed from the account (ADR-0074 section
+2.5) that still holds the lineage seed and runs a modified client from
+entering again: the vault, the journal root and the owner key all derive from
+that seed, which removal does not change, and the peers cannot see the
+owner's DeviceGroup roster. The ADR-0074 section 2.3 roster check that keeps
+such a device out of chats is therefore not a peer rule here. Such a device
+could already reset the channel's journal and re-found the group with the same
+seed (ADR-0057, ADR-0090 decision A), so this adds the shorter path, not a new
+capability. Mitigation built 2026-11-14 after the `lakko-security` pass: an
+owner device that applies another device's entry runs the own-device
+reconcile at once, so a leaf whose device is not in its roster is retired in
+the same pass. Closing it needs a seed change on removal. Invariants **#3** /
+**#4**; **#2** and **#5** unchanged.
 
 ## A key joins a person only with the consent of the key pinned for them (C-89)
 
@@ -5872,3 +6034,147 @@ sees one more opaque track. In a group call the share media is sealed with
 SFrame under stream indices 2 (picture) and 5 (sound); in a one-to-one call it
 travels as the camera does there. Invariants **#4** (a group share that cannot
 be sealed is not sent); **#2**, **#3** and **#5** untouched.
+
+
+## A device that fell behind a conversation notices it and comes back (C-92, C-93)
+
+[ADR-0091](../adr/0091-conversation-rejoin.md). Phase 1 and 1b (prevention)
+built 2026-11-18 on `services/ds` and the web, iOS and Android clients,
+host-tested only. Phase 2 (recovery) core and both FFI surfaces built
+2026-11-19 in `lakko-mls`, `lakko-contacts`, `lakko-ffi-uniffi`,
+`lakko-ffi-wasm` and the NSE extension surface, host-tested only; no client
+drives it yet, nothing walked, nothing deployed; `lakko-security` not run.
+
+### C-92: the commit the DS names as leaving the device's epoch is never skipped on a first failure
+
+**The rule.** A signed read of a claimed conversation journal names, beside
+`latest_epoch`, the registered commit row of every epoch above the epoch the
+read was signed at (`commits`, ADR-0081 stores a commit row with each
+registration). A row that fails to apply is held, not skipped, exactly when
+it is not this device's own echo and it is the commit the DS names as moving
+the journal from the device's epoch to the next: the cursor stays before it
+and the apply is retried with a bounded backoff (2 s to 300 s, 8 attempts;
+chosen, not measured). After the attempts the row is skipped, the device is
+marked behind, and phase 2 takes over. Every other failing row is skipped at
+once, so a row that can never apply still never wedges the poll. A group
+loaded below the epoch recorded with its cursor reads that commit again.
+Every failed apply is logged on the three clients as one line with no group
+id, row id, key, account, name or text.
+
+**Why it is indexed.** Before it, a device that failed one commit skipped it
+like any other row and could never read the conversation again while
+believing it was still a member (live on 2026-11-18, the desktop group of
+ADR-0091 "What happened").
+
+**Where it is enforced.** `services/ds/src/journal.rs`
+(`registered_commits_above`); web `chat/registered-commit-hold.ts` and
+`chat/cursor-epoch.ts`, iOS `Chat/RegisteredCommitHold.swift` and
+`Chat/CursorEpoch.swift`, Android `chat/RegisteredCommitHold.kt` and
+`chat/CursorEpoch.kt`. Pinned by the DS test
+`a_signed_read_names_the_registered_commit_rows_above_its_epoch` (DB-gated)
+and the client unit suites.
+
+**What this does NOT do.** It does not bring back a device whose retries were
+spent: that is C-93. Invariants **#4** (a held row is never applied unread);
+**#2**, **#3** and **#5** untouched.
+
+### C-93: a device behind in a conversation never commits, sweeps, registers or repairs there, and is replaced only by a commit adding a KeyPackage it minted for that conversation and epoch
+
+**The rule.** A device is behind in a conversation when a drained read names
+a `latest_epoch` above its own and it owes no commit, or after three refused
+reads at its current key (`lakko_mls::conversation_behind_verdict`, ADR-0091
+section 1). While behind it takes no membership or repair action there. It
+comes back by one commit that replaces its leaf `L` with a re-entry
+KeyPackage `K` it minted under its own device identity: same signature key,
+same device binding, and a KeyPackage extension `0xFF04`
+(`version ‖ group_id ‖ epoch_left`) signed with the leaf key.
+
+Every gate (the proposer's own check, the receipt gate, the sweep and the
+peer commit gate) applies two rules in `lakko-mls::reentry::judge`:
+
+- an `Add` whose signature key is a current leaf's is admissible only when
+  its marker names this group and the epoch the commit leaves and its account
+  is that leaf's account; any other colliding `Add` is refused
+  (`RefusalReason::ReentryPairInvalid`), so a replayed directory KeyPackage
+  cannot swap a device out;
+- a `Remove(L)` the ordinary rules refuse only as `OwnerUnremovable`,
+  `RemoveNotOwnerOrAdmin` or `OneToOneMembershipFixed` is authorised when an
+  `Add` by the SAME sender is a valid re-entry for `L` (in the store at
+  receipt, in the selection at the sweep, in the commit at the commit gate);
+  the sweep carries the pair together or drops both. `owner_survives` and
+  `one_to_one_holds` are unchanged and pass, because the account keeps a
+  leaf.
+
+The returning device joins over its stale active group only through
+`Group::join_reentry`, and only when the Welcome adds one of the re-entry
+KeyPackages it recorded (by its `KeyPackageRef` and the new leaf's
+encryption key), is one epoch above that KeyPackage's marker and above the
+stored group, is for the same group and kind, passes the ordinary
+conversation admission, comes from an account in the stored roster, and its
+new leaf carries the stored own leaf's signature key. A refused join changes
+nothing. `Group::join_from_welcome` still refuses an active stored group
+(C-88).
+
+**Why it is indexed.** It is the second way into a conversation over an
+active group, and it lifts the owner's and a one-to-one person's
+last-leaf protection for exactly one replacement; a mistake in either
+removes a person or lets a stranger's commit replace a device.
+
+**Where it is enforced.** `crates/lakko-mls/src/reentry.rs` (marker codec,
+`judge`, the collision and pair rules),
+`crates/lakko-mls/src/group/reentry_join.rs` (`reentry_request_target`,
+`propose_reentry_replacement`, `join_reentry`), the call sites in
+`crates/lakko-mls/src/group.rs` (`gate_incoming_proposal`,
+`propose_add_member`, `propose_remove_member`, `stage_pending_proposals`,
+`sweep_keeps`, `selection_is_admissible`, `authorise_role_commit`), and
+`crates/lakko-mls/src/conversation_behind.rs` (the shared rules). Pinned by
+the ADR-0091 section 6 tests in `group/reentry_join.rs` (`reentry_tests`)
+and `conversation_behind.rs`, and the fuzz target `reentry_marker_decode`;
+the request envelope by `conversation_reentry_decode` and the knock-key
+envelope by `knock_key_decode` in `lakko-contacts`.
+
+**What this does NOT do.** The core cannot see the client's stop list; that
+the device stops acting while behind is client work (ADR-0091 phase 2 S3/S4,
+unbuilt). It does not decide whether a request's device is still the
+account's or whether its leaf is writing; that is
+`reentry_admission_verdict` over facts the client supplies. It does not
+bring back a device whose account no longer has a leaf in the group.
+Invariants **#3** (an MLS state-machine change; external review under G-39)
+and **#4** (refuse, never fall back); **#2** and **#5** untouched.
+
+## A metric label never carries an identifier (C-94)
+
+### C-94: metric labels come from closed sets fixed in the source
+
+No label of any metric a Lakko service records carries an identifier
+([ADR-0096](../adr/0096-service-observability.md) section 1). A label value
+comes from a closed set fixed in the source: the service name, the route
+template (axum's `MatchedPath`, or `unmatched`), the method from a fixed list
+or `other`, the status class, and named outcomes, reasons and kinds. Never an
+account, device, login handle, username, group, journal, mailbox, room, call,
+channel, `push_gid`, blob, peer, token or nonce, IP address or location, nor a
+prefix or hash of one. No gauge has one series per object and no exemplar
+ties a sample to a request. A metrics store is a dataset an operator, a backup
+or a seizure can be asked for, kept for weeks and indexed by time; a metric
+labelled by group or room would be the social graph with timestamps
+(invariant #5).
+
+**Where it is enforced.** `crates/lakko-metrics`: `red_layer` (requests,
+duration and in-flight count by route template, method and status class),
+`exposition::check` (foreign label names, non-template routes, label length,
+and `lakko_log_hygiene::scan::find_identifiers` over the whole text).
+`crates/lakko-log-hygiene/src/lint.rs` `lint_metric_labels` (a label key or
+value that names a denied identifier, or a value built with `format!`,
+`to_string`, `to_owned`, `String::from` or an encoder), run over every service
+by `crates/lakko-log-hygiene/tests/source_lint.rs`, which also requires every
+service with a router to mount the layer and a metrics listener. Pinned by
+`crates/lakko-metrics/tests/red_layer.rs` (hex, base64 and UUID ids in paths
+and as method tokens never reach the exposition),
+`services/sfu/tests/metrics_exposition.rs`, and the metrics scan added to the
+DS and discovery capture tests (database-gated). Host-tested 2026-11-08; not
+deployed.
+
+**What this does NOT do.** It does not hide when activity happened: aggregate
+counts at 15-second resolution reveal activity timing while users are few
+(ADR-0096 section 8). Invariants **#5** (strengthened for metrics); **#1**,
+**#2**, **#3**, **#4** untouched.

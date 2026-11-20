@@ -56,6 +56,7 @@ fn build_state(pool: MySqlPool, anon: Option<AnonTokenIssuer>) -> crate::AppStat
         room_cap: Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: anon.map(Arc::new),
+        anon_cred: None,
         handle_pepper: Some(Arc::new(TEST_PEPPER)),
         recovery_email: None,
         limits: Arc::new(crate::limits::Limits::defaults()),

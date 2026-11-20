@@ -239,4 +239,48 @@ final class ChannelsFormattingTests: XCTestCase {
                 calendar: calendar, locale: locale)),
             "Refreshed 3 days ago.")
     }
+
+    // MARK: - Pin, mute and archive on a channel row (base scenario 29)
+
+    private func flags(pinned: Bool = false, muted: Bool = false, archived: Bool = false) -> FlagsState {
+        FlagsState(pinned: pinned, muted: muted, archived: archived, unreadOverride: false, updatedAtHlc: 1)
+    }
+
+    /// UX group-and-channel-privacy 12 — a channel's row reads its pin, mute
+    /// and archive from the synced flags, keyed on the channel id in
+    /// lower-case hex (2026-11-13: the row offered only "Add to folder").
+    @MainActor
+    func testChannelRowCarriesItsSyncedFlags() {
+        let channels = ChannelsUiState()
+        let id = String(repeating: "ab", count: 16)
+        channels.addChannel(ChannelHandle(id: id.uppercased(), localName: "News", localDescription: "", addedAtMs: 1))
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:],
+            flags: [ChannelFlags.key(channelIdHex: id): flags(pinned: true, muted: true, archived: true)],
+            coPublished: { _ in false })
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertTrue(rows[0].pinned)
+        XCTAssertTrue(rows[0].muted)
+        XCTAssertTrue(rows[0].archived)
+        let none = ChatListScreen.channelRows(channels: channels, channelUnread: [:], coPublished: { _ in false })
+        XCTAssertFalse(none[0].pinned || none[0].muted || none[0].archived)
+    }
+
+    /// The shared order puts a pinned channel first and an archived one last,
+    /// as it does a group.
+    @MainActor
+    func testPinnedChannelSortsFirstAndArchivedLast() {
+        let channels = ChannelsUiState()
+        let pinned = String(repeating: "1", count: 32)
+        let plain = String(repeating: "2", count: 32)
+        let archived = String(repeating: "3", count: 32)
+        for (id, at) in [(pinned, UInt64(1)), (plain, 2), (archived, 3)] {
+            channels.addChannel(ChannelHandle(id: id, localName: id, localDescription: "", addedAtMs: at))
+        }
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:],
+            flags: [pinned: flags(pinned: true), archived: flags(archived: true)],
+            coPublished: { _ in false })
+        XCTAssertEqual(ConversationList.sorted(rows).map(\.id), [pinned, plain, archived])
+    }
 }

@@ -27,9 +27,11 @@
  * Also here: the chat-list summary (unread count + last-message preview) read
  * from a slot, and the conversion from a received event to a persisted row.
  */
+import { base64Encode } from "../auth/account-id";
+import { contentPreviewOf } from "../attach/preview";
 import { authorIdentityToPersisted } from "./author-identity";
 import type { IncomingChatEvent } from "./client";
-import { attachmentsPreviewLabel } from "./list-preview";
+import { messagePreviewWords, previewMediaOf, type PreviewMedia } from "./list-preview";
 import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
 import { persistedFromMembership } from "./membership-rows";
@@ -273,6 +275,12 @@ export interface ChatListSummary {
   /** The newest message's author key (base64) when it is someone else's and
    *  the log recorded one, for the sender prefix in a group row; else `null`. */
   readonly lastAuthorKeyB64: string | null;
+  /** ADR-0087 section 14 — the newest message's channel invitation card
+   *  (base64), when it carried one; the row reads the invitation from it. */
+  readonly previewChannelInviteB64?: string;
+  /** `docs/ux/media-messages.md` section 11 — the newest message's first
+   *  photo or video, for the row's thumbnail; absent when it has none. */
+  readonly previewMedia?: PreviewMedia;
 }
 
 /**
@@ -293,7 +301,15 @@ export interface ChatListSummary {
 export function summarizeGroupSlot(
   slot: PersistedGroup | undefined,
   syncedReadUpTo: bigint | null,
+  ownPersonKeyB64: string | null = null,
 ): ChatListSummary {
+  // A message this account sent from another of its devices arrives as an
+  // incoming row; the timeline draws it as the person's own by its author
+  // key, and so does the list: "You: ..." and never unread (base scenario
+  // 33, 2026-11-11: the list read "Ada Two: ..." for the person's own line).
+  const fromSelf = (m: PersistedMessage): boolean =>
+    m.direction === "outgoing" ||
+    (ownPersonKeyB64 !== null && m.direction === "incoming" && m.authorKeyB64 === ownPersonKeyB64);
   const messages = slot?.messages ?? [];
   let readUpTo: bigint | null = syncedReadUpTo;
   if (slot?.lastViewedMessageId !== undefined) {
@@ -310,7 +326,7 @@ export function summarizeGroupSlot(
   const historyThrough = floor === undefined ? null : BigInt(floor);
   let unread = 0;
   for (const m of messages) {
-    if (m.direction !== "incoming") continue;
+    if (m.direction !== "incoming" || fromSelf(m)) continue;
     const id = idOf(m);
     if (id === null) continue;
     if (historyThrough !== null && id <= historyThrough) continue;
@@ -330,12 +346,20 @@ export function summarizeGroupSlot(
   return {
     unread,
     preview: last === undefined ? null : previewText(last),
-    previewIsOwn: last?.direction === "outgoing",
+    previewIsOwn: last !== undefined && fromSelf(last),
     lastAt: last?.createdAt ?? null,
     lastAuthorKeyB64:
-      last !== undefined && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
+      last !== undefined && !fromSelf(last) && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
         ? last.authorKeyB64
         : null,
+    ...(last !== undefined && last.deleted !== true && typeof last.channelInviteB64 === "string"
+      ? { previewChannelInviteB64: last.channelInviteB64 }
+      : {}),
+    ...(() => {
+      if (last === undefined || last.deleted === true || contentPreviewOf(last.content) !== null) return {};
+      const media = previewMediaOf(last.attachments);
+      return media === null ? {} : { previewMedia: media };
+    })(),
   };
 }
 
@@ -350,12 +374,13 @@ function previewText(m: PersistedMessage): string {
   // ADR-0061 section 6 — a message from a newer Lakko: the catalog's words,
   // never the core's English placeholder.
   if (typeof m.unsupportedVersion === "number") return t("chat.message.unsupported");
-  const text = m.text.replace(/\s+/g, " ").trim();
-  if (text.length > 0) {
-    return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;
-  }
-  // docs/ux/client-redesign.md section 5.1 — a media message shows its kind.
-  return attachmentsPreviewLabel(m.attachments);
+  // ADR-0092 — a poll, checklist, location, contact card or article.
+  const contentLine = contentPreviewOf(m.content);
+  if (contentLine !== null) return contentLine;
+  // docs/ux/media-messages.md section 11 — the text, after the count words
+  // when the message carries files only; with no text, the words alone.
+  const line = messagePreviewWords(m.text.replace(/\s+/g, " ").trim(), m.attachments);
+  return line.length > PREVIEW_MAX_CHARS ? `${line.slice(0, PREVIEW_MAX_CHARS - 1)}…` : line;
 }
 
 /**
@@ -396,6 +421,11 @@ export function eventToPersistedMessage(
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
+      // ADR-0092 — the content object, verbatim.
+      ...(e.content === undefined ? {} : { content: e.content }),
+      ...(e.contentState === undefined ? {} : { contentState: e.contentState }),
+      // ADR-0087 section 14 — the invitation card, opened offline when drawn.
+      ...(e.channelInvite === undefined ? {} : { channelInviteB64: base64Encode(e.channelInvite) }),
     };
   }
   const membership = persistedFromMembership(e.membership);

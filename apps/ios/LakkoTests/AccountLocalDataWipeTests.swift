@@ -35,8 +35,19 @@ final class AccountLocalDataWipeTests: XCTestCase {
         0x0B, 0x1B, 0x2B, 0x3B, 0x4B, 0x5B, 0x6B, 0x7B,
         0x8B, 0x9B, 0xAB, 0xBB, 0xCB, 0xDB, 0xEB, 0xB2,
     ])
+    /// The account of the unknown-store test alone: its planted stores name
+    /// no account any other test inventories, so a removal the App Group
+    /// preferences daemon has not applied yet cannot reach another test's
+    /// walk (the full suite saw `lakko.test-unknown-store.v1` survive into
+    /// the next test's inventory of account A).
+    private let accountIdC = Data([
+        0x0C, 0x1C, 0x2C, 0x3C, 0x4C, 0x5C, 0x6C, 0x7C,
+        0x8C, 0x9C, 0xAC, 0xBC, 0xCC, 0xDC, 0xEC, 0xC3,
+    ])
     private var a: String { base64Encode(accountIdA) }
     private var b: String { base64Encode(accountIdB) }
+    private var c: String { base64Encode(accountIdC) }
+    private static let unknownSharedKey = "lakko.test-unknown-store.v1"
 
     private let channelA = Data(repeating: 0xCA, count: 16)
     private let channelB = Data(repeating: 0xCB, count: 16)
@@ -55,6 +66,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         savedFolderTab = UserDefaults.standard.object(forKey: AccountLocalDataWipe.selectedFolderTabKey)
         savedAnswers = UserDefaults.standard.object(forKey: DeviceLinkAnswerLimit.defaultKey)
         savedMarks = JournalFoundingMarks.shared.all()
+        // A planted unknown store left by an interrupted run.
+        SharedStorage.sharedDefaults()?.removeObject(forKey: Self.unknownSharedKey)
         wipeQuietly(a)
         wipeQuietly(b)
         // The clean-up above is a wipe like any other and seals both
@@ -192,23 +205,24 @@ final class AccountLocalDataWipeTests: XCTestCase {
     /// know about is reported, in every place it can be, rather than passing
     /// silently.
     func testAStoreTheWipeDoesNotKnowIsReportedAsLeftover() throws {
-        let unknownKey = "lakko.test-unknown-store.v1.\(a)"
+        let unknownKey = "lakko.test-unknown-store.v1.\(c)"
         UserDefaults.standard.set(Data([1]), forKey: unknownKey)
-        SharedStorage.sharedDefaults()?.set(["x": a], forKey: "lakko.test-unknown-store.v1")
+        SharedStorage.sharedDefaults()?.set(["x": c], forKey: Self.unknownSharedKey)
         defer {
             UserDefaults.standard.removeObject(forKey: unknownKey)
-            SharedStorage.sharedDefaults()?.removeObject(forKey: "lakko.test-unknown-store.v1")
+            SharedStorage.sharedDefaults()?.removeObject(forKey: Self.unknownSharedKey)
+            SharedStorage.sharedDefaults()?.synchronize()
         }
         let appSupport = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let unknownFile = appSupport.appendingPathComponent(
-            "lakko-test-unknown/\(a.replacingOccurrences(of: "/", with: "_")).bin")
+            "lakko-test-unknown/\(c.replacingOccurrences(of: "/", with: "_")).bin")
         try FileManager.default.createDirectory(
             at: unknownFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data([1]).write(to: unknownFile)
         defer { try? FileManager.default.removeItem(at: unknownFile.deletingLastPathComponent()) }
 
-        let report = AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+        let report = AccountLocalDataWipe.wipe(accountIdB64: c, removeDeliveredNotifications: {})
 
         let places = Set(report.leftovers.map(\.place))
         XCTAssertTrue(report.leftovers.contains(AccountDataInventory.Item(place: .standardDefaults, name: unknownKey)))
@@ -325,6 +339,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, seed: Data(repeating: 5, count: DeviceIdentityStore.seedLength))
         try DeviceIdentityStore.putDeviceBinding(accountIdB64: x, binding: Data([6, 6]))
         InviteLinkSecretStore.shared.put(accountIdB64: x, slug: "slug", secret: Data(repeating: 7, count: 12))
+        PasskeyNoPrfStore().insert("cred", accountIdB64: x)
         KeychainAnonTokenStore().save(
             accountKey: x, context: .pushRegister,
             tokens: [AnonToken(context: AnonTokenContext.pushRegister.rawValue, epoch: 1, headerValue: "h")])
@@ -355,6 +370,9 @@ final class AccountLocalDataWipeTests: XCTestCase {
         DeviceGroupSnapshotStore().putSnapshot(accountIdB64: x, blob: Data([1, 2]))
         // ADR-0063 feed + ADR-0059 Discover (this branch's stores).
         ChannelPostLogStore().put(accountIdB64: x, payload: ChannelPostLogPayload(channels: [:]))
+        // `docs/ux/channel-notifications.md` section 5 — the per-channel
+        // "last notified post" cursors.
+        ChannelNotifiedStore().save(accountIdB64: x, channelIdHex: channelHex, cursor: 7, keep: [channelHex])
         try FeedStore().save(accountIdB64: x, state: FeedState())
         try FeedReadingStore().save(accountIdB64: x, reading: FeedReading.decode(Data()))
         try DiscoverStore().save(accountIdB64: x, kind: .prefs, plaintext: Data([1]))
@@ -399,6 +417,10 @@ final class AccountLocalDataWipeTests: XCTestCase {
         ContactsInboxStore().save(PersistedContactsInbox.empty, accountIdB64: x)
         StateBundle.saveKnownGroupIds(["abc"], accountIdB64: x)
         CoPublishedJournals(defaults: standard, accountIdB64: { x }).mark(journalIdHex: "ab", accountIdB64: x)
+        // ADR-0090 — an owed own-account hand-over and a queued device request.
+        ChannelDeviceAdmissionStore(accountIdB64: x).markHandoverOwed(channelHex)
+        ChannelDeviceAdmissionStore(accountIdB64: x).enqueue(
+            [(plaintext: Data([1]), sender: Data(repeating: 2, count: 32))], channelId: channelHex)
         MediaPrefs(defaults: standard, accountIdB64: { x }).markPlayed("played", accountIdB64: x)
         EmojiIndex.saveRecent(["\u{1F600}"], standard, accountIdB64: x)
         EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], standard, accountIdB64: x)
@@ -409,6 +431,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         RestoredKnownGroupsStore.add(
             accountIdB64: x, groupIdsHex: [String(repeating: "ab", count: 32)])
         BackupRestoreRetryStore.mark(accountIdB64: x)
+        RestoredDeviceStore.noteRestored(accountIdB64: x, knownConversations: 1)
+        RestoredRejoinAnswerStore.record(.answered, accountIdB64: x)
         // The guest marker.
         GuestAccountMarker().mark(accountIdB64: x, nowMs: 1_760_000_000_000)
         GuestAccountMarker().noteUsernameClaimed(accountIdB64: x, username: "mira")

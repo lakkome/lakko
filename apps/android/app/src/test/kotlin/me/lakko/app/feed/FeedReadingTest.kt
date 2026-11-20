@@ -252,4 +252,22 @@ class FeedReadingTest {
         assertEquals(FeedReading(), decodeFeedReading(FeedReadingWire(version = 99, hidden = listOf(group))))
         assertEquals(FeedReading(), decodeFeedReading(null))
     }
+
+    @Test
+    fun aRefetchAfterTheLogDropDoesNotCountWhatTheOldLogHadLookedAt() {
+        // Live on the Pixel 7a (2026-11-12): the marker stood at 1 (the first
+        // post), the old log's cursor at 4 (a photo, a file and a GIF passed
+        // over); refetched as version 2 they read as 3 new posts.
+        val pixel = advanceChannelRead(FeedReading(), channel, 1)
+        val refetched = listOf(1L, 2L, 3L, 4L)
+        assertEquals(3, channelUnreadCount(refetched, pixel.channelRead[channel], own = false))
+        val floored = readFloorAfterDrop(pixel, mapOf(channel to 4L))
+        assertEquals(0, channelUnreadCount(refetched, floored.channelRead[channel], own = false))
+        // A post after the old log's reach is still new; a marker never moves back.
+        assertEquals(1, channelUnreadCount(refetched + 5L, floored.channelRead[channel], own = false))
+        val ahead = advanceChannelRead(FeedReading(), channel, 9)
+        assertEquals(9L, readFloorAfterDrop(ahead, mapOf(channel to 4L)).channelRead[channel])
+        // A channel with no marker gets the floor as its start.
+        assertEquals(4L, readFloorAfterDrop(FeedReading(), mapOf(otherChannel to 4L)).channelRead[otherChannel])
+    }
 }

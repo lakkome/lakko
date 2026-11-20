@@ -653,6 +653,7 @@ pub(crate) async fn put(
             ));
         },
         BindOutcome::TooSoon { retry_after_secs } => {
+            crate::metrics::handle_change_too_soon();
             return Err(ApiError::Limit(crate::limits::LimitError::Limited {
                 code: crate::limits::CODE_HANDLE_BIND_LIMITED,
                 retry_after_secs,

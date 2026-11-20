@@ -65,6 +65,7 @@ use crate::access::{
     check_proof, consume_nonce, db_error, parts, refused, verify_header, HandlerError,
 };
 use crate::journal::{self, PSEUDONYM_LEN};
+use crate::metrics::ProofRefusal;
 use crate::AppState;
 
 /// Largest body of a claim or a write: the largest growth of the tree, the
@@ -362,7 +363,8 @@ pub(crate) async fn put_claim(
             "owner_pk_b64 is not the key this directory is named after",
         ));
     }
-    let owner = VerifyingKey::from_bytes(&owner_pk).map_err(|_| refused())?;
+    let owner =
+        VerifyingKey::from_bytes(&owner_pk).map_err(|_| refused(ProofRefusal::UnknownKey))?;
     let proof = verify_header(&headers, &parts(&method, &uri, &body), |epoch| {
         (epoch == OWNER_PROOF_EPOCH).then_some(owner)
     })?;
@@ -378,7 +380,7 @@ pub(crate) async fn put_claim(
         .await
         .map_err(db_error("record claim nonce"))?
     {
-        return Err(refused());
+        return Err(refused(ProofRefusal::Replay));
     }
     if let Err(refusal) = state
         .anon_tokens
@@ -436,9 +438,10 @@ pub(crate) async fn post_write(
         return Err(bad_request("only a claim names the owner"));
     }
     let Some(current) = load_current(&state.db, &id).await? else {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     };
-    let owner = VerifyingKey::from_bytes(&current.owner_pk).map_err(|_| refused())?;
+    let owner = VerifyingKey::from_bytes(&current.owner_pk)
+        .map_err(|_| refused(ProofRefusal::UnknownKey))?;
     let proof = verify_header(&headers, &parts(&method, &uri, &body), |epoch| {
         (epoch == OWNER_PROOF_EPOCH).then_some(owner)
     })?;
@@ -457,7 +460,7 @@ pub(crate) async fn post_write(
     .await
     .map_err(db_error("lock directory"))?;
     let Some(current) = row.map(current_of) else {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     };
     // A refusal below commits: the nonce stays spent.
     if !consume_nonce(&mut *tx, &id, &proof.nonce)
@@ -467,7 +470,7 @@ pub(crate) async fn post_write(
         tx.commit()
             .await
             .map_err(db_error("commit refused write"))?;
-        return Err(refused());
+        return Err(refused(ProofRefusal::Replay));
     }
     let digest = write_digest(&body);
     let decision = decide(&current, &write, &digest);
@@ -488,7 +491,7 @@ pub(crate) async fn post_write(
         .await
         .map_err(db_error("update directory"))?;
         if updated.rows_affected() != 1 {
-            return Err(refused());
+            return Err(refused(ProofRefusal::UnknownKey));
         }
         if let Some(chain) = &write.chain {
             sqlx::query(
@@ -561,13 +564,14 @@ async fn gate_read(
             .await
             .map_err(db_error("load directory read key"))?;
     let Some((current_epoch, read_pk)) = row else {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     };
-    let key = VerifyingKey::from_bytes(&read_pk).map_err(|_| refused())?;
+    let key = VerifyingKey::from_bytes(&read_pk).map_err(|_| refused(ProofRefusal::UnknownKey))?;
     check_proof(&state.db, id, headers, &parts(method, uri, &[]), |epoch| {
         (epoch == current_epoch).then_some(key)
     })
     .await
+    .map(|_| ())
 }
 
 fn binary(bytes: Vec<u8>) -> Response {
@@ -735,9 +739,10 @@ pub(crate) async fn delete_directory(
 ) -> Result<Response, HandlerError> {
     let id = journal::decode_pseudonym(&directory_hex)?;
     let Some(current) = load_current(&state.db, &id).await? else {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     };
-    let owner = VerifyingKey::from_bytes(&current.owner_pk).map_err(|_| refused())?;
+    let owner = VerifyingKey::from_bytes(&current.owner_pk)
+        .map_err(|_| refused(ProofRefusal::UnknownKey))?;
     check_proof(
         &state.db,
         &id,

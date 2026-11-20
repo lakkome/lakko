@@ -4,6 +4,7 @@
 package me.lakko.app.translation
 
 import uniffi.lakko_ffi_uniffi.DetectedLanguage
+import uniffi.lakko_ffi_uniffi.LanguageCandidates
 import uniffi.lakko_ffi_uniffi.TranslationEngineState
 import java.io.File
 
@@ -108,6 +109,14 @@ public interface TranscriptionEngine {
 public interface LanguageDetector {
     /** `null` when it cannot tell, or when there is no detector. */
     public suspend fun detect(text: String): DetectedLanguage?
+
+    /**
+     * The detection with the languages it was a near tie with (ADR-0082 note
+     * of 2026-11-15). A detector that has no ranked list answers [detect]
+     * with no alternatives.
+     */
+    public suspend fun detectCandidates(text: String): LanguageCandidates? =
+        detect(text)?.let { LanguageCandidates(it, emptyList()) }
 }
 
 /** The translation engine of a device that has none it can trust to stay local. */
@@ -140,13 +149,12 @@ public object NoTranscriptionEngine : TranscriptionEngine {
 }
 
 /**
- * No detector. Android's `TextClassifier.detectLanguage` is the only platform
- * detector, and its own documentation says requests "may be handled in an
- * OEM-provided process": nothing in its API says the text stays on the device,
- * so by ADR-0082 section 1 it is not used. ML Kit Language Identification
- * reports the identified languages to Google (its data disclosure), so it is
- * not used either. Without a detector every message is "could not tell": the
- * menu opens the language picker, and the conversation bar never appears.
+ * No detector: every message is "could not tell". The installed detector is
+ * [CoreLanguageDetector] (the shared core's on-device detector); this one is
+ * the default before `TranslationCenter.install` and in tests. Android's
+ * platform detectors are not used: `TextClassifier.detectLanguage` may be
+ * "handled in an OEM-provided process", and ML Kit Language Identification
+ * reports the identified languages to Google (ADR-0082 section 1).
  */
 public object NoLanguageDetector : LanguageDetector {
     override suspend fun detect(text: String): DetectedLanguage? = null

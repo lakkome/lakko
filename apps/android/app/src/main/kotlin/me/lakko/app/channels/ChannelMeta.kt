@@ -171,6 +171,14 @@ public object ChannelMetaPublisher {
         clearAvatar: Boolean = false,
         /** Section 13a — the allowed reactions; `null` keeps the held one. */
         reactions: uniffi.lakko_ffi_uniffi.FfiAllowedReactions? = null,
+        /**
+         * Keep the composed record as this device's copy BEFORE it is sent
+         * (the first record of a channel this device created): a failed send
+         * then leaves the owner's device holding the record it meant to post,
+         * and the owed re-issue posts that record, flag and signed @name
+         * included, instead of composing one that says "not public".
+         */
+        keepBeforeSend: Boolean = false,
     ) {
         val held = state.channels.value.firstOrNull { it.id == channelId }
         val heldRecord = held?.sharedMeta()?.fullRecord()
@@ -189,7 +197,14 @@ public object ChannelMetaPublisher {
                 else -> reactions
             },
         )
-        postRecord(state, client, channelId, composeChannelMeta(record))
+        val plaintext = composeChannelMeta(record)
+        if (keepBeforeSend) {
+            when (val c = classifyChannelPlaintext(plaintext)) {
+                is ClassifiedPost.Meta -> state.adoptSharedMeta(channelId, c.meta)
+                else -> Unit
+            }
+        }
+        postRecord(state, client, channelId, plaintext)
     }
 
     /** Seal and publish one composed record plaintext, then file it. */
@@ -228,19 +243,23 @@ public object ChannelMetaPublisher {
     /**
      * Re-issue the record this device holds for [channelId] — after a rotation
      * (ADR-0051 §4) — with the STORED stamp verbatim, never a fresh clock read.
-     * A channel created before records existed re-issues its local name and
-     * description under a fresh stamp instead. Returns `false` on a failed
-     * send (logged; the caller keeps it owed), `true` once it landed or when
-     * there is nothing to issue (the channel is gone, or has no name).
+     * Returns `false` on a failed send (logged; the caller keeps it owed),
+     * `true` once it landed or when there is nothing to issue (the channel is
+     * gone, or this device holds no record of it).
+     *
+     * A device holding no record never composes one: it does not know the
+     * channel's flag here, and a record defaulting to "not public" told every
+     * reader a public channel was private (seen live 2026-11-13, web). The
+     * owner's device keeps its first record before sending it
+     * (`post(keepBeforeSend = true)`), so it always holds one.
      */
     public suspend fun reissue(state: ChannelsUiState, client: ChannelsClient, channelId: String): Boolean {
         val channel = state.channels.value.firstOrNull { it.id == channelId } ?: return true
-        val shared = channel.sharedMeta()
-        val name = shared?.name ?: channel.localName.trim()
-        if (name.isEmpty()) return true
-        val description = shared?.description ?: channel.localDescription.trim()
-        val stamp = shared?.updatedAtMs ?: System.currentTimeMillis().toULong()
-        val stored = shared?.recordB64?.takeIf { it.isNotEmpty() }?.let {
+        val shared = channel.sharedMeta() ?: return true
+        val name = shared.name
+        val description = shared.description
+        val stamp = shared.updatedAtMs
+        val stored = shared.recordB64.takeIf { it.isNotEmpty() }?.let {
             try {
                 java.util.Base64.getDecoder().decode(it)
             } catch (_: IllegalArgumentException) {

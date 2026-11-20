@@ -98,6 +98,31 @@ export function registerServiceEnvelopeSender(send: ServiceEnvelopeSender): () =
   };
 }
 
+/**
+ * ADR-0091 section 3, route 1 - send one envelope to the account's other
+ * devices now, through the sync runtime's own handle (the registered
+ * sender), serialized with the other sends. Rejects when no DeviceGroup is
+ * loaded yet or the publish failed; the caller retries.
+ */
+export function sendServiceEnvelopeNow(envelope: Uint8Array): Promise<void> {
+  const run = chain.then(async () => {
+    const send = sender;
+    if (send === null) throw new Error("no DeviceGroup sender registered");
+    await send(envelope);
+  });
+  chain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/** Whether a DeviceGroup sender is registered (the account's DeviceGroup sync
+ *  runs on this device). Without one {@link sendServiceEnvelopeNow} throws. */
+export function hasServiceEnvelopeSender(): boolean {
+  return sender !== null;
+}
+
 /** Send every dirty kind that has a composer, serialized. Never rejects. */
 export function flushServiceEnvelopes(): Promise<void> {
   chain = chain.then(async () => {

@@ -25,14 +25,14 @@ struct CallEndMenu: View {
         VStack(spacing: 0) {
             row(
                 l10n.t("call.end_menu.leave"),
-                systemImage: "rectangle.portrait.and.arrow.right",
+                icon: .logout,
                 colour: Color.lakkoText,
                 action: onLeave)
             // The destructive row in the end button's red, the only other red
             // on the call screen.
             row(
                 l10n.t("call.end_menu.end_for_all"),
-                systemImage: "phone.down.fill",
+                icon: .phoneDownFill,
                 colour: Color.lakkoDanger,
                 action: onEndForEveryone)
         }
@@ -51,12 +51,11 @@ struct CallEndMenu: View {
     }
 
     private func row(
-        _ title: String, systemImage: String, colour: Color, action: @escaping () -> Void
+        _ title: String, icon: LkIcon, colour: Color, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 17))
+                LkIconView(icon, size: 20, relativeTo: nil)
                     .frame(width: 24)
                 Text(title)
                     .font(.body)
@@ -83,7 +82,7 @@ struct CallEndedForEveryoneBanner: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "phone.down.fill")
+            LkIconView(.phoneDownFill, size: 20)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .padding(.top, 2)
                 .accessibilityHidden(true)

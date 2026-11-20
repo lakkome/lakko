@@ -36,9 +36,15 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// claim like every other field, bound to the signature key the receiver
     /// supplies; its blob key is SECRET and kept app-private with the profile.
     public let avatar: ProfileAvatar?
+    /// ADR-0092 section 7 — whether the person lets others share their
+    /// contact card (profile envelope v5: off exactly when their "who can find
+    /// me" setting is `Nobody`). The person's own statement; `true` for a row
+    /// stored before the field existed and for a claim this device made up (a
+    /// found name, a pending contact's link).
+    public let cardShareable: Bool
 
     enum CodingKeys: String, CodingKey {
-        case displayName, username, updatedAtMs, accountId, usernameCertificate, avatar
+        case displayName, username, updatedAtMs, accountId, usernameCertificate, avatar, cardShareable
     }
 
     public init(
@@ -48,9 +54,11 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         accountId: Data? = nil,
         usernameCertificate: Data? = nil,
         grants: [FfiReachGrant] = [],
-        avatar: ProfileAvatar? = nil
+        avatar: ProfileAvatar? = nil,
+        cardShareable: Bool = true
     ) {
         self.avatar = avatar
+        self.cardShareable = cardShareable
         self.displayName = displayName
         self.username = username
         self.updatedAtMs = updatedAtMs
@@ -68,7 +76,8 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
             updatedAtMs: try c.decode(UInt64.self, forKey: .updatedAtMs),
             accountId: try c.decodeIfPresent(Data.self, forKey: .accountId),
             usernameCertificate: try c.decodeIfPresent(Data.self, forKey: .usernameCertificate),
-            avatar: try c.decodeIfPresent(ProfileAvatar.self, forKey: .avatar))
+            avatar: try c.decodeIfPresent(ProfileAvatar.self, forKey: .avatar),
+            cardShareable: try c.decodeIfPresent(Bool.self, forKey: .cardShareable) ?? true)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -79,6 +88,7 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         try c.encodeIfPresent(accountId, forKey: .accountId)
         try c.encodeIfPresent(usernameCertificate, forKey: .usernameCertificate)
         try c.encodeIfPresent(avatar, forKey: .avatar)
+        try c.encode(cardShareable, forKey: .cardShareable)
     }
 
     /// The name this device found a person under, filed for them until their
@@ -101,7 +111,8 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     public var withoutGrants: ProfileClaim {
         ProfileClaim(
             displayName: displayName, username: username, updatedAtMs: updatedAtMs,
-            accountId: accountId, usernameCertificate: usernameCertificate, avatar: avatar)
+            accountId: accountId, usernameCertificate: usernameCertificate, avatar: avatar,
+            cardShareable: cardShareable)
     }
 }
 
@@ -213,6 +224,22 @@ final class ReceivedProfileStore {
         // nothing does not: it would put the stand-in back.
         let replacesFoundName = stored?.isFoundName == true && !claim.isFoundName
             && (claim.displayName != nil || claim.username != nil)
+        // ADR-0092 section 7 — a name-less profile newer than a found name
+        // (a person on `Nobody` re-stamps their profile to say so) keeps the
+        // found name, which still stands in for the name they never set, and
+        // takes only what it says about sharing their card.
+        if let stored, stored.isFoundName, claim.displayName == nil, claim.username == nil,
+           !claim.isFoundName {
+            guard stored.cardShareable != claim.cardShareable else { return .notNewer }
+            profiles[key] = ProfileClaim(
+                displayName: stored.displayName, username: stored.username,
+                updatedAtMs: stored.updatedAtMs, avatar: stored.avatar,
+                cardShareable: claim.cardShareable)
+            if let data = try? JSONEncoder().encode(profiles) {
+                persistence.save(data, accountIdB64: accountIdB64)
+            }
+            return .stored
+        }
         if let stored, !replacesFoundName, !isNewer(claim.updatedAtMs, stored.updatedAtMs) {
             // The same profile sent again (a growth or request answer carries
             // the stamp it was set at) is not newer, but it can carry an
@@ -227,7 +254,8 @@ final class ReceivedProfileStore {
                 username: stored.username,
                 updatedAtMs: stored.updatedAtMs,
                 accountId: learned,
-                avatar: stored.avatar
+                avatar: stored.avatar,
+                cardShareable: stored.cardShareable
             )
             if let data = try? JSONEncoder().encode(profiles) {
                 persistence.save(data, accountIdB64: accountIdB64)
@@ -245,7 +273,8 @@ final class ReceivedProfileStore {
                 username: claim.username,
                 updatedAtMs: claim.updatedAtMs,
                 accountId: known,
-                avatar: claim.avatar
+                avatar: claim.avatar,
+                cardShareable: claim.cardShareable
             )
         }
         profiles[key] = next
@@ -320,11 +349,22 @@ public struct OwnProfile: Codable, Equatable, Sendable {
     public let updatedAtMs: UInt64
     /// ADR-0084 — the published profile photo, or `nil` for none.
     public let avatar: ProfileAvatar?
+    /// ADR-0092 section 7 — the "my card may be shared" value this stamp was
+    /// set with, `nil` for a profile stored before the field existed (read as
+    /// shareable). What is SENT is always computed from the current "who can
+    /// find me" setting; this only tells ``ProfileDirectory`` when a change of
+    /// the setting needs a new stamp, since a receiver keeps a profile only
+    /// when it is strictly newer.
+    public let cardShareable: Bool?
 
-    public init(displayName: String?, updatedAtMs: UInt64, avatar: ProfileAvatar? = nil) {
+    public init(
+        displayName: String?, updatedAtMs: UInt64, avatar: ProfileAvatar? = nil,
+        cardShareable: Bool? = nil
+    ) {
         self.displayName = displayName
         self.updatedAtMs = updatedAtMs
         self.avatar = avatar
+        self.cardShareable = cardShareable
     }
 }
 
@@ -361,11 +401,13 @@ struct OwnProfileStore {
     /// gate itself first (``ProfileDirectory/setOwnDisplayName(_:accountIdB64:)``).
     @discardableResult
     func save(
-        displayName: String?, avatar: ProfileAvatar? = nil, accountIdB64: String, nowMs: UInt64
+        displayName: String?, avatar: ProfileAvatar? = nil, accountIdB64: String, nowMs: UInt64,
+        cardShareable: Bool? = nil
     ) -> OwnProfile {
         let previous = load(accountIdB64: accountIdB64)?.updatedAtMs ?? 0
         let stamp = max(nowMs, previous &+ 1)
-        let profile = OwnProfile(displayName: displayName, updatedAtMs: stamp, avatar: avatar)
+        let profile = OwnProfile(
+            displayName: displayName, updatedAtMs: stamp, avatar: avatar, cardShareable: cardShareable)
         if let data = try? JSONEncoder().encode(profile),
            let gate = AccountStoreGate.enter(accountIdB64) {
             defer { gate.leave() }

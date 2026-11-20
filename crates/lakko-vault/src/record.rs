@@ -14,7 +14,8 @@
 //!
 //! All integers are big-endian. `opt<T>` is `0x00`, or `0x01` followed by
 //! `T`; a `bool` is `0x00` or `0x01`; any other byte in either is refused.
-//! Each of the four containers starts with `version(1) = 0x01`.
+//! Each of the four containers starts with `version(1) = 0x03` (versions 1
+//! and 2, before ADR-0047 section 6, are refused).
 //!
 //! ```text
 //! chunk := version || count u16 (<= 512) || message*
@@ -27,7 +28,7 @@
 //!   || attachment_count u8 (<= 64) || attachment*
 //!   || opt<reply> || opt<forward>
 //!   || reaction_count u16 (<= 1024) || reaction*
-//!   || opt<call> || opt<unsupported_version u32>
+//!   || opt<call> || opt<unsupported_version u32> || opt<content>
 //!
 //! attachment :=
 //!   blob_id(32) || key(32) || nonce(12) || size u64
@@ -35,6 +36,8 @@
 //!   || kind_len u8 (<= 32) || kind || opt<duration_ms u32>
 //!   || waveform_len u8 (<= 128) || waveform
 //!   || opt<width u16> || opt<height u16> || opt<thumb>
+//!   || title_len u8 (<= 255) || title || artist_len u8 (<= 255) || artist
+//!   || inline_thumb_len u16 (<= 4096) || inline_thumb
 //! thumb :=
 //!   blob_id(32) || key(32) || nonce(12) || mime_len u16 (<= 256) || mime
 //!   || size u32 || opt<width u16> || opt<height u16>
@@ -44,6 +47,8 @@
 //! origin := group_id_len u8 (1..=128) || group_id || message_id u64
 //! reaction := reactor(32) || emoji_len u8 (1..=64) || emoji
 //! call := outcome u8 || video bool || duration_secs u32
+//! content := kind u8 (1..=5) || payload_len u32 (1..=196608) || payload
+//!   || state_len u16 (<= 8192) || state
 //!
 //! head := version || ref || kind u8 (0 unknown, 1 one-to-one, 2 group)
 //!   || title_len u16 (<= 255) || title
@@ -64,7 +69,8 @@
 //! shared_pin := message_id u64 || pinned bool || updated_at_ms u64
 //! personal_pin := message_id u64 || pinned_at_ms u64
 //! chunk_entry := count u16 || first_id u64 || last_id u64 || version u64
-//! reentry := epoch u64 || group_info_len u32 (1..=1 MiB) || group_info
+//! reentry := epoch u64 || ds_access_seed(32) || group_info_len u32 (1..=1 MiB)
+//!   || group_info
 //! registrar := rank u8 || seed(32)
 //!
 //! devices_head := version || reentry_count u8 (<= 2) || reentry*
@@ -73,10 +79,18 @@
 //! entry := ref || last_activity_ms u64 || membership u8
 //! ```
 //!
-//! A string without a presence byte (`mime`, `name`, `kind`, a reply's or a
+//! A content block (ADR-0092 section 3.11) is a poll (1), checklist (2),
+//! location (3), contact card (4) or article (5): the JSON value of the
+//! envelope's content field and, for a poll or checklist, a folded-state
+//! snapshot (empty when none). Both are opaque here; the FFI decodes them
+//! with `lakko_attachments::Content::from_payload` and
+//! `lakko_attachments::content_state::ContentState::decode`.
+//!
+//! A string without a presence byte (`mime`, `name`, `kind`, `title`,
+//! `artist`, a reply's or a
 //! forward's `author`, `excerpt`, `title`, `display_name`, `username`) is
-//! absent when it is empty; the same holds for `waveform`. Every string is
-//! UTF-8.
+//! absent when it is empty; the same holds for `waveform` and
+//! `inline_thumb`. Every string is UTF-8.
 //!
 //! ## Canonical
 //!
@@ -102,7 +116,8 @@
 //!
 //! The bounds are structural. The media rules of ADR-0047 (a duration only
 //! for a voice or video note and within its limit, a dimension within its
-//! range, a thumb within its size limit) live in `lakko-attachments`
+//! range, a thumb within its size limit, a micro thumbnail that is a JPEG on
+//! the first image or video of a message only) live in `lakko-attachments`
 //! (`RawMediaMetadata::bounded`), which this crate does not depend on; the
 //! FFI crates apply them on both routes, as they do for the history bundle
 //! of `lakko_mls::history_placeholder`, whose attachment field set and caps
@@ -124,14 +139,27 @@ use thiserror::Error;
 use crate::keys::{ConversationRef, MAX_CONVERSATION_ID_LEN, REF_TAG_CONVERSATION};
 use crate::seal::MAX_PLAINTEXT_BYTES;
 
-/// The one version byte the four containers carry.
-pub const RECORD_VERSION_V1: u8 = 0x01;
+/// The one version byte the four containers carry. Version 2 (ADR-0092):
+/// audio title and artist on an attachment, and the content block on a
+/// message. Version 3 (ADR-0047 section 6): the micro thumbnail on an
+/// attachment. Flag day: versions 1 and 2 are refused.
+pub const RECORD_VERSION_V3: u8 = 0x03;
 
 /// Largest encoded record, in bytes: what one sealed object carries.
 pub const MAX_RECORD_BYTES: usize = MAX_PLAINTEXT_BYTES;
 
 /// Longest message text, in UTF-8 bytes (1 MiB).
 pub const MAX_TEXT_BYTES: usize = 1 << 20;
+/// Longest audio title or artist, bytes (ADR-0092).
+pub const MAX_AUDIO_TAG_BYTES: usize = 255;
+/// Largest content payload, bytes (chosen; matches
+/// `lakko_attachments::content_state::MAX_CONTENT_PAYLOAD_BYTES`).
+pub const MAX_CONTENT_PAYLOAD_BYTES: usize = 196_608;
+/// Largest content state snapshot, bytes (chosen; matches
+/// `lakko_attachments::content_state::MAX_CONTENT_STATE_BYTES`).
+pub const MAX_CONTENT_STATE_BYTES: usize = 8_192;
+/// Content kind bytes a record carries.
+pub const CONTENT_KINDS: core::ops::RangeInclusive<u8> = 1..=5;
 /// Most attachments on one message.
 pub const MAX_ATTACHMENTS: usize = 64;
 /// Longest attachment or thumb `mime`, in UTF-8 bytes.
@@ -142,6 +170,9 @@ pub const MAX_NAME_BYTES: usize = 1024;
 pub const MAX_KIND_BYTES: usize = 32;
 /// Longest waveform, in bytes.
 pub const MAX_WAVEFORM_BYTES: usize = 128;
+/// Longest micro thumbnail, in bytes (ADR-0047 section 6; matches
+/// `lakko_attachments::MAX_INLINE_THUMB_BYTES`).
+pub const MAX_INLINE_THUMB_BYTES: usize = 4096;
 /// Longest reply author snapshot, in UTF-8 bytes.
 pub const MAX_REPLY_AUTHOR_BYTES: usize = 255;
 /// Longest reply excerpt snapshot, in UTF-8 bytes.
@@ -186,14 +217,14 @@ const FLAG_KNOWN: u8 = FLAG_EDITED | FLAG_DELETED;
 // an empty one is refused by that rule and not as a short input. A count is
 // checked against the remaining input at this size before a list is
 // allocated.
-const MIN_MESSAGE_LEN: usize = 8 + 1 + 1 + 8 + 8 + 1 + 4 + 1 + 1 + 1 + 2 + 1 + 1;
-const MIN_ATTACHMENT_LEN: usize = 32 + 32 + 12 + 8 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1;
+const MIN_MESSAGE_LEN: usize = 8 + 1 + 1 + 8 + 8 + 1 + 4 + 1 + 1 + 1 + 2 + 1 + 1 + 1;
+const MIN_ATTACHMENT_LEN: usize = 32 + 32 + 12 + 8 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2;
 const MIN_REACTION_LEN: usize = 32 + 1;
 const MIN_PERSON_LEN: usize = 32 + 1 + 1 + 1;
 const SHARED_PIN_LEN: usize = 8 + 1 + 8;
 const PERSONAL_PIN_LEN: usize = 8 + 8;
 const CHUNK_ENTRY_LEN: usize = 2 + 8 + 8 + 8;
-const MIN_REENTRY_LEN: usize = 8 + 4;
+const MIN_REENTRY_LEN: usize = 8 + 32 + 4;
 const MIN_INDEX_ENTRY_LEN: usize = 3 + 8 + 1;
 
 /// Why a record was refused. Reason codes only: no variant carries input.
@@ -266,6 +297,10 @@ pub enum RecordError {
     /// The index names one conversation twice.
     #[error("the index repeats a conversation")]
     RepeatedRef,
+    /// A content block with an unknown kind, an empty or over-long payload,
+    /// or an over-long state (ADR-0092).
+    #[error("a content block is not admissible")]
+    Content,
 }
 
 impl RecordError {
@@ -295,6 +330,7 @@ impl RecordError {
             Self::Reentry => "reentry",
             Self::Entries => "entries",
             Self::RepeatedRef => "repeatedRef",
+            Self::Content => "content",
         }
     }
 }
@@ -443,6 +479,12 @@ pub struct VaultAttachment {
     pub height: Option<u16>,
     /// Poster frame.
     pub thumb: Option<VaultThumb>,
+    /// ADR-0092 audio title; empty when none.
+    pub title: String,
+    /// ADR-0092 audio artist; empty when none.
+    pub artist: String,
+    /// ADR-0047 section 6 micro thumbnail (JPEG bytes); empty when none.
+    pub inline_thumb: Vec<u8>,
 }
 
 impl core::fmt::Debug for VaultAttachment {
@@ -460,6 +502,9 @@ impl core::fmt::Debug for VaultAttachment {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("thumb", &self.thumb)
+            .field("title", &self.title)
+            .field("artist", &self.artist)
+            .field("inline_thumb_len", &self.inline_thumb.len())
             .finish()
     }
 }
@@ -514,6 +559,18 @@ pub struct VaultCall {
     pub duration_secs: u32,
 }
 
+/// An ADR-0092 content message: kind, payload and state snapshot, opaque
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VaultContent {
+    /// Content kind byte, in [`CONTENT_KINDS`].
+    pub kind: u8,
+    /// The payload, 1..=[`MAX_CONTENT_PAYLOAD_BYTES`] bytes.
+    pub payload: Vec<u8>,
+    /// The folded-state snapshot; empty when none.
+    pub state: Vec<u8>,
+}
+
 /// One saved message: the row shape of a head's tail and of every chunk.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VaultMessage {
@@ -548,6 +605,9 @@ pub struct VaultMessage {
     /// Set when the message was of a wire version the saving device could
     /// not read: that version.
     pub unsupported_version: Option<u32>,
+    /// ADR-0092 content, for a poll, checklist, location, contact card or
+    /// article message.
+    pub content: Option<VaultContent>,
 }
 
 /// One chunk of earlier messages.
@@ -608,11 +668,18 @@ pub struct ChunkEntry {
     pub version: u64,
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReentryEpoch {
     /// The epoch the GroupInfo describes.
     pub epoch: u64,
+    /// The Delivery Service access seed of that epoch: the group's
+    /// `export_secret("lakko/ds/access/v1", group_id, 32)` at `epoch`, the
+    /// input of the journal's access signer (ADR-0053). An entering device
+    /// signs the epoch-`epoch` proof of its entry commit with it. Secret;
+    /// redacted in `Debug`.
+    pub ds_access_seed: SecretBytes<32>,
     /// The GroupInfo with its ratchet tree, as MLS encodes it. Opaque here.
     pub group_info: Vec<u8>,
 }
@@ -711,6 +778,21 @@ impl VaultAttachment {
             MAX_WAVEFORM_BYTES,
             RecordError::Attachment,
         )?;
+        within(
+            self.title.len(),
+            MAX_AUDIO_TAG_BYTES,
+            RecordError::Attachment,
+        )?;
+        within(
+            self.artist.len(),
+            MAX_AUDIO_TAG_BYTES,
+            RecordError::Attachment,
+        )?;
+        within(
+            self.inline_thumb.len(),
+            MAX_INLINE_THUMB_BYTES,
+            RecordError::Attachment,
+        )?;
         self.thumb.as_ref().map_or(Ok(()), VaultThumb::validate)
     }
 }
@@ -770,6 +852,21 @@ impl VaultMessage {
                 reaction.emoji.len(),
                 MAX_EMOJI_BYTES,
                 RecordError::Reactions,
+            )?;
+        }
+        if let Some(content) = &self.content {
+            if !CONTENT_KINDS.contains(&content.kind) || content.payload.is_empty() {
+                return Err(RecordError::Content);
+            }
+            within(
+                content.payload.len(),
+                MAX_CONTENT_PAYLOAD_BYTES,
+                RecordError::Content,
+            )?;
+            within(
+                content.state.len(),
+                MAX_CONTENT_STATE_BYTES,
+                RecordError::Content,
             )?;
         }
         Ok(())
@@ -965,6 +1062,9 @@ fn put_attachment(out: &mut Vec<u8>, attachment: &VaultAttachment) {
     if let Some(thumb) = &attachment.thumb {
         put_thumb(out, thumb);
     }
+    put_bytes_u8(out, attachment.title.as_bytes());
+    put_bytes_u8(out, attachment.artist.as_bytes());
+    put_bytes_u16(out, &attachment.inline_thumb);
 }
 
 fn put_message(out: &mut Vec<u8>, message: &VaultMessage) {
@@ -1009,6 +1109,12 @@ fn put_message(out: &mut Vec<u8>, message: &VaultMessage) {
         out.extend_from_slice(&call.duration_secs.to_be_bytes());
     }
     put_opt_u32(out, message.unsupported_version);
+    put_bool(out, message.content.is_some());
+    if let Some(content) = &message.content {
+        out.push(content.kind);
+        put_bytes_u32(out, &content.payload);
+        put_bytes_u16(out, &content.state);
+    }
 }
 
 const fn check_size(out: &[u8]) -> Result<(), RecordError> {
@@ -1030,6 +1136,7 @@ fn put_reentry(out: &mut Vec<u8>, reentry: &[ReentryEpoch]) -> Result<(), Record
     put_len_u8(out, reentry.len());
     for epoch in reentry {
         out.extend_from_slice(&epoch.epoch.to_be_bytes());
+        out.extend_from_slice(epoch.ds_access_seed.as_bytes());
         put_bytes_u32(out, &epoch.group_info);
         check_size(out)?;
     }
@@ -1052,7 +1159,7 @@ impl HistoryChunk {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V1];
+        let mut out = vec![RECORD_VERSION_V3];
         put_messages(&mut out, &self.messages)?;
         check_size(&out)?;
         Ok(out)
@@ -1075,7 +1182,7 @@ impl ConversationHead {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V1];
+        let mut out = vec![RECORD_VERSION_V3];
         self.conversation.write_to(&mut out);
         out.push(self.kind.to_wire());
         put_bytes_u16(&mut out, self.title.as_bytes());
@@ -1135,7 +1242,7 @@ impl DevicesHead {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V1];
+        let mut out = vec![RECORD_VERSION_V3];
         put_reentry(&mut out, &self.reentry)?;
         check_size(&out)?;
         Ok(out)
@@ -1158,7 +1265,7 @@ impl VaultIndex {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V1];
+        let mut out = vec![RECORD_VERSION_V3];
         put_len_u32(&mut out, self.entries.len());
         for entry in &self.entries {
             entry.conversation.write_to(&mut out);
@@ -1183,7 +1290,7 @@ impl<'a> Reader<'a> {
             return Err(RecordError::TooLarge);
         }
         let mut reader = Self { rest: bytes };
-        if reader.u8()? != RECORD_VERSION_V1 {
+        if reader.u8()? != RECORD_VERSION_V3 {
             return Err(RecordError::UnknownVersion);
         }
         Ok(reader)
@@ -1355,6 +1462,18 @@ fn read_attachment(r: &mut Reader<'_>) -> Result<VaultAttachment, RecordError> {
     } else {
         None
     };
+    let title_len = r.len_u8()?;
+    let title = r.string(title_len, MAX_AUDIO_TAG_BYTES, RecordError::Attachment)?;
+    let artist_len = r.len_u8()?;
+    let artist = r.string(artist_len, MAX_AUDIO_TAG_BYTES, RecordError::Attachment)?;
+    let inline_thumb_len = r.len_u16()?;
+    let inline_thumb = r
+        .bounded(
+            inline_thumb_len,
+            MAX_INLINE_THUMB_BYTES,
+            RecordError::Attachment,
+        )?
+        .to_vec();
     Ok(VaultAttachment {
         blob_id,
         key,
@@ -1368,6 +1487,9 @@ fn read_attachment(r: &mut Reader<'_>) -> Result<VaultAttachment, RecordError> {
         width,
         height,
         thumb,
+        title,
+        artist,
+        inline_thumb,
     })
 }
 
@@ -1488,7 +1610,34 @@ fn read_message(r: &mut Reader<'_>) -> Result<VaultMessage, RecordError> {
         reactions,
         call,
         unsupported_version: r.opt_u32()?,
+        content: read_content(r)?,
     })
+}
+
+fn read_content(r: &mut Reader<'_>) -> Result<Option<VaultContent>, RecordError> {
+    if !r.bool()? {
+        return Ok(None);
+    }
+    let kind = r.u8()?;
+    if !CONTENT_KINDS.contains(&kind) {
+        return Err(RecordError::Content);
+    }
+    let payload_len = r.len_u32()?;
+    if payload_len == 0 {
+        return Err(RecordError::Content);
+    }
+    let payload = r
+        .bounded(payload_len, MAX_CONTENT_PAYLOAD_BYTES, RecordError::Content)?
+        .to_vec();
+    let state_len = r.len_u16()?;
+    let state = r
+        .bounded(state_len, MAX_CONTENT_STATE_BYTES, RecordError::Content)?
+        .to_vec();
+    Ok(Some(VaultContent {
+        kind,
+        payload,
+        state,
+    }))
 }
 
 fn read_messages(r: &mut Reader<'_>, max: usize) -> Result<Vec<VaultMessage>, RecordError> {
@@ -1522,6 +1671,7 @@ fn read_reentry(r: &mut Reader<'_>) -> Result<Vec<ReentryEpoch>, RecordError> {
     let mut reentry = Vec::with_capacity(count);
     for _ in 0..count {
         let epoch = r.u64()?;
+        let ds_access_seed = SecretBytes::new(r.array::<32>()?);
         let info_len = r.len_u32()?;
         if info_len == 0 {
             return Err(RecordError::Reentry);
@@ -1529,7 +1679,11 @@ fn read_reentry(r: &mut Reader<'_>) -> Result<Vec<ReentryEpoch>, RecordError> {
         let group_info = r
             .bounded(info_len, MAX_GROUP_INFO_BYTES, RecordError::Reentry)?
             .to_vec();
-        reentry.push(ReentryEpoch { epoch, group_info });
+        reentry.push(ReentryEpoch {
+            epoch,
+            ds_access_seed,
+            group_info,
+        });
     }
     Ok(reentry)
 }

@@ -70,6 +70,7 @@ run_tools() {
         -e LAKKO_BACKUP_MYSQL_ARGS="-h$SRC -uroot -ptestroot" \
         -e LAKKO_BACKUP_HOST=backup-test \
         -e LAKKO_BACKUP_EXPECT_ETC=0 \
+        -e LAKKO_BACKUP_TEXTFILE_DIR=/w/textfile \
         "$TOOLS" bash -euo pipefail -c "apt-get -qq update >/dev/null && \
             DEBIAN_FRONTEND=noninteractive apt-get -qq install -y restic mariadb-client >/dev/null 2>&1 && $1"
 }
@@ -85,6 +86,9 @@ run_tools '
     /scripts/backup.sh
     /scripts/backup.sh
     /scripts/restore-check.sh
+    grep -q "^lakko_job_last_success_timestamp_seconds{task=\"backup_db\"} [0-9]" /w/textfile/lakko_backup_db.prom
+    grep -q "^lakko_job_last_success_timestamp_seconds{task=\"backup_blobs\"} [0-9]" /w/textfile/lakko_backup_blobs.prom
+    echo "[backup-test] OK heartbeat files written"
     restic snapshots --compact
     mkdir -p /w/restored
     restic restore latest --tag lakko --target /w/restored >/dev/null

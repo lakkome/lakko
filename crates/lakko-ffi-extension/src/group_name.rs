@@ -220,6 +220,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         })
         .unwrap();
         assert!(decode_group_name_envelope(profile).is_err());

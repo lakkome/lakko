@@ -183,6 +183,14 @@ private struct ChatScaledFont: ViewModifier {
     }
 }
 
+/// The point size ``View/chatFont(_:weight:italic:monospacedDigit:)`` gives
+/// a text style, for UIKit text (the composer's text view).
+enum ChatFontSize {
+    static func points(style: UIFont.TextStyle, dynamicTypeSize: DynamicTypeSize, scale: CGFloat) -> CGFloat {
+        ChatScaledFont.size(style: style, base: nil, dynamicTypeSize: dynamicTypeSize) * scale
+    }
+}
+
 extension View {
     /// Read the stored chat text size at the root of a window.
     func chatTextScaleRoot() -> some View { modifier(ChatTextScaleRoot()) }
@@ -215,9 +223,9 @@ struct InitialsAvatar: View {
     var size: CGFloat = 40
     /// `true` renders the group glyph instead of initials.
     var isGroup: Bool = false
-    /// An SF Symbol drawn when the name yields no initials (a person nothing
-    /// is known about), e.g. `person.fill`. `nil` leaves the circle blank.
-    var placeholderSymbol: String? = nil
+    /// An icon drawn when the name yields no initials (a person nothing is
+    /// known about), e.g. `.personFill`. `nil` leaves the circle blank.
+    var placeholderIcon: LkIcon? = nil
     /// ADR-0084 — whose profile photo to show, when this device holds it.
     /// `nil` (a group, a channel, someone with no key) draws initials only.
     var photo: AvatarPhoto? = nil
@@ -241,12 +249,10 @@ struct InitialsAvatar: View {
         return ZStack {
             Circle().fill(tint.background)
             if isGroup && initials.isEmpty {
-                Image(systemName: "person.3.fill")
-                    .font(.system(size: size * 0.38, weight: .semibold))
+                LkIconView(.person3Fill, size: size * 0.45, relativeTo: nil)
                     .foregroundStyle(tint.foreground)
-            } else if initials.isEmpty, let placeholderSymbol {
-                Image(systemName: placeholderSymbol)
-                    .font(.system(size: size * 0.42, weight: .semibold))
+            } else if initials.isEmpty, let placeholderIcon {
+                LkIconView(placeholderIcon, size: size * 0.5, relativeTo: nil)
                     .foregroundStyle(tint.foreground)
             } else {
                 Text(initials)

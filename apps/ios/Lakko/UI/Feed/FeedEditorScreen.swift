@@ -162,8 +162,7 @@ struct FeedEditorScreen: View {
                 Button {
                     rule.icon = UInt8(index)
                 } label: {
-                    Image(systemName: entry.symbol)
-                        .font(.body)
+                    LkIconView(entry.icon, size: 20)
                         .frame(maxWidth: .infinity, minHeight: 36)
                         .background(
                             RoundedRectangle(cornerRadius: LakkoRadius.control)

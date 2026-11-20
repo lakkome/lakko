@@ -28,6 +28,7 @@ import { MemoryStorage } from "../test/fake-storage";
 import type { AcceptedContact } from "../contacts/local-store";
 import type { RestoreGateContext, RestoreResult } from "./client";
 import {
+  landingRestoreSettled,
   prefetchAccountBackup,
   restoreAccountBackup,
   restoreOwedAccountBackup,
@@ -510,6 +511,35 @@ describe("restoreOwedAccountBackup (the session-landing step)", () => {
     const l = landing();
     expect(await l.run()).toBeNull();
     expect(l.restores).toEqual([]);
+  });
+
+  it("marks the landing's backup step settled for the account, owed or not (the username step waits for it)", async () => {
+    const l = landing();
+    const account = "U0VUVExFRFNFVFRMRURTRQ==";
+    markBackupRestoreOwed(account, l.storage);
+    let resolveRestore: (o: AccountBackupRestoreOutcome) => void = () => undefined;
+    const pending = restoreOwedAccountBackup(
+      {
+        accountIdBytes: ACCOUNT_BYTES,
+        accountIdB64: account,
+        sessionToken: "v1.session",
+        deviceKey: async () => DEVICE_KEY,
+      },
+      {
+        isOwed: (a) => isBackupRestoreOwed(a, l.storage),
+        clearOwed: (a) => clearBackupRestoreOwed(a, l.storage),
+        cachedPhrase: async () => PHRASE,
+        restore: () =>
+          new Promise((resolve) => {
+            resolveRestore = resolve;
+          }),
+      },
+    );
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(landingRestoreSettled(account)).toBe(false);
+    resolveRestore({ kind: "no-backup" });
+    await pending;
+    expect(landingRestoreSettled(account)).toBe(true);
   });
 
   it("the phrase prompt's landing fetches and applies with the phrase in hand", async () => {

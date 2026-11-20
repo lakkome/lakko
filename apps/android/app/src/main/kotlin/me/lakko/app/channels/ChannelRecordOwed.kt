@@ -35,6 +35,28 @@ internal suspend fun reissueRecordOwed(
     return landed
 }
 
+/**
+ * The first record of a channel this device created: owed before the send,
+ * cleared once it landed. A failed send is logged and stays owed, and the
+ * publisher loop re-issues it ([ChannelMetaPublisher.reissue]). Returns
+ * whether it landed; never throws but a cancellation.
+ */
+internal suspend fun postFirstChannelRecord(
+    marks: OwedRecordMarks,
+    channelId: String,
+    post: suspend () -> Unit,
+): Boolean = reissueRecordOwed(marks, channelId) {
+    try {
+        post()
+        true
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        android.util.Log.w("ChannelRecordOwed", "channel record not posted at creation; owed", e)
+        false
+    }
+}
+
 /** Owed marks of the bound account, in this device's preferences file
  *  [prefsName], keyed `account|channel`. Nothing is recorded while no
  *  account is bound. Written with `commit()`: a mark is on disk before the

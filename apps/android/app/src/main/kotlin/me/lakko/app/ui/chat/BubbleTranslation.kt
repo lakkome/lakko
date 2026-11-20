@@ -61,11 +61,22 @@ internal fun rememberBubbleTranslation(msg: ChatMessage, isOwn: Boolean): Bubble
     // The text a translation works on: the caption, else an open transcript.
     val readable = msg.text.ifEmpty { transcript.orEmpty() }
     val shown = (line as? TranslateLine.Shown)?.text
-    val offer = remember(conversation, readable, isOwn, settings, cap, store) {
+    val detections by TranslationCenter.detections.collectAsStateWithLifecycle()
+    // The menu's answer changes when this message's detection arrives.
+    val detected = conversation?.let { detections[TranslationStoreState.messageKey(it, msg.messageId)] }
+    val offer = remember(conversation, readable, isOwn, settings, cap, store, detected) {
         if (conversation == null) {
             TranslateOffer.NONE
         } else {
             TranslationCenter.translateOffer(conversation, msg.messageId, readable, isOwn)
+        }
+    }
+    // UX 3.2 — before any translation, the message's language up front.
+    val languageLine = remember(conversation, readable, isOwn, settings, cap, detected) {
+        if (conversation == null || msg.text.isEmpty()) {
+            null
+        } else {
+            TranslationCenter.languageLine(conversation, msg.messageId, msg.text, isOwn)
         }
     }
     val autoOn = conversation != null && store.conversations[conversation]?.autoTranslate == true
@@ -82,7 +93,7 @@ internal fun rememberBubbleTranslation(msg: ChatMessage, isOwn: Boolean): Bubble
     }
     return BubbleTranslation(
         shownText = if (msg.text.isNotEmpty() && shown != null) shown else msg.text,
-        captionLine = if (msg.text.isNotEmpty()) line else null,
+        captionLine = bubbleCaptionLine(msg.text, line, languageLine),
         copyText = shown ?: readable,
         menuOffered = offer != TranslateOffer.NONE || line is TranslateLine.Shown,
         menuLabel = if (line is TranslateLine.Shown) t("chat.message.show_original") else t("chat.message.translate"),
@@ -110,3 +121,11 @@ internal fun rememberBubbleTranslation(msg: ChatMessage, isOwn: Boolean): Bubble
         transcriptTarget = conversation?.let { TranscriptTarget(it, msg.messageId, opId, line.takeIf { msg.text.isEmpty() }) },
     )
 }
+
+/**
+ * UX 3.2 — the quiet line under a caption: the translation's own line when
+ * there is one (manual or automatic), else the language line up front; none
+ * without a caption.
+ */
+internal fun bubbleCaptionLine(caption: String, line: TranslateLine?, languageLine: TranslateLine?): TranslateLine? =
+    if (caption.isEmpty()) null else line ?: languageLine

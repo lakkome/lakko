@@ -1353,10 +1353,26 @@ async function broadcastAndMarkDistributed(
     await withNetworkTimeout("broadcast", () => broadcast(envelope));
     await markGroupRoutingDistributed(accountId, groupIdB64);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("push-routing secret broadcast failed", err);
+    // ADR-0091: a device behind in the conversation sends nothing; the row
+    // stays pending and goes out once it is back. Not a failure to log. Read
+    // by name: `chat/client.ts` imports this module.
+    if (!refusedAsBehind(err)) {
+      // eslint-disable-next-line no-console
+      console.warn("push-routing secret broadcast failed", err);
+    }
     return;
   }
+}
+
+/** Whether `err` (or a `cause` under it) is `chat/client.ts`'s
+ *  `ConversationBehindError`. */
+function refusedAsBehind(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth += 1) {
+    if ((current as { name?: unknown }).name === "ConversationBehindError") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**

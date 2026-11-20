@@ -2783,3 +2783,61 @@ async fn a_public_channel_serves_its_seed_openly_and_going_private_withdraws_it(
     let count: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(count["count"], 1);
 }
+
+/// ADR-0096: a driven route moves the domain counters, an error response
+/// carries its code as the `code` label, and the exposition holds no
+/// identifier (the channel id of this test is not in it).
+#[tokio::test]
+async fn routes_move_their_metrics() {
+    let metrics = lakko_metrics::install("channels", "0.0.0").unwrap();
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&create_body())
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
+        .body(vec![7, 7, 7])
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
+        .body(Vec::<u8>::new())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    // No proof at all.
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
+        .body(vec![1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let text = metrics.render();
+    lakko_metrics::exposition::assert_clean(&text, &["step", "kind", "reason"], &[]);
+    assert!(!text.contains(CHANNEL_HEX), "{text}");
+    assert!(
+        text.contains("lakko_channels_posts_total{outcome=\"ok\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("lakko_channels_posts_total{outcome=\"rejected\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "lakko_channels_proof_refusals_total{kind=\"copublisher\",reason=\"malformed\"}"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("code=\"empty-post\""), "{text}");
+    assert!(text.contains("code=\"owner-proof-required\""), "{text}");
+}

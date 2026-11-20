@@ -91,32 +91,31 @@ internal enum class FailedRowVerdict {
 }
 
 /**
- * The verdict for a row `processIncomingVerifyingRemovals` refused.
+ * The verdict for a row `processIncomingVerifyingRemovals` refused (ADR-0091,
+ * open question 6 closed: the same exact rule the conversation poll uses,
+ * [me.lakko.app.chat.registeredCommitVerdict]).
  *
- * [isOwnEcho]: this device's own row ([me.lakko.app.push.isOwnMessageEcho]).
- * Its effect is already in the snapshot (an own commit is merged before it is
- * published, ADR-0081; an own application message changes nothing here).
- * [sealedEpoch] / [epochAfter]: the row's framed epoch and the epoch after it
- * (`epochOfMessage` / `epochAfterMessage`; `after > sealed` only for a
- * commit), `null` when the bytes are not an MLS message. [localEpoch]: the
- * handle's epoch when the row was read, `null` when unreadable.
+ * HOLD exactly when the row is the commit the DS registered as leaving the
+ * handle's epoch ([registeredCommits], the read's `commits`). An own echo
+ * ([me.lakko.app.push.isOwnMessageEcho]: its effect is already in the snapshot,
+ * an own commit is merged before it is published, ADR-0081), an application
+ * message, a commit of an epoch already passed and a commit-shaped row posted
+ * through the plain publish route all PASS. [localEpoch]: the handle's epoch
+ * when the row was read, `null` when unreadable.
  */
 internal fun failedRowVerdict(
     isOwnEcho: Boolean,
-    sealedEpoch: ULong?,
-    epochAfter: ULong?,
+    rowId: Long,
     localEpoch: ULong?,
-): FailedRowVerdict {
-    if (isOwnEcho) return FailedRowVerdict.PASS
-    // Not MLS framing: no later read can process it either.
-    if (sealedEpoch == null || epochAfter == null) return FailedRowVerdict.PASS
-    // Not a commit: an application message or a proposal cannot move this
-    // device's epoch, and a consumed generation never opens again.
-    if (epochAfter <= sealedEpoch) return FailedRowVerdict.PASS
-    // A commit of an epoch this handle is already past can never apply.
-    if (localEpoch != null && sealedEpoch < localEpoch) return FailedRowVerdict.PASS
-    return FailedRowVerdict.HOLD
-}
+    registeredCommits: Map<ULong, Long>?,
+): FailedRowVerdict =
+    if (me.lakko.app.chat.registeredCommitVerdict(isOwnEcho, rowId, localEpoch, registeredCommits) ==
+        me.lakko.app.chat.RegisteredCommitVerdict.HOLD
+    ) {
+        FailedRowVerdict.HOLD
+    } else {
+        FailedRowVerdict.PASS
+    }
 
 /**
  * The persisted position of one run of the receive loop, under the rule in

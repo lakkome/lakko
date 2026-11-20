@@ -709,6 +709,12 @@ pub struct FfiProfile {
     /// SECRET. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub avatar: Option<FfiAvatar>,
+    /// `false` when the person does not let others share their contact card
+    /// (ADR-0092 section 7, profile v5 flags bit 0). A client sends `false`
+    /// exactly when its own "who can find me" setting is `Nobody`. Defaults
+    /// to `true` so existing initialisers compile.
+    #[uniffi(default = true)]
+    pub card_shareable: bool,
 }
 
 /// A reference to one encrypted avatar blob (ADR-0084): what
@@ -829,6 +835,7 @@ impl From<RustProfile> for FfiProfile {
             username_certificate: p.username_certificate,
             grants: p.grants.into_iter().map(Into::into).collect(),
             avatar: p.avatar.map(Into::into),
+            card_shareable: p.card_shareable,
         }
     }
 }
@@ -869,6 +876,7 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
         username_certificate: p.username_certificate,
         grants,
         avatar,
+        card_shareable: p.card_shareable,
     })
 }
 
@@ -2552,6 +2560,39 @@ pub enum FfiIncomingEnvelopeKind {
     /// publisher; requests before the next rotation collapse into it. Never
     /// render it. Appended last.
     ChannelRotateRequest,
+    /// A co-publisher's device asks an owner device to admit or retire one
+    /// of its account's devices (ADR-0090 section 2.2). `payload` is the
+    /// whole envelope; decode it with `decodePublisherDeviceRequestEnvelope`.
+    /// Only an owner device acts on it, under the rule in that function's
+    /// documentation. Never render it. Appended last.
+    PublisherDeviceRequest,
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). `payload` is the whole envelope; decode it with
+    /// `decodeChannelAdmissionMarkEnvelope` and keep the largest mark from a
+    /// current publisher. Never render it. Appended last.
+    ChannelAdmissionMark,
+    /// ADR-0092 section 3.9 — the open polls and checklists a committer
+    /// hands to a newcomer. `payload` is the whole envelope: keep it with the
+    /// sender's account key (resolved at receipt, C-68) when
+    /// `openItemsSenderTrusted` says so, then `assembleOpenItems` and
+    /// `adoptOpenItem`. Never render it. Appended last.
+    OpenItems,
+    /// ADR-0092 section 3.9 — old ballot rows of one anonymous poll handed
+    /// to a newcomer. `payload` is the whole envelope; read it with
+    /// `decodePollBallotsEnvelope` and treat each row like a journal ballot
+    /// row. Never render it. Appended last.
+    PollBallots,
+    /// ADR-0091 phase 2 — a device of this account that fell behind a
+    /// conversation asks to be brought back (route 1). `payload` is the
+    /// whole envelope; decode it with `decodeConversationReentryEnvelope`,
+    /// check it with `Group.reentryRequestTarget` and
+    /// `reentryAdmissionVerdict`. Never render it. Appended last.
+    ConversationReentry,
+    /// ADR-0091 phase 2 — the group's knock public key (route 3). `payload`
+    /// is the whole envelope; decode it with `decodeKnockKeyEnvelope` and
+    /// keep it only from the owner or an admin resolved at receipt, when
+    /// `knockKeyIsNewer`. Never render it. Appended last.
+    KnockKey,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2774,6 +2815,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             group_photo: Some(photo.into()),
             ..FfiIncomingEnvelope::of(K::GroupPhoto)
         },
+        IncomingEnvelope::OpenItems(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::OpenItems)
+        },
+        IncomingEnvelope::PollBallots(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PollBallots)
+        },
         IncomingEnvelope::GroupReactions(value) => FfiIncomingEnvelope {
             group_reactions: Some(value.into()),
             ..FfiIncomingEnvelope::of(K::GroupReactions)
@@ -2793,6 +2842,22 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ChannelRotateRequest(channel) => FfiIncomingEnvelope {
             payload: channel.to_vec(),
             ..FfiIncomingEnvelope::of(K::ChannelRotateRequest)
+        },
+        IncomingEnvelope::PublisherDeviceRequest(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PublisherDeviceRequest)
+        },
+        IncomingEnvelope::ChannelAdmissionMark(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelAdmissionMark)
+        },
+        IncomingEnvelope::ConversationReentry(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ConversationReentry)
+        },
+        IncomingEnvelope::KnockKey(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::KnockKey)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
@@ -5391,6 +5456,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         }
     }
 
@@ -5403,6 +5469,17 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
+        }
+    }
+
+    #[test]
+    fn profile_card_flag_round_trips() {
+        for shareable in [true, false] {
+            let mut p = canonical_profile();
+            p.card_shareable = shareable;
+            let wire = compose_profile_envelope(p.clone()).expect("compose");
+            assert_eq!(decode_profile_envelope(wire).expect("decode"), p);
         }
     }
 
@@ -5473,6 +5550,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         })
         .expect("compose blank");
         let decoded = decode_profile_envelope(blank).expect("decode blank");
@@ -6029,4 +6107,20 @@ pub fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 #[must_use]
 pub fn call_invite_max_uses() -> u32 {
     RUST_CALL_INVITE_MAX_USES
+}
+
+/// ADR-0081 (third amendment): the note a running device posts to a rejoin
+/// knock's rendezvous at once, meaning "a device of this account is online".
+#[uniffi::export]
+#[must_use]
+pub fn compose_rejoin_present() -> Vec<u8> {
+    lakko_contacts::rejoin_present::compose_rejoin_present()
+}
+
+/// Is this rendezvous row exactly a rejoin presence note (and so not a
+/// Welcome)?
+#[uniffi::export]
+#[must_use]
+pub fn is_rejoin_present(row: Vec<u8>) -> bool {
+    lakko_contacts::rejoin_present::is_rejoin_present(&row)
 }

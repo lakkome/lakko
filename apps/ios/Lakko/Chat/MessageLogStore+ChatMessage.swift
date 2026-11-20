@@ -92,6 +92,8 @@ extension PersistedMessage {
             }
         self.unsupportedVersion = msg.unsupportedVersion
         self.lastOpId = msg.lastOpId
+        // ADR-0092 — a deleted content message is stored empty too.
+        self.content = msg.deleted ? nil : msg.content
     }
 
     /// Inverse — reconstruct a runtime ``ChatMessage`` from
@@ -134,7 +136,8 @@ extension PersistedMessage {
                     originMessageId: $0.originMessageId)
             },
             unsupportedVersion: unsupportedVersion,
-            lastOpId: lastOpId
+            lastOpId: lastOpId,
+            content: content
         )
     }
 }
@@ -157,7 +160,10 @@ extension PersistedAttachment {
             waveformB64: ref.waveform?.base64EncodedString(),
             width: ref.width,
             height: ref.height,
-            thumb: ref.thumb.map(PersistedThumb.init(from:))
+            thumb: ref.thumb.map(PersistedThumb.init(from:)),
+            title: ref.title,
+            artist: ref.artist,
+            inlineThumbB64: ref.inlineThumb?.base64EncodedString()
         )
     }
 
@@ -184,7 +190,12 @@ extension PersistedAttachment {
             waveform: waveform,
             width: width,
             height: height,
-            thumb: thumb?.toThumbRef()
+            thumb: thumb?.toThumbRef(),
+            title: title,
+            artist: artist,
+            // ADR-0047 section 6 — re-bounded on the way out, so a stored
+            // value never reaches a decoder unchecked.
+            inlineThumb: InlineThumb.bounded(inlineThumbB64.flatMap { Data(base64Encoded: $0) })
         )
     }
 }
