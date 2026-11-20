@@ -29,6 +29,9 @@ final class ChannelPublisherLoops {
     /// Between passes (chosen, not measured; web and Android use the same):
     /// the rotation policy's own clock is a day.
     static let intervalSeconds: UInt64 = 60
+    /// The wait before the next pass when this one found the device identity
+    /// not ready yet (right after start): chosen, not measured.
+    static let notReadyIntervalSeconds: UInt64 = 5
 
     private var opened: Set<String> = []
     private var publicSeedEpoch: [String: UInt32] = [:]
@@ -38,6 +41,9 @@ final class ChannelPublisherLoops {
     /// (ADR-0087 section 15, the rotate request); several collapse into one.
     private var rotateRequested: Set<String> = []
     private var running = false
+    /// A channel of the last pass did not open because the device identity
+    /// was not bound yet; the next pass comes sooner.
+    private var identityNotReady = false
     /// ADR-0090 section 4 — since when this owner device has held an MLS
     /// epoch the channel service has not taken (the unfinished-reseal
     /// takeover), by channel.
@@ -86,7 +92,8 @@ final class ChannelPublisherLoops {
             if UIApplication.shared.applicationState != .background, let seed = accountIdentitySeed() {
                 await pass(channels: channels, client: client, seed: seed)
             }
-            try? await Task.sleep(nanoseconds: Self.intervalSeconds * 1_000_000_000)
+            let wait = identityNotReady ? Self.notReadyIntervalSeconds : Self.intervalSeconds
+            try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
         }
     }
 
@@ -94,6 +101,7 @@ final class ChannelPublisherLoops {
         guard !running, let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
         channelsRef = channels
         running = true
+        identityNotReady = false
         defer { running = false }
         // 2026-11-20 — an owned channel whose owner proof was refused moves
         // its owner key to the current key first (``ChannelOwnerRepair``).
@@ -289,8 +297,12 @@ final class ChannelPublisherLoops {
             if let channelsRef {
                 ChannelInvites.repairFlagIfMissing(channelIdHex: channelId, state: channelsRef, currentSeed: seed)
             }
+        } catch is ChannelPublisherIdentity.NotBound {
+            // Right after start the device identity may not be bound yet: not
+            // a failure, the next pass comes in a few seconds.
+            identityNotReady = true
         } catch {
-            NSLog("[channels] a publisher group did not open")
+            NSLog("[channels] a publisher group did not open (%@)", PublisherCommitFailure.logLabel(error))
         }
     }
 

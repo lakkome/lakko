@@ -416,6 +416,12 @@ public enum PublisherCommitFailure: Equatable, Sendable {
     /// the error's description (a URL in it names the channel).
     public static func logLabel(_ error: Error) -> String {
         if let api = error as? ChannelsApiError { return "\(api.status) \(api.code)" }
+        // An enum error names its case, never its associated values (a core
+        // message may carry an id).
+        let mirror = Mirror(reflecting: error)
+        if mirror.displayStyle == .enum, let label = mirror.children.first?.label {
+            return "\(type(of: error)).\(label)"
+        }
         return String(describing: type(of: error))
     }
 }

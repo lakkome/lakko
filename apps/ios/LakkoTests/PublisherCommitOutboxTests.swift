@@ -300,6 +300,14 @@ final class PublisherCommitOutboxTests: XCTestCase {
         XCTAssertEqual(PublisherCommitFailure.logLabel(refusal), "401 owner-proof-required")
     }
 
+    /// An enum error is logged by its case, never by its associated values
+    /// (a core message may carry an id).
+    func testALogLabelNamesTheCaseAndNotTheMessage() {
+        let label = PublisherCommitFailure.logLabel(FfiError.Group(message: "group 0123456789abcdef0123 refused"))
+        XCTAssertEqual(label, "FfiError.Group")
+        XCTAssertFalse(label.contains("0123456789abcdef"))
+    }
+
     /// The storm seen on an iPhone: 172 entries of one channel, each refused
     /// `401`, tried back to back. Now one request, then none until a reset.
     func testAPileOfRefusedEntriesCostsOneRequestAndIsHeldUntilTheNextStart() async {

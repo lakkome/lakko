@@ -140,6 +140,13 @@ enum ChannelVaultHead {
     /// Sign-out / account switch.
     static func reset() { known = [:] }
 
+    /// A log label for a vault failure: the error's type and, for a vault
+    /// client error, its case; never an id or a body.
+    static func errorLabel(_ error: Error) -> String {
+        if let vault = error as? VaultClientError { return String("VaultClientError.\(vault)".prefix(80)) }
+        return PublisherCommitFailure.logLabel(error)
+    }
+
     private static func nowMs() -> UInt64 { UInt64(max(0, Date().timeIntervalSince1970 * 1000)) }
 
     /// Write `entry` into the channel's head: the head last known here (or
@@ -202,7 +209,8 @@ enum ChannelVaultHead {
                     }
                 } catch {
                     known[channelId] = nil
-                    NSLog("ADR-0064: a channel head was not read after a conflict; not written")
+                    NSLog("ADR-0064: a channel head was not read after a conflict (%@); not written",
+                          ChannelVaultHead.errorLabel(error))
                     return false
                 }
             } catch {
