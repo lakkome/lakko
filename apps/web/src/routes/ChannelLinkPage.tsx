@@ -159,7 +159,7 @@ export function ChannelLinkPage(props: { readonly slug: string; readonly opened:
                 owner's device approves, whether or not this page is open. */}
             <p role="status">{t("channels.join.waiting")}</p>
           </Match>
-          {/* ADR-0098 step 3: a suspended account subscribes to nothing and
+          {/* ADR-0099 step 3: a suspended account subscribes to nothing and
               takes on no channel. */}
           <Match when={accountSuspended()}>{null}</Match>
           <Match when={props.opened.publisherInvite}>

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderator's blob delete ([ADR-0098] section 4, step 5).
+//! The moderator's blob delete ([ADR-0099] section 4, step 5).
 //!
 //! A moderator deletes a blob named in a report's evidence by a signed
 //! statement. The moderation service logs it and forwards it to storage's
@@ -46,7 +46,7 @@
 //! startup) raises the floor: `200 {"list_version": n}`, `400 bad-list`,
 //! `409 stale-list` (older than the floor).
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use std::net::SocketAddr;
 use std::sync::Arc;

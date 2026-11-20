@@ -65,7 +65,7 @@ export interface ChannelPostItemProps {
   /** ADR-0065 — whether this account saved the post. */
   readonly saved: boolean;
   readonly onToggleSaved: () => void;
-  /** ADR-0098 section 2 - `Report` in the menu, for a subscriber. Absent:
+  /** ADR-0099 section 2 - `Report` in the menu, for a subscriber. Absent:
    *  no Report row. */
   readonly onReport?: (() => void) | undefined;
   /** ADR-0092 — `Close poll` on a publisher's open poll post. */

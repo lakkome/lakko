@@ -112,7 +112,7 @@
 //!   renamed away from stays unclaimable before the hourly pruner frees it
 //!   (ADR-0076 D1; default 2592000 = 30 days, chosen not measured).
 //! - `LAKKO_DISCOVERY_MODERATION_BIND` — the internal moderation listener
-//!   (ADR-0098 step 5; default `127.0.0.1:8097`, loopback, never proxied).
+//!   (ADR-0099 step 5; default `127.0.0.1:8097`, loopback, never proxied).
 //! - `LAKKO_DISCOVERY_INTERNAL_SECRET` — standard base64 of at least 16
 //!   bytes, the `x-lakko-internal-secret` the moderation service presents.
 //! - `LAKKO_DISCOVERY_MODERATION_ROOT_KEY` — base64url of the moderation root
@@ -163,7 +163,7 @@
 //! - `GET    /discovery/group-invite/{blob_id}`   — fetch GroupInviteCapability blob (ADR-0028, G-3)
 //! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3, token)
 //! - On the moderation listener only (`LAKKO_DISCOVERY_MODERATION_BIND`,
-//!   ADR-0098 step 5, [`moderation`]):
+//!   ADR-0099 step 5, [`moderation`]):
 //!   `POST /internal/moderation/statement` (apply a moderator's signed
 //!   statement) and `POST /internal/moderation/account` (the panel's read of
 //!   an account target).
@@ -494,7 +494,7 @@ async fn main() -> Result<()> {
     // idempotent, so it never blocks startup or any request path.
     let _transparency_reconciler = maybe_spawn_reconciler(state.transparency.clone(), pool.clone());
 
-    // ADR-0098 step 5 — the internal listener the moderation service
+    // ADR-0099 step 5 — the internal listener the moderation service
     // forwards a moderator's statement to. Loopback, never proxied.
     let _hold_pruner = moderation::spawn_hold_pruner(pool.clone());
     spawn_internal_listener(state.clone()).await?;
@@ -523,7 +523,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// ADR-0098 step 5 - start the internal listener a moderator's statement
+/// ADR-0099 step 5 - start the internal listener a moderator's statement
 /// arrives on, when its secret and root key are set (one warning otherwise).
 ///
 /// # Errors
@@ -584,7 +584,7 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         // owner (ADR-0078 section 10) and are not touched.
         // Session-token-gated; the account_id comes from the verified token.
         // `DELETE /discovery/account` is in `account_delete_routes`: it also
-        // takes a suspended account's restricted session (ADR-0098 step 3).
+        // takes a suspended account's restricted session (ADR-0099 step 3).
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
         // ADR-0050 — remove one device's KeyPackage (device removal). ADR-0074:
@@ -666,7 +666,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
 
     let protected = protected_routes(&state);
     // A3 (GDPR erasure) — purge this account's discovery footprint. Takes the
-    // `s1` restricted session too (ADR-0098 step 3), so a suspended person who
+    // `s1` restricted session too (ADR-0099 step 3), so a suspended person who
     // deletes the account leaves nothing here.
     let account_delete = Router::new()
         .route(

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! The MariaDB blob index (`storage_blobs`, migrations `0001` and `0003`),
-//! in [`vault`], the vault index (migration `0004`), and the ADR-0098
+//! in [`vault`], the vault index (migration `0004`), and the ADR-0099
 //! tombstones and moderation bookkeeping (migration `0005`).
 
 use async_trait::async_trait;

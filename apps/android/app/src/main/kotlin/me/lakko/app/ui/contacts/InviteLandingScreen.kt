@@ -293,13 +293,13 @@ private fun ReadyPanel(state: InviteLandingState.Ready, onAdd: () -> Unit, onNot
         )
     }
     Spacer(Modifier.height(24.dp))
-    // ADR-0098 step 4 / UX 3 — a link from an account the moderation log
+    // ADR-0099 step 4 / UX 3 — a link from an account the moderation log
     // confirms suspended has no Add.
     val inviterKeyB64 = remember(invite.ownerSignaturePubkey) {
         invite.ownerSignaturePubkey.takeIf { it.size == 32 }?.let { java.util.Base64.getEncoder().encodeToString(it) }
     }
     val inviterSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(inviterKeyB64)
-    // ADR-0098 section 4 - a suspended account adds no contacts.
+    // ADR-0099 section 4 - a suspended account adds no contacts.
     val addReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     if (inviterSuspended || state.inviterSuspended) {
         Text(

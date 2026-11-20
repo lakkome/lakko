@@ -311,7 +311,7 @@ public object ChannelRemovalWatch {
         for ((channelId, keys) in state.subscriberKeysByChannel.value) {
             if (channelId in publishing) continue
             val channel = state.channels.value.firstOrNull { it.id == channelId } ?: continue
-            // ADR-0098 step 5 — a removed channel is asked once per period.
+            // ADR-0099 step 5 — a removed channel is asked once per period.
             if (!RemovedChannels.mayAsk(channelId)) continue
             try {
                 client.fetchEnvelope(channelId, ChannelsComposer.bytesToHex(keys.publicKey))

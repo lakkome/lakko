@@ -4,7 +4,7 @@
 //! Witness cosign state + the consistency-gated cosign logic (ADR-0020).
 //!
 //! The witness keeps ONE piece of state per log it co-signs (witness v2,
-//! ADR-0098 section 5) — its last-co-signed `(tree_root, log_size)` for that
+//! ADR-0099 section 5) — its last-co-signed `(tree_root, log_size)` for that
 //! log. Before co-signing a new operator root it verifies
 //! the root is operator-signed AND that a Merkle consistency proof shows the
 //! new root append-only-extends its high-water. Two divergent forks cannot both

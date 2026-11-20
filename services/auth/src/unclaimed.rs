@@ -133,7 +133,7 @@ pub(crate) async fn is_past_unclaimed_lifetime(
 /// A database error; nothing is deleted or queued then.
 pub(crate) async fn prune_unclaimed(pool: &MySqlPool, ttl_secs: u64) -> Result<u64, sqlx::Error> {
     // One transaction: the batch is chosen and locked, each account's
-    // identity-key history is deleted or kept (ADR-0098 F3: kept while the
+    // identity-key history is deleted or kept (ADR-0099 F3: kept while the
     // account is suspended), then the accounts go and their purge is queued.
     let mut conn = crate::session::read_committed_conn(pool).await?;
     let mut tx = sqlx::Acquire::begin(&mut conn).await?;

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 step 4 - the standing service (cache, one request in flight per
+ * ADR-0099 step 4 - the standing service (cache, one request in flight per
  * prefix, failure back-off, `unknown` on any core error, nothing asked when
  * unpinned), the reactive read, and the mark sites' decisions. The core's
  * prefix and its refusal of an answer that does not check are asked of the

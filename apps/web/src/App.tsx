@@ -120,7 +120,7 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
     {props.children}
     <CallHostView />
     {/*
-     * ADR-0098 section 2 - the one report sheet. In the router (Add messages
+     * ADR-0099 section 2 - the one report sheet. In the router (Add messages
      * opens a conversation) and outside every route, so a report started on
      * one screen survives the trip to another.
      */}

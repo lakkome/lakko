@@ -33,7 +33,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0098 section 4 - the transport's two parts in a suspension: a bearer
+ * ADR-0099 section 4 - the transport's two parts in a suspension: a bearer
  * route's bare `403 account-suspended` makes the provider refresh once (the
  * refresh answers the restricted session), and while suspended no write to
  * the Delivery Service leaves the device.

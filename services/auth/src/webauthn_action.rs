@@ -365,7 +365,7 @@ pub(crate) async fn action_start(
         .ok_or(ApiError::Disabled)?
         .clone();
     let action_hash = decode_action_hash(&req.action_hash_b64)?;
-    // ADR-0098 section 4: a suspended account reaches this route (it is how
+    // ADR-0099 section 4: a suspended account reaches this route (it is how
     // an account with a passkey deletes itself) and nothing else through it.
     if standing.suspended && action_hash != delete_account_action_hash(&auth.0) {
         return Err(ApiError::AccountSuspended(None));

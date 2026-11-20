@@ -157,7 +157,7 @@ struct SettingsScreen: View {
                 row(l10n.t("who_can_find_me.title"), icon: .person2Gear) {
                     onOpen(.whoCanFindMe)
                 }
-                // ADR-0098 / UX 1.1, 2.3.
+                // ADR-0099 / UX 1.1, 2.3.
                 row(l10n.t("block.list.title"), icon: .personCircleXmark) { onOpen(.blockedPeople) }
                 row(l10n.t("report.list.title"), icon: .flag) { onOpen(.yourReports) }
                 // ADR-0080 — per device, on by default.

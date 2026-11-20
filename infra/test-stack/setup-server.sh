@@ -135,7 +135,7 @@ if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
   echo "channels database URL added to the env file"
 fi
 
-# The moderation service (ADR-0098) arrived later: an older env file gains
+# The moderation service (ADR-0099) arrived later: an older env file gains
 # its database URL. The moderator list and root key are installed by hand
 # (see tools/moderation-root); without them reporting answers 503.
 if ! grep -q '^LAKKO_MODERATION_DATABASE_URL=' $ENV_FILE; then
@@ -143,7 +143,7 @@ if ! grep -q '^LAKKO_MODERATION_DATABASE_URL=' $ENV_FILE; then
   echo "moderation database URL added to the env file"
 fi
 
-# Account suspension (ADR-0098 section 4): auth's internal listener and the
+# Account suspension (ADR-0099 section 4): auth's internal listener and the
 # moderation service share one secret, generated once and then kept. An env
 # file that already holds either side's value gives it to the other. The root
 # key is copied from the moderation service's only when that one is set (it
@@ -171,7 +171,7 @@ if [ -n "$MODERATION_ROOT" ] && ! grep -q '^LAKKO_AUTH_MODERATION_ROOT_KEY=' $EN
   echo "moderation root key copied to auth"
 fi
 
-# The other services that apply moderator actions (ADR-0098 step 5):
+# The other services that apply moderator actions (ADR-0099 step 5):
 # discovery (names, search, group handles), channels, storage (blob delete).
 # Each pair shares its own secret, generated once and then kept; an env file
 # that already holds either side's value gives it to the other. The root key

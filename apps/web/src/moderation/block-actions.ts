@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 section 6, UX `reporting-and-moderation.md` sections 1.2 and 1.3 -
+ * ADR-0099 section 6, UX `reporting-and-moderation.md` sections 1.2 and 1.3 -
  * blocking and unblocking a person, the one way each runs on this client.
  *
  * Block: the register first (it takes effect on this device at once, and on

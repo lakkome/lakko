@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 section 2, UX `reporting-and-moderation.md` sections 2.1 to 2.3 -
+ * ADR-0099 section 2, UX `reporting-and-moderation.md` sections 2.1 to 2.3 -
  * the report sheet's rules, decided once here so the sheet, the select mode
  * and the send cannot disagree. Pure: `vitest` runs without Solid, so every
  * decision lives in this module and the components hold markup.
@@ -14,7 +14,7 @@ export const REPORT_MAX_MESSAGES = 20;
 /** UX 2.2 - the comment is up to 500 characters (chosen). */
 export const REPORT_COMMENT_MAX = 500;
 
-/** The report's conversation kind (the core's codes, ADR-0098 section 2). */
+/** The report's conversation kind (the core's codes, ADR-0099 section 2). */
 export type ConversationKindCode = 1 | 2 | 3 | 4 | 5 | 6;
 export const CONVERSATION_ONE_TO_ONE: ConversationKindCode = 1;
 export const CONVERSATION_GROUP: ConversationKindCode = 2;
@@ -285,7 +285,7 @@ export function statusKey(status: ReportStatus): string {
 }
 
 /**
- * The highest moderator-list version this device has seen (ADR-0098 section
+ * The highest moderator-list version this device has seen (ADR-0099 section
  * 2): a list below it is treated as unavailable, a list at or above it is
  * accepted and becomes the new floor.
  */

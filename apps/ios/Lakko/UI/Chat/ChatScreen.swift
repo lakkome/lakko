@@ -64,13 +64,13 @@ public struct ChatScreen: View {
     // result callback. Both routes funnel into
     // ``ChatViewModel/onAttachmentPicked(bytes:mime:name:)``.
     @State private var photoPickerItems: [PhotosPickerItem] = []
-    /// ADR-0098 — the blocked set the banner, the collapsed rows and the
+    /// ADR-0099 — the blocked set the banner, the collapsed rows and the
     /// card follow.
     @ObservedObject private var blocks = BlockList.shared
-    /// ADR-0098 step 4 — the suspension marks the one-to-one's top banner
+    /// ADR-0099 step 4 — the suspension marks the one-to-one's top banner
     /// and the member list follow.
     @ObservedObject private var suspensions = SuspensionMarks.shared
-    /// ADR-0098 / UX 2.2 — the open report sheet.
+    /// ADR-0099 / UX 2.2 — the open report sheet.
     @State private var reportRequest: ReportRequest?
     /// UX 1.2 — collapsed rows of a blocked person the reader tapped open.
     @State private var revealedBlocked: Set<Int64> = []
@@ -97,7 +97,7 @@ public struct ChatScreen: View {
     @StateObject private var media: ChatMediaController
     /// ADR-0047 §4 — the caret the emoji picker inserts at.
     @StateObject private var caret = ComposerCaret()
-    /// ADR-0098 step 3 — a suspended account reads its chats: no composer,
+    /// ADR-0099 step 3 — a suspended account reads its chats: no composer,
     /// no call controls.
     @Environment(\.accountSuspended) private var accountSuspended
     /// ADR-0047 §4 — the open picker, if any.
@@ -294,7 +294,7 @@ public struct ChatScreen: View {
                     selected: request.emoji,
                     onOpenPerson: nil)
             }
-            // ADR-0098 / UX 2.2 — the report sheet; the checked follow-up
+            // ADR-0099 / UX 2.2 — the report sheet; the checked follow-up
             // (Also block / Leave the group) applies when the report goes.
             .reportSheet($reportRequest) { follow in
                 switch follow {
@@ -316,7 +316,7 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
-            // ADR-0098 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // ADR-0099 step 4 / UX `reporting-and-moderation.md` section 3 —
             // the other person's account is suspended (verified in the
             // moderation log): one line at the top, no action, the chat still
             // works. A blocked person's banner stands alone.
@@ -409,7 +409,7 @@ public struct ChatScreen: View {
             messagesWidth = width
         }
         .background(Color.lakkoBackground)
-        // ADR-0098 step 4 — ask about the other person when the one-to-one
+        // ADR-0099 step 4 — ask about the other person when the one-to-one
         // opens (and when its roster first names them).
         .task(id: viewModel.oneToOnePeerKey) {
             if let peer = viewModel.oneToOnePeerKey { _ = await suspensions.standing(peer) }
@@ -1048,7 +1048,7 @@ public struct ChatScreen: View {
                                 selecting: selection != nil,
                                 onSelect: { enterSelection(with: entry.message.messageId) },
                                 quotesOwnMessage: viewModel.quotesOwnMessage(entry.message),
-                                // ADR-0098 / UX 2.1 — Report on someone else's
+                                // ADR-0099 / UX 2.1 — Report on someone else's
                                 // message: its author, with this message.
                                 // Built on tap: it reads the whole timeline.
                                 onReport: viewModel.canReport(entry.message)
@@ -1589,11 +1589,11 @@ public struct ChatScreen: View {
 
     @ViewBuilder
     private var composer: some View {
-        // ADR-0098 step 3 — a suspended account sends nothing: one muted
+        // ADR-0099 step 3 — a suspended account sends nothing: one muted
         // line in the composer's slot, no send control.
         if accountSuspended {
             SuspendedComposerLine()
-        // ADR-0098 / UX 1.2 — in the one-to-one with a blocked person the
+        // ADR-0099 / UX 1.2 — in the one-to-one with a blocked person the
         // banner replaces the composer.
         } else if let blocked = blocks.entries.isEmpty ? nil : viewModel.blockedOneToOnePeer {
             blockedBanner(blocked)
@@ -1626,7 +1626,7 @@ public struct ChatScreen: View {
         .buttonStyle(.plain)
     }
 
-    /// ADR-0098 step 4 — the suspended peer's banner: inline, sunken, an
+    /// ADR-0099 step 4 — the suspended peer's banner: inline, sunken, an
     /// icon and one sentence, no action (Block is on the card).
     private func suspendedPeerBanner(_ key: Data) -> some View {
         HStack(alignment: .top, spacing: 10) {
@@ -2436,7 +2436,7 @@ struct MessageRow: View {
     /// quote names it "You" on this device, whatever name the snapshot
     /// carries (`docs/ux/message-actions.md` section 3.1).
     var quotesOwnMessage: Bool = false
-    /// ADR-0098 — the menu's Report; `nil` where it is not offered (an own
+    /// ADR-0099 — the menu's Report; `nil` where it is not offered (an own
     /// message, a conversation this device cannot act in).
     var onReport: (() -> Void)? = nil
     /// ADR-0087 section 12 — this row is a channel post: it is drawn as an
@@ -2450,7 +2450,7 @@ struct MessageRow: View {
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
     @Environment(\.messageMenuPresenter) private var menuPresenter
-    /// ADR-0098 step 3 — a suspended account's chips are not taps: a tap
+    /// ADR-0099 step 3 — a suspended account's chips are not taps: a tap
     /// would send a reaction.
     @Environment(\.accountSuspended) private var accountSuspended
     /// ADR-0082 — the conversation this row belongs to, for translation and
@@ -2849,7 +2849,7 @@ struct MessageRow: View {
         return actions
     }
 
-    /// ADR-0098 / UX 2.1 — Report on someone else's landed message.
+    /// ADR-0099 / UX 2.1 — Report on someone else's landed message.
     private var canReport: Bool {
         onReport != nil && actionsAvailable && !isOutgoing && message.direction != .system
             && !message.deleted && message.messageId > 0 && !isHistoryRow
@@ -3773,9 +3773,9 @@ struct GroupInfoScreen: View {
     var onOpenContact: (Int64) -> Void = { _ in }
     /// ADR-0061 — observed so a language switch re-renders the panel.
     @ObservedObject var l10n = Localization.shared
-    /// ADR-0098 step 4 — the member list's suspension markers.
+    /// ADR-0099 step 4 — the member list's suspension markers.
     @ObservedObject private var suspensions = SuspensionMarks.shared
-    /// ADR-0098 step 3 — a suspended account adds and invites nobody.
+    /// ADR-0099 step 3 — a suspended account adds and invites nobody.
     @Environment(\.accountSuspended) private var accountSuspended
 
     /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
@@ -3805,7 +3805,7 @@ struct GroupInfoScreen: View {
     @State private var rejectAllConfirm = false
     /// ADR-0087 section 11 — the `Delete this group?` confirmation.
     @State private var deleteGroupConfirm = false
-    /// ADR-0098 / UX 2.1 — the report sheet for the group.
+    /// ADR-0099 / UX 2.1 — the report sheet for the group.
     @State private var reportRequest: ReportRequest?
 
     /// What the screen does after the chat is gone: the row it was reached from
@@ -4287,7 +4287,7 @@ struct GroupInfoScreen: View {
                         ForEach(viewModel.members, id: \.leafIndex) { member in
                             HStack {
                                 memberIdentity(member)
-                                    // ADR-0098 step 4 — ask about the rows on
+                                    // ADR-0099 step 4 — ask about the rows on
                                     // screen.
                                     .task(id: member.signaturePublicKey) {
                                         if viewModel.ownLeafIndex != member.leafIndex {
@@ -4403,7 +4403,7 @@ struct GroupInfoScreen: View {
                     ShareChannelsSection(
                         hub: viewModel.sharedChannelsHub, groupIdHex: viewModel.groupIdHex)
                 }
-                // ADR-0098 / UX 2.1 — Report the group, by its `@name`, for
+                // ADR-0099 / UX 2.1 — Report the group, by its `@name`, for
                 // anyone but the owner (the shared rule decides).
                 if sections.contains(.report), viewModel.groupHandle != nil {
                     Section {
@@ -4548,7 +4548,7 @@ struct GroupInfoScreen: View {
             ) {
                 [.danger(l10n.t("chat.leave.confirm")) { viewModel.onLeaveGroup() }, .cancel()]
             }
-            // ADR-0098 / UX 2.3 — `Leave the group`, when checked, goes with
+            // ADR-0099 / UX 2.3 — `Leave the group`, when checked, goes with
             // the report.
             .reportSheet($reportRequest) { follow in
                 if follow == .leave { viewModel.onLeaveGroup() }
@@ -4625,7 +4625,7 @@ struct GroupInfoScreen: View {
                 HStack(spacing: 6) {
                     Text(viewModel.memberLabel(member))
                         .foregroundStyle(Color.lakkoText)
-                    // ADR-0098 step 4 — a suspended member: a muted marker
+                    // ADR-0099 step 4 — a suspended member: a muted marker
                     // after the name. The remove control stays as it is.
                     if SuspensionMarkRules.showsMemberMarker(
                         isOwnRow: viewModel.ownLeafIndex == member.leafIndex,

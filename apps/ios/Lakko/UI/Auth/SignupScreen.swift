@@ -37,7 +37,7 @@ public struct SignupScreen: View {
                 if viewModel.placeHeld {
                     AuthHint(text: l10n.t("auth.signup.code.held"))
                 }
-                AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("auth.signup.lede"))
+                AuthTitle(title: l10n.t("auth.signup.title"))
 
                 VStack(alignment: .leading, spacing: 6) {
                     AuthTextField(

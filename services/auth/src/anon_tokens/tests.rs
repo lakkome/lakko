@@ -594,7 +594,7 @@ async fn a_young_account_draws_the_young_call_join_quota() {
     assert_eq!(json(&body)["remaining"], 97);
 }
 
-/// ADR-0098 step 3: a suspended account reads its chats, files included, so
+/// ADR-0099 step 3: a suspended account reads its chats, files included, so
 /// its restricted session (and a leftover access token) may draw `blob-read`
 /// passes and nothing else.
 #[tokio::test]

@@ -127,7 +127,7 @@ use crate::AppState;
 /// - `channel-comment` (ADR-0087 section 13a): one token per comment added;
 ///   deleting one's own spends none. 200 a day is chosen, not measured, with
 ///   room to spare over what a person writes in a day.
-/// - `report` (ADR-0098 section 2): one token per report sent to the
+/// - `report` (ADR-0099 section 2): one token per report sent to the
 ///   moderators. 10 a day is chosen, not measured: a person reports rarely,
 ///   and the limit is what keeps one account from flooding the moderation
 ///   queue without the queue learning who reported.
@@ -398,7 +398,7 @@ pub(crate) enum TokenApiError {
         retry_after_secs: u64,
     },
     /// A suspended account asked for a context other than `blob-read`
-    /// (403 `account-suspended`; ADR-0098: it may still read its chats,
+    /// (403 `account-suspended`; ADR-0099: it may still read its chats,
     /// files included, and nothing else).
     Suspended,
     /// Store or unreachable crypto failure (500 `internal`).
@@ -554,7 +554,7 @@ pub(crate) async fn issue_tokens(
     if !context.is_session_issuable() {
         return Err(TokenApiError::ContextNotIssuable);
     }
-    // ADR-0098 step 3: a suspended account reads its chats, attachments
+    // ADR-0099 step 3: a suspended account reads its chats, attachments
     // included, so it may still draw `blob-read` passes; nothing else.
     if standing.suspended && context != TokenContext::BlobRead {
         return Err(TokenApiError::Suspended);

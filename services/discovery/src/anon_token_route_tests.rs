@@ -426,7 +426,7 @@ async fn a_batch_evaluates_like_single_evaluations_for_one_register_token() {
     );
 }
 
-/// ADR-0098 step 3: a suspended account's restricted session (`s1`) erases the
+/// ADR-0099 step 3: a suspended account's restricted session (`s1`) erases the
 /// account's discovery rows and opens nothing else.
 #[tokio::test]
 async fn the_restricted_session_only_deletes_the_account() {

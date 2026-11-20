@@ -539,7 +539,7 @@ pub(crate) async fn delete_account(
         .execute(&mut *tx)
         .await
         .map_err(ApiError::Db)?;
-    // ADR-0098 F3: the account's identity-key history goes with it, unless
+    // ADR-0099 F3: the account's identity-key history goes with it, unless
     // the account is suspended now (then it stays taken until the end).
     crate::identity_target::on_account_deleted(&mut tx, &auth.0, crate::session::now_ms())
         .await
@@ -836,7 +836,7 @@ async fn auth_finish_answer(
         .map_err(ApiError::Db)?;
     }
 
-    // ADR-0098 section 4: a suspended account lands in suspended mode. Checked
+    // ADR-0099 section 4: a suspended account lands in suspended mode. Checked
     // after the signature counter above, which is part of authenticating
     // (clone detection), and before anything is issued.
     crate::suspension::refuse_landing_if_suspended(
@@ -1207,7 +1207,7 @@ pub(crate) struct AuthenticatedDevice {
 /// it always was. Stamps an [`AuthenticatedAccount`] and an
 /// [`AuthenticatedDevice`] into the request extensions on success.
 ///
-/// ADR-0098 section 4: an account that is suspended is refused with `403
+/// ADR-0099 section 4: an account that is suspended is refused with `403
 /// {"error":"account-suspended"}` after those checks; the suspension is read
 /// in the same query as the generation.
 pub(crate) async fn require_session(
@@ -1219,7 +1219,7 @@ pub(crate) async fn require_session(
         .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
     let suspended = admit_credential(&state, &verified).await?;
     if suspended {
-        // ADR-0098 section 4: a suspended account's access token opens no
+        // ADR-0099 section 4: a suspended account's access token opens no
         // bearer route. No credentials in this body; the client calls the
         // refresh route, whose `403` carries the restricted session.
         tracing::debug!("webauthn auth: bearer of a suspended account refused");
@@ -1230,7 +1230,7 @@ pub(crate) async fn require_session(
 }
 
 /// Bearer middleware of the four routes a suspended account may call
-/// ([ADR-0098] section 4): read the suspension, send an appeal, delete the
+/// ([ADR-0099] section 4): read the suspension, send an appeal, delete the
 /// account, sign out (plus the passkey action ceremony, which is how an
 /// account with a passkey deletes itself; `webauthn_action::action_start`
 /// accepts only the delete-account action while the account is suspended).
@@ -1239,7 +1239,7 @@ pub(crate) async fn require_session(
 /// same generation and device-floor checks as [`require_session`], and
 /// stamps the same extensions plus a [`SessionStanding`].
 ///
-/// [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+/// [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 pub(crate) async fn require_session_or_restricted(
     State(state): State<AppState>,
     mut request: axum::extract::Request,
@@ -1261,7 +1261,7 @@ enum BearerKinds {
     AccessOrRestricted,
 }
 
-/// What a bearer route knows about the account's standing (ADR-0098).
+/// What a bearer route knows about the account's standing (ADR-0099).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SessionStanding {
     /// The account is suspended now.
@@ -1305,7 +1305,7 @@ fn bearer_credential(
 
 /// The generation check (ADR-0073) and the device floor (ADR-0074) of a
 /// verified credential, in that order (see [`require_session`] for why), and
-/// whether the account is suspended (ADR-0098), read with the generation in
+/// whether the account is suspended (ADR-0099), read with the generation in
 /// one query.
 async fn admit_credential(
     state: &AppState,
@@ -1606,7 +1606,7 @@ pub(crate) enum ApiError {
         /// Unix milliseconds at which the last open anchor expires.
         until_ms: i64,
     },
-    /// ADR-0098 section 4: the account is suspended. `403` with the body
+    /// ADR-0099 section 4: the account is suspended. `403` with the body
     /// `{"error":"account-suspended"}`, plus, when the route authenticated
     /// the person (a landing route, the refresh route), the restricted
     /// session and a refresh credential ([`crate::suspension::SuspendedBody`]).

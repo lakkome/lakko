@@ -17,7 +17,7 @@ import me.lakko.app.moderation.StandingAnswer
 import uniffi.lakko_ffi_uniffi.InfoSection
 
 /*
- * ADR-0098 step 5, UX `reporting-and-moderation.md` section 3 ("A channel
+ * ADR-0099 step 5, UX `reporting-and-moderation.md` section 3 ("A channel
  * that was removed") — a channel Lakko's moderators removed.
  *
  * The channels service answers every route of such a channel with
@@ -26,7 +26,7 @@ import uniffi.lakko_ffi_uniffi.InfoSection
  * stay readable, and nothing that writes (composer, comments, reactions,
  * publisher tools, invite links) is offered. What the conversation and the
  * info say depends on the moderation log: "This channel was removed for
- * breaking Lakko's rules." only when the log proves it (C-97), else the
+ * breaking Lakko's rules." only when the log proves it (C-98), else the
  * neutral "This channel isn't available.".
  *
  * Network reads of a removed channel stop: [mayAsk] lets one read through

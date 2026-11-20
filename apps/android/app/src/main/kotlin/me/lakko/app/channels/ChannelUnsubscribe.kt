@@ -76,7 +76,7 @@ public object ChannelUnsubscribe {
     }
 
     /**
-     * ADR-0098 step 5 — the owner or a publisher takes a channel moderators
+     * ADR-0099 step 5 — the owner or a publisher takes a channel moderators
      * removed out of the list: it ends here and the account's conversation
      * end is written, so the account's other devices drop it too, as a
      * subscriber's Unsubscribe does. Only the channels-service call is
@@ -117,7 +117,7 @@ public object ChannelUnsubscribe {
         }
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
-        // ADR-0098 step 5 — a removed channel's mark goes with it.
+        // ADR-0099 step 5 — a removed channel's mark goes with it.
         RemovedChannels.noteAnswered(channelId)
         // ADR-0060 §3 — the server drops the member card with the
         // subscription, so a later subscription uploads afresh.

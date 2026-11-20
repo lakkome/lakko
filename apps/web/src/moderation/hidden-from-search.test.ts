@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 step 5 - an account moderators hid from search: the refused
+ * ADR-0099 step 5 - an account moderators hid from search: the refused
  * Everyone publish is recognised, Who can find me holds the state for that
  * account, Everyone cannot be chosen, and a later publish that succeeds
  * leaves the state.
@@ -27,7 +27,7 @@ afterEach(() => {
 
 const ENDPOINT = "/discovery/visibility";
 
-describe("hidden from search (ADR-0098 step 5)", () => {
+describe("hidden from search (ADR-0099 step 5)", () => {
   it("recognises the refused Everyone publish and nothing else", () => {
     expect(isHiddenFromSearchError(new DiscoveryHttpError(403, ENDPOINT, JSON.stringify({ error: HIDDEN_FROM_SEARCH })))).toBe(
       true,

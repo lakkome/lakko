@@ -273,7 +273,7 @@ public final class AuthClient {
     /// Returns the RAW 153-byte attestation (URL-safe-no-pad decoded from the
     /// response), ready to hand to `DiscoveryClient.uploadIdentityBundle`.
     ///
-    /// ADR-0098 F3: `identity` is the account identity whose key is
+    /// ADR-0099 F3: `identity` is the account identity whose key is
     /// recorded; the request carries its `signIdentityProof` over
     /// `accountId` (``IdentityProof``).
     public func mintGenesisAttestation(
@@ -615,7 +615,7 @@ public final class AuthClient {
                 )
             )
         } catch var suspended as AccountSuspendedError {
-            // ADR-0098 step 3 — the password was right and the account is
+            // ADR-0099 step 3 — the password was right and the account is
             // suspended: the export key goes with the credentials, so the
             // device key is written as on any sign-in.
             suspended.exportKey = out.exportKey()
@@ -938,7 +938,7 @@ public final class AuthClient {
     /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
     /// ``AuthClientError/network(endpoint:underlying:)``.
     ///
-    /// ADR-0098 F3: the finish carries `signIdentityProof` by the identity
+    /// ADR-0099 F3: the finish carries `signIdentityProof` by the identity
     /// `seed` seeds (which must be `newSignaturePubkey`) over `accountId`.
     public func resetAccountKeys(
         sessionToken: String,
@@ -1037,7 +1037,7 @@ public final class AuthClient {
         guard revokeDeviceIds.count <= KeyRotationWire.maxRevokedDevices else {
             throw AuthClientError.argument("at most 8 device ids may be revoked with a rotation")
         }
-        // ADR-0098 F3: by the NEW key, over the account id.
+        // ADR-0099 F3: by the NEW key, over the account id.
         let identityProof = try IdentityProof.b64(
             seed: seed, accountId: accountId, expectedPubkey: newSignaturePubkey)
         let reg = try OpaqueRegister.startRecovery(seed: seed)
@@ -1202,7 +1202,7 @@ public final class AuthClient {
         }
         let oldSeed = attempt.record.oldSeed
         let accountIdB64 = base64UrlEncodeNoPad(accountId)
-        // ADR-0098 F3: by the NEW key (the one `newSeed` seeds), over the
+        // ADR-0099 F3: by the NEW key (the one `newSeed` seeds), over the
         // account id. Computed once, so a re-sent finish is byte-identical.
         let identityProof = try IdentityProof.b64(
             seed: attempt.newSeed, accountId: accountId, expectedPubkey: attempt.newSignaturePubkey)
@@ -1633,7 +1633,7 @@ public final class AuthClient {
             )
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            // ADR-0098 step 3 — read before the body is truncated: the
+            // ADR-0099 step 3 — read before the body is truncated: the
             // landing's credentials do not fit the diagnostic text.
             if let suspended = AccountSuspendedError.from(status: httpResponse.statusCode, body: data) {
                 throw suspended

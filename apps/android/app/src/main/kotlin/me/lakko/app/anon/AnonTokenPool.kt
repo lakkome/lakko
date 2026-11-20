@@ -76,7 +76,7 @@ public enum class AnonTokenContext(public val wire: String) {
     CHANNEL_REACT("channel-react"),
     /** ADR-0087 section 13a: one per comment under a channel post. */
     CHANNEL_COMMENT("channel-comment"),
-    /** ADR-0098 section 2: one per report sent to Lakko's moderators. */
+    /** ADR-0099 section 2: one per report sent to Lakko's moderators. */
     REPORT("report"),
 }
 
@@ -105,7 +105,7 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
     // ADR-0087 section 13a. Chosen, not measured.
     AnonTokenContext.CHANNEL_REACT -> 16
     AnonTokenContext.CHANNEL_COMMENT -> 8
-    // ADR-0098 section 2: pre-fetched so the issuance time says nothing
+    // ADR-0099 section 2: pre-fetched so the issuance time says nothing
     // about when a report is sent. Chosen, not measured.
     AnonTokenContext.REPORT -> 2
 }
@@ -191,7 +191,7 @@ public sealed interface AnonIssueOutcome {
     /** 503 `anon-tokens-disabled`. */
     public data object Disabled : AnonIssueOutcome
 
-    /** ADR-0098 section 4 - `403 account-suspended`: the account is
+    /** ADR-0099 section 4 - `403 account-suspended`: the account is
      *  suspended and this context is not issued to it. Not now, not a fault. */
     public data object Suspended : AnonIssueOutcome
 
@@ -329,7 +329,7 @@ public class AnonTokenPool(
      *  release rule (ADR-0078 section 8): a take never starts an issuance. */
     private val refillOnEmptyTake: Boolean = false,
     /**
-     * ADR-0098 section 4 - which contexts may be issued now. While the
+     * ADR-0099 section 4 - which contexts may be issued now. While the
      * account is suspended the issuer answers only `blob-read` (files in
      * chats still open); every other context is neither refilled nor asked
      * for, so the schedule sends nothing the issuer would refuse.
@@ -384,7 +384,7 @@ public class AnonTokenPool(
         data class Filled(val tokens: List<PooledAnonToken>) : RefillResult
         data class Quota(val retryAfterSecs: Long) : RefillResult
         data object Disabled : RefillResult
-        /** Not issued to a suspended account (ADR-0098): not now. */
+        /** Not issued to a suspended account (ADR-0099): not now. */
         data object Suspended : RefillResult
         data class Failed(val reason: String, val cause: Throwable?) : RefillResult
     }

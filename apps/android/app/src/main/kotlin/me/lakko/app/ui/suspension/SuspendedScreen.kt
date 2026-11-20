@@ -64,7 +64,7 @@ import me.lakko.app.ui.auth.BusyButton
 import me.lakko.app.ui.auth.Lead
 
 /**
- * ADR-0098 section 4 (UX `docs/ux/reporting-and-moderation.md` section 4) -
+ * ADR-0099 section 4 (UX `docs/ux/reporting-and-moderation.md` section 4) -
  * the one screen that tells a suspended person why: the reason, the end
  * date or that there is none, what still works, and [Appeal] [Read my
  * chats] [Sign out]. Drawn by the app root in place of the app until "Read

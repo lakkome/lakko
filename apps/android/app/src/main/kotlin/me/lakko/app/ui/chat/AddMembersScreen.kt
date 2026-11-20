@@ -145,7 +145,7 @@ internal fun AddMembersScreen(
             ownKeyB64 = null,
         )
     }
-    // ADR-0098 step 4 / UX 3 — search does not list a suspended account; a
+    // ADR-0099 step 4 / UX 3 — search does not list a suspended account; a
     // found row leaves once the moderation log confirms it.
     val foundPersonKeys = remember(foundPersonRows) { foundPersonRows.mapTo(HashSet()) { it.person.keyB64 } }
     val suspendedFound by me.lakko.app.ui.suspension.rememberSuspendedAmong(foundPersonKeys)

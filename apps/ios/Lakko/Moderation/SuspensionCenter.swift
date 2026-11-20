@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0098 step 3 / UX `reporting-and-moderation.md` section 4 — suspended
+/// ADR-0099 step 3 / UX `reporting-and-moderation.md` section 4 — suspended
 /// mode for the account signed in on this device.
 ///
 /// Entered when auth answers `403 account-suspended` (a landing, a refresh,

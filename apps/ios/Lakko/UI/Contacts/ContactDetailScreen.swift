@@ -43,7 +43,7 @@ struct ContactDetailScreen: View {
     var onChatDeleted: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
-    /// ADR-0098 step 3 — a suspended account calls and adds nobody.
+    /// ADR-0099 step 3 — a suspended account calls and adds nobody.
     @Environment(\.accountSuspended) private var accountSuspended
     @State private var renaming = false
     @State private var draftName = ""
@@ -55,9 +55,9 @@ struct ContactDetailScreen: View {
     @ObservedObject private var l10n = Localization.shared
     /// ADR-0060 — whether `Their contacts can find me` stands follows the setting.
     @ObservedObject private var reach = ReachCenter.shared
-    /// ADR-0098 — Block / Unblock and the "Blocked" line follow the register.
+    /// ADR-0099 — Block / Unblock and the "Blocked" line follow the register.
     @ObservedObject private var blocks = BlockList.shared
-    /// ADR-0098 step 4 — the "Account suspended" line follows the marks.
+    /// ADR-0099 step 4 — the "Account suspended" line follows the marks.
     @ObservedObject private var suspensions = SuspensionMarks.shared
     @State private var confirmingBlock = false
     @State private var reportRequest: ReportRequest?
@@ -154,7 +154,7 @@ struct ContactDetailScreen: View {
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    // ADR-0098 / UX 1.4 — a muted line under a blocked
+                    // ADR-0099 / UX 1.4 — a muted line under a blocked
                     // person's name; step 4 / UX 3 — or under a suspended
                     // one's (blocked wins when both apply).
                     switch SuspensionMarkRules.cardLine(
@@ -310,7 +310,7 @@ struct ContactDetailScreen: View {
             // different things — one forgets the PERSON, the other forgets the
             // CONVERSATION — and the rule can return both at once, so neither
             // is worded as if it did the other's job.
-            // ADR-0098 / UX 1.1, 2.1 — Report, then Block (or Unblock), in
+            // ADR-0099 / UX 1.1, 2.1 — Report, then Block (or Unblock), in
             // the danger block above Remove contact.
             if sections.contains(.report) || sections.contains(.block) || sections.contains(.unblock) {
                 Section {
@@ -361,11 +361,11 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
-        // ADR-0098 step 4 — ask about the person when their card opens.
+        // ADR-0099 step 4 — ask about the person when their card opens.
         .task(id: contact.request.fromPubkey) {
             _ = await suspensions.standing(contact.request.fromPubkey)
         }
-        // ADR-0098 / UX 1.2 — Block asks first; blocking also removes the
+        // ADR-0099 / UX 1.2 — Block asks first; blocking also removes the
         // contact, so the card stays and reads `Unblock`.
         .lakkoDialog(
             isPresented: $confirmingBlock,

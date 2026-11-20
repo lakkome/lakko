@@ -953,7 +953,7 @@ private fun JoinCallPanel(
             }
             when (ui.phase) {
                 JoinCallPhase.Idle -> {
-                    // ADR-0098 section 4 — calls are not offered to a
+                    // ADR-0099 section 4 — calls are not offered to a
                     // suspended account: no Join, only the way out.
                     val callsSuspended by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
                     if (callsSuspended) {

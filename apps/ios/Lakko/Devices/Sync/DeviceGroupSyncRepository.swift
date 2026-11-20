@@ -545,7 +545,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             NewDeviceNoticeCenter.shared.setAcknowledged(
                 accountIdB64: account, keys: (try? s.acknowledgedDevices()) ?? [])
         }
-        // ADR-0098 section 6 — the blocked set every path reads, and its
+        // ADR-0099 section 6 — the blocked set every path reads, and its
         // App Group mirror for the notification extension (written at every
         // launch and every fold; an equal set is not rewritten). A `nil`
         // account (the sign-out teardown) writes nothing.
@@ -912,7 +912,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isQuickReactionEnvelope(bytes: envelope) { return "quick-reaction" }
         // UX 17.6 — every device acknowledgement is its own slot.
         if isDeviceAckEnvelope(bytes: envelope) { return "device-ack:" + envelope.base64EncodedString() }
-        // ADR-0098 section 6 — every block register is its own slot.
+        // ADR-0099 section 6 — every block register is its own slot.
         if isBlockedEnvelope(bytes: envelope) { return "blocked:" + envelope.base64EncodedString() }
         // ADR-0079 — every link record is its own slot.
         if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
@@ -1347,7 +1347,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 await flushUnsentDeviceAcks()
                 guard bound.isCurrent else { return }
             }
-            // ADR-0098 section 6 — the same for a block whose send failed.
+            // ADR-0099 section 6 — the same for a block whose send failed.
             if blocksUnsent {
                 await flushUnsentBlocks()
                 guard bound.isCurrent else { return }
@@ -2334,7 +2334,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
-            // ADR-0098 section 6 — a block register, the same way: the
+            // ADR-0099 section 6 — a block register, the same way: the
             // blocked set reaches every path through ``refreshDerived()``.
             if isBlockedEnvelope(bytes: envelope) {
                 do {
@@ -2582,7 +2582,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.pollChoiceEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
-        // ADR-0098 section 6 — and every block register, unblocks included.
+        // ADR-0099 section 6 — and every block register, unblocks included.
         for envelope in (try? syncedState.blockedEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
@@ -2966,7 +2966,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
-    // MARK: - ADR-0098 section 6: the block register
+    // MARK: - ADR-0099 section 6: the block register
 
     static func blocksUnsentKey(accountIdB64: String) -> String {
         "lakko.blocks.unsent.v1.\(accountIdB64)"

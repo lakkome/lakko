@@ -129,7 +129,7 @@ public final class AuthAnonTokenIssuer: AnonTokenIssuing, @unchecked Sendable {
         case 503 where AnonTokenRoute.errorCode(in: data) == "anon-tokens-disabled":
             throw AnonTokenUnavailable.disabled
         case 403 where AnonTokenRoute.errorCode(in: data) == accountSuspendedCode:
-            // ADR-0098 step 3 — a suspended account draws `blob-read` only:
+            // ADR-0099 step 3 — a suspended account draws `blob-read` only:
             // "not now" for this context, until the suspension ends.
             throw AnonTokenUnavailable.refused(code: accountSuspendedCode)
         default:

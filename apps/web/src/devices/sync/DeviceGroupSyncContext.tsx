@@ -323,7 +323,7 @@ export interface DeviceGroupSyncApi {
    *  key; a send that does not go out is owed and re-sent at the next start.
    *  Never throws. */
   acknowledgeDevices(keysHex: readonly string[]): Promise<void>;
-  /** ADR-0098 section 6 - reactive: the accounts this account blocked, from
+  /** ADR-0099 section 6 - reactive: the accounts this account blocked, from
    *  every device, most recently blocked first. */
   readonly blockedAccounts: Accessor<readonly BlockedEntry[]>;
   /** Block or unblock the account whose 32-byte account signature key is
@@ -749,7 +749,7 @@ export function DeviceGroupSyncProvider(props: {
     setSavedBlobIdsHex(p.savedBlobIdsHex);
     setEndedConversations(p.endedConversations);
     setAcknowledgedDevices(readAcknowledgedDevices(synced, untrack(acknowledgedDevices)));
-    // ADR-0098 section 6 - the block register, for every receive path.
+    // ADR-0099 section 6 - the block register, for every receive path.
     {
       const next = readBlockedAccounts(synced, untrack(blockedAccounts));
       setBlockedAccounts(next);
@@ -1363,7 +1363,7 @@ export function DeviceGroupSyncProvider(props: {
       if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
-      // ADR-0098 section 6 - and every block register, so a device that
+      // ADR-0099 section 6 - and every block register, so a device that
       // joins applies the blocks from its first poll.
       await sendLineageEnvelopes(synced.blockedEnvelopes());
       // 2026-11-13 - and every channel-subscription register, leaves
@@ -1984,7 +1984,7 @@ export function DeviceGroupSyncProvider(props: {
     await sendDeviceAckEnvelopes(account, envelopes);
   }
 
-  // ----- ADR-0098 section 6: the block register -----------------------
+  // ----- ADR-0099 section 6: the block register -----------------------
 
   /** `localStorage` marker: a block or unblock written here has not been
    *  confirmed sent. Re-sending every held register is idempotent: the fold
@@ -3436,7 +3436,7 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
-      // ADR-0098 section 6 - the block register, the same way.
+      // ADR-0099 section 6 - the block register, the same way.
       if (wasmSync !== null && wasmSync.isBlockedEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyBlockedEnvelope(parsed.serviceEnvelope) === true) {
@@ -3938,7 +3938,7 @@ export function DeviceGroupSyncProvider(props: {
     revoke: revokeLinkRecordImpl,
   });
   onCleanup(() => installLinkRegister(null));
-  // ADR-0098 section 6 - the block writer for screens outside this tree's
+  // ADR-0099 section 6 - the block writer for screens outside this tree's
   // reach (the report sheet, a request row).
   installBlockWriter(setBlockedImpl);
   onCleanup(() => installBlockWriter(null));
@@ -3983,7 +3983,7 @@ function readAcknowledgedDevices(
   return keys;
 }
 
-/** ADR-0098 section 6 - the block register as entries; `held` when it did
+/** ADR-0099 section 6 - the block register as entries; `held` when it did
  *  not change or cannot be read. */
 function readBlockedAccounts(
   s: { blockedAccounts(): Uint8Array; blockedAccountTimes(): BigUint64Array },

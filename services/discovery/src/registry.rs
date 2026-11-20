@@ -1050,16 +1050,45 @@ mod rename_tests {
         assert_eq!(st, StatusCode::UNAUTHORIZED);
         assert_eq!(c.certified(account).await, Some(first));
 
-        // Account deletion removes every row, the retired one included.
-        assert_eq!(c.replace(account, random::<64>()).await.0, StatusCode::OK);
+        // Account deletion leaves no row under the account, the retired one
+        // included, but holds both names like a rename does (ADR-0098
+        // section 4): a peer that has not yet learned of the deletion must
+        // never see a stranger under the old name.
+        let second = random::<64>();
+        assert_eq!(c.replace(account, second).await.0, StatusCode::OK);
         assert_eq!(c.rows(account).await.len(), 2);
         let (st, _) = c
             .call("DELETE", "/discovery/account", Some(account), None)
             .await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert!(c.rows(account).await.is_empty());
-        // The freed name is free at once: the account is gone, nobody can be
-        // mistaken for it by its devices' own record.
-        assert_eq!(c.register(random::<16>(), first).await.0, StatusCode::OK);
+        let stranger = random::<16>();
+        assert_eq!(c.register(stranger, first).await.0, StatusCode::CONFLICT);
+        assert_eq!(c.register(stranger, second).await.0, StatusCode::CONFLICT);
+        // The held rows are retired, answer no lookup, and are freed by the
+        // pruner after the hold.
+        let held: Vec<(bool, bool)> = sqlx::query_as(
+            "SELECT retired_at IS NOT NULL, is_public FROM usernames WHERE oprf_hash IN (?, ?)",
+        )
+        .bind(&first[..])
+        .bind(&second[..])
+        .fetch_all(&c.state.db)
+        .await
+        .unwrap();
+        assert_eq!(held, vec![(true, false), (true, false)]);
+        sqlx::query(
+            "UPDATE usernames SET retired_at = retired_at - INTERVAL ? SECOND \
+             WHERE oprf_hash IN (?, ?)",
+        )
+        .bind(i64::try_from(DEFAULT_NAME_INTERVAL_SECS).unwrap() + 60)
+        .bind(&first[..])
+        .bind(&second[..])
+        .execute(&c.state.db)
+        .await
+        .unwrap();
+        prune_retired(&c.state.db, DEFAULT_NAME_INTERVAL_SECS)
+            .await
+            .unwrap();
+        assert_eq!(c.register(stranger, first).await.0, StatusCode::OK);
     }
 }

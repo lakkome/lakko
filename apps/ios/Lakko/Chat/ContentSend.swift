@@ -83,7 +83,7 @@ extension ChatRepository {
                     stored.ops.ringB64 = encoded.base64EncodedString()
                 }
                 sentStored = stored
-                // ADR-0098 section 1 — a content message is signed by this
+                // ADR-0099 section 1 — a content message is signed by this
                 // device's leaf like a chat message, so it can be reported.
                 return try await sealAndPublishLocked(
                     groupIdHex: groupIdHex, plaintextBytes: bytes, wake: .message, attest: true)

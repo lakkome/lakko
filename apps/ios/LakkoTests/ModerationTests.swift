@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-/// ADR-0098 step 2 on iOS: attested messages, the block routing, the
+/// ADR-0099 step 2 on iOS: attested messages, the block routing, the
 /// moderation client's answers, the moderator-list gate and the report
 /// sheet's states.
 @MainActor

@@ -774,7 +774,7 @@ private fun GroupTile(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            // ADR-0098 / UX 1.2 — a blocked person stays in the call; their
+            // ADR-0099 / UX 1.2 — a blocked person stays in the call; their
             // tile carries a muted "Blocked" label.
             val register by me.lakko.app.moderation.BlockRegister.state.collectAsStateWithLifecycle()
             if (!participant.isLocal && register?.isBlocked(participant.personKeyB64) == true &&

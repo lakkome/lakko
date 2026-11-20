@@ -26,7 +26,7 @@ enum ReportCandidates {
     }
 }
 
-/// ADR-0098 / UX 2.1 — a report on a channel from its info: nothing
+/// ADR-0099 / UX 2.1 — a report on a channel from its info: nothing
 /// included at first, every post this device holds offered, `Unsubscribe` as
 /// the follow-up. The posts come from the channel's local post log (the one
 /// the Feed reads), so they are there whether or not the conversation is

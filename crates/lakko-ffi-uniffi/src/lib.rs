@@ -37,6 +37,7 @@ use lakko_mls::{
     RoleTable as MlsRoleTable,
 };
 
+pub mod account_deleted;
 pub mod account_statement;
 pub mod anon_cred;
 pub mod anon_token;
@@ -894,7 +895,7 @@ pub enum FfiError {
     /// bad name or a bad key argument). The client shows no list.
     #[error("supporters list: {0}")]
     SupportersList(String),
-    // ADR-0098 reporting and moderation. APPENDED last: a `flat_error`
+    // ADR-0099 reporting and moderation. APPENDED last: a `flat_error`
     // lowers by ordinal.
     // ------------------------------------------------------------------
     /// A report or a message attestation was refused (`moderation.rs`). The
@@ -3034,7 +3035,7 @@ impl Group {
 
     /// The device binding of the leaf at `leaf` (ADR-0050), empty for a leaf
     /// that is its account key, or `None` for a leaf not in the roster. A
-    /// report carries it beside a message the leaf signed (ADR-0098
+    /// report carries it beside a message the leaf signed (ADR-0099
     /// section 1).
     pub fn device_binding_at(&self, leaf: u32) -> Result<Option<Vec<u8>>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;

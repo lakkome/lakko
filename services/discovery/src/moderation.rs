@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderator actions discovery applies ([ADR-0098] section 4, step 5).
+//! The moderator actions discovery applies ([ADR-0099] section 4, step 5).
 //!
 //! A moderator signs a statement with a security key; the moderation service
 //! logs it and forwards it to discovery's internal listener
@@ -65,7 +65,7 @@
 //!
 //! An hourly pruner deletes holds past their end with their claims.
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -95,7 +95,7 @@ use crate::AppState;
 pub(crate) const CLAIM_MODERATION_HOLD: u8 = 3;
 
 /// How long a taken-back name is held: 180 days from the statement's issue
-/// time (ADR-0098 section 4). Chosen, not measured.
+/// time (ADR-0099 section 4). Chosen, not measured.
 pub(crate) const HOLD_MS: u64 = 180 * 86_400 * 1000;
 
 /// `handles.moderation`: nothing.

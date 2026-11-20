@@ -200,7 +200,7 @@ export function AccountCard(): JSX.Element {
 export interface DeleteAccountTarget {
   readonly accountId: Uint8Array;
   /** The bearer of every deletion request: the access token, or a suspended
-   *  account's restricted session (ADR-0098), which opens auth's
+   *  account's restricted session (ADR-0099), which opens auth's
    *  `DELETE /account`, discovery's `DELETE /discovery/account` and
    *  storage's `DELETE /backup` and nothing else. */
   readonly bearer: string;
@@ -211,7 +211,7 @@ export interface DeleteAccountTarget {
 
 export function DeleteAccountDialog(props: {
   readonly onClose: () => void;
-  /** ADR-0098: a suspended account on a device that holds none of its keys
+  /** ADR-0099: a suspended account on a device that holds none of its keys
    *  passes its own target; otherwise the signed-in session is the target. */
   readonly target?: DeleteAccountTarget;
 }): JSX.Element {
@@ -344,7 +344,7 @@ export function DeleteAccountDialog(props: {
           buildDeletionCleanups(base64Encode(secrets.accountId), secrets.bearer),
         wipe: async () => {
           gate.clear();
-          // Wipes this device and lands on the sign-in screen (ADR-0098: a
+          // Wipes this device and lands on the sign-in screen (ADR-0099: a
           // suspended account's own target supplies its local cleanup).
           await secrets.finish();
         },

@@ -29,7 +29,7 @@ public enum class ApiService(public val pathSegment: String, public val localDev
     PUSH_GW("push-gw", "http://10.0.2.2:8085"),
     CHANNELS("channels", "http://10.0.2.2:8086"),
     GIFS("gifs", "http://10.0.2.2:8091"),
-    /** ADR-0098: reports to Lakko's moderators. */
+    /** ADR-0099: reports to Lakko's moderators. */
     MODERATION("moderation", "http://10.0.2.2:8100"),
 }
 

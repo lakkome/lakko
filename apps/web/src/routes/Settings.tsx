@@ -109,7 +109,7 @@ function currentLanguageOwnName(): string {
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
   if (s === "privacy-groups" || s === "privacy-contacts") return s;
-  // ADR-0098 - Blocked people and Your reports, sub-screens of Privacy.
+  // ADR-0099 - Blocked people and Your reports, sub-screens of Privacy.
   if (s === "privacy-blocked" || s === "privacy-reports") return s;
   // ADR-0082 / UX section 6 - a sub-screen of Language.
   if (s === "translation") return "translation";
@@ -583,15 +583,20 @@ function AboutSection(): JSX.Element {
         {/* docs/ux/beta-notice.md: first, so the protection claim below is
             read with the caveat. */}
         <BetaNoticeRow />
-        <div class="lk-card-row">
-          <span class="lk-card-row-icon">
-            <Icon name="info-circle" size={20} />
-          </span>
-          <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{t("settings.about.version")}</span>
-            <span class="lk-card-row-sub">{appVersion()}</span>
-          </div>
-        </div>
+        {/* No row when the build names no real version (walk 7: "0.0.0"). */}
+        <Show when={appVersion()}>
+          {(version) => (
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="info-circle" size={20} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-title">{t("settings.about.version")}</span>
+                <span class="lk-card-row-sub">{version()}</span>
+              </div>
+            </div>
+          )}
+        </Show>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="heart" size={20} />

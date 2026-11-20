@@ -262,7 +262,7 @@ public fun DiscoverCardView(
                         TextButton(onClick = { model.hideTopic(topic) }) { Text(t("discover.card.hide_topic")) }
                     }
                     Spacer(Modifier.weight(1f))
-                    // ADR-0098 — Report, behind the card's overflow: the channel,
+                    // ADR-0099 — Report, behind the card's overflow: the channel,
                     // with its listing included.
                     var overflow by remember(card.channelIdHex) { mutableStateOf(false) }
                     Box {

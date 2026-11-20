@@ -480,7 +480,7 @@ public final class ChatClient {
     /// an MLS handshake row (a commit, a proposal), which has no application
     /// sender and must be applied whoever sent it, and for a leaf that does
     /// not resolve.
-    /// ADR-0098 section 1 — what a report's evidence needs of an application
+    /// ADR-0099 section 1 — what a report's evidence needs of an application
     /// row that is a chat message: the attestation verdict, the attested
     /// plaintext as received, the sender leaf's signature key and the leaf's
     /// device binding, all read now, while the roster is the epoch's (C-68).
@@ -608,7 +608,7 @@ public final class ChatClient {
             if let origin = Self.resendOrigin(of: processed) {
                 resendOrigins[message.id] = origin
             }
-            // ADR-0098 section 1 — read at receipt, like the author.
+            // ADR-0099 section 1 — read at receipt, like the author.
             if let found = Self.messageEvidence(of: processed, group: group) {
                 evidence[message.id] = found
             }
@@ -786,7 +786,7 @@ public final class ChatClient {
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let raw, let senderLeaf, _):
-            // ADR-0098 section 1 — a chat plaintext arrives wrapped in its
+            // ADR-0099 section 1 — a chat plaintext arrives wrapped in its
             // attestation; every arm below reads the envelope inside. A
             // plaintext with no wrapper (a signal, a service envelope) comes
             // back unchanged, and a malformed wrapper stays whole and
@@ -1927,7 +1927,7 @@ public struct PollMessagesResult: Equatable {
     /// application row came from, `nil` for an MLS handshake row. Empty when
     /// the producer resolved none (then nothing is dropped by sender).
     public let eventSenders: [MemberIdentity?]
-    /// ADR-0098 section 1 — what a report needs of each chat row of this
+    /// ADR-0099 section 1 — what a report needs of each chat row of this
     /// batch, by DS message id, read at receipt (the leaf may be reused
     /// later, C-68). The repository keeps it for rows from someone else.
     public let evidence: [Int64: MessageEvidence]

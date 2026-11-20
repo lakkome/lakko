@@ -45,7 +45,7 @@
 //!    of a name this key already holds as its current row is not a conflict:
 //!    it answers as the first claim did, with the statement's content and a
 //!    renewed lease (a retry of a claim whose answer was lost).
-//! 6. Moderation (ADR-0098 step 5, [`crate::moderation`]): a row a moderator
+//! 6. Moderation (ADR-0099 step 5, [`crate::moderation`]): a row a moderator
 //!    blocked refuses every write (`403 blocked`) and is never freed by the
 //!    pruner, so its name stays held; a delisted row refuses a write that
 //!    publishes it or moves it to another name (`403 delisted`). A name a
@@ -337,7 +337,7 @@ struct Row {
     handle_id: Vec<u8>,
     write_pk: Vec<u8>,
     retired: bool,
-    /// `handles.moderation` (ADR-0098 step 5): open, delisted or blocked.
+    /// `handles.moderation` (ADR-0099 step 5): open, delisted or blocked.
     moderation: u8,
 }
 

@@ -25,7 +25,7 @@ import me.lakko.app.config.ApiService
 import me.lakko.app.transport.lakkoHttpEngine
 
 /**
- * ADR-0098 section 2 — the moderation service, sessionless.
+ * ADR-0099 section 2 — the moderation service, sessionless.
  *
  * Every request rides the shared Lakko HTTP engine, so an armed device sends
  * it through the anti-censorship tunnel like every other service. A report
@@ -89,7 +89,7 @@ public class ModerationClient(
     }
 
     /**
-     * ADR-0098 step 4 — `GET /moderation/snapshot/latest/bucket/{prefix}`, no
+     * ADR-0099 step 4 — `GET /moderation/snapshot/latest/bucket/{prefix}`, no
      * session: the latest suspension snapshot's bucket for one four-hex
      * prefix, as the JSON body the core verifies; `null` on any failure.
      */
@@ -101,7 +101,7 @@ public class ModerationClient(
     }
 
     /**
-     * ADR-0098 F2 — `GET /moderation/log/entry/{index}?size={size}`, no
+     * ADR-0099 F2 — `GET /moderation/log/entry/{index}?size={size}`, no
      * session: one moderation log leaf with its inclusion path in the tree of
      * [size] leaves (the bucket answer's own log size), as the JSON body the
      * core proves a standing with; `null` on any failure.

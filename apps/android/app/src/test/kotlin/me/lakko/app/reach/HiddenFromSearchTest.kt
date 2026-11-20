@@ -12,7 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0098 step 5 — discovery refuses the Everyone record with
+ * ADR-0099 step 5 — discovery refuses the Everyone record with
  * `403 hidden-from-search` while moderators keep the account out of search:
  * Who can find me says so and Everyone cannot be chosen; the state is kept
  * for the account, is not a failure to retry, and ends when a later

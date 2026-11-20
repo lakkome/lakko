@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0098 section 2 — the client half of `services/moderation`.
+/// ADR-0099 section 2 — the client half of `services/moderation`.
 ///
 /// Three routes, all anonymous: a report carries nothing that names the
 /// person who sent it (UX `reporting-and-moderation.md` section 0), so no
@@ -169,7 +169,7 @@ public final class ModerationClient: @unchecked Sendable {
     }
 }
 
-/// ADR-0098 section 2 — the moderator list this device accepts: verified
+/// ADR-0099 section 2 — the moderator list this device accepts: verified
 /// under the pinned root key, and never older than the newest version this
 /// device has seen (a list with a lower version is treated as unavailable,
 /// so a server cannot roll back to a list holding a revoked moderator).

@@ -985,7 +985,7 @@ async fn try_apply_identity_once(
     Ok(decision)
 }
 
-/// The account target of a signature key (ADR-0098 step 5): what
+/// The account target of a signature key (ADR-0099 step 5): what
 /// `identity_bundles.account_target` holds and what a moderator statement
 /// names an account by. Written in the same statement as the key, by every
 /// writer of it.
@@ -1646,7 +1646,7 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("same-key upload"));
             assert_eq!(stored_link(&pool, &acct).await.as_deref(), expected);
-            // ADR-0098 step 5: the INSERT and the UPDATE both write the
+            // ADR-0099 step 5: the INSERT and the UPDATE both write the
             // key's account target.
             assert_eq!(
                 stored_target(&pool, &acct).await.as_deref(),

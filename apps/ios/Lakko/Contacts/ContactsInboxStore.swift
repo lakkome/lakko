@@ -86,7 +86,7 @@ public enum ContactsInboxMerge {
         case alreadyPending
         /// The sender is already an accepted contact (by signature key).
         case alreadyAccepted
-        /// ADR-0098 section 6 — the sender is blocked: dropped unseen.
+        /// ADR-0099 section 6 — the sender is blocked: dropped unseen.
         case blocked
     }
 

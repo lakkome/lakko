@@ -319,7 +319,7 @@ data class GenesisAttestRequest(
      *  identity pubkey. The server binds it to the authenticated account
      *  under `lakko/genesis-attest/v1`; it does NOT independently verify
      *  the key is "correct" (it cannot — invariant #2). */
-    val pubkey_b64: String,    /** ADR-0098 F3: base64url (no padding) of the 64-byte identity proof,
+    val pubkey_b64: String,    /** ADR-0099 F3: base64url (no padding) of the 64-byte identity proof,
      *  the recorded key's signature over the account id and itself
      *  (`signIdentityProof`). */
     val identity_proof_b64: String,
@@ -497,7 +497,7 @@ data class KeyResetFinishRequest(
     val recovery_upload: String,
     /** base64url (no padding) of the NEW AccountIdentity Ed25519 public key
      *  the attestation binds the generation to. */
-    val new_signature_pubkey_b64: String,    /** ADR-0098 F3: base64url (no padding) of the 64-byte identity proof,
+    val new_signature_pubkey_b64: String,    /** ADR-0099 F3: base64url (no padding) of the 64-byte identity proof,
      *  the recorded key's signature over the account id and itself
      *  (`signIdentityProof`). */
     val identity_proof_b64: String,
@@ -512,7 +512,7 @@ data class KeyRotateFinishRequest(
     val recovery_upload: String,
     /** base64url (no padding) of the NEW AccountIdentity public key. */
     val new_signature_pubkey_b64: String,
-    /** ADR-0098 F3: base64url (no padding) of the 64-byte identity proof,
+    /** ADR-0099 F3: base64url (no padding) of the 64-byte identity proof,
      *  the recorded key's signature over the account id and itself
      *  (`signIdentityProof`). */
     val identity_proof_b64: String,
@@ -605,7 +605,7 @@ data class RecallFinishRequest(
     val password_upload: String,
     val recovery_upload: String,
     val new_signature_pubkey_b64: String,
-    /** ADR-0098 F3: base64url (no padding) of the 64-byte identity proof,
+    /** ADR-0099 F3: base64url (no padding) of the 64-byte identity proof,
      *  the recorded key's signature over the account id and itself
      *  (`signIdentityProof`). */
     val identity_proof_b64: String,
@@ -871,7 +871,7 @@ data class AccountNoticesResponse(
     val more: Boolean = false,
 )
 
-/** ADR-0098 section 4 - `POST /account/suspension/appeal`: the appeal sealed
+/** ADR-0099 section 4 - `POST /account/suspension/appeal`: the appeal sealed
  *  to the moderators, standard base64. */
 @Serializable
 public data class SuspensionAppealRequest(val sealed_b64: String)

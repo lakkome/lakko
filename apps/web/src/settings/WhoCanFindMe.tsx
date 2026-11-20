@@ -134,7 +134,7 @@ function ModeRow(props: {
   readonly label: string;
   readonly helper?: string;
   readonly current: ModeName;
-  /** ADR-0098 step 5: Everyone while moderators hid the account. */
+  /** ADR-0099 step 5: Everyone while moderators hid the account. */
   readonly disabled?: boolean;
 }): JSX.Element {
   return (
@@ -153,7 +153,7 @@ function ModeRow(props: {
 export function WhoCanFindMeSection(): JSX.Element {
   const navigate = useNavigate();
   const auth = useAuth();
-  /** ADR-0098 step 5: moderators hid this account from search. */
+  /** ADR-0099 step 5: moderators hid this account from search. */
   const hidden = (): boolean => {
     const s = auth.state();
     return isHiddenFromSearch(s.kind === "session" ? s.account.accountId : null);

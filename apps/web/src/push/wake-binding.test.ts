@@ -133,7 +133,7 @@ describe("the callers (source)", () => {
     expect(src).not.toMatch(/subscribeToPush\(\)/);
     expect(src).not.toMatch(/subscribePushFor\(\)/);
     // Signup, the session landing, a guest account that was kept, recover,
-    // and the end of a suspension (ADR-0098).
+    // and the end of a suspension (ADR-0099).
     // Each goes through `subscribePushFor`, the one caller of
     // `subscribeToPush`, which names the account and passes the "is this
     // account still signed in" check with it.

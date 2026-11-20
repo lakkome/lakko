@@ -603,7 +603,7 @@ export function PostComments(props: {
               </div>
             )}
           </Show>
-          {/* ADR-0098 step 3: a suspended account comments on nothing. */}
+          {/* ADR-0099 step 3: a suspended account comments on nothing. */}
           <SuspendedComposerLine />
           <form
             class="lk-comment-field"

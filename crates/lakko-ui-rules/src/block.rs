@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! What a block does on each path (ADR-0098 section 6, UX
+//! What a block does on each path (ADR-0099 section 6, UX
 //! `reporting-and-moderation.md` section 1.2).
 //!
 //! A block is a register the account's devices share; every receive path

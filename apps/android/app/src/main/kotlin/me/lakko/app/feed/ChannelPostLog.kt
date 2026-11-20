@@ -80,7 +80,7 @@ public data class PersistedChannelPost(
      *  a location, contact card or article (re-parsed when read). Absent in
      *  a row written before it. */
     val contentEnvelopeB64: String? = null,
-    /** ADR-0098 section 2 — the post's wire as served (base64url), what a
+    /** ADR-0099 section 2 — the post's wire as served (base64url), what a
      *  report from the channel's info includes when this post is picked. */
     val wireB64: String? = null,
 )

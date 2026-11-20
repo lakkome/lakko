@@ -294,7 +294,7 @@ pub(crate) fn decode_hash(b64: &str) -> Result<[u8; OPRF_HASH_LEN], HandlerError
 /// username is a `409`: the name lookup only ever returns accounts whose
 /// username is public. Entering without a public record, or leaving with
 /// one, is a `400`. Entering while a moderator hid the account from search
-/// is `403 {"error":"hidden-from-search"}` (ADR-0098 step 5); leaving is
+/// is `403 {"error":"hidden-from-search"}` (ADR-0099 step 5); leaving is
 /// always allowed. Idempotent.
 pub(crate) async fn put_visibility(
     State(state): State<AppState>,
@@ -374,7 +374,7 @@ async fn put_visibility_inner(
     let mut tx = sqlx::Connection::begin(&mut *conn)
         .await
         .map_err(db_err("begin visibility"))?;
-    // ADR-0098 step 5: a moderator removed this account from search.
+    // ADR-0099 step 5: a moderator removed this account from search.
     if req.public
         && crate::moderation::is_hidden(&mut *tx, account)
             .await

@@ -3385,7 +3385,7 @@ public class ChatRepository(
     public fun heldGroupIds(): Set<String> = groups.keys.toSet()
 
     /**
-     * ADR-0098 section 6 — the other person's account key (base64) when
+     * ADR-0099 section 6 — the other person's account key (base64) when
      * [groupIdHex] is a one-to-one, else `null`.
      */
     public fun oneToOnePeerPersonKey(groupIdHex: String): String? {
@@ -3394,7 +3394,7 @@ public class ChatRepository(
         return keys.firstOrNull { it != own }
     }
 
-    /** ADR-0098 section 6 — whether typing, read receipts and profile
+    /** ADR-0099 section 6 — whether typing, read receipts and profile
      *  updates are withheld from the one-to-one [groupIdHex]. */
     private fun withholdsSignalIn(groupIdHex: String): Boolean {
         if (me.lakko.app.moderation.BlockRegister.state.value?.blocked.isNullOrEmpty()) return false
@@ -5114,7 +5114,7 @@ public class ChatRepository(
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
-                    // ADR-0098 section 1 — a chat envelope is signed by this leaf.
+                    // ADR-0099 section 1 — a chat envelope is signed by this leaf.
                     attest = true,
                 )
                 // ADR-0023 — stamp our own signature key as the author so a
@@ -5177,7 +5177,7 @@ public class ChatRepository(
                     group = record.group,
                     plaintext = envelope,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
-                    // ADR-0098 section 1 — an op on a poll or checklist is a
+                    // ADR-0099 section 1 — an op on a poll or checklist is a
                     // chat envelope, attested like an edit or a reaction.
                     attest = true,
                 )
@@ -5374,7 +5374,7 @@ public class ChatRepository(
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
-                    // ADR-0098 section 1 — a chat envelope is signed by this leaf.
+                    // ADR-0099 section 1 — a chat envelope is signed by this leaf.
                     attest = true,
                 )
                 // ADR-0023 — our own IDENTITY, resolved through the roster in
@@ -5445,7 +5445,7 @@ public class ChatRepository(
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
-                    // ADR-0098 section 1 — a chat envelope is signed by this leaf.
+                    // ADR-0099 section 1 — a chat envelope is signed by this leaf.
                     attest = true,
                 )
                 // ADR-0023 — our own IDENTITY, resolved through the roster in
@@ -5550,7 +5550,7 @@ public class ChatRepository(
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
-                    // ADR-0098 section 1 — a chat envelope is signed by this leaf.
+                    // ADR-0099 section 1 — a chat envelope is signed by this leaf.
                     attest = true,
                 )
                 // ADR-0023 — our own IDENTITY, resolved through the roster in
@@ -5592,12 +5592,12 @@ public class ChatRepository(
         forSession { sendTypingOnMlsThread(groupIdHex = groupIdHex, isTyping = isTyping) }
 
     private suspend fun sendTypingOnMlsThread(groupIdHex: String, isTyping: Boolean): Unit {
-        // ADR-0098 section 4 — a suspended account sends nothing (and does
+        // ADR-0099 section 4 — a suspended account sends nothing (and does
         // not advance its sender ratchet for a message that cannot go out).
         if (me.lakko.app.auth.SuspensionGate.readOnly.value) return
         // ADR-0073 R.7 case 1 — not sent into a dead one-to-one.
         if (deadOneToOne(groupIdHex)) return
-        // ADR-0098 section 6 — withheld from a blocked person.
+        // ADR-0099 section 6 — withheld from a blocked person.
         if (withholdsSignalIn(groupIdHex)) return
         // ADR-0091 phase 2 section 2 — nor by a device behind there, nor
         // while a read of the journal was refused (walk 3, W3-R2).
@@ -5648,11 +5648,11 @@ public class ChatRepository(
         forSession { sendReadReceiptOnMlsThread(groupIdHex = groupIdHex, upTo = upTo) }
 
     private suspend fun sendReadReceiptOnMlsThread(groupIdHex: String, upTo: Long): Unit {
-        // ADR-0098 section 4 — a suspended account sends nothing.
+        // ADR-0099 section 4 — a suspended account sends nothing.
         if (me.lakko.app.auth.SuspensionGate.readOnly.value) return
         // ADR-0073 R.7 case 1 — not sent into a dead one-to-one.
         if (deadOneToOne(groupIdHex)) return
-        // ADR-0098 section 6 — withheld from a blocked person.
+        // ADR-0099 section 6 — withheld from a blocked person.
         if (withholdsSignalIn(groupIdHex)) return
         // ADR-0091 phase 2 section 2 — nor by a device behind there, nor
         // while a read of the journal was refused (walk 3, W3-R2).
@@ -5895,7 +5895,7 @@ public class ChatRepository(
         val identity = canonicalIdentity.get() ?: return failed
         val record = groups[groupIdHex] ?: return nothing
         if (readIsActive { record.group.isActive() } == false) return nothing
-        // ADR-0098 section 6 — profile updates stop going to a blocked person.
+        // ADR-0099 section 6 — profile updates stop going to a blocked person.
         if (withholdsSignalIn(groupIdHex)) return nothing
         val profile = ownProfileForWire(groupIdHex, record.group) ?: return nothing
         val envelope = try {
@@ -6113,7 +6113,7 @@ public class ChatRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            // ADR-0098 step 5 — moderators removed this account from search:
+            // ADR-0099 step 5 — moderators removed this account from search:
             // not a failure to retry, the screen says so.
             if (me.lakko.app.reach.isHiddenFromSearch(cause)) {
                 ensureSession()
@@ -9835,7 +9835,7 @@ public class ChatRepository(
      * sender posted ([withoutSupersededActs]). Called from the poll's locked
      * apply region, right after the batch applied.
      */
-    /** ADR-0098 section 6 — [me.lakko.app.moderation.withoutBlockedEvents]
+    /** ADR-0099 section 6 — [me.lakko.app.moderation.withoutBlockedEvents]
      *  for [group]; free when nobody is blocked. */
     private fun withoutBlockedSenders(group: Group, events: List<IncomingChatEvent>): List<IncomingChatEvent> {
         if (me.lakko.app.moderation.BlockRegister.state.value?.blocked.isNullOrEmpty()) return events
@@ -10435,7 +10435,7 @@ public class ChatRepository(
                             group = successor.group,
                             plaintext = envelope,
                             persistRatchet = { persistSnapshotDurableOrThrow() },
-                            // ADR-0098 section 1 — a chat envelope is signed by this leaf.
+                            // ADR-0099 section 1 — a chat envelope is signed by this leaf.
                             attest = true,
                         )
                     },
@@ -11113,7 +11113,7 @@ public class ChatRepository(
             // ADR-0073 R.5 / R.8 — nothing a superseded sender posted acts:
             // dropped here, before any sink, row or call route sees it
             // ([supersededActDropped]). MLS frames were applied above.
-            // ADR-0098 section 6 — and what a block removes, before anything
+            // ADR-0099 section 6 — and what a block removes, before anything
             // stores, counts, notifies or rings for it.
             val batchEvents = withoutBlockedSenders(
                 record.group,
@@ -11391,7 +11391,7 @@ public class ChatRepository(
         // messages it missed after each applied poll (throttled to once a
         // minute by its record). A read, not a send: also while behind.
         pushScope.launchSession { lookForGapHistoryBestEffort(groupIdHex) }
-        // ADR-0098 section 4 — a suspended account reads and writes nothing:
+        // ADR-0099 section 4 — a suspended account reads and writes nothing:
         // every duty below (registrations, the sweep, re-requests, the
         // committer envelope, repairs) is a DS write the transport refuses,
         // and a sweep would stage a commit it cannot publish. The read is done.
@@ -16796,7 +16796,7 @@ public class ChatRepository(
         // Ed25519 key derivation the rank read costs. The gate there stays the
         // authority.
         if (!foreground) return BeaconEmitVerdict.NOT_FOREGROUND.name
-        // ADR-0098 section 4 — a suspended account cannot sweep, so it is no
+        // ADR-0099 section 4 — a suspended account cannot sweep, so it is no
         // candidate (and sends nothing).
         if (me.lakko.app.auth.SuspensionGate.readOnly.value) return BeaconEmitVerdict.NOT_A_CANDIDATE.name
         // ADR-0091 phase 2 section 2 / C-64 — a device behind in this
@@ -16895,7 +16895,7 @@ public class ChatRepository(
         forSession { sweepIfCommitterOnMlsThread(groupIdHex = groupIdHex) }
 
     private suspend fun sweepIfCommitterOnMlsThread(groupIdHex: String): SweepOutcome? {
-        // ADR-0098 section 4 — a suspended account commits nothing (the
+        // ADR-0099 section 4 — a suspended account commits nothing (the
         // commit could not be published; staging it would only leave a
         // verdict owed).
         if (me.lakko.app.auth.SuspensionGate.readOnly.value) return null
@@ -17110,7 +17110,7 @@ public class ChatRepository(
                             resolveLeafSignatureKey = { leaf ->
                                 resolveLeafSignatureKey(rosterOf(record.group), leaf)
                             },
-                            // ADR-0098 section 1 — the same evidence as the poll's.
+                            // ADR-0099 section 1 — the same evidence as the poll's.
                             evidenceOf = { plaintext, leaf ->
                                 me.lakko.app.moderation.receivedEvidence(record.group, plaintext, leaf)
                             },
@@ -18407,7 +18407,7 @@ public data class ChatMessage(
     /** The same, for the person keys that left. */
     val membershipLeft: List<MemberIdentity> = emptyList(),
     /**
-     * ADR-0098 section 1 — what a report of this row carries, captured at
+     * ADR-0099 section 1 — what a report of this row carries, captured at
      * receipt (the attested plaintext, the sender leaf key and its device
      * binding). Only on a message from someone else; dropped with the words
      * when the row is deleted.
@@ -18906,7 +18906,7 @@ private class GroupRecord(
                         unsupportedVersion = event.unsupportedVersion,
                         // ADR-0087 section 14 — a channel invitation card.
                         channelInvite = event.channelInvite,
-                        // ADR-0098 section 1 — evidence for a report, kept for
+                        // ADR-0099 section 1 — evidence for a report, kept for
                         // someone else's message only.
                         evidence = event.evidence.takeIf {
                             event.senderKey == null || event.senderKey != ownPersonKey

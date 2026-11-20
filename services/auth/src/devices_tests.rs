@@ -109,7 +109,7 @@ fn grant(state: &AppState, account: &[u8; 16]) -> String {
 
 /// A deterministic account identity key per test account.
 /// A fresh random identity key on every call: a key belongs to one account
-/// forever (ADR-0098 F3) in a database the tests share across runs. The tag
+/// forever (ADR-0099 F3) in a database the tests share across runs. The tag
 /// names the key in the test; two calls never agree.
 fn account_key(_tag: u8) -> SigningKey {
     let mut seed = [0u8; 32];
@@ -126,7 +126,7 @@ fn account_of(bearer: &str) -> [u8; 16] {
         .expect("16 bytes")
 }
 
-/// `key`'s identity proof for `account` (ADR-0098 F3).
+/// `key`'s identity proof for `account` (ADR-0099 F3).
 fn identity_proof(account: &[u8; 16], key: &SigningKey) -> String {
     b64(&lakko_attest::sign_identity_proof(&key.to_seed(), account))
 }
@@ -661,7 +661,7 @@ async fn the_genesis_mint_signs_only_the_recorded_key() {
         None
     );
 
-    // ADR-0098 F3: no proof, a proof by another key, a proof for another
+    // ADR-0099 F3: no proof, a proof by another key, a proof for another
     // account: 400, nothing recorded.
     for proof in [
         None,
@@ -782,7 +782,7 @@ async fn the_genesis_mint_signs_only_the_recorded_key() {
         None
     );
 
-    // ADR-0098 F3: a key another account recorded is refused, with its own
+    // ADR-0099 F3: a key another account recorded is refused, with its own
     // proof, and the second account records nothing.
     let (st, bytes) = post(
         &state,

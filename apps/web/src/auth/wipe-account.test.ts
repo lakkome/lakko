@@ -799,7 +799,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.tones": "retired",
   // device settings (see the module doc of wipe-account.ts)
   "lakko.theme": "device",
-  // ADR-0098 section 2: the highest moderator-list version seen here, which
+  // ADR-0099 section 2: the highest moderator-list version seen here, which
   // names no account.
   "lakko.moderation.list-version.v1": "device",
   // docs/ux/text-size.md: the message text size is chosen per device.

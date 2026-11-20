@@ -273,7 +273,7 @@ public class ChannelsClient(
             header(signatureHeaderName, signatureHeaderValue)
         }
         if (response.status.isSuccess() || response.status.value == 404) return
-        // ADR-0098 step 5 / ADR-0087 section 15 — a removed or deleted
+        // ADR-0099 step 5 / ADR-0087 section 15 — a removed or deleted
         // channel (`410`) holds no subscription to drop: the unsubscribe is
         // done, and it neither fails nor marks the channel again.
         if (response.status.value == 410) return
@@ -1378,7 +1378,7 @@ public class ChannelsClient(
                         runCatching { onChannelDeleted?.invoke(id) }
                     }
                 }
-                // ADR-0098 step 5 — moderators removed the channel: nothing
+                // ADR-0099 step 5 — moderators removed the channel: nothing
                 // ends on the device; the channel is marked and the log asked.
                 if (e.status == 410 && e.code == RemovedChannels.CODE) {
                     channelIdInPath(response.call.request.url.encodedPath)?.let { id ->
@@ -1525,7 +1525,7 @@ public class ChannelsApiException(
 ) : Exception("$code (HTTP $status): $detail")
 
 /**
- * ADR-0098 step 5 — a removed channel answers `410 channel-removed` on every
+ * ADR-0099 step 5 — a removed channel answers `410 channel-removed` on every
  * route, so a success on any route naming the channel means it was restored:
  * the removal is forgotten and everything comes back as before.
  */

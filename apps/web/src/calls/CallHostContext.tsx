@@ -1206,10 +1206,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       console.warn("inbound call signaling did not parse; dropped", err);
       return;
     }
-    // ADR-0098 step 3 - a suspended account makes no call and answers none:
+    // ADR-0099 step 3 - a suspended account makes no call and answers none:
     // an offer rings nothing (the other side's offer runs out on its own).
     if (parsed.kind === "offer" && accountSuspended()) return;
-    // ADR-0098 section 6 - a one-to-one call from a blocked person does not
+    // ADR-0099 section 6 - a one-to-one call from a blocked person does not
     // ring: declined silently, with no missed-call row (the shared rule).
     if (
       parsed.kind === "offer" &&
@@ -3923,7 +3923,7 @@ function GroupCallBanner(): JSX.Element {
       clock(),
       viewer,
     )
-      // ADR-0098 section 6 - a group call a blocked person started is not
+      // ADR-0099 section 6 - a group call a blocked person started is not
       // announced on other screens (it does not ring); the chat still shows
       // it, and anyone in the group can join.
       .filter(
@@ -3951,7 +3951,7 @@ function GroupCallBanner(): JSX.Element {
   const banner = createMemo(() => {
     const s = auth.state();
     if (s.kind !== "session") return null;
-    // ADR-0098 step 3: a suspended account is offered no call to join.
+    // ADR-0099 step 3: a suspended account is offered no call to join.
     if (accountSuspended()) return null;
     foregroundVersion();
     const live = liveCalls();

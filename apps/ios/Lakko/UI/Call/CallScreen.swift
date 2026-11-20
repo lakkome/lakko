@@ -390,7 +390,7 @@ private struct QualityIndicator: View {
 /// old grid scroll.
 private struct ParticipantTile: View {
     @ObservedObject var l10n = Localization.shared
-    /// ADR-0098 section 6 — a blocked person's tile carries a muted label.
+    /// ADR-0099 section 6 — a blocked person's tile carries a muted label.
     @ObservedObject private var blocks = BlockList.shared
     let participant: CallUiState.Participant
     let size: CGSize

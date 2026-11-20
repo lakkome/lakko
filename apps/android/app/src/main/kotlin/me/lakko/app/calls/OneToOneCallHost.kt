@@ -1040,7 +1040,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
 
     private suspend fun ring(row: Event.Row, muted: Boolean) {
         val offer = row.body as? FfiCallSignalingBody.Offer ?: return
-        // ADR-0098 section 4 — a suspended account makes no calls: an offer
+        // ADR-0099 section 4 — a suspended account makes no calls: an offer
         // rings nothing and is not answered.
         if (me.lakko.app.auth.SuspensionGate.readOnly.value) return
         val p = port ?: run {

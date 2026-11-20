@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Whether this device is in suspended mode (ADR-0098 step 3, UX
+ * Whether this device is in suspended mode (ADR-0099 step 3, UX
  * `reporting-and-moderation.md` section 4), readable without the auth
  * context.
  *
@@ -27,7 +27,7 @@ export function setAccountSuspendedFlag(value: boolean): void {
 
 /**
  * The writes a suspended account still makes to the channels service and to
- * storage (ADR-0098 step 3), as `METHOD path`: buying a file-read pass (files
+ * storage (ADR-0099 step 3), as `METHOD path`: buying a file-read pass (files
  * in chats still open) and deleting the backup (with the account). Every
  * other request but GET and HEAD is refused.
  */

@@ -29,7 +29,7 @@
 //! row, `i` marks a node's import done. `V` claims a vault, `O` commits a
 //! version of one of its objects, `X` deletes a vault with its objects
 //! ([`vault`]); vault reservations and the write-rate window live in memory
-//! only, so a restart frees every reservation. ADR-0098 step 5: `x`
+//! only, so a restart frees every reservation. ADR-0099 step 5: `x`
 //! tombstones an id a moderator deleted (and removes its row; kept forever),
 //! `s` records a moderator statement applied, `v` raises the highest
 //! moderator-list version seen. Node names carry no whitespace (checked at
@@ -52,7 +52,7 @@ use super::{
 
 mod vault;
 
-/// The moderation state of the index (ADR-0098 step 5).
+/// The moderation state of the index (ADR-0099 step 5).
 #[derive(Default)]
 struct Moderation {
     /// Tombstoned id -> the day it was tombstoned.

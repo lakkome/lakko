@@ -146,7 +146,7 @@ public enum SessionRefreshOutcome: Equatable {
     case revoked
     /// `401 refresh-invalid`: the credential is dead; sign in again.
     case invalid
-    /// `403 account-suspended` (ADR-0098 step 3): the account is suspended.
+    /// `403 account-suspended` (ADR-0099 step 3): the account is suspended.
     /// The landing's pair (the `s1` in the access slot, a new `r2`) is now
     /// installed and the provider is in suspended mode.
     case suspended(SuspendedLanding)
@@ -184,7 +184,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// `true` once the server answered `device-revoked` (ADR-0074); every
     /// later access is refused without a network call until ``clear()``.
     private var revoked = false
-    /// `true` while the account is suspended (ADR-0098 step 3): the pair's
+    /// `true` while the account is suspended (ADR-0099 step 3): the pair's
     /// access slot holds the `s1`, and only the requests
     /// ``SuspendedRequestRule`` allows leave the device. Cleared by a
     /// refresh that answers a normal pair.
@@ -216,11 +216,11 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// The refresh credential was refused as invalid: sign in again, nothing
     /// is wiped.
     public var onRefreshInvalid: (@Sendable (_ accountIdB64: String) -> Void)?
-    /// ADR-0098 step 3 — auth answered `403 account-suspended` with
+    /// ADR-0099 step 3 — auth answered `403 account-suspended` with
     /// credentials: the landing's pair is installed (each renewal of the
     /// `s1` fires again, so the caller keeps the newest one).
     public var onSuspended: (@Sendable (_ landing: SuspendedLanding, _ accountIdB64: String) -> Void)?
-    /// ADR-0098 step 3 — a refresh answered a normal pair while the provider
+    /// ADR-0099 step 3 — a refresh answered a normal pair while the provider
     /// was suspended: the suspension ended or was lifted. Fired after
     /// ``onPairRefreshed``.
     public var onSuspensionEnded: (@Sendable (_ accountIdB64: String) -> Void)?
@@ -291,7 +291,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         return superseded
     }
 
-    /// Whether the account is suspended (ADR-0098 step 3).
+    /// Whether the account is suspended (ADR-0099 step 3).
     public var isSuspended: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -544,7 +544,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         try requireAllowedWhileSuspended(first, carriesSessionBearer: true)
         let (data, response) = try await send(first)
         guard let http = response as? HTTPURLResponse, http.statusCode == 401 else {
-            // ADR-0098 step 3 — a bearer route of auth refused the account as
+            // ADR-0099 step 3 — a bearer route of auth refused the account as
             // suspended (with no credentials): one refresh fetches the `s1`
             // and enters suspended mode. Already suspended, there is nothing
             // new to learn.

@@ -5077,7 +5077,7 @@ button.lk-reactors-row:focus-visible {
   flex: 0 0 auto;
   margin: 12px 24px 0;
 }
-/* ADR-0098 step 5: the line of a channel moderators removed, in its info. */
+/* ADR-0099 step 5: the line of a channel moderators removed, in its info. */
 .lk-info-header .lk-channel-removed {
   margin: 8px 0 0;
 }
@@ -8600,7 +8600,7 @@ button.lk-folder-new {
   cursor: pointer;
   align-items: flex-start;
 }
-/* ADR-0098 step 5: Everyone while moderators hid the account from search. */
+/* ADR-0099 step 5: Everyone while moderators hid the account from search. */
 .lk-privacy-choice.disabled {
   cursor: default;
   opacity: 0.55;
@@ -9690,7 +9690,7 @@ button.lk-card-row-button {
   opacity: 0.85;
 }
 
-/* ADR-0098 (docs/ux/reporting-and-moderation.md). The report sheet: the
+/* ADR-0099 (docs/ux/reporting-and-moderation.md). The report sheet: the
    layer's card on wide web, a bottom sheet on a phone width. */
 .lk-report-form {
   gap: var(--space-3);
@@ -9735,7 +9735,7 @@ button.lk-card-row-button {
     border-radius: var(--radius-md) var(--radius-md) 0 0;
   }
 }
-/* ADR-0098 step 3: the suspended screen's actions and the appeal sheet's
+/* ADR-0099 step 3: the suspended screen's actions and the appeal sheet's
    counter (docs/ux/reporting-and-moderation.md section 4). */
 .lk-suspended-actions {
   gap: var(--space-2);
@@ -9788,7 +9788,7 @@ button.lk-card-row-button {
   width: auto;
 }
 /* The one-to-one banner under the header when the other person's account is
-   suspended (ADR-0098 step 4, reporting UX 3): nothing it replaces, no
+   suspended (ADR-0099 step 4, reporting UX 3): nothing it replaces, no
    action. */
 .lk-suspended-banner {
   margin: 8px 12px 0;
@@ -9796,7 +9796,7 @@ button.lk-card-row-button {
   color: var(--surface-muted);
   font-size: 0.85rem;
 }
-/* "Suspended" after a member's name in a group's member list (ADR-0098
+/* "Suspended" after a member's name in a group's member list (ADR-0099
    step 4, reporting UX 3). */
 .lk-member-suspended {
   font-weight: normal;

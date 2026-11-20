@@ -236,11 +236,11 @@ targets:
         LakkoAppStoreUrl: ""
         LakkoCurrentRelease: "1"
         LakkoReleaseCheckDevOverride: "false"
-        # ADR-0098 section 2 — base64url of the 32-byte Ed25519 offline root key
+        # ADR-0099 section 2 — base64url of the 32-byte Ed25519 offline root key
         # that signs the moderator list. EMPTY → reporting is unavailable (the
         # report sheet says so); there is no serving-tier fallback.
         LakkoModerationRootKey: ""
-        # ADR-0098 step 4 — base64url of the 32-byte Ed25519 operator key of
+        # ADR-0099 step 4 — base64url of the 32-byte Ed25519 operator key of
         # the moderation log (the snapshot of active suspensions is checked
         # under it, with the transparency witness pins above). EMPTY or
         # malformed → no suspension marks anywhere and no snapshot request.
@@ -670,7 +670,7 @@ targets:
       - path: Lakko/Chat/ContinuityMirror.swift
         type: file
         buildPhase: sources
-      # ADR-0098 section 6 — the account's blocked people, mirrored by the
+      # ADR-0099 section 6 — the account's blocked people, mirrored by the
       # app and READ here, so nothing of a blocked person's is notified. The
       # register itself lives in the synced state (C-59). Foundation only.
       - path: Lakko/Moderation/BlockedSenderMirror.swift

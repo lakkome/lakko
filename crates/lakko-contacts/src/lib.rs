@@ -25,6 +25,10 @@
 //!   The sealed plaintext is
 //!   `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ intro`
 //!   (ADR-0048 §2, ADR-0060 §6).
+//! - [`account_deleted`] — the ADR-0098 account-deleted envelope a deleting
+//!   device posts in every conversation, and the shared rules deciding whether
+//!   a person is shown as "Deleted account" and whether their `@username`
+//!   may be shown.
 //! - [`committer_delegation`] — the ADR-0060 §6 committer-delegation
 //!   envelope: a proposer's delegations for whichever candidate commits its
 //!   `Add`, so the Welcome reaches the added person's closed mailbox.
@@ -110,6 +114,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod account_deleted;
 pub mod ack;
 pub mod admission_seed;
 pub mod allowed_reactions;
@@ -171,6 +176,13 @@ pub mod shared_channels;
 pub mod username;
 pub mod visibility;
 
+pub use account_deleted::{
+    account_deletion_status, compose_account_deleted, decode_account_deleted, directory_check_due,
+    may_show_username, try_unwrap_account_deleted, verify_account_deleted, AccountDeleted,
+    AccountDeletedError, AccountStatus, DirectoryAnswer, ACCOUNT_DELETED_ENVELOPE_DOMAIN_V1,
+    ACCOUNT_DELETED_ENVELOPE_LEN, ACCOUNT_DELETED_MAX_GROUP_ID_LEN, ACCOUNT_DELETED_VERSION_V1,
+    DIRECTORY_RECHECK_AFTER_MS, DIRECTORY_RETRY_AFTER_MS, USERNAME_CONFIRMATION_VALID_MS,
+};
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use admission_seed::{
     admission_seed_public_key, compose_admission_seed, decode_admission_seed,

@@ -704,7 +704,7 @@ export default function Feed(): JSX.Element {
     for (const [hex, upTo] of advanced) {
       const entry = chats.groups().find((g) => syncGroupIdHex(g.group.groupId) === hex);
       if (entry === undefined || readIsActive(entry.group) === false) continue;
-      // ADR-0098 section 6 - no read receipt to a blocked person.
+      // ADR-0099 section 6 - no read receipt to a blocked person.
       if (signalsWithheldFrom(entry.group, chats.identity())) continue;
       const secrets = auth.identitySecrets();
       if (secrets !== null && chats.identity() !== null) {

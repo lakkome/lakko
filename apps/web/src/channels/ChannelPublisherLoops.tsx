@@ -268,7 +268,7 @@ export async function rotateChannel(
   onProgress?: (done: number, total: number) => void,
   requestedAtEpoch?: bigint,
 ): Promise<void> {
-  // ADR-0098 step 3: a suspended account rotates nothing (every step of a
+  // ADR-0099 step 3: a suspended account rotates nothing (every step of a
   // rotation writes to the channels service and the DS).
   if (accountSuspended()) return;
   // Only an owner device rotates the channel key; a co-publisher's never.
@@ -1347,7 +1347,7 @@ export const ChannelPublisherLoops: Component = () => {
   }
 
   async function pass(): Promise<void> {
-    // ADR-0098 step 3: no publisher work (rotation, approvals, seeds) while
+    // ADR-0099 step 3: no publisher work (rotation, approvals, seeds) while
     // the account is suspended; the next pass after it ends picks it up.
     if (accountSuspended()) return;
     const lineage = chats.conversationAccountIdentity();

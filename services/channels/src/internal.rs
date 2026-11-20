@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The internal moderation listener ([ADR-0098] section 4, step 5).
+//! The internal moderation listener ([ADR-0099] section 4, step 5).
 //!
 //! A channel is moderated only by a moderator's signed statement. The
 //! moderation service logs it and forwards it here: a second listener bound
@@ -56,7 +56,7 @@
 //! newest applied to the channel, else `200 {"applied": true}`. A statement
 //! may name a channel id that does not exist yet.
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use std::sync::Arc;
 

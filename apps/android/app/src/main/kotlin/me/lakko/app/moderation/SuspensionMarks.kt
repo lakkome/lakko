@@ -15,7 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 /*
- * ADR-0098 step 4, UX `reporting-and-moderation.md` section 3 — whether
+ * ADR-0099 step 4, UX `reporting-and-moderation.md` section 3 — whether
  * ANOTHER person's account is suspended, as the moderation log says.
  *
  * The moderation service publishes a snapshot of active suspensions in 65,536
@@ -30,7 +30,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * time; nothing about a standing reaches disk, so when a suspension ends
  * nothing about it is kept. Nothing here logs an account key or a prefix.
  *
- * ADR-0098 F2: the snapshot alone never marks anyone. A `suspended` answer
+ * ADR-0099 F2: the snapshot alone never marks anyone. A `suspended` answer
  * is acted on only after the moderation log entry behind it is fetched and
  * proven to be a statement a listed moderator signed (`moderationProve...`,
  * [StandingProofs]); until then, and whenever that fails, the standing is
@@ -49,7 +49,7 @@ public class ModerationLogPins(
 
 /** One verified answer, read for one account. [logIndex] is the moderation
  *  log index of the statement behind the account's snapshot entry, the entry
- *  a `suspended` standing must be proven with (ADR-0098 F2). */
+ *  a `suspended` standing must be proven with (ADR-0099 F2). */
 public data class VerifiedStanding(val suspended: Boolean, val reuseUntilMs: Long, val logIndex: ULong? = null)
 
 /** What [SuspensionStandings.answerOf] found: the standing, and until when a
@@ -98,7 +98,7 @@ public class SuspensionStandings(
     private val scope: CoroutineScope,
     private val nowMs: () -> Long = System::currentTimeMillis,
     /**
-     * ADR-0098 F2: prove a `suspended` [answer] for [key] from the log entry
+     * ADR-0099 F2: prove a `suspended` [answer] for [key] from the log entry
      * at [logIndex]; `true` only when a listed moderator's statement proves
      * it. `null` proves nothing, so no standing is ever SUSPENDED.
      */
@@ -149,7 +149,7 @@ public class SuspensionStandings(
 
     /**
      * The standing of the subject whose raw identifier is [key] (an account
-     * key, or, for the channel instance of ADR-0098 step 5, a 16-byte
+     * key, or, for the channel instance of ADR-0099 step 5, a 16-byte
      * channel id), with the time the answer may be reused until; `null` when
      * nothing verified it.
      */
@@ -177,7 +177,7 @@ public class SuspensionStandings(
             return StandingAnswer.UNKNOWN
         }
         if (!verified.suspended) return StandingAnswer(AccountStanding.NOT_SUSPENDED, verified.reuseUntilMs)
-        // ADR-0098 F2: suspended only when the log entry proves it.
+        // ADR-0099 F2: suspended only when the log entry proves it.
         if (!provenFor(cached, key, verified.logIndex)) return StandingAnswer.UNKNOWN
         return StandingAnswer(AccountStanding.SUSPENDED, verified.reuseUntilMs)
     }
@@ -300,7 +300,7 @@ public object SuspensionMarks {
 
     private val client: ModerationClient by lazy { ModerationClient() }
 
-    /** ADR-0098 F2: the log-entry proof both services run before a mark. */
+    /** ADR-0099 F2: the log-entry proof both services run before a mark. */
     private val proofs: StandingProofs by lazy {
         StandingProofs(
             rootKey = { pinnedModerationRootKey() },
@@ -347,7 +347,7 @@ public object SuspensionMarks {
     }
 
     /**
-     * ADR-0098 step 5 — the same service for channels: a removed channel is
+     * ADR-0099 step 5 — the same service for channels: a removed channel is
      * an entry of kind Channel in the same snapshot, keyed on the 16-byte
      * channel id. A separate instance, so the per-prefix cache of accounts
      * and of channels never mix.

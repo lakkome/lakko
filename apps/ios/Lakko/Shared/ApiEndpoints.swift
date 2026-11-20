@@ -20,7 +20,7 @@ public enum ApiService: String, CaseIterable, Sendable {
     case pushGw = "push-gw"
     case channels
     case gifs
-    /// ADR-0098 — `services/moderation` (reports and the moderator list).
+    /// ADR-0099 — `services/moderation` (reports and the moderator list).
     case moderation
 
     /// The base URL used when the build carries no API base URL: the service's

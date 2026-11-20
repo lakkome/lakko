@@ -32,7 +32,7 @@ public struct InviteLandingScreen: View {
     public var onOpenContacts: () -> Void
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 step 4 — an inviter whose account is suspended cannot be
+    /// ADR-0099 step 4 — an inviter whose account is suspended cannot be
     /// added.
     @ObservedObject private var suspensions = SuspensionMarks.shared
 
@@ -59,7 +59,7 @@ public struct InviteLandingScreen: View {
         .navigationTitle(l10n.t("invite.contact.page_title"))
         .navigationBarTitleDisplayMode(.inline)
         .task { await viewModel.open() }
-        // ADR-0098 step 4 — ask about the link's issuer once it is read.
+        // ADR-0099 step 4 — ask about the link's issuer once it is read.
         .task(id: inviterKey) {
             if let inviterKey { _ = await suspensions.standing(inviterKey) }
         }
@@ -112,7 +112,7 @@ public struct InviteLandingScreen: View {
                     .foregroundStyle(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
             }
-            // ADR-0098 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // ADR-0099 step 4 / UX `reporting-and-moderation.md` section 3 —
             // the inviter's account is suspended: one line and Done, no Add.
             if !SuspensionMarkRules.inviteOffersAdd(
                 inviterSuspended: viewModel.inviterSuspended
@@ -489,10 +489,10 @@ public final class InviteLandingViewModel: ObservableObject {
     /// Set once Add has recorded the pending contact: the screen closes into
     /// that chat.
     @Published public private(set) var chatToOpen: ChatTarget?
-    /// ADR-0098 step 4 — Add found the inviter's account suspended: the page
+    /// ADR-0099 step 4 — Add found the inviter's account suspended: the page
     /// says so and sends nothing.
     @Published public private(set) var inviterSuspended = false
-    /// ADR-0098 step 4 — the inviter's verified standing, waited for at most
+    /// ADR-0099 step 4 — the inviter's verified standing, waited for at most
     /// its bound. Injectable for tests.
     var inviterSuspendedCheck: @MainActor (Data) async -> Bool = {
         await SuspensionMarks.shared.verifiedSuspended($0)
@@ -594,7 +594,7 @@ public final class InviteLandingViewModel: ObservableObject {
         guard case .ready(let invite, false, _) = state else { return }
         state = .ready(invite, adding: true, failed: false)
         let repository = self.repository
-        // ADR-0098 step 4 — a tap before the inviter's standing answered
+        // ADR-0099 step 4 — a tap before the inviter's standing answered
         // waits for it (bounded): a verified suspension sends nothing.
         let check = inviterSuspendedCheck
         let gated = await Cancellation.shielded {

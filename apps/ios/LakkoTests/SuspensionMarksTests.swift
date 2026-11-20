@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-/// ADR-0098 step 4 — the suspension marks service (cache until
+/// ADR-0099 step 4 — the suspension marks service (cache until
 /// `reuseUntilMs`, one request per prefix, a failure back-off, `unknown` on
 /// any check error, nothing asked when unpinned, never this account) and
 /// each mark site's decision.

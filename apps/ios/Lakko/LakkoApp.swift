@@ -194,7 +194,7 @@ struct LakkoApp: App {
         // A group call never rings a closed device, so a call wake for a
         // GROUP conversation, or for one whose group call this device is in or
         // just left, rings nothing either (older senders woke for group ends).
-        // ADR-0098 section 6 — no notification of a blocked person's over a
+        // ADR-0099 section 6 — no notification of a blocked person's over a
         // running app.
         PushAppDelegate.conversationSuppressed = { [weak chat] groupIdHex in
             guard let peer = chat?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return false }
@@ -202,7 +202,7 @@ struct LakkoApp: App {
         }
         VoipPushRegistrar.shared.callWakeSuppressed = {
             [weak host, weak groupHost, weak chat] groupIdHex in
-            // ADR-0098 section 6 — a call from a person this account blocked
+            // ADR-0099 section 6 — a call from a person this account blocked
             // is declined without a ring (`blockVerdict(.incomingCall)`); the
             // row itself is dropped by the receive filter, so no missed-call
             // row is written either.
@@ -210,7 +210,7 @@ struct LakkoApp: App {
                BlockList.shared.verdict(.incomingCall, accountKey: peer) == .declineSilently {
                 return true
             }
-            // ADR-0098 step 3 — a suspended account takes no calls.
+            // ADR-0099 step 3 — a suspended account takes no calls.
             if SessionTokenProvider.shared.isSuspended { return true }
             return CallWakeSuppression.anySource(
                 oneToOne: host?.suppressesCallWake(groupIdHex: groupIdHex) ?? false,
@@ -467,7 +467,7 @@ struct LakkoApp: App {
         QuickReactionSetting.shared.onChoose = { [weak sync] emoji in
             Task { _ = await sync?.setQuickReaction(emoji) }
         }
-        // ADR-0098 section 6 — a block is the account's, written through its
+        // ADR-0099 section 6 — a block is the account's, written through its
         // synced state.
         BlockList.shared.setter = { [weak sync] key, blocked in
             sync?.setBlocked(accountKey: key, blocked: blocked) ?? false
@@ -835,7 +835,7 @@ struct LakkoApp: App {
                     // ADR-0060 section 4 — a `fof` rotation that came due
                     // while the app was closed.
                     ReachCenter.shared.noteForeground()
-                    // ADR-0098 step 3 — a suspended account asks auth again
+                    // ADR-0099 step 3 — a suspended account asks auth again
                     // on every return to the foreground.
                     Task { await SuspensionCenter.shared.noteForeground() }
                 }
@@ -904,7 +904,7 @@ struct AppRoot: View, Equatable {
     let services: AppServices
     @ObservedObject private var authRepository: AuthRepository
     @ObservedObject private var inviteIntake: InviteIntake
-    /// ADR-0098 step 3 — suspended mode: the suspended screen in place of
+    /// ADR-0099 step 3 — suspended mode: the suspended screen in place of
     /// the app, or the read-only app. Publishes rarely.
     @ObservedObject private var suspension = SuspensionCenter.shared
     /// ADR-0061 — the two backup alarms below read the catalog, so they
@@ -979,7 +979,7 @@ struct AppRoot: View, Equatable {
                 // ADR-0097 — the supporters list, at most once a day.
                 await SupportersListCenter.shared.refreshIfDue()
             }
-            // ADR-0098 step 3 — while suspended, ask auth again every 10
+            // ADR-0099 step 3 — while suspended, ask auth again every 10
             // minutes; a normal pair ends suspended mode silently.
             .task(id: suspension.account) {
                 await suspension.runChecks()
@@ -1059,7 +1059,7 @@ struct AppRoot: View, Equatable {
                     services.linkCallHost.reset()
                 }
         } else if suspension.active, !(suspension.reading && sessionWithKeys) {
-            // ADR-0098 step 3 / UX `reporting-and-moderation.md` section 4 —
+            // ADR-0099 step 3 / UX `reporting-and-moderation.md` section 4 —
             // the one screen that says why. A device without the account's
             // keys has no chats to read and shows it alone.
             SuspendedScreen(
@@ -1397,9 +1397,9 @@ enum TabRoute: Hashable {
     case chatFolders(reorder: Bool)
     /// Settings > Privacy > Who can find me (ADR-0060).
     case whoCanFindMe
-    /// Settings > Privacy > Blocked people (ADR-0098, UX 1.1).
+    /// Settings > Privacy > Blocked people (ADR-0099, UX 1.1).
     case blockedPeople
-    /// Settings > Privacy > Your reports (ADR-0098, UX 2.3).
+    /// Settings > Privacy > Your reports (ADR-0099, UX 2.3).
     case yourReports
     /// Settings > About > Supporters (ADR-0097 section 2).
     case supporters
@@ -1945,7 +1945,7 @@ private struct SessionRoot: View, Equatable {
             MembershipEndToast(center: chatRepository.membershipEndNotices)
                 .animation(.easeOut(duration: 0.2), value: chatRepository.membershipEndNotices.shown)
         }
-        // ADR-0098 / UX 2.3 — "Report sent. Moderators will review it."
+        // ADR-0099 / UX 2.3 — "Report sent. Moderators will review it."
         .overlay(alignment: .bottom) {
             ReportSentToast()
                 .animation(.easeOut(duration: 0.2), value: ReportNoticeCenter.shared.shown)

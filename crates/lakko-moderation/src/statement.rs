@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A moderator's action ([ADR-0098] section 4).
+//! A moderator's action ([ADR-0099] section 4).
 //!
 //! ```text
 //! statement = DOMAIN ‖ version(1) ‖ statement_id(16) ‖ action(1)
@@ -24,7 +24,7 @@
 //! `statement_id`s it applied and refuses a repeat; that state is the
 //! service's.
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use lakko_crypto::hash::{blake3_derive_key_from_material, sha256};
 

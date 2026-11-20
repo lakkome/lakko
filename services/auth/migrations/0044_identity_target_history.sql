@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0098 security fix F3: one account per identity key, proven, with
+-- ADR-0099 security fix F3: one account per identity key, proven, with
 -- history.
 --
 -- 1. `account_identity_targets`: every account target

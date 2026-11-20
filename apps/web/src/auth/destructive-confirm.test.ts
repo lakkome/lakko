@@ -38,8 +38,7 @@ describe("the remove-passkey confirmation", () => {
 
   it("states the consequence and the irreversibility", () => {
     expect(removePasskeyConfirmation({ nickname: "laptop" }).body).toBe(
-      "The device that owns the matching private key will no longer be able " +
-        "to sign in with it. This cannot be undone.",
+      "You will no longer be able to log in with this passkey. This cannot be undone.",
     );
   });
 
@@ -88,13 +87,14 @@ describe("the delete-account confirmation", () => {
 
   it("enumerates what is erased rather than gesturing at it", () => {
     // Same rule §6.2.4 states for the chat delete: the body is exact because
-    // the user cannot check afterwards. This one spans both tiers — the
-    // server-side identity AND the local device — and says so.
+    // the user cannot check afterwards. Plain outcomes (walk 7, 2026-11-20):
+    // what the person loses, that every device is signed out, and that it
+    // cannot be undone; no machinery words.
     const body = deleteAccountConfirmation().body ?? "";
-    expect(body).toContain("recovery factors");
-    expect(body).toContain("signs you out everywhere");
-    expect(body).toContain("this device");
+    for (const lost of ["account", "username", "contacts", "messages"]) expect(body).toContain(lost);
+    expect(body).toContain("every device will be signed out");
     expect(body).toContain("cannot be undone");
+    expect(body).not.toMatch(/server|keys|recovery factors|identity/);
   });
 });
 

@@ -149,7 +149,7 @@ public class ChannelPublisherLoop private constructor(
                 Log.w(TAG, "owned channels not re-founded yet: ${e.javaClass.simpleName}")
             }
             for (id in state.keysByChannel.value.keys.toList()) {
-                // ADR-0098 step 5 — a removed channel's heartbeat stops; one
+                // ADR-0099 step 5 — a removed channel's heartbeat stops; one
                 // pass per period asks whether it was restored.
                 if (!RemovedChannels.mayAsk(id)) continue
                 try {
@@ -163,7 +163,7 @@ public class ChannelPublisherLoop private constructor(
                         continue
                     }
                     if (RemovedChannels.isRemovedError(e)) {
-                        // ADR-0098 step 5 — removed by moderators: kept.
+                        // ADR-0099 step 5 — removed by moderators: kept.
                         Log.i(TAG, "channel pass: channel removed")
                         continue
                     }

@@ -168,7 +168,7 @@ pub(crate) struct ResetFinishReq {
     /// recorded as the account's identity key (ADR-0074 section 0.1).
     pub(crate) new_signature_pubkey_b64: String,
     /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
-    /// over the account id and that key (`signIdentityProof`, ADR-0098 F3).
+    /// over the account id and that key (`signIdentityProof`, ADR-0099 F3).
     /// Absent or invalid: `400 identity-proof-invalid`.
     #[serde(default)]
     pub(crate) identity_proof_b64: Option<String>,
@@ -381,7 +381,7 @@ async fn finish_answer(
     .await
     .map_err(ApiError::Db)?;
 
-    //    The new key's target, claimed for this account (ADR-0098 F3): a key
+    //    The new key's target, claimed for this account (ADR-0099 F3): a key
     //    another account holds is refused and the reset rolls back.
     crate::identity_target::claim(
         &mut tx,

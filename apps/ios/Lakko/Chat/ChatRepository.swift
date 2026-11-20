@@ -812,7 +812,7 @@ public final class ChatRepository: ObservableObject {
             },
             canSend: { [weak self] groupIdHex in
                 guard let self, self.groups[groupIdHex] != nil else { return false }
-                // ADR-0098 section 6 — profile updates stop going to a
+                // ADR-0099 section 6 — profile updates stop going to a
                 // blocked person in the one-to-one with them.
                 if self.withholdsSignal(groupIdHex: groupIdHex) { return false }
                 return !membershipEnded(self.membershipStateNow(groupIdHex: groupIdHex))
@@ -5088,7 +5088,7 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        // ADR-0098 section 1 — a chat, edit, delete or reaction envelope is
+        // ADR-0099 section 1 — a chat, edit, delete or reaction envelope is
         // signed by this device's conversation leaf over the group id before
         // the MLS encrypt, so a recipient can hand it to a moderator as
         // evidence. Typing, read receipts and service envelopes are not.
@@ -5133,24 +5133,24 @@ public final class ChatRepository: ObservableObject {
         return result
     }
 
-    /// ADR-0098 — the messages this device holds for `groupIdHex` (a report
+    /// ADR-0099 — the messages this device holds for `groupIdHex` (a report
     /// from outside the conversation offers them in `Add messages`).
     public func heldMessages(groupIdHex: String) -> [ChatMessage] {
         groups[groupIdHex]?.messages ?? []
     }
 
-    /// ADR-0098 section 6 — the other person of the one-to-one
+    /// ADR-0099 section 6 — the other person of the one-to-one
     /// `groupIdHex` is blocked: typing, read receipts and profile updates are
     /// not sent to them (`blockVerdict(.outgoingSignal)`). `false` for a
     /// group.
     func withholdsSignal(groupIdHex: String) -> Bool {
-        // ADR-0098 step 3 — a suspended account sends nothing at all.
+        // ADR-0099 step 3 — a suspended account sends nothing at all.
         if SessionTokenProvider.shared.isSuspended { return true }
         guard let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return false }
         return BlockList.shared.verdict(.outgoingSignal, accountKey: peer) == .withhold
     }
 
-    /// ADR-0098 section 6 — the person blocked in the one-to-one
+    /// ADR-0099 section 6 — the person blocked in the one-to-one
     /// `groupIdHex`, for the banner that replaces the composer; `nil` in a
     /// group or when the other person is not blocked.
     public func blockedOneToOnePeer(groupIdHex: String) -> Data? {
@@ -5159,7 +5159,7 @@ public final class ChatRepository: ObservableObject {
         return peer
     }
 
-    /// ADR-0098 section 1 — keep the evidence of the chat messages of a
+    /// ADR-0099 section 1 — keep the evidence of the chat messages of a
     /// batch that came from someone else, so a report can carry them later.
     /// Own messages (this account's other devices included) need none.
     func keepEvidence(
@@ -5177,7 +5177,7 @@ public final class ChatRepository: ObservableObject {
         MessageEvidenceStore.shared.put(accountIdB64: accountIdB64, groupIdHex: groupIdHex, kept)
     }
 
-    /// ADR-0098 section 1 — `envelope` wrapped with this device's leaf
+    /// ADR-0099 section 1 — `envelope` wrapped with this device's leaf
     /// signature over `group`'s id. Throws when the core refuses it (only a
     /// service envelope or a bad group id can be refused), so a chat message
     /// is never sent unattested by accident.
@@ -5202,7 +5202,7 @@ public final class ChatRepository: ObservableObject {
     ) async throws {
         // ADR-0073 R.7 case 1 — typing is not sent into a dead one-to-one.
         if isDeadSession(groupIdHex: groupIdHex) { return }
-        // ADR-0098 section 6 — nor to a person this account blocked.
+        // ADR-0099 section 6 — nor to a person this account blocked.
         if withholdsSignal(groupIdHex: groupIdHex) { return }
         let envelopeBytes: Data
         do {
@@ -5229,7 +5229,7 @@ public final class ChatRepository: ObservableObject {
     ) async throws {
         // ADR-0073 R.7 case 1 — nor is a read receipt.
         if isDeadSession(groupIdHex: groupIdHex) { return }
-        // ADR-0098 section 6 — nor to a person this account blocked.
+        // ADR-0099 section 6 — nor to a person this account blocked.
         if withholdsSignal(groupIdHex: groupIdHex) { return }
         let envelopeBytes: Data
         do {

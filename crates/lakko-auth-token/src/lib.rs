@@ -9,7 +9,7 @@
 //!
 //! Four credentials, dotted strings ([ADR-0073] section 3.1 and its
 //! 2026-10-04 amendment; [ADR-0074] section 0.4 for the device and the issue
-//! time; [ADR-0098] section 4 for the restricted session):
+//! time; [ADR-0099] section 4 for the restricted session):
 //!
 //! ```text
 //! access      = v3.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
@@ -94,7 +94,7 @@
 //!
 //! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
 //! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -153,7 +153,7 @@ pub const FRESH_GRANT_VERSION: &str = "k1";
 pub const FRESH_GRANT_KEY_DOMAIN: &str = "lakko/fresh-auth-grant/v1";
 
 /// Version marker of a restricted session (a suspended account's credential,
-/// ADR-0098 section 4). [`TokenSecret::verify_restricted`] refuses any other
+/// ADR-0099 section 4). [`TokenSecret::verify_restricted`] refuses any other
 /// marker, and [`TokenSecret::verify`] / [`TokenSecret::verify_refresh`]
 /// refuse this one.
 pub const RESTRICTED_VERSION: &str = "s1";

@@ -24,7 +24,7 @@ final class ChannelConversationModel: ObservableObject {
     let client: ChannelsClient
     let accountIdentitySeed: Data
     private(set) weak var sync: DeviceGroupSyncRepository?
-    /// ADR-0098 step 5 — the channels moderators removed.
+    /// ADR-0099 step 5 — the channels moderators removed.
     let removals: ChannelRemovals
     private var removalWatch: AnyCancellable?
 
@@ -106,7 +106,7 @@ final class ChannelConversationModel: ObservableObject {
 
     var isPublisher: Bool { state.keysByChannel[channelId] != nil }
 
-    /// ADR-0098 step 5 — set while the service answers `channel-removed` for
+    /// ADR-0099 step 5 — set while the service answers `channel-removed` for
     /// this channel: the line the conversation shows instead of its write
     /// controls.
     var removal: ChannelRemovals.Status? { removals.status(channelId) }
@@ -198,7 +198,7 @@ final class ChannelConversationModel: ObservableObject {
                 return
             }
             if ChannelsApiError.isChannelRemoved(error) {
-                // ADR-0098 step 5 — nothing ends: the posts this device holds
+                // ADR-0099 step 5 — nothing ends: the posts this device holds
                 // stay readable.
                 await showHeldPosts()
                 return
@@ -314,7 +314,7 @@ final class ChannelConversationModel: ObservableObject {
         timeline = ChannelTimeline.fold(Array(next.values))
     }
 
-    /// ADR-0098 — the evidence item of a post as it was received (its wire),
+    /// ADR-0099 — the evidence item of a post as it was received (its wire),
     /// `nil` when this device no longer holds it.
     func postEvidence(cursor: UInt64) -> FfiEvidenceItem? {
         guard let id = channelIdBytes,
@@ -323,7 +323,7 @@ final class ChannelConversationModel: ObservableObject {
         return .channelPost(channelId: id, post: wire)
     }
 
-    /// ADR-0098 / UX 2.1 — a report on the channel from a post's menu (that
+    /// ADR-0099 / UX 2.1 — a report on the channel from a post's menu (that
     /// post included) or from the channel's info (nothing included). Every
     /// post may be picked; `Unsubscribe` is the follow-up for a subscriber.
     func reportRequest(title: String, includingCursor: UInt64?, subscriber: Bool) -> ReportRequest? {

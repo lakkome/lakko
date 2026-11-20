@@ -97,9 +97,9 @@ public fun SettingsScreen(
     onOpenChatFolders: () -> Unit = {},
     /** `docs/ux/who-can-find-me.md` section 2 — Settings > Privacy. */
     onOpenWhoCanFindMe: () -> Unit = {},
-    /** ADR-0098 — Settings > Privacy > Blocked people. */
+    /** ADR-0099 — Settings > Privacy > Blocked people. */
     onOpenBlockedPeople: () -> Unit = {},
-    /** ADR-0098 — Settings > Privacy > Your reports. */
+    /** ADR-0099 — Settings > Privacy > Your reports. */
     onOpenYourReports: () -> Unit = {},
     /** ADR-0075 / UX 19.1 — Settings > Account: how the account is
      *  protected (status line, banner, recovery email, recovery phrase). */

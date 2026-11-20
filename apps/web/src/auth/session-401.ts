@@ -37,7 +37,7 @@
 export const CODE_KEY_GENERATION_SUPERSEDED = "key-generation-superseded";
 export const CODE_REFRESH_INVALID = "refresh-invalid";
 export const CODE_DEVICE_REVOKED = "device-revoked";
-/** ADR-0098 section 4: auth's bearer routes refuse a suspended account's
+/** ADR-0099 section 4: auth's bearer routes refuse a suspended account's
  *  access token with `403` and this code (no credentials); the refresh route
  *  answers it with the restricted session. */
 export const CODE_ACCOUNT_SUSPENDED = "account-suspended";
@@ -66,7 +66,7 @@ export type BearerRefusal =
   | "refresh-and-retry"
   /** Report the `401` to the caller as it is. */
   | "report"
-  /** ADR-0098: `403 account-suspended` from a bearer route of auth. The
+  /** ADR-0099: `403 account-suspended` from a bearer route of auth. The
    *  provider refreshes once (the refresh answers with the restricted
    *  session) and the caller gets the refusal as it is. */
   | "suspended";

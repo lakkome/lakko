@@ -386,7 +386,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
           class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
           style={offset((l) => (!hasRow() ? l.row : l.card))}
         >
-            {/* ADR-0098 step 3: the content actions (a poll's Close, a
+            {/* ADR-0099 step 3: the content actions (a poll's Close, a
                 checklist's Edit), React, Reply, Forward, Edit and Delete each
                 send; a suspended account's menu does not offer them. */}
             <Show when={props.pinOnly !== true && !accountSuspended()}>

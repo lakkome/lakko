@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "सर्वर पर पासकी की सुविधा चालू नहीं है।",
+      "text": "पासकी अभी उपलब्ध नहीं हैं।",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "पहले से अकाउंट है? {link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता।",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "यह आपके संपर्कों को दिखता है। अपना यूज़रनेम दिखाने के लिए इसे खाली छोड़ दें।",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "सर्वर ने बदला हुआ या पुराना बैकअप लौटाया। आपका खाता सुरक्षित है; हमने पुराना डेटा रीस्टोर किए बिना आगे बढ़ना जारी रखा।",
+      "text": "Lakko को आपके सहेजे गए डेटा की पुरानी प्रति मिली और उसने उसका इस्तेमाल नहीं किया। आपका खाता सुरक्षित है।",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "Lakko बीटा में है, और इसकी सुरक्षा की अभी तक किसी स्वतंत्र ऑडिट ने जाँच नहीं की है। जहाँ आपकी सुरक्षा इस पर निर्भर हो, वहाँ इस पर भरोसा न करें।",
+      "text": "Lakko बीटा में है। एक स्वतंत्र सुरक्षा ऑडिट अभी पूरा नहीं हुआ है; हम इस पर काम कर रहे हैं। हमें विश्वास है कि Lakko इस्तेमाल के लिए सुरक्षित है, लेकिन हम अभी इसे साबित नहीं कर सकते। आगे बढ़कर, आप यह जोखिम स्वीकार करते हैं।",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "सर्वर ने अनुरोध अस्वीकार कर दिया। बाद में फिर से कोशिश करें।",
+      "text": "Lakko अभी यह नहीं कर सका। बाद में फिर कोशिश करें।",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "यह चैनल सर्वर पर मौजूद नहीं है।",
+      "text": "यह चैनल अब मौजूद नहीं है।",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "सर्वर पर अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
+      "text": "Lakko के पास अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "\"{name}\" एन्क्रिप्ट हो रही है…",
+      "text": "\"{name}\" तैयार हो रही है…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "\"{name}\" एन्क्रिप्ट हो रही है ({index}/{total})…",
+      "text": "\"{name}\" तैयार हो रही है ({index}/{total})…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "एन्क्रिप्ट और अपलोड हो रहा है…",
+      "text": "भेजा जा रहा है…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "सर्वर से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें।",
+      "text": "Lakko से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें।",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "सर्वर पर अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
+      "text": "Lakko के पास अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "आपका कोई भी लिंक खोलने वाला व्यक्ति आपको संपर्क अनुरोध भेज सकता है, जब तक लिंक की समय-सीमा खत्म न हो जाए या उसके सभी इस्तेमाल पूरे न हो जाएँ।",
+      "text": "जो भी आपका कोई लिंक खोलता है, वह आपका संपर्क बन जाता है, जब तक लिंक की अवधि खत्म न हो या वह पूरा इस्तेमाल न हो जाए।",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
+      "text": "जो भी यह कोड स्कैन करता है, वह आपका संपर्क बन जाता है।",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "सर्वर पर अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
+      "text": "Lakko के पास अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "अगर आप पासवर्ड भूल जाएँ या यह फ़ोन खो दें, तो इसी तरह अकाउंट में वापस आएँगे।",
+      "text": "अगर आप अपना पासवर्ड भूल जाएँ या यह डिवाइस खो जाए, तो इसी तरह आप वापस आ सकते हैं।",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "अगर आप पासवर्ड भूल जाएँ या यह फ़ोन खो दें, तो आप इस अकाउंट में वापस नहीं आ पाएँगे।",
+      "text": "अगर आप अपना पासवर्ड भूल जाएँ या यह डिवाइस खो जाए, तो आप इस खाते में वापस नहीं आ पाएँगे।",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "आपकी पहचान रिस्टोर नहीं हो सकी। फिर से कोशिश करें।",
+      "text": "आपका खाता बहाल नहीं हो सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "मैसेज, कॉल और संपर्क अनुरोध एंड-टू-एंड एन्क्रिप्टेड हैं: उन्हें सिर्फ़ बातचीत में शामिल लोग पढ़ सकते हैं। आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता, और हर संपर्क का एक सुरक्षा नंबर होता है जिसे आप आमने-सामने मिलाकर देख सकते हैं।",
+      "text": "संदेश, कॉल और संपर्क अनुरोध एंड-टू-एंड एन्क्रिप्टेड हैं: बातचीत में शामिल लोग ही इन्हें पढ़ सकते हैं। हर संपर्क का एक सुरक्षा नंबर होता है, जिसे आप आमने-सामने मिला सकते हैं।",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "\"लॉग आउट करें\" आपका डेटा इस डिवाइस पर रखता है। \"इस डिवाइस को भूल जाएँ\" उसे हटा देता है; आप सिर्फ़ साइन इन किए हुए दूसरे डिवाइस, कुंजियाँ रिस्टोर करने वाली पासकी, या अपने रिकवरी फ़्रेज़ से ही वापस आ सकते हैं। \"खाता मिटाएँ\" सर्वर पर खाता मिटा देता है और इस डिवाइस को साफ़ कर देता है; इसे पहले जैसा नहीं किया जा सकता।",
+      "text": "लॉग आउट करने पर आपके संदेश इस डिवाइस पर रहते हैं। \"इस डिवाइस को भूल जाएँ\" उन्हें इस डिवाइस से हटा देता है; आपका खाता बना रहता है। \"खाता हटाएँ\" आपका खाता हमेशा के लिए हटा देता है।",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "इससे सर्वर पर आपकी पहचान — यूज़रनेम, कुंजियाँ, रिकवरी के तरीके और बैकअप — मिट जाती है और आप हर जगह से साइन आउट हो जाते हैं। इस डिवाइस से आपके लोकल मैसेज भी मिटा दिए जाते हैं। इसे पहले जैसा नहीं किया जा सकता।",
+      "text": "आपका खाता, यूज़रनेम, संपर्क और संदेश हटा दिए जाएँगे, और हर डिवाइस से साइन आउट हो जाएगा। इसे पूर्ववत नहीं किया जा सकता।",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "Lakko बंद होने पर चैनल पोस्ट देर से आ सकती हैं।",
+      "text": "जब Lakko बंद होता है, तो नए चैनल पोस्ट की सूचनाएँ देर से आ सकती हैं।",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "सर्वर की गड़बड़ी ({status})।",
+      "text": "कुछ गलत हो गया ({status})। फिर से कोशिश करें।",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "जिस डिवाइस के पास इससे मेल खाने वाली निजी कुंजी है, वह अब इससे साइन इन नहीं कर पाएगा। इसे पहले जैसा नहीं किया जा सकता।",
+      "text": "आप अब इस पासकी से लॉग इन नहीं कर पाएँगे। इसे पूर्ववत नहीं किया जा सकता।",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "लॉग इन के लिए नया पासवर्ड चुनें। इस डिवाइस में आपके खाते की कुंजियाँ पहले से हैं, इसलिए आप सिर्फ़ नया पासवर्ड टाइप करते हैं।",
+      "text": "लॉग इन के लिए नया पासवर्ड चुनें।",
       "status": "machine"
     },
     "settings.password.title": {

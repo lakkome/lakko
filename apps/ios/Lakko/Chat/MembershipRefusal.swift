@@ -483,7 +483,7 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // ADR-0092 content kinds, poll ballots, the channel-poll
                 // credential and the open-items hand-over.
                 .Content, .Ballot, .AnonCred, .OpenItems,
-                // ADR-0098 message attestation and reports.
+                // ADR-0099 message attestation and reports.
                 .Moderation:
                 return nil
             }

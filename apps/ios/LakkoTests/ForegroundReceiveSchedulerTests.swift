@@ -254,6 +254,57 @@ final class ForegroundReceiveSchedulerTests: XCTestCase {
         XCTAssertTrue(fake.polls.isEmpty, "the open chat already long-polls the call's group")
     }
 
+    /// Walk 7 (2026-11-20): a group joined while the loop paused for the long
+    /// idle interval was not polled for over 15 s; a new group now ends the
+    /// pause and keeps the short interval.
+    func testANewlyJoinedGroupIsSweptAtOnceAndKeepsTheShortInterval() async {
+        let fake = Fake()
+        fake.groups = ["a"]
+        let scheduler = makeScheduler(fake)
+        XCTAssertFalse(scheduler.noteGroupsIfNew(), "nothing to compare before the first sweep")
+        await scheduler.runSweep()
+        XCTAssertFalse(scheduler.noteGroupsIfNew(), "the same groups are not new")
+        fake.groups = ["a", "joined"]
+        XCTAssertTrue(scheduler.noteGroupsIfNew())
+        fake.groups = ["a"]
+        XCTAssertFalse(scheduler.noteGroupsIfNew(), "a group that left is not a new one")
+    }
+
+    func testANewGroupEndsTheIdlePause() async {
+        let fake = Fake()
+        fake.groups = ["a"]
+        let scheduler = ForegroundReceiveScheduler(
+            ports: .init(
+                groups: { fake.groups },
+                isExcluded: { _ in false },
+                poll: { group, waitSecs in
+                    fake.polls.append((group, waitSecs))
+                    return false
+                },
+                callGroup: { nil },
+                sleepMs: { _ in
+                    await withCheckedContinuation { fake.sleepers.append($0) }
+                },
+                random: { 0.5 },
+                nowMs: { fake.nowMs },
+                pushReachable: { true }
+            ),
+            config: .init(concurrency: 1)
+        )
+        scheduler.setForeground(true)
+        scheduler.start()
+        defer {
+            scheduler.stop()
+            fake.releaseSleepers()
+        }
+        await waitUntil { fake.polls.count == 1 && !fake.sleepers.isEmpty }
+        XCTAssertEqual(scheduler.currentIntervalMs(), scheduler.config.idlePushIntervalMs)
+        fake.groups = ["a", "joined"]
+        fake.releaseSleepers()
+        await waitUntil { fake.polls.contains { $0.group == "joined" } }
+        XCTAssertEqual(scheduler.currentIntervalMs(), scheduler.config.intervalMs)
+    }
+
     func testThePauseIsTheIntervalPlusOrMinusTheJitter() {
         let config = ForegroundReceiveScheduler.Config()
         XCTAssertEqual(ForegroundReceiveScheduler.pauseMs(config: config, random: 0.5), 4_000)

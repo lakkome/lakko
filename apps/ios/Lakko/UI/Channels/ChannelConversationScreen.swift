@@ -37,7 +37,7 @@ struct ChannelConversationScreen: View {
     @EnvironmentObject private var inviteIntake: InviteIntake
     @ObservedObject private var l10n = Localization.shared
     @Environment(\.dismiss) private var dismiss
-    /// ADR-0098 step 3 — a suspended account reads; it does not post.
+    /// ADR-0099 step 3 — a suspended account reads; it does not post.
     @Environment(\.accountSuspended) private var accountSuspended
 
     @State private var editing: ChannelTimelineItem?
@@ -57,7 +57,7 @@ struct ChannelConversationScreen: View {
     @State private var width: CGFloat = 360
     @State private var onScreen: Set<UInt64> = []
     @State private var composerFocused = false
-    /// ADR-0098 / UX 2.1 — the report sheet opened from a post's menu.
+    /// ADR-0099 / UX 2.1 — the report sheet opened from a post's menu.
     @State private var reportRequest: ReportRequest?
 
     private func onEnded() {
@@ -189,7 +189,7 @@ struct ChannelConversationScreen: View {
             .onChange(of: onScreen) { _, _ in markNewestRead() }
             .onDisappear { media.chatHidden() }
             .sheet(item: $picker) { request in pickerSheet(request) }
-            // ADR-0098 / UX 2.3 — `Unsubscribe`, when checked, goes with the
+            // ADR-0099 / UX 2.3 — `Unsubscribe`, when checked, goes with the
             // report.
             .reportSheet($reportRequest) { follow in
                 guard follow == .unsubscribe else { return }
@@ -424,7 +424,7 @@ struct ChannelConversationScreen: View {
                 onShowReactors: { _ in anonymousNote = true },
                 onJoinCallInvite: { inviteIntake.handle($0) },
                 onOpenOwnLink: { inviteIntake.handle($0) },
-                // ADR-0098 / UX 2.1 — a subscriber reports the channel from a
+                // ADR-0099 / UX 2.1 — a subscriber reports the channel from a
                 // post, with that post included.
                 onReport: model.access == .reading && model.writable
                     ? {
@@ -591,8 +591,8 @@ struct ChannelConversationScreen: View {
     @ViewBuilder
     private var bottomBar: some View {
         if let removal = model.removal {
-            // ADR-0098 step 5 — a removed channel: the posts stay, nothing is
-            // written; the line says why only when the log proved it (C-97).
+            // ADR-0099 step 5 — a removed channel: the posts stay, nothing is
+            // written; the line says why only when the log proved it (C-98).
             ChannelRemovedLine(status: removal)
         } else {
             liveBottomBar
@@ -850,7 +850,7 @@ struct ChannelConversationScreen: View {
     }
 }
 
-/// ADR-0098 step 5 / UX `reporting-and-moderation.md` section 3 — where a
+/// ADR-0099 step 5 / UX `reporting-and-moderation.md` section 3 — where a
 /// removed channel's composer or `Subscribe` was: `suspended.channel_removed`
 /// once the moderation log verified the removal, else the neutral
 /// `channels.unavailable`.

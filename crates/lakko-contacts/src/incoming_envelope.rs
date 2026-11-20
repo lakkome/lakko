@@ -124,6 +124,7 @@
 
 use thiserror::Error;
 
+use crate::account_deleted::{try_unwrap_account_deleted, AccountDeleted, AccountDeletedError};
 use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
@@ -392,6 +393,12 @@ pub enum IncomingEnvelope<'a> {
     /// both FFI surfaces), store it as pending, and adopt only once the
     /// server-side change is visible. See [`crate::key_rotation`].
     KeyRotation(KeyRotation),
+    /// The sender's account was deleted (ADR-0098). Never rendered; the
+    /// caller verifies it with
+    /// [`crate::account_deleted::verify_account_deleted`] against the
+    /// sender's account key resolved at receipt (C-68) and this
+    /// conversation's group id before marking the person deleted.
+    AccountDeleted(AccountDeleted),
     /// What another device of this account says about itself (ADR-0080):
     /// platform, model, versions, city, last activity. Never a chat bubble,
     /// and meaningful ONLY in the account's own DeviceGroup: a client that
@@ -586,6 +593,9 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     KeyRotation(#[from] KeyRotationError),
+    /// A malformed account-deleted statement (ADR-0098).
+    #[error(transparent)]
+    AccountDeleted(#[from] AccountDeletedError),
     /// The device-card domain (ADR-0080) with a malformed payload.
     #[error(transparent)]
     DeviceCard(#[from] DeviceCardError),
@@ -735,6 +745,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7h. Key rotation — ADR-0074 section 3.3.
     if let Some(rotation) = try_unwrap_key_rotation(plaintext)? {
         return Ok(IncomingEnvelope::KeyRotation(rotation));
+    }
+    // 7h'. Account deleted — ADR-0098.
+    if let Some(statement) = try_unwrap_account_deleted(plaintext)? {
+        return Ok(IncomingEnvelope::AccountDeleted(statement));
     }
     // 7i. Device card — ADR-0080.
     if let Some(card) = try_unwrap_device_card(plaintext)? {

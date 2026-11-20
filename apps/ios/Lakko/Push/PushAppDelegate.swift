@@ -29,7 +29,7 @@ import UserNotifications
 public final class PushAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
-    /// ADR-0098 section 6 — whether a conversation's notifications are not
+    /// ADR-0099 section 6 — whether a conversation's notifications are not
     /// shown over a running app (a one-to-one with a person this account
     /// blocked, `blockVerdict(.notification)`). Wired by the composition
     /// root; `nil` shows everything.
@@ -144,7 +144,7 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
             completionHandler([])
             return
         }
-        // ADR-0098 section 6 — nothing of a blocked person's is shown over
+        // ADR-0099 section 6 — nothing of a blocked person's is shown over
         // a running app. (The extension cannot read the synced block
         // register, so this is the foreground half only.)
         let userInfo = content.userInfo

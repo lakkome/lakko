@@ -216,7 +216,7 @@ internal fun buildBackgroundDecryptDeps(
         override fun groupName(accountIdB64: String, groupHex: String): String? =
             me.lakko.app.chat.GroupNameStore.name(appContext, accountIdB64, groupHex)
 
-        // ADR-0098 section 6 — the block register, from the persisted synced
+        // ADR-0099 section 6 — the block register, from the persisted synced
         // state. A READ (C-59).
         override fun isBlocked(accountIdB64: String, senderAccountB64: String?): Boolean =
             me.lakko.app.moderation.BlockRegister.isBlockedOnDisk(appContext, accountIdB64, senderAccountB64)
@@ -367,7 +367,7 @@ private class RealThrowawayGroup(
             BackgroundPayloadKind.MESSAGE -> Unit
         }
         val body = try {
-            // ADR-0098 section 1 — a chat plaintext is attested; a preview is
+            // ADR-0099 section 1 — a chat plaintext is attested; a preview is
             // not evidence, so it is unwrapped without a check.
             parseBodyEnvelope(me.lakko.app.moderation.unwrapForBody(app.data))
         } catch (_: Throwable) {

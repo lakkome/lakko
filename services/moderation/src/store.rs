@@ -6,7 +6,7 @@
 //! `services/channels` pattern).
 //!
 //! A report creates the case of its target, or reopens it when the case was
-//! decided (ADR-0098 step 5). The rest of the trait is the moderators'
+//! decided (ADR-0099 step 5). The rest of the trait is the moderators'
 //! panel ([`crate::panel`]): case locks, the checks a moderator's browser
 //! posts back, decisions, internal notes and the appeal outcomes it counts.
 

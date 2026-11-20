@@ -237,14 +237,14 @@ public class ChatClient(
         plaintext: ByteArray,
         persistRatchet: suspend () -> Unit,
         /**
-         * ADR-0098 section 1 — `true` for a chat, edit, delete or reaction
+         * ADR-0099 section 1 — `true` for a chat, edit, delete or reaction
          * envelope (replies and forwards are chat envelopes): the envelope is
          * signed by this device's conversation leaf before the MLS encrypt.
          * `false` for typing, read receipts, call signaling and every
          * `lakko/` service envelope, which are never attested. A signing
          * failure aborts the send: a chat message never goes out unsigned.
          *
-         * Defaults to `true` (ADR-0098 F10): a caller that forgets the
+         * Defaults to `true` (ADR-0099 F10): a caller that forgets the
          * argument signs, and every caller that must not attest says so.
          */
         attest: Boolean = true,
@@ -555,7 +555,7 @@ public class ChatClient(
                 processed = processed,
                 resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
                 resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(rosterOf(group), leaf) },
-                // ADR-0098 section 1 — the report evidence, read here for
+                // ADR-0099 section 1 — the report evidence, read here for
                 // the same reason as the roster: the leaf may be reused.
                 evidenceOf = { plaintext, leaf -> me.lakko.app.moderation.receivedEvidence(group, plaintext, leaf) },
             )
@@ -941,10 +941,10 @@ internal fun toEvent(
     decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
     decodeSharedChannels: (ByteArray) -> me.lakko.app.discover.SharedList? = ::decodeSharedListOrNull,
     isRegistrarSeed: (ByteArray) -> Boolean = ::registrarSeedArm,
-    /** ADR-0098 section 1 — the envelope inside an attested plaintext (a peek,
+    /** ADR-0099 section 1 — the envelope inside an attested plaintext (a peek,
      *  then `unwrapAttested`); a plain plaintext passes through untouched. */
     unwrapBody: (ByteArray) -> ByteArray = { me.lakko.app.moderation.unwrapForBody(it) },
-    /** ADR-0098 section 1 — the report evidence of a chat row, read at
+    /** ADR-0099 section 1 — the report evidence of a chat row, read at
      *  receipt; `null` keeps none (the host suite, a swept bundle). */
     evidenceOf: (ByteArray, UInt?) -> me.lakko.app.moderation.MessageEvidence? = { _, _ -> null },
     decodeKnockKey: (ByteArray) -> uniffi.lakko_ffi_uniffi.FfiKnockKey? = ::decodeKnockKeyOrNull,
@@ -1227,7 +1227,7 @@ internal fun toEvent(
                 // sender — such a message can never be a valid
                 // edit/delete target). It feeds the author-only
                 // edit/delete gate + reaction attribution.
-                // ADR-0098 section 1 — a chat plaintext is attested; the body
+                // ADR-0099 section 1 — a chat plaintext is attested; the body
                 // parser reads the envelope inside the wrapper.
                 val body = parseBody(unwrapBody(processed.data))
                 val senderLeaf = processed.senderLeaf
@@ -1519,7 +1519,7 @@ public sealed interface IncomingChatEvent {
          *  (`chat.message.unsupported`), never core prose. `null` for every
          *  readable message. */
         val unsupportedVersion: Long? = null,
-        /** ADR-0098 section 1 — what a report of this row carries, captured at
+        /** ADR-0099 section 1 — what a report of this row carries, captured at
          *  receipt; `null` when the sender leaf could not be resolved. */
         val evidence: me.lakko.app.moderation.MessageEvidence? = null,
         /** ADR-0092 — the poll, checklist, location, contact card or article

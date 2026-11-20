@@ -140,7 +140,7 @@ export class ScopedDiscoveryClient {
       throw new DiscoveryNetworkError(endpoint, err);
     }
     if (!response.ok) {
-      // The body carries the code a caller branches on (ADR-0098 step 5:
+      // The body carries the code a caller branches on (ADR-0099 step 5:
       // `403 {"error":"hidden-from-search"}`).
       const body = await response.text().catch(() => "");
       throw new DiscoveryHttpError(response.status, endpoint, body);

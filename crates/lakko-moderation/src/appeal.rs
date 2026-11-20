@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A suspended person's appeal ([ADR-0098] section 4, UX section 4).
+//! A suspended person's appeal ([ADR-0099] section 4, UX section 4).
 //!
 //! An appeal is a short text sealed to the moderator list with
 //! [`Purpose::Appeal`], so only the listed moderators open it and a report's
@@ -17,7 +17,7 @@
 //! The sealed bytes are exactly a [`crate::seal::split`]-able part: there is
 //! no outer framing, so auth checks the shape with `split` alone.
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use lakko_crypto::agreement::SecretKey;
 

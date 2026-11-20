@@ -2207,7 +2207,7 @@ impl Group {
 
     /// The device binding of the leaf at `leaf` (ADR-0050), empty for a leaf
     /// that is its account key, or `undefined` for a leaf not in the roster.
-    /// A report carries it beside a message the leaf signed (ADR-0098
+    /// A report carries it beside a message the leaf signed (ADR-0099
     /// section 1).
     #[wasm_bindgen(js_name = deviceBindingAt)]
     pub fn device_binding_at(&self, leaf: u32) -> Result<Option<Vec<u8>>, JsValue> {

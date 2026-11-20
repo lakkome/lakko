@@ -422,7 +422,7 @@ public fun pinMenuFor(
 }
 
 /**
- * ADR-0098 section 4 — whether this device may pin or unpin for everyone
+ * ADR-0099 section 4 — whether this device may pin or unpin for everyone
  * now: the standing to ([mayShared]), and not while the account is
  * suspended, since a shared pin is an envelope sent to the chat. A
  * suspended account keeps `Pin for me` (local only).

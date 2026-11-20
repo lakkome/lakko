@@ -13,7 +13,7 @@ import org.junit.Test
 import uniffi.lakko_ffi_uniffi.FfiLinkAnswer
 
 /**
- * ADR-0098 step 4 — the inbox poll screens a fetched batch before anything is
+ * ADR-0099 step 4 — the inbox poll screens a fetched batch before anything is
  * stored or decided. A request that answers one of this account's invite
  * links is accepted with no card once decided, so a verified suspension must
  * drop it here, before the poll keeps it undecided.

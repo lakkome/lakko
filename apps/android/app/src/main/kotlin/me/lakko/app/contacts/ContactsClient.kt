@@ -1901,7 +1901,7 @@ public data class IncomingContactRequest(
     /** `docs/ux/who-can-find-me.md` section 6.4 — the group the request was
      *  sent inside (hex), shown as "Via {group}"; `null` for a mailbox row. */
     val viaGroupIdHex: String? = null,
-    /** ADR-0098 section 2 — the verified request's wire as received, what a
+    /** ADR-0099 section 2 — the verified request's wire as received, what a
      *  report of the request includes. Not part of equality. */
     val wire: ByteArray? = null,
 ) {

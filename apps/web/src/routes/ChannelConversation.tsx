@@ -154,7 +154,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   const readerRole = (): "owner" | "publisher" | null => channelReaderDeviceRoleOf(id);
   const reading = (): boolean => canPublish() || channelReadStateOf(id) === "reading";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(id);
-  // ADR-0098 step 5: moderators removed the channel. It stays, the posts on
+  // ADR-0099 step 5: moderators removed the channel. It stays, the posts on
   // this device stay readable, nothing that writes is offered.
   const removalLine = (): ReturnType<typeof channelRemovalLine> => channelRemovalLine(id);
   const removed = (): boolean => removalLine() !== null;
@@ -499,7 +499,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     }
   }
 
-  // ----- ADR-0098 section 2: reporting the channel's posts -----
+  // ----- ADR-0099 section 2: reporting the channel's posts -----
   /** A post's menu: the channel is the target, the post is included. */
   function reportPost(cursor: number): void {
     openChannelReport({
@@ -793,7 +793,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
               </div>
             )}
           </Show>
-          {/* ADR-0098 step 3: a suspended publisher posts nothing. */}
+          {/* ADR-0099 step 3: a suspended publisher posts nothing. */}
           <Show when={canPublish() && !removed()}>
             <SuspendedComposerLine />
             <Show when={controls().composer}>

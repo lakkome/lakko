@@ -6,9 +6,9 @@ import XCTest
 
 @testable import Lakko
 
-/// ADR-0098 step 5 — a channel moderators removed (`410 channel-removed`):
+/// ADR-0099 step 5 — a channel moderators removed (`410 channel-removed`):
 /// nothing ends, the posts held stay readable, write controls go, the line
-/// says "removed" only after the log verified it (C-97), the service is asked
+/// says "removed" only after the log verified it (C-98), the service is asked
 /// once per standing period, and a restore leaves no trace. Also the
 /// `403 hidden-from-search` state of Who can find me.
 @MainActor

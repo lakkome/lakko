@@ -1601,7 +1601,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Blocked people (ADR-0098 section 6)
+    // Blocked people (ADR-0099 section 6)
     // -----------------------------------------------------------------
 
     /// Block (`blocked`) or unblock the account whose 32-byte account
@@ -2725,7 +2725,7 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
-/// One blocked account (ADR-0098 section 6).
+/// One blocked account (ADR-0099 section 6).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BlockedAccount {
     /// The blocked account's 32-byte account signature key.
@@ -2734,7 +2734,7 @@ pub struct BlockedAccount {
     pub blocked_at_ms: u64,
 }
 
-/// `true` when `bytes` open with the block envelope domain (ADR-0098
+/// `true` when `bytes` open with the block envelope domain (ADR-0099
 /// section 6): the routing question for a DeviceGroup service envelope.
 /// Says nothing about validity; [`SyncedState::apply_blocked_envelope`]
 /// decides that.
@@ -2744,7 +2744,7 @@ pub fn is_blocked_envelope(bytes: Vec<u8>) -> bool {
     core::is_blocked_envelope(&bytes)
 }
 
-/// Longest block envelope (ADR-0098 section 6); below
+/// Longest block envelope (ADR-0099 section 6); below
 /// `deviceGroupServiceEnvelopeMaxLen()`.
 #[uniffi::export]
 #[must_use]

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Read-only mode of a suspended account (ADR-0098 step 3, UX
+ * Read-only mode of a suspended account (ADR-0099 step 3, UX
  * `reporting-and-moderation.md` section 4), after "Read my chats":
  *
  *   - `SuspendedComposerLine` stands in every composer's slot: one muted

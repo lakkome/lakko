@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target `report_open` (ADR-0098). See the `[[bin]]` comment in
+//! Fuzz target `report_open` (ADR-0099). See the `[[bin]]` comment in
 //! `../Cargo.toml` for what it drives and asserts.
 
 #![no_main]

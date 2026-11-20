@@ -126,7 +126,7 @@ Report is never offered on your own messages, on your own account, or in a
 conversation you are not part of. A group is reported only when it has an
 `@name`, and never by its owner: nothing else names a group to the
 moderators, so in a group without one a person reports the members'
-messages from the message menu (ADR-0098 open question 3). A channel is
+messages from the message menu (ADR-0099 open question 3). A channel is
 reported by its subscribers, not by its owner or publishers.
 
 ### 2.2 The sheet

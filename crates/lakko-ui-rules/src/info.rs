@@ -153,13 +153,13 @@ pub enum InfoSection {
     /// groups and channels is on. Appended last so earlier uniffi ordinals
     /// stay put.
     MembersCanFindMe,
-    /// Block this person (ADR-0098 section 6, UX `reporting-and-moderation.md`
+    /// Block this person (ADR-0099 section 6, UX `reporting-and-moderation.md`
     /// section 1.1). A person's card only, in the danger block. Appended last
     /// so earlier uniffi ordinals stay put.
     Block,
     /// Unblock a blocked person, in place of [`Self::Block`].
     Unblock,
-    /// Report to Lakko's moderators (ADR-0098 section 2, UX section 2.1): on
+    /// Report to Lakko's moderators (ADR-0099 section 2, UX section 2.1): on
     /// a person's card, a group's info and a channel's info, never on the
     /// viewer's own group or channel.
     Report,
@@ -272,7 +272,7 @@ pub struct PersonInfoCapabilities {
     /// (`docs/ux/who-can-find-me.md` section 5.1), under either form. The
     /// client reads it from the setting, so this crate never does.
     pub contacts_of_contacts_on: bool,
-    /// The viewer blocked this person (ADR-0098 section 6). Read from the
+    /// The viewer blocked this person (ADR-0099 section 6). Read from the
     /// account's synced block register.
     pub is_blocked: bool,
 }
@@ -317,7 +317,7 @@ pub struct GroupInfoCapabilities {
     /// The group holds an `@name` (ADR-0087). A group is reported by its
     /// `@name`; one without a name is named on no server, so it is not
     /// reported as a group and its members' messages are reported instead
-    /// (ADR-0098 open question 3).
+    /// (ADR-0099 open question 3).
     pub has_handle: bool,
 }
 
@@ -437,6 +437,27 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
         InfoSection::Block
     });
     if caps.is_contact {
+        sections.push(InfoSection::RemoveContact);
+    }
+    sections
+}
+
+/// What the info of a person whose account was deleted holds (ADR-0098,
+/// `docs/ux/deleted-account.md` section 3).
+///
+/// Only what still makes sense with nobody at the other end: returning to the
+/// readable one-to-one and deleting it when there is one, and removing the
+/// contact when the person is on the contact list. No call, no safety number
+/// (there is nothing left to compare), no rename, no add, no share, and
+/// nothing group-shaped.
+#[must_use]
+pub fn deleted_person_info_sections(has_one_to_one: bool, is_contact: bool) -> Vec<InfoSection> {
+    let mut sections = Vec::new();
+    if has_one_to_one {
+        sections.push(InfoSection::Message);
+        sections.push(InfoSection::DeleteChat);
+    }
+    if is_contact {
         sections.push(InfoSection::RemoveContact);
     }
     sections
@@ -839,7 +860,7 @@ mod tests {
     }
 
     /// A group is reported by anyone in it but its owner, by its `@name`: a
-    /// group with no name is not reported as a group (ADR-0098 open
+    /// group with no name is not reported as a group (ADR-0099 open
     /// question 3).
     #[test]
     fn a_group_is_reported_by_anyone_but_its_owner_by_its_name() {
@@ -1612,5 +1633,37 @@ mod tests {
     fn the_members_switch_is_conversation_only_and_named() {
         assert!(InfoSection::MembersCanFindMe.group_only());
         assert_eq!(InfoSection::MembersCanFindMe.name(), "members-can-find-me");
+    }
+
+    #[test]
+    fn a_deleted_person_offers_only_the_chat_and_the_contact_row() {
+        assert!(deleted_person_info_sections(false, false).is_empty());
+        assert_eq!(
+            deleted_person_info_sections(true, true),
+            vec![
+                InfoSection::Message,
+                InfoSection::DeleteChat,
+                InfoSection::RemoveContact
+            ]
+        );
+        assert_eq!(
+            deleted_person_info_sections(false, true),
+            vec![InfoSection::RemoveContact]
+        );
+        for one in [false, true] {
+            for contact in [false, true] {
+                let s = deleted_person_info_sections(one, contact);
+                for never in [
+                    InfoSection::Call,
+                    InfoSection::SafetyNumber,
+                    InfoSection::RenameContact,
+                    InfoSection::AddContact,
+                    InfoSection::TheirContactsCanFindMe,
+                ] {
+                    assert!(!s.contains(&never), "{never:?}");
+                }
+                assert!(s.iter().all(|x| !x.group_only()));
+            }
+        }
     }
 }

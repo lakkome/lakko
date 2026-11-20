@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 section 2 - `services/moderation` from the web client, same-origin
+ * ADR-0099 section 2 - `services/moderation` from the web client, same-origin
  * under `/api/moderation` (the service's paths start with `/moderation/`, so
  * the report route is `/api/moderation/moderation/report`). Every request is
  * anonymous: no session, no cookie, no referrer; the report itself spends

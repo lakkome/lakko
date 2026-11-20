@@ -350,7 +350,7 @@ export interface IncomingContactRequest {
    *  arrived inside (standard base64 of its id), shown as "Via {group}";
    *  absent for a request from the inbox. */
   viaGroupIdB64?: string;
-  /** ADR-0098 section 2 - the signed request wire as received, which a
+  /** ADR-0099 section 2 - the signed request wire as received, which a
    *  report on the request carries. Kept in memory with the request. */
   wire?: Uint8Array;
 }
@@ -1013,7 +1013,7 @@ function sweepPortsFor(
           } else if (event.kind === "serviceEnvelope") {
             // An unrecognised `lakko/…` service envelope: dropped, never shown.
           } else if (blockDropsEvent(wasmIfLoaded(), group, event)) {
-            // ADR-0098 section 6 - a blocked person's row in the one-to-one
+            // ADR-0099 section 6 - a blocked person's row in the one-to-one
             // with them: consumed, never shown.
           } else if (event.kind === "contentOp") {
             // ADR-0092 — filed at receipt, as the poll does.
@@ -5568,7 +5568,7 @@ export function decodeContactRequestBody(
     linkAnswer,
     createdAt,
     ...(viaGroupIdB64 !== undefined ? { viaGroupIdB64 } : {}),
-    // ADR-0098 section 2 - the signed request as received, a report's
+    // ADR-0099 section 2 - the signed request as received, a report's
     // evidence.
     wire: body,
   };

@@ -168,7 +168,7 @@ internal data class MessageActions(
     /** ADR-0087 section 13 — a publisher's `Ban from comments` on someone
      *  else's comment, in the destructive group under Delete. */
     val canBan: Boolean = false,
-    /** ADR-0098 / UX `reporting-and-moderation.md` 2.1 — `Report` on someone
+    /** ADR-0099 / UX `reporting-and-moderation.md` 2.1 — `Report` on someone
      *  else's message, in the destructive group. */
     val canReport: Boolean = false,
     /** ADR-0092 — the rows a content message adds (Retract vote, Close poll,
@@ -199,7 +199,7 @@ internal fun messageActionsFor(
     pinLabel: String = Localization.strings.value["chat.message.pin"],
     /** Saved section 2 — the message is in the account's saved list. */
     saved: Boolean = false,
-    /** ADR-0098 section 4 — the account is suspended: nothing that sends a
+    /** ADR-0099 section 4 — the account is suspended: nothing that sends a
      *  message (Reply, Forward, Edit, Delete) is offered. */
     suspended: Boolean = me.lakko.app.auth.SuspensionGate.readOnly.value,
     /** ADR-0087 section 14 — the bubble is drawn as a channel invitation
@@ -308,7 +308,7 @@ internal fun MessageActionMenuOverlay(
     onTranslate: () -> Unit = {},
     /** ADR-0087 section 13 — Ban from comments was chosen. */
     onBan: () -> Unit = {},
-    /** ADR-0098 — Report was chosen. */
+    /** ADR-0099 — Report was chosen. */
     onReport: () -> Unit = {},
     /** reactions-and-emoji section 5 — the emoji this person already gave
      *  this message (drawn pressed; pressing one takes it off). */

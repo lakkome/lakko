@@ -645,7 +645,7 @@ export class WebauthnClient {
 async function parseJsonOrThrow<T>(response: Response, endpoint: string): Promise<T> {
   if (!response.ok) {
     if (response.status === 403) {
-      // ADR-0098: a passkey sign-in of a suspended account answers with the
+      // ADR-0099: a passkey sign-in of a suspended account answers with the
       // restricted session; read whole, never truncated or logged.
       const full = await response.text().catch(() => "");
       const landing = isSuspendedBody(full) ? suspendedLandingOf(full) : null;

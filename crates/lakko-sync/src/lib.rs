@@ -120,7 +120,7 @@ pub mod fuzz_api {
     /// * `decode_device_ack_envelope` — the device-acknowledgement registers
     ///   (identity-recovery 17.5), reached the same way: canonical, folding
     ///   to exactly its keys, not applying twice.
-    /// * `decode_blocked_envelope` — the block registers (ADR-0098 section
+    /// * `decode_blocked_envelope` — the block registers (ADR-0099 section
     ///   6), reached the same way: canonical, folding to exactly its keys and
     ///   states, not applying twice.
     /// * `decode_poll_choice_envelope` — the account's own poll choices
@@ -324,7 +324,7 @@ pub mod fuzz_api {
         }
     }
 
-    /// The block envelope (ADR-0098 section 6): canonical, folds to exactly
+    /// The block envelope (ADR-0099 section 6): canonical, folds to exactly
     /// its keys and states, carried back by `blocked_envelopes`, and does
     /// not apply twice.
     fn blocked_envelope_holds(bytes: &[u8]) -> bool {

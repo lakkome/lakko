@@ -7,7 +7,7 @@ import XCTest
 
 @testable import Lakko
 
-/// ADR-0098 security fix F3 — every auth call that records the account's
+/// ADR-0099 security fix F3 — every auth call that records the account's
 /// identity key carries `identity_proof_b64`, an Ed25519 signature by the
 /// key being recorded over `"lakko/auth/identity-proof/v1" ‖ 0x00 ‖
 /// account_id ‖ pubkey`.

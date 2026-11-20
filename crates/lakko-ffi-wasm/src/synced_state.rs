@@ -2008,7 +2008,7 @@ impl SyncedState {
     }
 
     /// Block (`blocked`) or unblock the account whose 32-byte account
-    /// signature key is `accountKey` (ADR-0098 section 6), stamped `hlc`,
+    /// signature key is `accountKey` (ADR-0099 section 6), stamped `hlc`,
     /// at wall-clock `nowMs`. Returns the envelope to send in a DeviceGroup
     /// service envelope, or `undefined` when nothing changed. Throws
     /// `"bounds: ..."` when the key is not 32 bytes.
@@ -2628,7 +2628,7 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
-/// `true` when `bytes` open with the block envelope domain (ADR-0098
+/// `true` when `bytes` open with the block envelope domain (ADR-0099
 /// section 6). Says nothing about validity; `SyncedState.applyBlockedEnvelope`
 /// decides that.
 #[wasm_bindgen(js_name = isBlockedEnvelope)]

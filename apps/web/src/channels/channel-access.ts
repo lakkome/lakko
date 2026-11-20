@@ -1004,7 +1004,7 @@ export async function catchUpChannel(idHex: string): Promise<void> {
       }
     } catch (err) {
       if (apiError.is(err) && err.status === 410 && err.code === CHANNEL_REMOVED) {
-        // ADR-0098 step 5: a channel moderators removed is NOT this device
+        // ADR-0099 step 5: a channel moderators removed is NOT this device
         // being removed from it; it stays (`moderation/channel-removal.ts`).
       } else if (apiError.is(err) && (err.code === SUBSCRIBER_REMOVED || err.status === 410)) {
         // A publisher's subscription row going is not the end of the

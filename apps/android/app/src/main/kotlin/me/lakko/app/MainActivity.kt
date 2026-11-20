@@ -165,7 +165,7 @@ class MainActivity : ComponentActivity() {
         // ADR-0061 — the interface language: stored choice, else the system
         // language, else English. Loaded before the first frame.
         me.lakko.app.l10n.Localization.init(applicationContext)
-        // ADR-0098 F2: the standing proofs refuse a moderator list older
+        // ADR-0099 F2: the standing proofs refuse a moderator list older
         // than the one this device has seen (the report sheet's floor).
         me.lakko.app.moderation.ModeratorListCache.installFloor(
             me.lakko.app.moderation.ModeratorListVersionStore(applicationContext),
@@ -402,7 +402,7 @@ class MainActivity : ComponentActivity() {
                             antiCensorship = antiCensorship,
                             releaseChecker = releaseChecker,
                         )
-                        // ADR-0098 — the block dialog, the report sheet and the
+                        // ADR-0099 — the block dialog, the report sheet and the
                         // notice after a report, for every screen.
                         me.lakko.app.ui.moderation.ModerationHost(
                             contactsRepository = contactsRepository,
@@ -700,7 +700,7 @@ private fun AppRoot(
         return
     }
 
-    // ADR-0098 section 4 (docs/ux/reporting-and-moderation.md section 4) -
+    // ADR-0099 section 4 (docs/ux/reporting-and-moderation.md section 4) -
     // the account is suspended. The suspended screen replaces the app until
     // "Read my chats"; then the app runs read-only with a row back to it.
     // While the app is in front the refresh route is asked now and every ten
@@ -1487,7 +1487,7 @@ private fun SessionRoot(
         // runtime alongside the chat bootstrap so the poll
         // loop starts at the same moment chat surfaces become
         // usable. Idempotent for the same account id.
-        // ADR-0098 step 4 — this account is never marked suspended by the
+        // ADR-0099 step 4 — this account is never marked suspended by the
         // marks other people get (its own standing is the suspended screen).
         // Bound at every landing; sign-out and forget device clear it with
         // the kept standings (`DeviceGroupSyncRepository.clear`).
@@ -1836,6 +1836,9 @@ private fun SessionRoot(
                     // app-wide failure state, for the account it ran for. A
                     // sweep that fails as a whole counts as not answered.
                     val sweepAccount = chatRepository.currentAccountIdB64()
+                    // The groups this sweep reads; one that appears during the
+                    // pause (a chat just joined) ends it (`ReceiveCadence`).
+                    val sweptGroups = chatRepository.state.value.threads.map { it.groupIdHex }.toSet()
                     try {
                         // 2026-11-06 — one read of every group per sweep, no
                         // long polls held open; the pause below decides how
@@ -1864,7 +1867,11 @@ private fun SessionRoot(
                     )
                     val wakeBefore = me.lakko.app.chat.ReceiveCadence.lastWakeAtMs.value
                     kotlinx.coroutines.withTimeoutOrNull((pause - elapsed).coerceAtLeast(APP_POLL_MIN_ITERATION_MS)) {
-                        me.lakko.app.chat.ReceiveCadence.lastWakeAtMs.first { it > wakeBefore }
+                        me.lakko.app.chat.ReceiveCadence.awaitWakeOrNewGroup(
+                            wakeBefore = wakeBefore,
+                            swept = sweptGroups,
+                            groups = chatRepository.state.map { s -> s.threads.map { it.groupIdHex } },
+                        )
                     }
                 }
             } finally {
@@ -3037,7 +3044,7 @@ private fun SessionRoot(
                     )
                 }
 
-                // ADR-0098 — Settings > Privacy > Blocked people / Your reports.
+                // ADR-0099 — Settings > Privacy > Blocked people / Your reports.
                 composable(Routes.BLOCKED_PEOPLE) {
                     me.lakko.app.ui.moderation.BlockedPeopleScreen(
                         contactsRepository = contactsRepository,

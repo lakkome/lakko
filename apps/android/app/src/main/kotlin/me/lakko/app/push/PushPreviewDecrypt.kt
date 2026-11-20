@@ -365,7 +365,7 @@ public interface PushDecryptDeps {
     public fun heldRow(accountIdB64: String, groupHex: String, messageId: Long): me.lakko.app.chat.HeldRow? = null
 
     /**
-     * ADR-0098 section 6 — whether [senderAccountB64] is blocked by the
+     * ADR-0099 section 6 — whether [senderAccountB64] is blocked by the
      * account, read from the persisted synced state (a READ, C-59).
      */
     public fun isBlocked(accountIdB64: String, senderAccountB64: String?): Boolean = false
@@ -432,7 +432,7 @@ internal fun wakeRowSuppressed(
 }
 
 /**
- * ADR-0098 section 6 — whether a row of a blocked sender posts nothing: a
+ * ADR-0099 section 6 — whether a row of a blocked sender posts nothing: a
  * call offer is declined without a ring ([me.lakko.app.moderation.declinesCallSilently]),
  * anything else notifies for nothing ([me.lakko.app.moderation.suppressesNotification]).
  * Called only for a sender the register holds.
@@ -711,7 +711,7 @@ public suspend fun decryptPushWake(
                     suppressedRows += 1
                     continue
                 }
-                // ADR-0098 section 6 — nothing of a blocked person notifies,
+                // ADR-0099 section 6 — nothing of a blocked person notifies,
                 // and their calls do not ring (declined without a ring).
                 val blocked = runCatching { deps.isBlocked(account.accountIdB64, processed.senderAccountB64) }
                     .getOrDefault(false)

@@ -7,7 +7,7 @@ import me.lakko.app.moderation.AccountStanding
 import me.lakko.app.moderation.SuspensionMarks
 
 /**
- * ADR-0098 sections 3 and 6 — what the inbox poll lets through of a fetched
+ * ADR-0099 sections 3 and 6 — what the inbox poll lets through of a fetched
  * batch of contact requests, BEFORE anything is stored or decided. Every
  * route runs through it: the inbox, a request carried inside a group, and a
  * request answering one of this account's invite links, which is otherwise
@@ -29,7 +29,7 @@ internal suspend fun screenFetchedRequests(
 }
 
 /**
- * ADR-0098 step 4 / UX 3 — the held contact requests the Requests list shows:
+ * ADR-0099 step 4 / UX 3 — the held contact requests the Requests list shows:
  * a request kept from before its sender's suspension leaves the list once the
  * moderation log confirms it ([suspendedKeysB64] grows as answers arrive; an
  * unknown standing keeps the request).
@@ -43,7 +43,7 @@ internal fun shownPendingRequests(
     }
 
 /**
- * ADR-0098 step 4 — whether an undecided request answering one of this
+ * ADR-0099 step 4 — whether an undecided request answering one of this
  * account's invite links is dropped when it comes to be decided: only on a
  * suspension the log confirms within [timeoutMs]. It may have been set aside
  * before the suspension was published, or while the check at fetch timed out.

@@ -359,7 +359,7 @@ public class PasskeysViewModel(
      */
     public fun deleteAccount(context: Context, hasPasskey: Boolean, onProofRequired: () -> Unit) {
         rebindSession()
-        // The live session's account, or (ADR-0098) a suspended account's on
+        // The live session's account, or (ADR-0099) a suspended account's on
         // a device without its chats, with the restricted session.
         val secrets = repo.accountForDeletion() ?: run {
             mutableState.update { it.copy(deleteError = SESSION_NOT_READY) }
@@ -404,7 +404,7 @@ public class PasskeysViewModel(
                 // ADR-0064 section 1 — the vaults of the channels this
                 // account owns go before the account, best effort and
                 // bounded in time; keys from the lineage identity.
-                // ADR-0098: a suspended device without its chats holds no seed.
+                // ADR-0099: a suspended device without its chats holds no seed.
                 secrets.accountIdentitySeed?.let { seed ->
                     me.lakko.app.channels.ChannelVaultHeads.deleteOwnedVaults(
                         me.lakko.app.auth.conversationAccountSeedOf(
@@ -568,7 +568,7 @@ public class PasskeysViewModel(
     private fun accountDeletionCleanups(
         subscriptionIds: List<ByteArray>,
         pushTokens: me.lakko.app.anon.AnonTokenSource,
-        /** The access token, or (ADR-0098 section 4) a suspended account's
+        /** The access token, or (ADR-0099 section 4) a suspended account's
          *  `s1`, which storage's and discovery's account deletions accept. */
         sessionToken: String,
     ): List<me.lakko.app.account.AccountDeletion.Cleanup> {

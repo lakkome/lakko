@@ -88,7 +88,7 @@ public fun WhoCanFindMeScreen(
 ) {
     val settingOrNull by reach.visibility.collectAsStateWithLifecycle()
     val status by reach.applyStatus.collectAsStateWithLifecycle()
-    // ADR-0098 step 5 — moderators removed this account from search.
+    // ADR-0099 step 5 — moderators removed this account from search.
     val hiddenFromSearch by reach.hiddenFromSearch.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     var showList by rememberSaveable { mutableStateOf(false) }

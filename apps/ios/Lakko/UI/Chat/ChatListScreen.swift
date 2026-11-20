@@ -51,7 +51,7 @@ public struct ChatListScreen: View {
     @ObservedObject var feedReading: FeedReadingModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 step 3 — the read-only app of a suspended account.
+    /// ADR-0099 step 3 — the read-only app of a suspended account.
     @Environment(\.accountSuspended) private var accountSuspended
     /// The ledger openings of bare `/g/` links a row's second line reads
     /// (``BareGroupLink``): a finished opening redraws the row.
@@ -178,7 +178,7 @@ public struct ChatListScreen: View {
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
               VStack(spacing: 0) {
-                // ADR-0098 step 3 — reading a suspended account's chats: the
+                // ADR-0099 step 3 — reading a suspended account's chats: the
                 // suspended screen is one tap away.
                 if accountSuspended {
                     SuspendedBanner { SuspensionCenter.shared.showScreen() }
@@ -253,7 +253,7 @@ public struct ChatListScreen: View {
                 if let keysUpdatingLabel, !viewModel.synchronizing {
                     ToolbarItem(placement: .navigationBarLeading) { keysUpdatingLabel }
                 }
-                // ADR-0098 step 3 — a suspended account starts nothing.
+                // ADR-0099 step 3 — a suspended account starts nothing.
                 if !accountSuspended {
                     ToolbarItem(placement: .navigationBarTrailing) { createMenu }
                 }

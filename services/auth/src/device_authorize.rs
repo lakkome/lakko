@@ -223,7 +223,7 @@ async fn redeem_answer(
         return Err(ApiError::InvalidCredential);
     };
 
-    // ADR-0098 section 4: the grant is spent (it is the proof, and single
+    // ADR-0099 section 4: the grant is spent (it is the proof, and single
     // use), and a suspended account's new device lands in suspended mode.
     crate::suspension::refuse_landing_if_suspended(
         &state,

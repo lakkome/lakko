@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0098 step 5: a moderator statement names an account by its target,
+-- ADR-0099 step 5: a moderator statement names an account by its target,
 -- `BLAKE3-derive-key("lakko/moderation/account-target/v1", identity_pubkey)`
 -- (`lakko_moderation::target::account_target_hash`), and the moderation
 -- service no longer hands auth the identity key beside it.

@@ -388,7 +388,7 @@ fn identity_proof_inner(account_seed: &[u8; 32], account_id: &[u8]) -> Result<Ve
 }
 
 /// Sign the identity proof auth requires before it records an identity key
-/// for an account (ADR-0098 security fix F3): `accountIdentity`'s signature
+/// for an account (ADR-0099 security fix F3): `accountIdentity`'s signature
 /// over `"lakko/auth/identity-proof/v1\0" ‖ accountId ‖ pubkey`, `pubkey`
 /// being its own signature public key. Returns the 64-byte proof; send it as
 /// `identity_proof_b64` (base64url without padding) with the genesis mint,

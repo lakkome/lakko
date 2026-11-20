@@ -50,7 +50,7 @@ public fun evidenceItems(
     return (messages + rest + posts).take(REPORT_MESSAGE_LIMIT)
 }
 
-/** The report's target bytes (ADR-0098 section 2). */
+/** The report's target bytes (ADR-0099 section 2). */
 internal suspend fun targetBytes(target: ReportTargetRef): ByteArray? = when (target) {
     is ReportTargetRef.Account -> accountKeyBytes(target.accountKeyB64)
         ?.let { uniffi.lakko_ffi_uniffi.moderationAccountTarget(it) }
@@ -75,7 +75,7 @@ public class ProductionReportPorts(
     override fun rootKey(): ByteArray? = pinnedModerationRootKey()
 
     override suspend fun fetchModeratorList(): ModeratorListFetch = client.moderatorList().also {
-        // ADR-0098 F2: the standing proofs reuse the list the sheet fetched.
+        // ADR-0099 F2: the standing proofs reuse the list the sheet fetched.
         if (it is ModeratorListFetch.Ok) ModeratorListCache.shared.offer(it.bytes)
     }
 

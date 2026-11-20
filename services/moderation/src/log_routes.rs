@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The public routes of the moderation log (ADR-0098 section 5).
+//! The public routes of the moderation log (ADR-0099 section 5).
 //!
 //! No session; behind the per-network limit. Base64 is standard, padded.
 //!

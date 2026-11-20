@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0098 security fix F3 — the proof that this device holds the account
+/// ADR-0099 security fix F3 — the proof that this device holds the account
 /// identity key it asks auth to record.
 ///
 /// Every auth call that records the account's identity key (`POST

@@ -165,7 +165,7 @@ public class ReachManager internal constructor(
 
     private val mutableHiddenFromSearch = MutableStateFlow(false)
 
-    /** ADR-0098 step 5 — moderators removed this account from search
+    /** ADR-0099 step 5 — moderators removed this account from search
      *  (discovery answered `403 hidden-from-search` to the Everyone record):
      *  Who can find me says so and Everyone cannot be chosen. */
     public val hiddenFromSearch: StateFlow<Boolean> = mutableHiddenFromSearch.asStateFlow()
@@ -1481,7 +1481,7 @@ public class ReachManager internal constructor(
 
     public fun notePublishedEveryone(public: Boolean, key: String?) {
         val b = binding.get() ?: return
-        // ADR-0098 step 5 — an Everyone record that landed ends the
+        // ADR-0099 step 5 — an Everyone record that landed ends the
         // moderators' hiding; withdrawing says nothing about it.
         val hidden = if (public) false else doc.hiddenFromSearch
         doc = doc.copy(publishedPublic = public, publishedKey = key, hiddenFromSearch = hidden)
@@ -1500,7 +1500,7 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * ADR-0098 step 5 — discovery refused the Everyone record with
+     * ADR-0099 step 5 — discovery refused the Everyone record with
      * `403 hidden-from-search`. Not a failure to retry: the screen says
      * moderators removed the account from search, and the setting stays as
      * the person chose it.

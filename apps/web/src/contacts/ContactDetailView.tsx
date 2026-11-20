@@ -138,7 +138,7 @@ export interface ContactDetailViewProps {
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
-  /** ADR-0098 section 6 - the block register's answer for this person. */
+  /** ADR-0099 section 6 - the block register's answer for this person. */
   const blocked = (): boolean => isBlockedKeyB64(props.personKeyB64);
   const [blockBusy, setBlockBusy] = createSignal(false);
   const [blockError, setBlockError] = createLiveText();
@@ -189,7 +189,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
   const sections = createMemo(() =>
-    // ADR-0098 step 3: a suspended account adds no contact and calls nobody.
+    // ADR-0099 step 3: a suspended account adds no contact and calls nobody.
     sectionsWhileSuspended(
       personInfoSections(uiRules(), {
         membershipEnded: props.membershipEnded,
@@ -331,7 +331,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     // is gated on `is_active()` and raises, so the tiles would fail closed
     // anyway; a control that always errors is the shape 6.1.1 rejects, and a
     // call control asserts a live E2EE session there is not.
-    // ADR-0098 step 3: a suspended account places no call.
+    // ADR-0099 step 3: a suspended account places no call.
     const calls = !sections().includes("call") || accountSuspended()
       ? []
       : [
@@ -396,11 +396,11 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <Show when={resolved().usernameNotVerified}>
             <div class="lk-meta">{t("contacts.detail.username_not_verified")}</div>
           </Show>
-          {/* ADR-0098 UX 1.4 - a muted line under a blocked person's name. */}
+          {/* ADR-0099 UX 1.4 - a muted line under a blocked person's name. */}
           <Show when={blocked()}>
             <div class="lk-meta">{t("block.card_line")}</div>
           </Show>
-          {/* ADR-0098 step 4, UX 3 - a muted line under a suspended person's
+          {/* ADR-0099 step 4, UX 3 - a muted line under a suspended person's
               name; a block's line wins. */}
           <Show when={personMark(blocked(), isSuspendedKeyB64(props.personKeyB64)) === "suspended"}>
             <div class="lk-meta">{t("suspended.card_line")}</div>
@@ -562,7 +562,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           </section>
         </Show>
 
-        {/* ADR-0098 UX 1.1 / 2.1 - the danger block: Report, then Block or
+        {/* ADR-0099 UX 1.1 / 2.1 - the danger block: Report, then Block or
             Unblock, then Remove contact (the shared rule's order). */}
         <Show when={sections().includes("report")}>
           <section class="lk-card danger">

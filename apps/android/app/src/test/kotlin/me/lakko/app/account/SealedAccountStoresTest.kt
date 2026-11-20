@@ -121,7 +121,7 @@ class SealedAccountStoresTest {
         // what a publish needs.
         val client = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatClient.kt").readText()
         val prepare = client.substringAfter("    public suspend fun prepareSend(").substringBefore("\n    }\n")
-        // ADR-0098 — a chat envelope is attested first; the encrypt takes
+        // ADR-0099 — a chat envelope is attested first; the encrypt takes
         // the attested bytes (`sealed`).
         val sealed = prepare.indexOf("group.createApplicationMessage(identity, sealed)")
         val persisted = prepare.indexOf("persistRatchet()")

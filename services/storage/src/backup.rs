@@ -404,7 +404,7 @@ mod tests {
             .expect("issue")
     }
 
-    /// ADR-0098 step 3: a suspended account's restricted session deletes the
+    /// ADR-0099 step 3: a suspended account's restricted session deletes the
     /// backup (account deletion) and does nothing else here.
     #[tokio::test]
     async fn the_restricted_session_only_deletes() {

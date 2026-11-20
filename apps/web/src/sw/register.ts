@@ -42,6 +42,30 @@ export const SW_UPDATE_EVENT = "lakko:sw-update-available";
 
 let registered = false;
 
+/** Set once this page asks the browser for a newer worker by itself
+ *  (`watchForUpdates`). A worker found before that came with this page's own
+ *  load. */
+let laterCheckStarted = false;
+
+/** What to do with a worker that reached `installed` (or was already waiting).
+ *
+ * - `ignore`: nothing controls the page, so this is the first install, not an
+ *   update.
+ * - `activate-silently`: the worker came with this page's own load. Pages are
+ *   fetched network-first (`public/sw.js`), so the page already runs the code
+ *   that worker serves; offering "A new version of Lakko is ready" here was a
+ *   false notice (walk 7, 2026-11-20: it showed on the first load of the
+ *   site). The worker is told to take over without a reload.
+ * - `offer-reload`: a check this page made later found a newer version than
+ *   the one it runs: the banner offers the reload.
+ */
+export type UpdateFoundAction = "ignore" | "activate-silently" | "offer-reload";
+
+export function updateFoundAction(controlled: boolean, foundByLaterCheck: boolean): UpdateFoundAction {
+  if (!controlled) return "ignore";
+  return foundByLaterCheck ? "offer-reload" : "activate-silently";
+}
+
 /** The worker that is installed and waiting to take over, if any. Kept so a
  *  banner that mounts after the update was found still learns of it: an
  *  event dispatched before anyone listens is lost. */
@@ -138,8 +162,8 @@ export async function registerServiceWorker(): Promise<boolean> {
     // `waiting` state. Common when the user navigates away after
     // the SW installed but before they clicked Reload. Surface
     // the update banner on this mount too.
-    if (registration.waiting !== null && navigator.serviceWorker.controller !== null) {
-      dispatchUpdateAvailable(registration.waiting);
+    if (registration.waiting !== null) {
+      handleInstalled(registration.waiting);
     }
 
     // Standard `updatefound` path: a new SW byte-content has
@@ -149,12 +173,12 @@ export async function registerServiceWorker(): Promise<boolean> {
     // and we surface the banner.
     const follow = (incoming: ServiceWorker | null): void => {
       if (incoming === null) return;
+      // Captured when the install began, not when it ended: an install that
+      // started with this page's load stays this page's version.
+      const foundByLaterCheck = laterCheckStarted;
       incoming.addEventListener("statechange", () => {
-        if (
-          incoming.state === "installed" &&
-          navigator.serviceWorker.controller !== null
-        ) {
-          dispatchUpdateAvailable(incoming);
+        if (incoming.state === "installed") {
+          handleInstalled(incoming, foundByLaterCheck);
         }
       });
     };
@@ -182,6 +206,7 @@ function watchForUpdates(registration: ServiceWorkerRegistration): void {
     const now = Date.now();
     if (!shouldCheckForUpdate(lastCheckMs, now, visible)) return;
     lastCheckMs = now;
+    laterCheckStarted = true;
     registration.update().catch((err: unknown) => {
       // eslint-disable-next-line no-console
       console.warn("lakko: update check failed", err);
@@ -191,6 +216,16 @@ function watchForUpdates(registration: ServiceWorkerRegistration): void {
   window.addEventListener("focus", check);
   window.addEventListener("online", check);
   window.setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+}
+
+/** A worker that is installed and waiting: per {@link updateFoundAction}. */
+function handleInstalled(worker: ServiceWorker, foundByLaterCheck = laterCheckStarted): void {
+  const action = updateFoundAction(navigator.serviceWorker.controller !== null, foundByLaterCheck);
+  if (action === "offer-reload") {
+    dispatchUpdateAvailable(worker);
+  } else if (action === "activate-silently") {
+    worker.postMessage({ type: "SKIP_WAITING" });
+  }
 }
 
 /** Internal — dispatch the update-available event on `window` so

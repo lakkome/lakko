@@ -319,7 +319,7 @@ pub enum DirectoryQuery {
     },
 }
 
-/// A moderator's channel action (ADR-0098 section 4), applied from a signed
+/// A moderator's channel action (ADR-0099 section 4), applied from a signed
 /// statement the internal listener checked ([`crate::internal`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelModeration {
@@ -484,10 +484,10 @@ pub enum StorageError {
     /// A listing whose `updated_at_ms` is not newer than the stored one.
     #[error("listing is not newer than the stored one")]
     StaleListing,
-    /// A moderator blocked this channel's handle (ADR-0098 ChannelBlockHandle).
+    /// A moderator blocked this channel's handle (ADR-0099 ChannelBlockHandle).
     #[error("channel is blocked from the directory")]
     ListingBlocked,
-    /// A moderator delisted (or removed) this channel (ADR-0098).
+    /// A moderator delisted (or removed) this channel (ADR-0099).
     #[error("channel is delisted from the directory")]
     ListingDelisted,
     /// A member card names an epoch greater than the channel's
@@ -781,7 +781,7 @@ pub trait ChannelStore: Send + Sync {
         now_ms: u64,
     ) -> Result<Vec<DirectoryEntry>, StorageError>;
 
-    /// Apply a moderator's checked statement (ADR-0098 step 5), in one
+    /// Apply a moderator's checked statement (ADR-0099 step 5), in one
     /// step: a list older than the newest seen is
     /// [`ModerationOutcome::StaleList`], an id applied before
     /// [`ModerationOutcome::Repeat`], a statement older by `issued_at_ms`
@@ -796,11 +796,11 @@ pub trait ChannelStore: Send + Sync {
     ) -> Result<ModerationOutcome, StorageError>;
 
     /// The moderation-log index of the statement that removed `channel`, or
-    /// `None` when it is not removed (ADR-0098 ChannelRemove).
+    /// `None` when it is not removed (ADR-0099 ChannelRemove).
     async fn removed_channel(&self, channel: ChannelId) -> Result<Option<u64>, StorageError>;
 
     /// Raise the moderator-list floor (the highest list version seen) to
-    /// `list_version` when it is higher, on its own (ADR-0098 F1: a newer
+    /// `list_version` when it is higher, on its own (ADR-0099 F1: a newer
     /// list is kept even when the statement beside it is refused). `false`
     /// when `list_version` is older than the floor (nothing changed).
     async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, StorageError>;
@@ -1443,7 +1443,7 @@ struct Inner {
     listings: HashMap<ChannelId, StoredListing>,
     /// Channel id → first-listed time; survives a withdrawal.
     first_listed_at: HashMap<ChannelId, u64>,
-    /// Channel id → its moderation (ADR-0098).
+    /// Channel id → its moderation (ADR-0099).
     moderation: HashMap<ChannelId, ModerationRow>,
     /// Moderator statement ids applied.
     moderation_applied: std::collections::HashSet<[u8; 16]>,
@@ -4135,7 +4135,7 @@ mod tests {
         s.put_listing(c, stored("C", 1), 300).await.unwrap();
         let entry = s.listing(c, 400).await.unwrap().unwrap();
         assert_eq!(entry.first_listed_at_ms, 100);
-        // ADR-0098: a delist and a block accumulate, a restore clears them.
+        // ADR-0099: a delist and a block accumulate, a restore clears them.
         let apply = |action, id: u8, at| ModerationStatement {
             statement_id: [id; 16],
             list_version: 1,

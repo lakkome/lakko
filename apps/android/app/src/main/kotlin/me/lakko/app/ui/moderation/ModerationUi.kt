@@ -79,7 +79,7 @@ import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 
 /*
- * ADR-0098, UX `reporting-and-moderation.md` sections 1 and 2 — the block
+ * ADR-0099, UX `reporting-and-moderation.md` sections 1 and 2 — the block
  * dialog, the report sheet and the notice after a report, presented once for
  * the whole app ([ModerationHost] sits beside the app root). Every entry
  * point asks [ModerationRequests]; none draws its own copy of the sheet.

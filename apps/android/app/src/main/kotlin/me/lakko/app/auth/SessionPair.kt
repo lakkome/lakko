@@ -152,7 +152,7 @@ public fun deviceSegmentOfAccessToken(token: String): String? =
     accessTokenSegments(token)?.get(DEVICE_SEGMENT_INDEX)?.takeIf { it.isNotEmpty() }
 
 /**
- * The account segment of an access token or of an ADR-0098 restricted
+ * The account segment of an access token or of an ADR-0099 restricted
  * session (`s1.`, the same seven segments): what ties the suspended pair of
  * an account to the one installed for it. `null` for anything else.
  */

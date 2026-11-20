@@ -9,7 +9,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 /**
- * ADR-0098 section 4 - the suspended mode of an account, kept on disk so it
+ * ADR-0099 section 4 - the suspended mode of an account, kept on disk so it
  * survives a restart: the `s1` restricted session and the `r2` refresh
  * credential a `403 account-suspended` handed this device.
  *

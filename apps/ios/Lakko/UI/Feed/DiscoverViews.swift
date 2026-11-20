@@ -144,7 +144,7 @@ struct DiscoverCardView: View {
     @State private var busy = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 / UX 2.1 — Report from the card's menu, its listing included.
+    /// ADR-0099 / UX 2.1 — Report from the card's menu, its listing included.
     @State private var reportRequest: ReportRequest?
 
     private var cardReport: ReportRequest? {
@@ -238,7 +238,7 @@ struct DiscoverCardView: View {
                     items.append(.action(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) })
                 }
             }
-            // ADR-0098 / UX 2.1 — never on a channel this account owns.
+            // ADR-0099 / UX 2.1 — never on a channel this account owns.
             if model.relation(card.channelIdHex) != .own, let report = cardReport {
                 items.append(.action(l10n.t("report.action"), icon: .flag, destructive: true) {
                     reportRequest = report

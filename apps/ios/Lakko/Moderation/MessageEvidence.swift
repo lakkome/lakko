@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// What a report needs of one received chat message (ADR-0098 section 1):
+/// What a report needs of one received chat message (ADR-0099 section 1):
 /// the attestation verdict, the attested plaintext exactly as it was
 /// decrypted, the sender leaf's signature key and the leaf's ADR-0050 device
 /// binding. All of it is read at receipt, because a leaf can be handed to

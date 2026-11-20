@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0098 step 5 - what the moderators' panel keeps beside the reports.
+-- ADR-0099 step 5 - what the moderators' panel keeps beside the reports.
 --
 -- Nothing here names a reporter, and nothing here is published: the public
 -- record of a decision is its statement in the moderation log.

@@ -17,7 +17,7 @@
 //!   Ed25519 verifying key (the PIN for the KT log; required — the witness
 //!   refuses to boot without it, since it could otherwise co-sign any root).
 //! - `LAKKO_WITNESS_MODERATION_OPERATOR_PUBKEY` — base64 of the moderation
-//!   log's operator key (ADR-0098 section 5; optional — unset, a moderation
+//!   log's operator key (ADR-0099 section 5; optional — unset, a moderation
 //!   cosign answers 404 `unknown-log`).
 //! - `LAKKO_WITNESS_COSIGN_SECRET` — shared secret gating `POST /witness/cosign`.
 

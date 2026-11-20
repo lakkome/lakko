@@ -95,11 +95,11 @@ pub(crate) enum UploadOutcome {
     /// A row already existed; its last access was moved to the upload day
     /// and its delete key left as it was (the first uploader's).
     Existed,
-    /// A moderator deleted this id (ADR-0098); no row was written.
+    /// A moderator deleted this id (ADR-0099); no row was written.
     Removed,
 }
 
-/// A moderator's checked BlobDelete statement (ADR-0098 step 5).
+/// A moderator's checked BlobDelete statement (ADR-0099 step 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModerationDelete {
     /// The statement id; applied once.
@@ -158,7 +158,7 @@ pub(crate) trait BlobIndex: Send + Sync {
     /// ([`UploadOutcome::Removed`]).
     async fn record_upload(&self, row: BlobRow) -> Result<UploadOutcome, IndexError>;
 
-    /// Whether a moderator deleted `id` (ADR-0098).
+    /// Whether a moderator deleted `id` (ADR-0099).
     async fn is_tombstoned(&self, id: &BlobId) -> Result<bool, IndexError>;
 
     /// Apply a moderator's BlobDelete in one step: a list older than the
@@ -172,7 +172,7 @@ pub(crate) trait BlobIndex: Send + Sync {
     ) -> Result<ModerationOutcome, IndexError>;
 
     /// Raise the moderator-list floor (the highest list version seen) to
-    /// `list_version` when it is higher, on its own (ADR-0098 F1: a newer
+    /// `list_version` when it is higher, on its own (ADR-0099 F1: a newer
     /// list is kept even when the statement beside it is refused). `false`
     /// when `list_version` is older than the floor (nothing changed).
     async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, IndexError>;
@@ -890,7 +890,7 @@ pub(crate) mod contract {
         assert!(!index.remove(&a.id).await.unwrap());
     }
 
-    /// The ADR-0098 tombstone. `ids` (two blob ids) and `statement` (the
+    /// The ADR-0099 tombstone. `ids` (two blob ids) and `statement` (the
     /// seed of the statement ids) are random, so a persistent database can
     /// be reused across runs (a tombstone is kept forever); `version` is the
     /// list version every statement carries (it only grows in a shared

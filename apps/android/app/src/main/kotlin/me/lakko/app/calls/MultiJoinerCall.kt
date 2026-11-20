@@ -827,9 +827,11 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.GROUP_CONTACT_REQUEST -> Unit
             // ADR-0091 phase 2 - a conversation re-entry request rides the
             // DeviceGroup, a mailbox or a knock queue, and a knock key rides a
-            // GROUP JOURNAL; neither means anything on the SFU relay. Dropped.
+            // GROUP JOURNAL; neither means anything on the SFU relay. ADR-0098's
+            // deleted-account notice is not a call envelope either. Dropped.
             FfiIncomingEnvelopeKind.CONVERSATION_REENTRY,
             FfiIncomingEnvelopeKind.KNOCK_KEY,
+            FfiIncomingEnvelopeKind.ACCOUNT_DELETED,
             -> Unit
         }
     }

@@ -49,7 +49,7 @@
 //! answers every route that names it (`/v1/channels/{id}/...`,
 //! `/v1/directory/listing/{id}`) with `410 {"code": "channel-removed",
 //! "detail", "log_index"}` from a layer that runs before the handlers
-//! (ADR-0098 step 5); a delisted or blocked channel's listing is refused with
+//! (ADR-0099 step 5); a delisted or blocked channel's listing is refused with
 //! `403 listing-delisted` / `403 listing-blocked`.
 //!
 //! Every error path returns a JSON envelope with a stable
@@ -2458,7 +2458,7 @@ async fn deleted_channel_layer(
 /// The id segment is percent-decoded first, as the router's `Path`
 /// extractor decodes it before the handler sees it: matching the raw text
 /// would let `%61b...` reach the handler of channel `ab...` past the removal
-/// check (ADR-0098 F7).
+/// check (ADR-0099 F7).
 fn channel_of_path(path: &str) -> Option<ChannelId> {
     let rest = path
         .strip_prefix("/v1/channels/")
@@ -2491,7 +2491,7 @@ fn percent_decode(segment: &str) -> Option<String> {
 }
 
 /// `503 moderation-check-failed`: the removal check could not be made, so
-/// the request is refused rather than let past it (ADR-0098 F7).
+/// the request is refused rather than let past it (ADR-0099 F7).
 fn moderation_check_failed() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -2503,7 +2503,7 @@ fn moderation_check_failed() -> Response {
         .into_response()
 }
 
-/// `410 channel-removed`: a moderator removed the channel (ADR-0098
+/// `410 channel-removed`: a moderator removed the channel (ADR-0099
 /// ChannelRemove). `log_index` names the statement in the moderation log, so
 /// a client can verify the removal against the log's snapshot.
 pub(crate) fn channel_removed(log_index: u64) -> Response {
@@ -2519,7 +2519,7 @@ pub(crate) fn channel_removed(log_index: u64) -> Response {
 }
 
 /// Answer every route of a removed channel with `410 channel-removed`
-/// (ADR-0098 step 5). Runs BEFORE the handlers, so nothing a removed
+/// (ADR-0099 step 5). Runs BEFORE the handlers, so nothing a removed
 /// channel's publisher or reader sends reaches the store; one primary-key
 /// read per request that names a channel (the id percent-decoded, as the
 /// handler will see it). A store failure refuses the request with `503
@@ -3079,7 +3079,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             Arc::clone(&state),
             deleted_channel_layer,
         ))
-        // ADR-0098 step 5: every route of a removed channel is a 410 before
+        // ADR-0099 step 5: every route of a removed channel is a 410 before
         // any handler runs. Outside every route layer, so it runs first; only
         // the metrics layer wraps it, so the 410 is counted.
         .layer(axum::middleware::from_fn_with_state(

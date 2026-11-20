@@ -268,7 +268,7 @@ enum BaselineBackupGate: Equatable {
         switch outcome {
         case .refreshed: return .upload
         case .noCredential, .failed: return .cacheOnly
-        // ADR-0098 step 3 — a suspended account uploads nothing.
+        // ADR-0099 step 3 — a suspended account uploads nothing.
         case .superseded, .revoked, .invalid, .suspended: return .skip
         }
     }

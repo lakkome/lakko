@@ -270,7 +270,7 @@ export function PeopleSearch(props: {
     asContacts(mergePeople([local(), network().outcome?.people ?? []], ownKeyHex()), contactSet());
   const people = (): PersonResult[] => {
     const all = merged();
-    // ADR-0098 step 4, UX 3 - search lists no suspended account. Rows show
+    // ADR-0099 step 4, UX 3 - search lists no suspended account. Rows show
     // at once; one drops out when the log confirms its suspension.
     return withoutSuspended(
       peopleRows(all, props.listedB64?.() ?? new Set(), props.standingAboveB64?.() ?? new Set()),
@@ -542,7 +542,7 @@ function PersonRow(props: {
             )}
           </Show>
         </Show>
-        {/* ADR-0098 step 3: a suspended account adds no contact. */}
+        {/* ADR-0099 step 3: a suspended account adds no contact. */}
         <Show when={view().add !== "hidden" && !accountSuspended()}>
           <button
             type="button"

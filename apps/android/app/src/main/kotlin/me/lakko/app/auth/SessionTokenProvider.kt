@@ -36,7 +36,7 @@ import kotlinx.coroutines.sync.withLock
  *     the sign-in screen, nothing is wiped.
  *   * A refresh that could not be made (offline, 5xx) keeps the current
  *     token; the caller fails as it did before a refresh existed.
- *   * A refresh answered `403 account-suspended` (ADR-0098 section 4)
+ *   * A refresh answered `403 account-suspended` (ADR-0099 section 4)
  *     reports the restricted credentials it carries to [install]'s
  *     `onSuspended` and marks the session suspended: from then on the
  *     provider refreshes nothing by itself (the suspension controller asks
@@ -67,7 +67,7 @@ public class SessionTokenProvider(
         val onResumed: (SessionPair) -> Unit,
         /** Set once a refusal was reported, so it is reported once. */
         @Volatile var refused: Boolean = false,
-        /** ADR-0098 - the account is suspended; the pair is the `s1` one. */
+        /** ADR-0099 - the account is suspended; the pair is the `s1` one. */
         @Volatile var suspended: Boolean = false,
     )
 
@@ -105,7 +105,7 @@ public class SessionTokenProvider(
     }
 
     /**
-     * ADR-0098 section 4 - serve the restricted pair of [credentials] (the
+     * ADR-0099 section 4 - serve the restricted pair of [credentials] (the
      * `s1` in the access slot, the `r2` in the refresh slot) as the
      * suspended session of the installed account. A no-op when nothing is
      * installed or the credentials name another account.
@@ -122,7 +122,7 @@ public class SessionTokenProvider(
     public fun isSuspended(): Boolean = installed?.suspended == true
 
     /**
-     * ADR-0098 - a bearer route of auth answered `403 account-suspended`
+     * ADR-0099 - a bearer route of auth answered `403 account-suspended`
      * with no credentials: refresh once to get them (the refresh route
      * answers the same `403` with the restricted session, which reaches
      * `onSuspended`). A no-op once the session is known to be suspended.
@@ -261,7 +261,7 @@ public class SessionTokenProvider(
                 // [update] replaced the pair while this was out: the refusal
                 // is of the old pair, not of the session.
                 if (inst.pair !== sent) return@withLock inst.pair
-                // ADR-0098 section 4 - the account is suspended: the answer
+                // ADR-0099 section 4 - the account is suspended: the answer
                 // carries the restricted session. Not a sign-out, not a wipe.
                 val suspension = err.suspended
                 if (suspension != null &&

@@ -59,7 +59,7 @@ struct SignedRootWire {
 
 #[derive(Serialize)]
 struct CosignReq {
-    /// Which log the root belongs to (witness v2, ADR-0098 section 5): always
+    /// Which log the root belongs to (witness v2, ADR-0099 section 5): always
     /// the KT log here.
     log: &'static str,
     new_root: SignedRootWire,

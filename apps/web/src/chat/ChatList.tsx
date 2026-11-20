@@ -153,7 +153,7 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           dismissable without a keyboard. */}
       <MenuBackdrop onClose={() => props.onClose()} />
       <div class="lk-menu" role="menu" aria-label={t("chats.create.menu")}>
-        {/* ADR-0098 step 3: a suspended account starts nothing new. */}
+        {/* ADR-0099 step 3: a suspended account starts nothing new. */}
         <Show when={!accountSuspended()}>
           <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
             <Icon name="chat" size={20} />
@@ -565,7 +565,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
       </label>
-      {/* ADR-0098 step 3: reading the chats of a suspended account; the row
+      {/* ADR-0099 step 3: reading the chats of a suspended account; the row
           brings the suspended screen back. */}
       <SuspendedBanner />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}

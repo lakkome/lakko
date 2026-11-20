@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0098 step 5: a channel is moderated only by a moderator's signed
+-- ADR-0099 step 5: a channel is moderated only by a moderator's signed
 -- statement, forwarded by the moderation service and checked here against
 -- the moderator list under the pinned moderation root. The ADR-0059
 -- shared-secret route and its remove / block / unblock actions are gone.

@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Offline tool (ADR-0098 section 3): generate the moderation root key and sign the moderator list."
+description = "Offline tool (ADR-0099 section 3): generate the moderation root key and sign the moderator list."
 
 [[bin]]
 name = "lakko-moderation-root"

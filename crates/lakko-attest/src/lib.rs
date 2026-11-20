@@ -126,7 +126,7 @@
 //! # Identity proof
 //!
 //! The crate also hosts the identity proof (see the [`identity_proof`]
-//! module, ADR-0098 security fixes): an account identity key's signature
+//! module, ADR-0099 security fixes): an account identity key's signature
 //! over the account id and its own public key, which auth requires before it
 //! records the key for the account. Client-signed, auth-verified, like the
 //! account statement.

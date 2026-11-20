@@ -227,7 +227,7 @@ export interface BubbleHost {
   /** Section 8 — `Select` was chosen in the card: enter the mode with this
    *  message already selected. */
   onSelect: (messageId: number) => void;
-  /** ADR-0098 section 2 - `Report` in the destructive group of the menu on
+  /** ADR-0099 section 2 - `Report` in the destructive group of the menu on
    *  someone else's message. Absent: no Report row. */
   onReport?: ((messageId: number) => void) | undefined;
 }
@@ -408,7 +408,7 @@ export function TimelineBubble(
         createdAt={ev.createdAt}
         channelInviteB64={ev.channelInvite === undefined ? undefined : base64Encode(ev.channelInvite)}
         {...props}
-        // ADR-0098 section 2 - never reported: a message from this person's
+        // ADR-0099 section 2 - never reported: a message from this person's
         // own other device.
         onReport={own ? undefined : props.onReport}
       />
@@ -1298,7 +1298,7 @@ function ChatBubbleBody(
                       <span class="lk-bubble-call-invite-title">
                         {t("chat.call_invite.title")}
                       </span>
-                      {/* ADR-0098 step 3: a suspended account joins no call. */}
+                      {/* ADR-0099 step 3: a suspended account joins no call. */}
                       <Show when={!accountSuspended()}>
                         <A class="lk-button-link primary" href={invite().href}>
                           {t("chat.call.join_short")}

@@ -696,7 +696,7 @@ public final class ContactsRepository: ObservableObject {
             // ADR-0060 section 1 (2026-11-06) — the contacts who wrote with a
             // retired `contact` key and get the current grant, invisibly.
             var regrant: [Data] = []
-            // ADR-0098 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // ADR-0099 step 4 / UX `reporting-and-moderation.md` section 3 —
             // the senders of this batch's requests whose accounts the
             // moderation log shows suspended, asked about all at once under
             // one bound of a few seconds. Only a verified `suspended` counts;
@@ -708,7 +708,7 @@ public final class ContactsRepository: ObservableObject {
                 // the rest belongs to the old account. Its grants, profiles
                 // and Welcomes are not filed under whoever is bound now.
                 guard boundAccountIdB64 == pollAccountIdB64 else { break }
-                // ADR-0098 step 4 — dropped unseen before anything else
+                // ADR-0099 step 4 — dropped unseen before anything else
                 // decides about it: no grant, profile, regrant, link-answer
                 // acceptance or card.
                 if Self.droppedAsSuspended(event, suspendedSenders: suspendedSenders) { continue }
@@ -725,7 +725,7 @@ public final class ContactsRepository: ObservableObject {
                 }
                 switch event {
                 case .contactRequest(let req, let replyGrant, let linkAnswer):
-                    // ADR-0098 section 6 — a request from a blocked account is
+                    // ADR-0099 section 6 — a request from a blocked account is
                     // dropped unseen, whichever route it took (the inbox or an
                     // invite link): nothing of it is kept, not its grant, not
                     // its profile.
@@ -1295,7 +1295,7 @@ public final class ContactsRepository: ObservableObject {
     func fileGroupContactRequest(
         groupIdHex: String, envelope: Data, senderKey: Data, ownX25519Secret: Data, createdAt: String
     ) -> Bool {
-        // ADR-0098 step 4 — a sender the moderation log already showed
+        // ADR-0099 step 4 — a sender the moderation log already showed
         // suspended is dropped unseen before anything else decides. This
         // route files synchronously inside the group's event fold, so it
         // cannot wait for a standing; one not yet known is asked about below
@@ -1821,20 +1821,20 @@ public final class ContactsRepository: ObservableObject {
     ///
     /// The mutation flows through `state`'s `didSet`, so the persisted
     /// accepted list and the name directory's renames follow.
-    /// ADR-0098 section 6 — whether a contact request from `key` is dropped
+    /// ADR-0099 section 6 — whether a contact request from `key` is dropped
     /// unseen (`blockVerdict(.contactRequest)`).
     static func requestBlocked(_ key: Data) -> Bool {
         BlockList.shared.verdict(.contactRequest, accountKey: key) == .drop
     }
 
-    /// ADR-0098 step 4 — of the given request senders, the ones verified
+    /// ADR-0099 step 4 — of the given request senders, the ones verified
     /// suspended, all asked about at once under one bound. Injectable for
     /// tests; the default asks ``SuspensionMarks``.
     var suspendedRequestSenders: @MainActor ([Data]) async -> Set<Data> = { keys in
         await SuspensionMarks.shared.verifiedSuspended(keys)
     }
 
-    /// ADR-0098 step 4 — whether a group-carried request's sender is known
+    /// ADR-0099 step 4 — whether a group-carried request's sender is known
     /// suspended now, and the background ask for one not yet known.
     /// Injectable for tests.
     var groupRequestSenderSuspended: @MainActor (Data) -> Bool = { SuspensionMarks.shared.isSuspended($0) }
@@ -1855,7 +1855,7 @@ public final class ContactsRepository: ObservableObject {
         return suspendedSenders.contains(req.fromPubkey)
     }
 
-    /// ADR-0098 section 6 / UX 1.2 — block a person: the register is written
+    /// ADR-0099 section 6 / UX 1.2 — block a person: the register is written
     /// (this device at once, the account's other devices at their next sync),
     /// their pending requests go unseen, and they are removed from the
     /// contact list exactly as `Remove contact` does (the contact key
@@ -3147,7 +3147,7 @@ public final class ContactsRepository: ObservableObject {
             return (try? linkClaimAnsweredElsewhere(
                 claims: Self.ffiClaims(seen), rosterKeys: roster.roster)) ?? false
         }
-        // ADR-0098 step 4 — before a held request is decided (it would be
+        // ADR-0099 step 4 — before a held request is decided (it would be
         // accepted with no card), its sender's standing is asked, all rows at
         // once under one bound: a verified suspension drops it unseen; a late
         // or failed answer decides it as before.

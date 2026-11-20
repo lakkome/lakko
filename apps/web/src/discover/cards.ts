@@ -56,7 +56,7 @@ export interface DirectoryCard {
   /** Set for a card that came from groups: the group with the most
    *  followers, and the total across groups. */
   readonly followers: GroupFollowers | null;
-  /** ADR-0098 section 2 - the listing as the directory served it (base64),
+  /** ADR-0099 section 2 - the listing as the directory served it (base64),
    *  which a report on the card carries. */
   readonly listingB64?: string;
 }

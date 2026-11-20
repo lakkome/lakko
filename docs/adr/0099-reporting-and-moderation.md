@@ -1,17 +1,19 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0098: Reporting, blocking and moderation
+# ADR-0099: Reporting, blocking and moderation
 
-> Numbered ADR-0089 until the merge with `main` on 2026-11-20, which had taken
-> 0089 for the camera background. The merge also moved this ADR's invariants
-> C-90..C-92 to C-95..C-97, its auth migrations `0037`-`0039` to `0042`-`0044`,
-> channels `0013` to `0014`, storage `0004` to `0005`, the `report` token
-> context byte 16 to 17, the block register tag 20 to 23, the moderation
-> service port 8094 to 8100, auth's internal listener 8095 to 8101, and the
-> discovery and storage moderation listeners' bind variables to
-> `LAKKO_DISCOVERY_MODERATION_BIND` / `LAKKO_STORAGE_MODERATION_BIND`. The text
-> below uses the new numbers.
+> Numbered ADR-0089 on its branch, then ADR-0098, now ADR-0099: `main` took
+> 0089 for the camera background and, in the second merge with `main` on
+> 2026-11-20, 0098 for the deleted account. The first merge moved this ADR's
+> invariants C-90..C-92 to C-95..C-97, its auth migrations `0037`-`0039` to
+> `0042`-`0044`, channels `0013` to `0014`, storage `0004` to `0005`, the
+> `report` token context byte 16 to 17, the block register tag 20 to 23, the
+> moderation service port 8094 to 8100, auth's internal listener 8095 to
+> 8101, and the discovery and storage moderation listeners' bind variables to
+> `LAKKO_DISCOVERY_MODERATION_BIND` / `LAKKO_STORAGE_MODERATION_BIND`; the
+> second moved the invariants again, to C-96..C-98 (main's C-95 is the
+> deleted account). The text below uses the new numbers.
 
 - **Status:** Accepted (2026-11-08). The maintainer decided:
   - reports are anonymous;
@@ -519,11 +521,11 @@ have to delete.
     rides the application plaintext.
 
   New invariant-index entries when built:
-  - C-95: a report's evidence verifies to the target account or is shown
+  - C-96: a report's evidence verifies to the target account or is shown
     as not verified;
-  - C-96: no service applies an action without a moderator signature under
+  - C-97: no service applies an action without a moderator signature under
     the pinned root;
-  - C-97: no client shows a suspension without log inclusion.
+  - C-98: no client shows a suspension without log inclusion.
 
   G-39's surface grows by the attestation, the report seal and the WebAuthn
   verifier. `lakko-security` should review before merge (auth, transport of
@@ -967,8 +969,8 @@ client over a network, and no mark has been seen on a screen.
   moderation-log operator key, the witness quorum under `LogId::Moderation`
   with the KT witness keys, the snapshot's inclusion, the bucket's inclusion
   and prefix, freshness within two periods (ten minutes of clock skew), the
-  entry's end. Indexed as C-97; C-96 (the statement check at auth, step 3)
-  is indexed with it. C-95 waits for the panel, where evidence is shown.
+  entry's end. Indexed as C-98; C-97 (the statement check at auth, step 3)
+  is indexed with it. C-96 waits for the panel, where evidence is shown.
 - **Pins.** `VITE_LAKKO_MODERATION_LOG_KEY` / Info.plist
   `LakkoModerationLogKey` / `BuildConfig.LAKKO_MODERATION_LOG_KEY`, empty by
   default: no request and no mark. The operator key is made on the
@@ -1020,7 +1022,7 @@ gate, no running auth behind the appeals screen.
   moderator_list_b64, log_index, reason, reason_salt_b64 }`. auth, discovery,
   channels and storage each verify a forwarded statement themselves and keep
   their own replay table, newest list version and per-target issue order
-  (C-96 now covers all four).
+  (C-97 now covers all four).
 - **Accounts by target.** auth (`accounts.identity_target`, migration
   `0043`) and discovery (`identity_bundles.account_target`, `0040`) keep
   `BLAKE3-derive-key("lakko/moderation/account-target/v1", key)` beside the
@@ -1072,7 +1074,7 @@ gate, no running auth behind the appeals screen.
   opened in the browser, messages marked "Written by this account" or "Not
   verified", media blurred, files on a click), decisions behind a sentence
   naming what is signed and a key touch, appeals with the own-decision
-  warning, log, moderators, numbers. C-95 indexed.
+  warning, log, moderators, numbers. C-96 indexed.
 - **Clients** (web and so desktop, iOS, Android): a `410 channel-removed`
   no longer ends the channel. It stays in the list with the posts already on
   the device; writing, reacting, commenting and invites are not offered; the
@@ -1121,7 +1123,7 @@ to fix everything. Host-tested only, nothing deployed.
   entry's inclusion under the same witnessed head, a Suspend or ChannelRemove
   signed by a moderator of a list verified under the pinned moderation root,
   the same target and end). The moderator list a client uses is never older
-  than the list floor the device already keeps. C-97 is amended accordingly.
+  than the list floor the device already keeps. C-98 is amended accordingly.
 - **One account per identity key, proven, with history.** Every auth route
   that records the account's identity key (genesis attest, key reset finish,
   key rotate finish, recall finish) requires an Ed25519 proof by that key over

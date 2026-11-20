@@ -61,7 +61,7 @@ public data class ChannelRow(
     val tsMs: Long,
     val epoch: UInt,
     val content: ChannelRowContent,
-    /** ADR-0098 section 2 — the post's wire as fetched, what a report of it includes. */
+    /** ADR-0099 section 2 — the post's wire as fetched, what a report of it includes. */
     val wire: ByteArray? = null,
 )
 
@@ -77,7 +77,7 @@ public data class ChannelPostItem(
      *  no key for, after the first one it can read. */
     val unavailable: Boolean = false,
     val channelInvite: ByteArray? = null,
-    /** ADR-0098 section 2 — the post's wire, for a report of it. */
+    /** ADR-0099 section 2 — the post's wire, for a report of it. */
     val wire: ByteArray? = null,
     /** ADR-0092 — the post's content, when it is one. */
     val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,

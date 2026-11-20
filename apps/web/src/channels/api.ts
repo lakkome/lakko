@@ -134,7 +134,7 @@ const CHANNEL_ERROR_KEYS: Readonly<Record<string, string>> = {
   "post-too-large": "channels.error.post_too_large",
   "empty-post": "channels.error.empty_post",
   "envelope-not-ready": "channels.error.not_let_in",
-  // ADR-0098 step 5: moderators removed the channel; nothing is said about
+  // ADR-0099 step 5: moderators removed the channel; nothing is said about
   // why until the log verified it (the conversation's own line does that).
   [CHANNEL_REMOVED]: "channels.unavailable",
 };

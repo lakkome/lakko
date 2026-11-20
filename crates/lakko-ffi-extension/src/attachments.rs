@@ -274,7 +274,7 @@ impl ParsedBody {
 /// (ADR-0023/0024). Never fails — a malformed / ambiguous op degrades to
 /// `Chat`, the same fail-safe posture the full surface uses.
 ///
-/// An attested message (ADR-0098 section 1) is unwrapped first, so the
+/// An attested message (ADR-0099 section 1) is unwrapped first, so the
 /// notification previews the envelope inside it. The signature is not
 /// checked here: a notification preview is not evidence, and the app checks
 /// it when it receives the message. A wrapper whose framing is malformed is

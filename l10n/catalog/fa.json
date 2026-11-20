@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "سرور پشتیبانی از کلید عبور را فعال نکرده است.",
+      "text": "کلیدهای عبور اکنون در دسترس نیستند.",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "حساب دارید؟ {link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "گذرواژه شما هرگز از دستگاهتان خارج نمی‌شود.",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "به مخاطبانتان نشان داده می‌شود. برای نمایش نام کاربری، آن را خالی بگذارید.",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "سرور یک نسخه پشتیبان تغییریافته یا قدیمی برگرداند. حساب شما امن است؛ بدون بازیابی داده‌های قدیمی‌تر ادامه دادیم.",
+      "text": "Lakko یک نسخهٔ قدیمی از داده‌های ذخیره‌شده‌تان دریافت کرد و از آن استفاده نکرد. حسابتان امن است.",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "Lakko در نسخه آزمایشی است و امنیت آن هنوز با یک ممیزی مستقل بررسی نشده است. جایی که امنیت شما به آن بستگی دارد به آن تکیه نکنید.",
+      "text": "Lakko در نسخهٔ آزمایشی است. یک ممیزی امنیتی مستقل هنوز تمام نشده است؛ روی آن کار می‌کنیم. باور داریم استفاده از Lakko امن است، اما هنوز نمی‌توانیم آن را ثابت کنیم. با ادامه دادن، این خطر را می‌پذیرید.",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "سرور درخواست را رد کرد. بعداً دوباره تلاش کنید.",
+      "text": "Lakko الان نتوانست این کار را انجام دهد. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "این کانال روی سرور وجود ندارد.",
+      "text": "این کانال دیگر وجود ندارد.",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
+      "text": "Lakko الان جایی برای فایل‌های جدید ندارد. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "در حال رمزگذاری «{name}»…",
+      "text": "در حال آماده‌سازی «{name}»…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "در حال رمزگذاری «{name}» ({index}/{total})…",
+      "text": "در حال آماده‌سازی «{name}» ({index}/{total})…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "در حال رمزگذاری و بارگذاری…",
+      "text": "در حال ارسال…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "دسترسی به سرور ممکن نشد. اتصال خود را بررسی کنید.",
+      "text": "اتصال به Lakko ممکن نشد. اتصال خود را بررسی کنید.",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
+      "text": "Lakko الان جایی برای فایل‌های جدید ندارد. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "هر کسی یکی از پیوندهای شما را باز کند، تا وقتی پیوند منقضی نشده یا ظرفیتش تمام نشده، می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "text": "هر کسی یکی از پیوندهایتان را باز کند، مخاطب شما می‌شود، تا وقتی پیوند منقضی یا تمام شود.",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "هر کسی این کد را اسکن کند می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "text": "هر کسی این کد را اسکن کند، مخاطب شما می‌شود.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
+      "text": "Lakko الان جایی برای فایل‌های جدید ندارد. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "اگر رمز عبور را فراموش کنید یا این گوشی را گم کنید، از این راه به حساب برمی‌گردید.",
+      "text": "اگر رمز عبورتان را فراموش کنید یا این دستگاه را گم کنید، این‌طور دوباره وارد می‌شوید.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "اگر رمز عبور را فراموش کنید یا این گوشی را گم کنید، دیگر نمی‌توانید به این حساب برگردید.",
+      "text": "اگر رمز عبورتان را فراموش کنید یا این دستگاه را گم کنید، دیگر نمی‌توانید به این حساب برگردید.",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "بازیابی هویت شما ممکن نشد. دوباره تلاش کنید.",
+      "text": "بازیابی حسابتان ممکن نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "پیام‌ها، تماس‌ها و درخواست‌های مخاطب رمزگذاری سرتاسری دارند: فقط افراد حاضر در گفتگو می‌توانند آن‌ها را بخوانند. رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود و هر مخاطب یک شماره امنیتی دارد که می‌توانید حضوری مقایسه کنید.",
+      "text": "پیام‌ها، تماس‌ها و درخواست‌های مخاطب سرتاسری رمزگذاری می‌شوند: فقط افراد حاضر در گفتگو می‌توانند آن‌ها را بخوانند. هر مخاطب یک شمارهٔ امنیتی دارد که می‌توانید حضوری مقایسه کنید.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "«خروج» داده‌های شما را روی این دستگاه نگه می‌دارد. «فراموش کردن این دستگاه» آن‌ها را حذف می‌کند؛ فقط با دستگاه دیگری که در آن وارد شده‌اید، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی می‌توانید برگردید. «حذف حساب» حساب را روی سرور پاک و این دستگاه را پاک‌سازی می‌کند؛ این کار برگشت‌پذیر نیست.",
+      "text": "«خروج» پیام‌هایتان را روی این دستگاه نگه می‌دارد. «فراموش کردن این دستگاه» آن‌ها را از این دستگاه پاک می‌کند؛ حسابتان می‌ماند. «حذف حساب» حسابتان را برای همیشه حذف می‌کند.",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "این کار هویت شما روی سرور را پاک می‌کند (نام کاربری، کلیدها، روش‌های بازیابی و نسخه پشتیبان) و شما را از همه‌جا خارج می‌کند. پیام‌های محلی شما هم از این دستگاه پاک می‌شوند. این کار برگشت‌پذیر نیست.",
+      "text": "حساب، نام کاربری، مخاطبان و پیام‌هایتان حذف می‌شوند و از همهٔ دستگاه‌ها خارج می‌شوید. این کار برگشت‌پذیر نیست.",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "پست‌های کانال ممکن است وقتی Lakko بسته است دیرتر برسند.",
+      "text": "وقتی Lakko بسته است، اعلان‌های پست‌های جدید کانال‌ها ممکن است دیر برسند.",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "خطای سرور ({status}).",
+      "text": "مشکلی پیش آمد ({status}). دوباره امتحان کنید.",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "دستگاهی که کلید خصوصی متناظر را دارد دیگر نمی‌تواند با آن وارد شود. این کار برگشت‌پذیر نیست.",
+      "text": "دیگر نمی‌توانید با این کلید عبور وارد شوید. این کار برگشت‌پذیر نیست.",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "رمز عبور جدیدی برای ورود انتخاب کنید. این دستگاه از قبل کلیدهای حساب شما را دارد، پس فقط رمز عبور جدید را وارد می‌کنید.",
+      "text": "یک رمز عبور جدید برای ورود انتخاب کنید.",
       "status": "machine"
     },
     "settings.password.title": {

@@ -114,7 +114,7 @@ public final class PasskeysViewModel: ObservableObject {
     /// state. Called on init + on any session-flip (login,
     /// logout, recover). Idempotent.
     public func rebindSession() {
-        // ADR-0098 step 3 — a suspended account signed in without its keys
+        // ADR-0099 step 3 — a suspended account signed in without its keys
         // deletes itself with the `s1`.
         client.setSessionToken(
             authRepository.identitySecrets?.sessionToken ?? authRepository.accountForDeletion()?.sessionToken)
@@ -389,7 +389,7 @@ public final class PasskeysViewModel: ObservableObject {
     @discardableResult
     func deleteAccount(proof: FreshAuthProofModel, hasPasskey: Bool) async -> Bool {
         rebindSession()
-        // ADR-0098 step 3 — the signed-in account, or a suspended one signed
+        // ADR-0099 step 3 — the signed-in account, or a suspended one signed
         // in here without its keys (its `s1`).
         guard let secrets = authRepository.accountForDeletion() else {
             message = .error(.key("common.error.session_not_ready"))
@@ -430,7 +430,7 @@ public final class PasskeysViewModel: ObservableObject {
                 discovery: DiscoveryClient(
                     sessionToken: authRepository.accountForDeletion()?.sessionToken ?? secrets.sessionToken))
             let accountIdB64 = base64Encode(secrets.accountId)
-            // ADR-0098 step 3 — the session of the account being deleted: a
+            // ADR-0099 step 3 — the session of the account being deleted: a
             // suspended account's `s1`, which discovery's account delete and
             // storage's backup delete accept.
             let token = authRepository.accountForDeletion()?.sessionToken ?? secrets.sessionToken

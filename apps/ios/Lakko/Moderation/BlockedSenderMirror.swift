@@ -4,7 +4,7 @@
 import CryptoKit
 import Foundation
 
-/// ADR-0098 section 6 — the account's blocked people, mirrored into the App
+/// ADR-0099 section 6 — the account's blocked people, mirrored into the App
 /// Group for the notification extension (ADR-0041).
 ///
 /// The block register lives in the account's synced state, which the

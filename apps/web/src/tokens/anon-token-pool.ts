@@ -108,7 +108,7 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
  * `channel-react` and `channel-comment` are ADR-0087 section 13a: one per
  * write under a channel post (nothing on the web spends them yet: channel
  * reactions and comments are phase B);
- * `report` is ADR-0098 section 2: one report to Lakko's moderators.
+ * `report` is ADR-0099 section 2: one report to Lakko's moderators.
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -158,7 +158,7 @@ export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
   // measured.
   "channel-react": 4,
   "channel-comment": 4,
-  // ADR-0098 section 2: reports to the moderators. Kept on hand so issuance
+  // ADR-0099 section 2: reports to the moderators. Kept on hand so issuance
   // time says nothing about when a report is sent. Chosen, not measured.
   report: 2,
 };
@@ -242,7 +242,7 @@ export class AnonTokenUnavailableError extends Error {
 }
 
 /**
- * ADR-0098 step 3: the account is suspended. While it is, the restricted
+ * ADR-0099 step 3: the account is suspended. While it is, the restricted
  * session may draw `blob-read` tokens only (files in chats still open);
  * every other context answers `403 account-suspended`. Not a failure to
  * retry: "not now", until the suspension ends.
@@ -434,7 +434,7 @@ interface Bucket {
   /** Unix ms until which the background refill is not retried. */
   backoffUntil: number;
   disabledUntil: number;
-  /** ADR-0098: unix ms until which issuance for this context is not asked
+  /** ADR-0099: unix ms until which issuance for this context is not asked
    *  again, after it answered `403 account-suspended`. */
   suspendedUntil: number;
   /** The pending scheduled refill of this context. */
@@ -506,7 +506,7 @@ export class AnonTokenPool {
   private readonly refillOnDemand: boolean;
 
   private sessionToken: string | null = null;
-  /** ADR-0098: the account is suspended; only `blob-read` is issued. */
+  /** ADR-0099: the account is suspended; only `blob-read` is issued. */
   private suspended = false;
   /** The load of the stored tokens for the current account, once started. */
   private hydration: Promise<void> | null = null;
@@ -564,7 +564,7 @@ export class AnonTokenPool {
   }
 
   /**
-   * ADR-0098 step 3: the account is (or is no longer) suspended. While it
+   * ADR-0099 step 3: the account is (or is no longer) suspended. While it
    * is, the session is the restricted one and only `blob-read` is drawn: no
    * other context is refilled, and a take of one finds what is held or is
    * refused at once ("not now"), never waiting on an issuance.

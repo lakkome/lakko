@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The witness client of the moderation log (ADR-0098 section 5).
+//! The witness client of the moderation log (ADR-0099 section 5).
 //!
 //! The same fan-out the KT log runs in `services/transparency`: after the
 //! operator signs a new head, each configured witness is asked to co-sign it

@@ -98,7 +98,7 @@ export interface ContactListPaneProps {
 
 export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const profiles = useProfiles();
-  /** ADR-0098 UX 1.2 - block the requester: the request goes with it. */
+  /** ADR-0099 UX 1.2 - block the requester: the request goes with it. */
   async function blockRequester(req: IncomingContactRequest, name: string): Promise<void> {
     if (!(await confirmBlock(name))) return;
     try {
@@ -109,7 +109,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
       console.warn("[block] not written", err instanceof Error ? err.name : "unknown");
     }
   }
-  /** ADR-0098 UX 2.1 - report the requester; the request itself, intro
+  /** ADR-0099 UX 2.1 - report the requester; the request itself, intro
    *  included, is what the report carries. */
   function reportRequest(req: IncomingContactRequest, name: string): void {
     openReport({
@@ -172,7 +172,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
     <aside class="lk-pane" aria-label={t("nav.contacts")}>
       <div class="lk-pane-head">
         <h1>{t("nav.contacts")}</h1>
-        {/* ADR-0098 step 3: a suspended account adds no contact and shares
+        {/* ADR-0099 step 3: a suspended account adds no contact and shares
             no invite link. */}
         <div class="lk-menu-anchor" style={accountSuspended() ? { display: "none" } : undefined}>
           <button
@@ -267,7 +267,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       <button class="small" type="button" onClick={() => props.onDecline(req)}>
                         {t("contacts.request.decline")}
                       </button>
-                      {/* ADR-0098 UX 1.1 / 2.1 - Block beside Accept and
+                      {/* ADR-0099 UX 1.1 / 2.1 - Block beside Accept and
                           Decline; Report carries the request itself. Inline
                           on a wide pane; behind the row's overflow menu on a
                           phone width (`.lk-request-more`). */}

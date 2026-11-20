@@ -1588,14 +1588,14 @@ public final class ChatViewModel: ObservableObject {
         ProfileDirectory.shared.resolve(signatureKeyB64: signatureKeyB64)?.name
     }
 
-    /// ADR-0098 section 6 — the person blocked in this one-to-one (the
+    /// ADR-0099 section 6 — the person blocked in this one-to-one (the
     /// banner replaces the composer), or `nil`.
     var blockedOneToOnePeer: Data? { repository.blockedOneToOnePeer(groupIdHex: groupIdHex) }
 
-    /// ADR-0098 — the other person's account key in a one-to-one, or `nil`.
+    /// ADR-0099 — the other person's account key in a one-to-one, or `nil`.
     var oneToOnePeerKey: Data? { repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) }
 
-    /// ADR-0098 — whether a message's menu offers Report: someone else's
+    /// ADR-0099 — whether a message's menu offers Report: someone else's
     /// landed message whose author resolved.
     func canReport(_ message: ChatMessage) -> Bool {
         guard message.direction == .incoming, message.messageId > 0,
@@ -1603,7 +1603,7 @@ public final class ChatViewModel: ObservableObject {
         return key.count == 32
     }
 
-    /// ADR-0098 / UX 2.1 — the report a message's menu opens: the message's
+    /// ADR-0099 / UX 2.1 — the report a message's menu opens: the message's
     /// author (a person), with that message included and that person's other
     /// messages offered. `nil` for a message whose author did not resolve.
     func reportRequest(for message: ChatMessage) -> ReportRequest? {
@@ -1617,7 +1617,7 @@ public final class ChatViewModel: ObservableObject {
             followUp: .block, personName: name)
     }
 
-    /// ADR-0098 / UX 2.1 — Report from a group's info: the group by its
+    /// ADR-0099 / UX 2.1 — Report from a group's info: the group by its
     /// `@name`, any message but the reporter's own offered, `Leave the group`
     /// as the follow-up. `nil` for a group with no `@name`.
     func groupReportRequest() -> ReportRequest? {

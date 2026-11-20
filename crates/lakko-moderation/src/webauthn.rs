@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The check of a moderator's WebAuthn assertion ([ADR-0098] section 3).
+//! The check of a moderator's WebAuthn assertion ([ADR-0099] section 3).
 //!
 //! A moderator signs a statement by touching their security key: the panel
 //! asks for an assertion whose challenge is the statement's 32-byte hash.
@@ -20,7 +20,7 @@
 //! one assertion against one known key. The signature counter is not
 //! checked: a cloned security key is outside what this check can see.
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;

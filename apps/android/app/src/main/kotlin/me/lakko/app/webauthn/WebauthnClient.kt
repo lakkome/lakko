@@ -722,7 +722,7 @@ public class WebauthnHttpError(
     public val status: Int,
     public val endpoint: String,
     public val body: String,
-    /** ADR-0098 section 4 - the passkey sign-in answered `403
+    /** ADR-0099 section 4 - the passkey sign-in answered `403
      *  account-suspended` with the restricted session (read from the whole
      *  body, before [body] is truncated). */
     public val suspended: me.lakko.app.auth.SuspendedCredentials? = null,

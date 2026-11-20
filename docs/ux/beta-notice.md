@@ -14,17 +14,18 @@ signing up, on the site, and in the store beta description.
 
 ## 1. Goal
 
-Before a person creates an account, they learn two things in plain words: Lakko is a
-beta, and its security has not been checked by an independent audit yet, so it is not
-for anyone whose safety depends on it. They are told once, clearly, and are not asked to
-tick anything. People already using Lakko can find the same words in Settings.
+Before a person creates an account, they learn in plain words that Lakko is a beta, that
+an independent security audit is not finished yet, and that continuing means accepting
+that risk (wording changed by the maintainer on 2026-11-20: the earlier "Do not rely on
+it where your safety depends on it." drove people away). They are told once, clearly,
+and are not asked to tick anything. People already using Lakko can find the same words in Settings.
 
 ## 2. The words
 
 | Key | Text |
 |---|---|
 | `beta.notice.title` | Beta |
-| `beta.notice.body` | Lakko is in beta, and its security has not yet been checked by an independent audit. Do not rely on it where your safety depends on it. |
+| `beta.notice.body` | Lakko is in beta. An independent security audit is not finished yet; we are working on it. We believe Lakko is safe to use, but we cannot prove it yet. By continuing, you accept this risk. |
 
 Both are marked `security_critical`: until a person has reviewed a translation, every
 language shows the English text. A mistranslated warning is worse than an English one.

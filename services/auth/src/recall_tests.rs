@@ -143,7 +143,7 @@ pub(crate) fn account_of_token(bearer: &str) -> [u8; 16] {
         .expect("16 bytes")
 }
 
-/// `key`'s identity proof for `account` (ADR-0098 F3), as a client sends
+/// `key`'s identity proof for `account` (ADR-0099 F3), as a client sends
 /// it beside a key auth records.
 pub(crate) fn identity_proof(account: &[u8; 16], key: &SigningKey) -> String {
     b64u(&lakko_attest::sign_identity_proof(&key.to_seed(), account))
@@ -362,7 +362,7 @@ pub(crate) async fn new_account(
         .execute(&state.db)
         .await
         .expect("insert account");
-    // What the genesis mint claims beside the key (ADR-0098 F3).
+    // What the genesis mint claims beside the key (ADR-0099 F3).
     sqlx::query(
         "INSERT INTO account_identity_targets (target, account_id, added_at_ms) VALUES (?, ?, 0)",
     )

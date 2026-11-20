@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! The one check a service runs before it applies a moderator's statement
-//! ([ADR-0098] sections 4 and 5, step 5).
+//! ([ADR-0099] sections 4 and 5, step 5).
 //!
 //! Every applying service (auth, discovery, channels, storage) and the
 //! moderation service itself chain the same primitives: the moderator list
@@ -38,7 +38,7 @@
 //! by `issued_at_ms` than the newest one applied to the same target changes
 //! nothing).
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;

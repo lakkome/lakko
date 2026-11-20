@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-# ADR-0098 section 2 - report intake and receipts for Lakko's moderators.
+# ADR-0099 section 2 - report intake and receipts for Lakko's moderators.
 # Needs its own MariaDB (LAKKO_MODERATION_DATABASE_URL), the shared anonymous
 # token secret (LAKKO_ANON_TOKEN_MASTER_SECRET), and the signed moderator list
 # with its root key (LAKKO_MODERATION_LIST_PATH, LAKKO_MODERATION_ROOT_KEY),

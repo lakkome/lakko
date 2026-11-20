@@ -1818,7 +1818,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
-        {/* ADR-0098 section 6 - a blocked person stays in the call; their
+        {/* ADR-0099 section 6 - a blocked person stays in the call; their
             tile carries a muted label (the shared rule's "label"). */}
         <Show
           when={

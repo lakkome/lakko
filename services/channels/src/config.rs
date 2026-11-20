@@ -124,7 +124,7 @@ pub struct Config {
     /// is floored to 1 so a rotation cannot strand every
     /// subscriber.
     pub envelope_retention_epochs: usize,
-    /// Where the internal moderation listener binds (ADR-0098 step 5),
+    /// Where the internal moderation listener binds (ADR-0099 step 5),
     /// from `LAKKO_CHANNELS_INTERNAL_BIND`. The listener starts only when
     /// `LAKKO_CHANNELS_INTERNAL_SECRET` and
     /// `LAKKO_CHANNELS_MODERATION_ROOT_KEY` are set; both are read by `main`

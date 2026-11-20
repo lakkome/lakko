@@ -9,12 +9,12 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0098 section 2, UX section 2.3 — what this device keeps about reports.
+ * ADR-0099 section 2, UX section 2.3 — what this device keeps about reports.
  *
  * "Your reports" lives on this device only: never synced, never in the
  * backup, removed by Forget device. Syncing it would tie the reports
  * together. The moderator-list version is the highest this device has seen
- * (ADR-0098 section 3): a lower one is treated as unavailable.
+ * (ADR-0099 section 3): a lower one is treated as unavailable.
  */
 
 /** One report sent from this device, as the reporter saw it. */

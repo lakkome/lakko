@@ -487,7 +487,7 @@ dev-channels:
 dev-gif-proxy:
     cargo run -p lakko-svc-gif-proxy
 
-# Run the moderation service locally (ADR-0098) on 127.0.0.1:8100. Reads
+# Run the moderation service locally (ADR-0099) on 127.0.0.1:8100. Reads
 # LAKKO_MODERATION_DATABASE_URL from .env (unset: reports in memory) and the
 # shared LAKKO_ANON_TOKEN_MASTER_SECRET. Without LAKKO_MODERATION_LIST_PATH and
 # LAKKO_MODERATION_ROOT_KEY reporting answers 503; make a test list with
@@ -647,12 +647,12 @@ dev-desktop:
 build-web:
     cd apps/web && npm run build
 
-# Build the moderators' panel (apps/moderation, ADR-0098 section 7) into
+# Build the moderators' panel (apps/moderation, ADR-0099 section 7) into
 # apps/moderation/dist/. It has no copy of the design system or the wasm
 # core: it imports apps/web's stylesheet and apps/web/wasm, so the wasm is
 # built first. In production nginx serves the dist from its own static root
 # (/var/www/lakko-moderation-panel, `just deploy-moderation-panel`) and
-# proxies only /panel/api to the moderation service (ADR-0098 F4). For LOCAL
+# proxies only /panel/api to the moderation service (ADR-0099 F4). For LOCAL
 # DEVELOPMENT only the service also serves it at `/` when
 # LAKKO_MODERATION_PANEL_DIR points at apps/moderation/dist (absolute path),
 # beside the API at /panel/api on LAKKO_MODERATION_PANEL_BIND
@@ -665,7 +665,7 @@ build-moderation-panel:
 # Install the built moderators' panel into nginx's static root on the host
 # that serves `moderation.lakko.me` (infra/nginx/sites-available/
 # moderation-panel.conf). The moderation service never serves it in
-# production (ADR-0098 F4). Same staging contract as `deploy-web`: rsync to
+# production (ADR-0099 F4). Same staging contract as `deploy-web`: rsync to
 # /tmp, then a root rsync into /var/www/lakko-moderation-panel/ (the VPS
 # sudoers entry must allow that target) and an nginx reload.
 deploy-moderation-panel: build-moderation-panel
@@ -1116,14 +1116,14 @@ mint-release-manifest latest min_supported:
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
 
-# ADR-0098 section 3 - generate the OFFLINE moderation root key. Writes the
+# ADR-0099 section 3 - generate the OFFLINE moderation root key. Writes the
 # 32-byte private seed to moderation-root.seed (mode 0600, keep it OFFLINE,
 # never commit) and prints the base64url public key to pin on the
 # moderation service and in each client build config.
 gen-moderation-root:
     cargo run -q -p lakko-moderation-root-tool -- keygen
 
-# ADR-0098 section 3 - sign the moderator list at a version from a JSON file
+# ADR-0099 section 3 - sign the moderator list at a version from a JSON file
 # of moderators (see tools/moderation-root/src/main.rs for the format).
 # Example: just sign-moderator-list 2 moderators.json moderation.lakko.me https://moderation.lakko.me
 sign-moderator-list version entries rp_id origin:

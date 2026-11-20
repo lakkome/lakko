@@ -12,7 +12,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 /*
- * ADR-0098 F2 — a mark needs a moderator's signature, not only the snapshot.
+ * ADR-0099 F2 — a mark needs a moderator's signature, not only the snapshot.
  *
  * A snapshot bucket that says "suspended" (or "removed", for a channel) is
  * acted on only once the moderation log entry behind it is fetched

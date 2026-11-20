@@ -93,6 +93,7 @@ import {
   backgroundSweepIntervalMs,
   BACKGROUND_SWEEP_JITTER_MS,
   GroupBackoff,
+  groupsAppeared,
   MAX_IMMEDIATE_REPOLLS,
   runBackgroundReceiveLoop,
   runSweep,
@@ -440,6 +441,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const WAKE_ACTIVE_MS = 60_000;
   /** Wall-clock deadline of the current wake window; 0 when none is open. */
   let wakeUntilMs = 0;
+  /** The groups the receive loop has seen this session; `null` before the
+   *  first list (see `groupsAppeared`). */
+  let seenGroups: Set<string> | null = null;
 
   /** Whether a push wake can reach this tab at all. Cached; see
    *  `push/wake-reach.ts` for why the answer has three values and not two. */
@@ -2359,6 +2363,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // begun just before the first `start` of a session is that session's.
     if (activeAccount !== null) binding.advance();
     activeAccount = null;
+    seenGroups = null;
     logCursors = null;
     backoff.clear();
     coordinator.reset();
@@ -2428,6 +2433,23 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   // A call starting in a hidden tab has to un-park the sweep at once.
   createEffect(() => {
     if (callHost.anyCallInProgress()) resume.wake();
+  });
+
+  // A group this device just joined is swept at once, and the short interval
+  // kept for a while (`groupsAppeared`).
+  createEffect(() => {
+    const ids = chats.groups().map((g) => g.groupIdB64);
+    untrack(() => {
+      if (activeAccount === null) {
+        seenGroups = null;
+        return;
+      }
+      if (groupsAppeared(seenGroups, ids)) {
+        wakeUntilMs = Date.now() + WAKE_ACTIVE_MS;
+        resume.wake();
+      }
+      seenGroups = new Set(ids);
+    });
   });
 
   const onVisibility = (): void => resume.wake();

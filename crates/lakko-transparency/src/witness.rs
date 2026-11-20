@@ -39,7 +39,7 @@ use crate::merkle::TreeHash;
 /// root signing payload (which is un-prefixed `tree_root ‖ log_size ‖
 /// timestamp`) and from the supersession / leaf-genesis domains.
 ///
-/// Version 2 (ADR-0098 section 5) binds the name of the log being co-signed,
+/// Version 2 (ADR-0099 section 5) binds the name of the log being co-signed,
 /// so one witness key can serve several logs and a co-signature for one log
 /// never verifies for another. Version 1 (no log name) is refused; there is
 /// no dual format.
@@ -52,7 +52,7 @@ const VERSION: u8 = 2;
 /// `version(1) ‖ tree_root(32) ‖ log_size(8 BE) ‖ signature(64)`.
 pub const WITNESS_COSIG_LEN: usize = 1 + 32 + 8 + SIGNATURE_LEN;
 
-/// The append-only logs a witness co-signs (ADR-0098 section 5). A closed set:
+/// The append-only logs a witness co-signs (ADR-0099 section 5). A closed set:
 /// the log's name is part of every co-signature, so adding a log is a code
 /// change, never a configuration value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -610,7 +610,7 @@ mod tests {
             .expect("single-witness path also verifies");
     }
 
-    // --- v2: the log name is bound (ADR-0098 section 5) ---
+    // --- v2: the log name is bound (ADR-0099 section 5) ---
 
     #[test]
     fn cosig_for_one_log_never_verifies_for_the_other() {

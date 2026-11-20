@@ -1725,7 +1725,7 @@ async fn items_carry_the_band_not_the_count_and_unknown_topics_file_under_other(
     assert!(items[0].get("count").is_none());
 }
 
-/// Moderator statements for the ADR-0098 tests: a software security key on a
+/// Moderator statements for the ADR-0099 tests: a software security key on a
 /// list signed by a test root.
 mod moderation {
     use lakko_crypto::signing::SigningKey;

@@ -396,7 +396,7 @@ private fun ChannelTimelineView(
     // Section 13a (phase B) — the comment count the service keeps per post.
     val commentCounts = remember(channelId) { mutableStateMapOf<Long, Long>() }
     var refreshTick by remember(channelId) { mutableIntStateOf(0) }
-    // ADR-0098 step 5 — a channel moderators removed: kept and readable,
+    // ADR-0099 step 5 — a channel moderators removed: kept and readable,
     // nothing that writes, network reads once per period.
     val removedChannels by me.lakko.app.channels.RemovedChannels.state.collectAsState()
     val removal = removedChannels[channelId.lowercase()]
@@ -858,7 +858,7 @@ private fun ChannelTimelineView(
                                 },
                                 onEdit = { editing = post },
                                 onDelete = { deleting = post },
-                                // ADR-0098 — the post menu reports the channel.
+                                // ADR-0099 — the post menu reports the channel.
                                 onReport = {
                                     me.lakko.app.ui.moderation.ModerationRequests.openReport(
                                         me.lakko.app.ui.moderation.ReportRequest(
@@ -983,11 +983,11 @@ private fun ChannelTimelineView(
                 }
             }
         }
-        // ADR-0098 section 4 - a suspended account posts nothing.
+        // ADR-0099 section 4 - a suspended account posts nothing.
         val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
         val removedLine = me.lakko.app.channels.channelRemovedLineKey(removal)
         if (removedLine != null) {
-            // ADR-0098 step 5 — for everyone: the line in place of anything
+            // ADR-0099 step 5 — for everyone: the line in place of anything
             // that writes.
             RemovedChannelLine(removedLine)
         } else if (isPublisher && suspendedReadOnly) {
@@ -1206,14 +1206,14 @@ private fun PostBlock(
     onToggleReaction: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    /** ADR-0098 step 5 — `false` for a channel moderators removed: no
+    /** ADR-0099 step 5 — `false` for a channel moderators removed: no
      *  reactions, no comments. */
     writable: Boolean = true,
     saved: Boolean = false,
     canSave: Boolean = false,
     onToggleSaved: (ChatMessage) -> Unit = {},
     onForward: ((ChatMessage) -> Unit)? = null,
-    /** ADR-0098 — a subscriber reports the channel with this post included. */
+    /** ADR-0099 — a subscriber reports the channel with this post included. */
     onReport: (() -> Unit)? = null,
     /** ADR-0092 — what a content post's card answers to. */
     contentCtx: me.lakko.app.ui.chat.ContentBubbleContext? = null,
@@ -1492,7 +1492,7 @@ private fun CommentsBlock(
             replyTo?.let { r ->
                 Text("${r.name}: ${r.text}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            // ADR-0098 section 4 - a suspended account writes no comments.
+            // ADR-0099 section 4 - a suspended account writes no comments.
             val commentsReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
             if (commentsReadOnly) {
                 Text(
@@ -1664,7 +1664,7 @@ private fun ChannelEmojiPicker(
     )
 }
 
-/** ADR-0098 step 5 — the line at the foot of a removed channel: the removal
+/** ADR-0099 step 5 — the line at the foot of a removed channel: the removal
  *  when the log proved it, the neutral line otherwise. */
 @Composable
 private fun RemovedChannelLine(key: String) {

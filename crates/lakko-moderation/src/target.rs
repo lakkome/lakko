@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! What a report or an action is about ([ADR-0098] sections 2 and 4).
+//! What a report or an action is about ([ADR-0099] sections 2 and 4).
 //!
 //! | Kind | Bytes | What they are |
 //! |---|---|---|
@@ -15,7 +15,7 @@
 //! public log does not carry the key itself; auth finds the account from the
 //! key it is handed beside the statement and checks it hashes to the target.
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use lakko_crypto::hash::blake3_derive_key_from_material;
 

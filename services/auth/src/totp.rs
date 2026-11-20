@@ -558,7 +558,7 @@ async fn recover_answer(
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
     tracing::info!("totp: code accepted, issuing session token");
     let key_generation = key_generation.ok_or(ApiError::InvalidCredential)?;
-    // ADR-0098 section 4: after the code was accepted (the replay counter is
+    // ADR-0099 section 4: after the code was accepted (the replay counter is
     // part of authenticating), before anything is issued.
     crate::suspension::refuse_landing_if_suspended(
         &state,

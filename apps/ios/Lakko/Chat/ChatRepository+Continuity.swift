@@ -690,7 +690,7 @@ extension ChatRepository {
         eventSenders incomingSenders: [MemberIdentity?],
         groupIdHex: String
     ) -> [IncomingChatEvent] {
-        // ADR-0098 section 6 — in a one-to-one with a blocked person, what
+        // ADR-0099 section 6 — in a one-to-one with a blocked person, what
         // they send is not kept: messages, signals, profile updates and calls
         // (UX `reporting-and-moderation.md` 1.2). In a group nothing is
         // dropped here; their messages collapse when drawn.

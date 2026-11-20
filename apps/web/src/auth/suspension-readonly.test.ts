@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 step 3: read-only mode. The info blocks a suspended account is not
+ * ADR-0099 step 3: read-only mode. The info blocks a suspended account is not
  * offered, and the write refusal of the channels service and storage (no
  * request other than GET or HEAD leaves while suspended).
  */

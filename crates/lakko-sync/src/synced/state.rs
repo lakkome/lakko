@@ -1017,7 +1017,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Blocked people (ADR-0098 section 6).
+    // Blocked people (ADR-0099 section 6).
     // -----------------------------------------------------------------
 
     /// Block (`blocked`) or unblock the account `account_key`, stamped

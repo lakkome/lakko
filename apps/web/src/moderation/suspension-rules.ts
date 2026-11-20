@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 step 4, `docs/ux/reporting-and-moderation.md` section 3 - what
+ * ADR-0099 step 4, `docs/ux/reporting-and-moderation.md` section 3 - what
  * each mark site shows, given the block register's answer and the standing
  * the moderation log confirmed. Pure, so every site's decision is tested
  * here rather than in the views.

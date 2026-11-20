@@ -278,7 +278,7 @@ final class CallHost: ObservableObject {
 
     /// Handle one row. See the type docs for the delivery contract.
     func receive(_ row: InboundCallRow) {
-        // ADR-0098 step 3 — a suspended account takes no calls: an offer
+        // ADR-0099 step 3 — a suspended account takes no calls: an offer
         // rings nothing (it could not be answered, nothing is sent).
         if case .offer = row.body, SessionTokenProvider.shared.isSuspended { return }
         guard seenRows.insert(row.dedupKey).inserted else { return }

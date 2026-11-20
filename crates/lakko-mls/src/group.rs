@@ -1843,7 +1843,7 @@ impl Group {
     /// device binding, or empty for a leaf that is its account key. `None`
     /// for a leaf that is not in the roster. Read-only; a report hands these
     /// bytes to a moderator beside a message the leaf signed, so the
-    /// moderator can resolve the leaf to its account (ADR-0098 section 1).
+    /// moderator can resolve the leaf to its account (ADR-0099 section 1).
     #[must_use]
     pub fn device_binding_at(&self, leaf: u32) -> Option<Vec<u8>> {
         self.inner

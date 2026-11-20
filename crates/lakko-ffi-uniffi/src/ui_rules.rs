@@ -57,6 +57,7 @@ use lakko_ui_rules::handle::{suggest_handle as rust_suggest_handle, HandleKind a
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
     conversation_info_sections as rust_conversation_info_sections,
+    deleted_person_info_sections as rust_deleted_person_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
     ChannelInfoCapabilities as RustChannelInfoCapabilities, ChannelRole as RustChannelRole,
@@ -657,11 +658,11 @@ pub enum InfoSection {
     /// while Members of my groups and channels is on. Appended last: uniffi
     /// lowers this enum by ordinal.
     MembersCanFindMe,
-    /// Block this person (ADR-0098 section 6). Appended last.
+    /// Block this person (ADR-0099 section 6). Appended last.
     Block,
     /// Unblock a blocked person, in place of `Block`. Appended last.
     Unblock,
-    /// Report to Lakko's moderators (ADR-0098 section 2). Appended last.
+    /// Report to Lakko's moderators (ADR-0099 section 2). Appended last.
     Report,
 }
 
@@ -705,7 +706,7 @@ impl From<RustInfoSection> for InfoSection {
     }
 }
 
-/// Where something from (or to) a person meets a block (ADR-0098
+/// Where something from (or to) a person meets a block (ADR-0099
 /// section 6, UX `reporting-and-moderation.md` 1.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum BlockPath {
@@ -745,7 +746,7 @@ pub enum BlockVerdict {
 }
 
 /// What a block does on `path` when the person is (`blocked`) or is not
-/// blocked: one rule for every client (ADR-0098 section 6).
+/// blocked: one rule for every client (ADR-0099 section 6).
 #[uniffi::export]
 #[must_use]
 pub fn block_verdict(path: BlockPath, blocked: bool) -> BlockVerdict {
@@ -783,7 +784,7 @@ pub struct PersonInfoCapabilities {
     /// `who-can-find-me.md` 5.1), under either form.
     #[uniffi(default = false)]
     pub contacts_of_contacts_on: bool,
-    /// The viewer blocked this person (ADR-0098 section 6), read from the
+    /// The viewer blocked this person (ADR-0099 section 6), read from the
     /// synced block register.
     #[uniffi(default = false)]
     pub is_blocked: bool,
@@ -821,7 +822,7 @@ pub struct GroupInfoCapabilities {
     /// This device's membership is over: read-only (ADR-0045 UX 6.2).
     pub membership_ended: bool,
     /// The group holds an `@name` (ADR-0087); a group is reported only by
-    /// its name (ADR-0098).
+    /// its name (ADR-0099).
     #[uniffi(default = false)]
     pub has_handle: bool,
 }
@@ -902,6 +903,19 @@ pub fn info_target(kind: ConversationKind) -> InfoTarget {
 #[must_use]
 pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     rust_person_info_sections(caps.into())
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// What the info of a person whose account was deleted holds (ADR-0098,
+/// `docs/ux/deleted-account.md`): `message` and `deleteChat` when a
+/// one-to-one exists, `removeContact` when the person is on the contact list,
+/// nothing else.
+#[uniffi::export]
+#[must_use]
+pub fn deleted_person_info_sections(has_one_to_one: bool, is_contact: bool) -> Vec<InfoSection> {
+    rust_deleted_person_info_sections(has_one_to_one, is_contact)
         .into_iter()
         .map(Into::into)
         .collect()

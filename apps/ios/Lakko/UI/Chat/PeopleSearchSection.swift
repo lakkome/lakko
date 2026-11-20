@@ -41,7 +41,7 @@ struct PeopleSearchSection: View {
     let isHeld: (String) -> Bool
     let onOpenHeld: (String) -> Void
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 step 4 — a person found suspended leaves the list as the
+    /// ADR-0099 step 4 — a person found suspended leaves the list as the
     /// answer arrives.
     @ObservedObject private var suspensions = SuspensionMarks.shared
 
@@ -145,7 +145,7 @@ struct PeopleSearchSection: View {
                     .multilineTextAlignment(.center)
             }
         }
-        // ADR-0098 step 4 — ask about every person found; the rows are shown
+        // ADR-0099 step 4 — ask about every person found; the rows are shown
         // at once and a suspended one drops out when its standing arrives.
         .task(id: model.suspensionCheckKeys) {
             suspensions.check(model.suspensionCheckKeys)
@@ -181,7 +181,7 @@ private struct FoundPersonRow: View {
     let onAskAgain: (() -> Void)?
     let onOpen: () -> Void
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 step 3 — a suspended account adds nobody.
+    /// ADR-0099 step 3 — a suspended account adds nobody.
     @Environment(\.accountSuspended) private var accountSuspended
 
     var body: some View {

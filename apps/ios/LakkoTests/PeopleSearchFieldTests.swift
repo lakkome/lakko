@@ -1035,7 +1035,7 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(rec.sent, [])
     }
 
-    // MARK: - ADR-0098 step 4 — suspended accounts
+    // MARK: - ADR-0099 step 4 — suspended accounts
 
     func testSearchDropsAPersonKnownSuspendedAndKeepsTheRest() async {
         let rec = Recorder()

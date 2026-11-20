@@ -59,7 +59,7 @@ public final class ChannelsClient {
     let transport: ChannelsTransport
     /// ADR-0059 section 9 — the publisher role per (account, channel).
     let roles: ChannelPublisherRoleCache
-    /// ADR-0098 step 5 — every channel request passes through it: a channel
+    /// ADR-0099 step 5 — every channel request passes through it: a channel
     /// moderators removed is not asked again until its standing's reuse
     /// period ends.
     let removalGate: ChannelRemovalGate
@@ -1146,7 +1146,7 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
         (error as? ChannelsApiError)?.code == channelDeletedCode
     }
 
-    /// ADR-0098 step 5 — moderators removed the channel: every route answers
+    /// ADR-0099 step 5 — moderators removed the channel: every route answers
     /// `410 channel-removed` for it (and this device answers the same for a
     /// channel it holds, ``ChannelRemovalGate``). Nothing ends: the channel
     /// stays, its posts stay readable, writing is not offered.

@@ -24,7 +24,7 @@
  *   4. `401 device-revoked` (ADR-0074), from the refresh route or from any
  *      bearer route, raises `device-revoked` once: this device was removed
  *      from the account, signs out and wipes everything.
- *   5. `403 account-suspended` (ADR-0098 section 4): from a bearer route of
+ *   5. `403 account-suspended` (ADR-0099 section 4): from a bearer route of
  *      auth it costs one refresh; the refresh answers with a restricted
  *      session, which the provider holds in place of the pair and announces
  *      as `suspended`. While it holds one, every request this account's
@@ -52,7 +52,7 @@ import type { RestrictedSession } from "./suspension";
 /** What the refresh transport answers. A network failure throws. */
 export type RefreshTransportResult =
   | { readonly kind: "pair"; readonly pair: SessionPair }
-  /** ADR-0098: `403 account-suspended` with the restricted session. */
+  /** ADR-0099: `403 account-suspended` with the restricted session. */
   | { readonly kind: "suspended"; readonly restricted: RestrictedSession }
   | { readonly kind: "refused"; readonly status: number; readonly errorCode: string | null };
 
@@ -63,7 +63,7 @@ export interface SessionTokenProviderPorts {
   /** Persist a refreshed pair under the device key. Best effort: a failure
    *  is logged by the port, the in-memory pair still serves this page. */
   readonly persist: (accountIdB64: string, pair: SessionPair) => Promise<void>;
-  /** Persist a restricted session (ADR-0098) the same way. */
+  /** Persist a restricted session (ADR-0099) the same way. */
   readonly persistRestricted?: (accountIdB64: string, restricted: RestrictedSession) => Promise<void>;
   readonly now?: () => number;
   readonly fetchImpl?: typeof fetch;
@@ -84,7 +84,7 @@ export type RefreshOutcome =
   | "invalid"
   /** The request never got an answer; the pair is kept. */
   | "network"
-  /** ADR-0098: the account is suspended. The restricted session is held in
+  /** ADR-0099: the account is suspended. The restricted session is held in
    *  place of the pair and `suspended` was raised. */
   | "suspended"
   /** No pair is installed, or the refresh credential has expired. */
@@ -96,7 +96,7 @@ export type SessionEvent =
   | { readonly kind: "superseded"; readonly accountIdB64: string }
   | { readonly kind: "device-revoked"; readonly accountIdB64: string }
   | { readonly kind: "refresh-invalid"; readonly accountIdB64: string }
-  /** ADR-0098: the refresh answered `403 account-suspended`. Raised on every
+  /** ADR-0099: the refresh answered `403 account-suspended`. Raised on every
    *  such answer (the periodic check included), with the newest restricted
    *  session; the listener decides whether anything changes. */
   | {
@@ -106,7 +106,7 @@ export type SessionEvent =
     };
 
 /**
- * The routes a restricted session opens (ADR-0098 section 4), as `METHOD
+ * The routes a restricted session opens (ADR-0099 section 4), as `METHOD
  * path` with the `/api/<service>` prefix every client of this app uses (the
  * web through nginx, the desktop through its host). Every other request
  * carrying a token of a suspended account is answered locally.
@@ -142,7 +142,7 @@ export class SessionTokenProvider {
   private ports: SessionTokenProviderPorts | null = null;
   private account: string | null = null;
   private held: SessionPair | null = null;
-  /** ADR-0098: the restricted session held in place of the pair while the
+  /** ADR-0099: the restricted session held in place of the pair while the
    *  account is suspended. Never both. */
   private restrictedHeld: RestrictedSession | null = null;
   /** Access tokens this page replaced through a refresh: a caller holding
@@ -182,7 +182,7 @@ export class SessionTokenProvider {
   }
 
   /**
-   * ADR-0098: hold `restricted` for `accountIdB64` in place of a pair (a
+   * ADR-0099: hold `restricted` for `accountIdB64` in place of a pair (a
    * landing answered `403 account-suspended`, or a refresh did). The access
    * token held until now, and an earlier restricted token, keep resolving to
    * the live restricted session on the routes it opens and are answered
@@ -260,7 +260,7 @@ export class SessionTokenProvider {
   }
 
   /**
-   * ADR-0098: the restricted token to send now, refreshed when it has at
+   * ADR-0099: the restricted token to send now, refreshed when it has at
    * most `REFRESH_AHEAD_MS` left. `null` when none is held, when its refresh
    * credential expired, when the refresh was refused, or when the refresh
    * answered a pair (the suspension ended; the caller reads `peek()`).
@@ -400,7 +400,7 @@ export class SessionTokenProvider {
   }
 
   /**
-   * ADR-0098: a request carrying a token of the suspended account. The routes
+   * ADR-0099: a request carrying a token of the suspended account. The routes
    * a restricted session opens go out with the live restricted token (or,
    * when the refresh just ended the suspension, the new access token); every
    * other one is answered here with `403 account-suspended` and never

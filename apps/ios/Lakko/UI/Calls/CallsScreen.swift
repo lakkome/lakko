@@ -43,7 +43,7 @@ struct CallsScreen: View {
     @ObservedObject var conversations: ChatListViewModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 step 3 — a suspended account makes no calls.
+    /// ADR-0099 step 3 — a suspended account makes no calls.
     @Environment(\.accountSuspended) private var accountSuspended
     /// Start a group video call and land in it. Returns the one sentence to
     /// show when it could not start (another call holds the slot, or there is

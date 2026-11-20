@@ -7,7 +7,7 @@ import SwiftUI
 // the one screen that says why, the appeal sheet, and the read-only app's
 // banner and composer line.
 
-/// Whether the signed-in account is suspended (ADR-0098 step 3). Read by
+/// Whether the signed-in account is suspended (ADR-0099 step 3). Read by
 /// every surface that sends: composers, call buttons, add-contact and invite
 /// entry points. Set at the app root from ``SuspensionCenter``.
 private struct AccountSuspendedKey: EnvironmentKey {

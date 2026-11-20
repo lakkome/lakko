@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 section 6 - who this account blocked, as every receive path on
+ * ADR-0099 section 6 - who this account blocked, as every receive path on
  * this page reads it.
  *
  * The register itself is the synced state's (`lakko-sync` blocked register,

@@ -16,7 +16,7 @@ import uniffi.lakko_ffi_uniffi.BlockPath
 import uniffi.lakko_ffi_uniffi.BlockVerdict
 
 /**
- * ADR-0098 section 6 — what a block removes from a received batch. The rule
+ * ADR-0099 section 6 — what a block removes from a received batch. The rule
  * itself is the core's (`blockVerdict`); the host suite has no native core, so
  * [BlockRules.verdict] is replaced by a table with the same answers, and the
  * tests assert that each path asks the rule about the right path and acts on

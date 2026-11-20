@@ -43,9 +43,9 @@ public struct ContactsScreen: View {
     @State private var scanPresented = false
     @State private var addMenuOpen = false
     @State private var sentExpanded = false
-    /// ADR-0098 / UX 1.1 — the request whose `Block` asks for confirmation.
+    /// ADR-0099 / UX 1.1 — the request whose `Block` asks for confirmation.
     @State private var blockingRequest: BlockingRequest?
-    /// ADR-0098 / UX 2.1 — the report sheet for a request.
+    /// ADR-0099 / UX 2.1 — the report sheet for a request.
     @State private var reportRequest: ReportRequest?
 
     struct BlockingRequest: Identifiable {
@@ -215,7 +215,7 @@ public struct ContactsScreen: View {
         .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            // ADR-0098 step 3 — a suspended account adds no contacts.
+            // ADR-0099 step 3 — a suspended account adds no contacts.
             if !accountSuspended {
                 ToolbarItem(placement: .topBarTrailing) {
                     addMenu
@@ -231,7 +231,7 @@ public struct ContactsScreen: View {
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
         }
-        // ADR-0098 / UX 1.2 — Block asks first.
+        // ADR-0099 / UX 1.2 — Block asks first.
         .lakkoDialog(item: $blockingRequest) { pending in
             LakkoDialogContent(
                 title: l10n.t("block.confirm.title", texts: ["name": pending.name]),
@@ -554,7 +554,7 @@ struct IncomingRequestRow: View {
     let accepting: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
-    /// ADR-0098 / UX 1.1, 2.1 — the row's overflow: Block and Report, each
+    /// ADR-0099 / UX 1.1, 2.1 — the row's overflow: Block and Report, each
     /// handed the name the row shows.
     var onBlock: (String) -> Void = { _ in }
     var onReport: (String) -> Void = { _ in }

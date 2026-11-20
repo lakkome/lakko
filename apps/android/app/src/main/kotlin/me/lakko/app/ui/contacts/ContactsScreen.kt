@@ -128,7 +128,7 @@ public fun ContactsScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    // ADR-0098 section 4 - a suspended account adds no contacts.
+    // ADR-0099 section 4 - a suspended account adds no contacts.
     val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // ADR-0048 — every name on this screen comes from the one resolver; the
     // version flow recomposes a row in place when a profile arrives or a
@@ -241,7 +241,7 @@ public fun ContactsScreen(
         listedPersonKeys(sections) { rowKey -> byKey[rowKey]?.let { base64Encode(it.request.fromPubkey) } }
     }
     val pendingAll = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
-    // ADR-0098 step 4 / UX 3 — a request held from before its sender's
+    // ADR-0099 step 4 / UX 3 — a request held from before its sender's
     // suspension leaves the list once the moderation log confirms it; the
     // list shows at once and an unknown standing keeps the request.
     val pendingKeys = remember(pendingAll) {
@@ -329,7 +329,7 @@ public fun ContactsScreen(
                             via = viaGroupLine(req.viaGroupIdHex, req.viaGroupIdHex?.let(viewModel::groupNameOf)),
                             onAccept = { viewModel.onAcceptClicked(req.messageId) },
                             onDecline = { viewModel.onDeclineClicked(req.messageId) },
-                            // ADR-0098 — Block and Report, behind the row's overflow.
+                            // ADR-0099 — Block and Report, behind the row's overflow.
                             onBlock = {
                                 val key = java.util.Base64.getEncoder().encodeToString(req.fromPubkey)
                                 val shown = nameVersion.let { directory.resolve(req.fromPubkey) }
@@ -619,7 +619,7 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            // ADR-0098 section 4 - accepting adds a contact: not while suspended.
+            // ADR-0099 section 4 - accepting adds a contact: not while suspended.
             val acceptReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
             if (!acceptReadOnly) Button(onClick = onAccept, enabled = !accepting) { Text(t(acceptButtonKey(acceptFailed))) }
             OutlinedButton(onClick = onDecline, enabled = !accepting) { Text(t("contacts.request.decline")) }

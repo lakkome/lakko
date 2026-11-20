@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "Sunucuda geçiş anahtarı desteği etkin değil.",
+      "text": "Geçiş anahtarları şu anda kullanılamıyor.",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "Zaten hesabınız var mı? {link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "Parolanız cihazınızdan asla çıkmaz.",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "Kişilerinize gösterilir. Kullanıcı adınızın gösterilmesi için boş bırakın.",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "Sunucu değiştirilmiş veya eskimiş bir yedek döndürdü. Hesabınız güvende; eski verileri geri yüklemeden devam ettik.",
+      "text": "Lakko kayıtlı verilerinizin eski bir kopyasını aldı ve kullanmadı. Hesabınız güvende.",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "Lakko beta aşamasında ve güvenliği henüz bağımsız bir denetimle kontrol edilmedi. Güvenliğinizin buna bağlı olduğu durumlarda ona güvenmeyin.",
+      "text": "Lakko beta aşamasında. Bağımsız bir güvenlik denetimi henüz tamamlanmadı; bunun üzerinde çalışıyoruz. Lakko'nun kullanımının güvenli olduğuna inanıyoruz, ancak bunu henüz kanıtlayamıyoruz. Devam ederek bu riski kabul etmiş olursunuz.",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "Sunucu isteği reddetti. Daha sonra tekrar deneyin.",
+      "text": "Lakko bunu şu anda yapamadı. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "Bu kanal sunucuda yok.",
+      "text": "Bu kanal artık yok.",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "Sunucuda şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
+      "text": "Lakko'da şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "Şifreleniyor: \"{name}\"…",
+      "text": "\"{name}\" hazırlanıyor…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "Şifreleniyor: \"{name}\" ({index}/{total})…",
+      "text": "\"{name}\" hazırlanıyor ({index}/{total})…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "Şifreleniyor ve yükleniyor…",
+      "text": "Gönderiliyor…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "Sunucuya ulaşılamadı. Bağlantınızı kontrol edin.",
+      "text": "Lakko'ya bağlanılamadı. Bağlantınızı kontrol edin.",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "Sunucuda şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
+      "text": "Lakko'da şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "Bağlantılarınızdan birini açan herkes, bağlantının süresi dolana veya kullanım hakkı bitene kadar size kişi isteği gönderebilir.",
+      "text": "Bağlantılarınızdan birini açan herkes, bağlantının süresi dolana veya kullanımı bitene kadar kişiniz olur.",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "Bu kodu tarayan herkes size kişi isteği gönderebilir.",
+      "text": "Bu kodu tarayan kişi kişiniz olur.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "Sunucuda şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
+      "text": "Lakko'da şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "Şifrenizi unutursanız veya bu telefonu kaybederseniz hesabınıza böyle geri dönersiniz.",
+      "text": "Şifrenizi unutursanız ya da bu cihazı kaybederseniz, hesabınıza bu şekilde geri dönersiniz.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "Şifrenizi unutursanız veya bu telefonu kaybederseniz bu hesaba geri dönemezsiniz.",
+      "text": "Şifrenizi unutursanız ya da bu cihazı kaybederseniz, bu hesaba geri dönemezsiniz.",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "Kimliğiniz geri yüklenemedi. Tekrar deneyin.",
+      "text": "Hesabınız geri yüklenemedi. Tekrar deneyin.",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: onları yalnızca sohbetteki kişiler okuyabilir. Şifreniz cihazınızdan hiç çıkmaz ve her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
+      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: yalnızca sohbetteki kişiler okuyabilir. Her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "Oturumu kapat, verilerinizi bu cihazda tutar. Bu cihazı unut, onları kaldırır; yalnızca oturum açık başka bir cihazla, hesap anahtarlarını geri yükleyen bir geçiş anahtarıyla veya kurtarma ifadenizle geri dönebilirsiniz. Hesabı sil, hesabı sunucudan siler ve bu cihazı temizler; bu işlem geri alınamaz.",
+      "text": "Çıkış yapmak mesajlarınızı bu cihazda tutar. Bu cihazı unut, onları bu cihazdan kaldırır; hesabınız kalır. Hesabı sil, hesabınızı kalıcı olarak siler.",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "Bu işlem sunucudaki kimliğinizi — kullanıcı adı, anahtarlar, kurtarma yöntemleri ve yedek — siler ve her yerde oturumunuzu kapatır. Bu cihazdaki yerel mesajlarınız da silinir. Bu işlem geri alınamaz.",
+      "text": "Hesabınız, kullanıcı adınız, kişileriniz ve mesajlarınız silinecek ve tüm cihazlarda oturum kapatılacak. Bu geri alınamaz.",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "Lakko kapalıyken kanal gönderileri gecikebilir.",
+      "text": "Lakko kapalıyken yeni kanal gönderileriyle ilgili bildirimler gecikebilir.",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "Sunucu hatası ({status}).",
+      "text": "Bir sorun oluştu ({status}). Tekrar deneyin.",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "Eşleşen özel anahtarı barındıran cihaz artık bununla giriş yapamayacak. Bu işlem geri alınamaz.",
+      "text": "Artık bu geçiş anahtarıyla giriş yapamayacaksınız. Bu geri alınamaz.",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "Giriş yapmak için yeni bir şifre seçin. Bu cihazda hesabınızın anahtarları zaten var, bu yüzden yalnızca yeni şifreyi yazarsınız.",
+      "text": "Giriş için yeni bir şifre seçin.",
       "status": "machine"
     },
     "settings.password.title": {

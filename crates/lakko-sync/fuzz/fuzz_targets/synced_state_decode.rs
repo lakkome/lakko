@@ -36,7 +36,7 @@
 //!   whose added-device warning was seen, sent the same way. Domain,
 //!   version, a bounded count, fixed-size entries, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys.
-//! * `decode_blocked_envelope` (ADR-0098 section 6): the people the account
+//! * `decode_blocked_envelope` (ADR-0099 section 6): the people the account
 //!   blocked or unblocked, sent the same way. Domain, version, a bounded
 //!   count, fixed-size entries with a state byte, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys and

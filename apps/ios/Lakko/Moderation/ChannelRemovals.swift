@@ -5,14 +5,14 @@ import Foundation
 import LakkoCore
 import os
 
-/// ADR-0098 step 5 / UX `reporting-and-moderation.md` section 3 ("A channel
+/// ADR-0099 step 5 / UX `reporting-and-moderation.md` section 3 ("A channel
 /// that was removed") — the channels this device was told are removed.
 ///
 /// The channels service answers every route of a channel moderators removed
 /// with `410 {"code":"channel-removed"}`. Unlike `channel-deleted`, nothing
 /// ends here: the channel stays in the list, the posts this device holds stay
 /// readable, and only the write controls go. Which line is shown is decided
-/// by the moderation log alone (C-97): ``Status/removed`` only after
+/// by the moderation log alone (C-98): ``Status/removed`` only after
 /// ``SuspensionMarks/channelCheck(_:)`` verified the removal, else
 /// ``Status/unavailable``.
 ///
@@ -215,7 +215,7 @@ public final class ChannelRemovalGate: @unchecked Sendable {
     }
 }
 
-/// ADR-0098 step 5 — what a removed channel's info offers, decided here so
+/// ADR-0099 step 5 — what a removed channel's info offers, decided here so
 /// the tests can run it: the publisher tools, the invitations and the reads
 /// the service no longer answers go, and so does Report; the `@name`, the
 /// description, the members-can-find-me switch and Unsubscribe stay. The owner's rename

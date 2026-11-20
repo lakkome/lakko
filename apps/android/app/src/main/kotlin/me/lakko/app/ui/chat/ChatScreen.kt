@@ -322,7 +322,7 @@ public fun ChatScreen(
     // on the roster only so a group loaded after first composition is read.
     val conversationKind = remember(state.groupIdHex, otherMembers) { viewModel.conversationKind() }
     val isGroupChat = conversationKind == ConversationKind.Group
-    // ADR-0098 section 6 — the block register, for the collapsed group rows,
+    // ADR-0099 section 6 — the block register, for the collapsed group rows,
     // the one-to-one banner and the call tiles.
     val blockRegister by me.lakko.app.moderation.BlockRegister.state.collectAsStateWithLifecycle()
     val blockScope = rememberCoroutineScope()
@@ -330,10 +330,10 @@ public fun ChatScreen(
         if (isGroupChat) null else viewModel.oneToOnePeerPersonKey()
     }
     val blockedPeerKey = oneToOnePeer?.takeIf { blockRegister?.isBlocked(it) == true }
-    // ADR-0098 step 4 / UX 3 — whether the other person in a one-to-one is
+    // ADR-0099 step 4 / UX 3 — whether the other person in a one-to-one is
     // suspended, as the moderation log confirms; asked when the chat opens.
     val peerSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(oneToOnePeer)
-    // ADR-0098 section 4 - while the account is suspended the chat is
+    // ADR-0099 section 4 - while the account is suspended the chat is
     // read-only: no composer, no calls.
     val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // UX 5.2 — the second header line of a 1x1 chat is the verified @username.
@@ -852,7 +852,7 @@ public fun ChatScreen(
             // (docs/ux/group-and-channel-privacy.md section 10).
             // ADR-0091 UX 2.6 — the buttons stay while this device is behind;
             // the call hosts fail a start then with the ordinary notice.
-            // ADR-0098 section 4 - a suspended account makes no calls.
+            // ADR-0099 section 4 - a suspended account makes no calls.
             callActive = callOccupant != null || membershipEnded || !callControls || suspendedReadOnly,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
@@ -890,7 +890,7 @@ public fun ChatScreen(
     Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
     Column(modifier = Modifier.fillMaxSize()) {
 
-        // ADR-0098 step 4 / UX 3 — a suspended person's one-to-one carries a
+        // ADR-0099 step 4 / UX 3 — a suspended person's one-to-one carries a
         // banner at the top; the chat still works. A blocked person's chat
         // shows the block banner only.
         if (oneToOnePeer != null &&
@@ -927,7 +927,7 @@ public fun ChatScreen(
         // device is not in. Hidden once this device's membership has ended —
         // the call key can no longer be derived, so Join could only fail.
         val joinable = joinableGroupCall
-        // ADR-0098 section 4 — and while the account is suspended: calls are
+        // ADR-0099 section 4 — and while the account is suspended: calls are
         // not offered.
         if (joinable != null && !membershipEnded && !suspendedReadOnly) {
             GroupCallBanner(
@@ -1292,7 +1292,7 @@ public fun ChatScreen(
                             onRetrySend = { viewModel.onRetrySend(it) },
                             // UX section 8 — enter selection mode on this row.
                             onSelect = { viewModel.onEnterSelection(msg) },
-                            // ADR-0098 — Report on someone else's message: its
+                            // ADR-0099 — Report on someone else's message: its
                             // author, with this message included.
                             onReport = {
                                 msg.authorKey?.let { author ->
@@ -1313,7 +1313,7 @@ public fun ChatScreen(
                                     )
                                 }
                             },
-                            // ADR-0098 / UX 1.2 — a blocked person's group
+                            // ADR-0099 / UX 1.2 — a blocked person's group
                             // message, collapsed until tapped.
                             collapsedBlocked = msg.direction == Direction.Incoming &&
                                 blockRegister?.isBlocked(msg.authorKey) == true &&
@@ -1436,11 +1436,11 @@ public fun ChatScreen(
                 onSave = { viewModel.onSaveSelected() },
             )
                 } else if (suspendedReadOnly) {
-                    // ADR-0098 section 4 - the account is suspended: one muted
+                    // ADR-0099 section 4 - the account is suspended: one muted
                     // line in place of the composer, no send control.
                     me.lakko.app.ui.suspension.SuspendedComposerLine()
                 } else if (blockedPeerKey != null) {
-                    // ADR-0098 / UX 1.2 — a banner replaces the composer in the
+                    // ADR-0099 / UX 1.2 — a banner replaces the composer in the
                     // one-to-one with a person this account blocked.
                     BlockedBanner(
                         name = viewModel.oneToOnePeerName() ?: viewModel.nameOf(blockedPeerKey),
@@ -1810,9 +1810,9 @@ private fun MessageRow(
     savedMessage: Boolean = false,
     /** Saved section 2 — Save / Remove from saved was chosen. */
     onToggleSaved: () -> Unit = {},
-    /** ADR-0098 — Report was chosen on someone else's message. */
+    /** ADR-0099 — Report was chosen on someone else's message. */
     onReport: () -> Unit = {},
-    /** ADR-0098 / UX 1.2 — a group message from someone this account blocked:
+    /** ADR-0099 / UX 1.2 — a group message from someone this account blocked:
      *  drawn as one muted row until tapped. */
     collapsedBlocked: Boolean = false,
 ) {
@@ -2225,7 +2225,7 @@ internal fun Bubble(
      *  and Delete for the owner and publishers whoever wrote it. `null` in a
      *  chat. */
     channelPost: ChannelPostActions? = null,
-    /** ADR-0098 — Report was chosen on someone else's message. */
+    /** ADR-0099 — Report was chosen on someone else's message. */
     onReport: (() -> Unit)? = null,
 ) {
     // ADR-0023 — every affordance is gated on the message having a
@@ -2340,7 +2340,7 @@ internal fun Bubble(
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE ||
             (mediaOnly && (mosaicSplit == null || mosaicBare)) || emojiOnly > 0
         val reactionCtx = LocalBubbleReactions.current
-        // ADR-0098 section 4 — a suspended account reacts to nothing (the
+        // ADR-0099 section 4 — a suspended account reacts to nothing (the
         // reaction would be refused), and joins no call from a link.
         val bubbleSuspended by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
         val contentBubbleCtx = LocalContentBubble.current
@@ -2782,7 +2782,7 @@ internal fun Bubble(
                             }
                         }.let { base ->
                             if (channelPost == null) {
-                                // ADR-0098 — Report only where a host can open it.
+                                // ADR-0099 — Report only where a host can open it.
                                 base.copy(canReport = base.canReport && onReport != null)
                             } else {
                                 base.copy(
@@ -2793,7 +2793,7 @@ internal fun Bubble(
                                     canSave = channelPost.canSave && !msg.deleted,
                                     canEdit = menuAvailable && channelPost.publisher && !msg.deleted,
                                     canDelete = menuAvailable && channelPost.publisher && !msg.deleted,
-                                    // ADR-0098 — a post reports the channel.
+                                    // ADR-0099 — a post reports the channel.
                                     canReport = base.canReport && onReport != null,
                                 )
                             }
@@ -2922,7 +2922,7 @@ internal data class ChannelPostActions(
     val canForward: Boolean = false,
     /** UX 12 — the post menu's Save (the saved register, kind channel). */
     val canSave: Boolean = false,
-    /** ADR-0098 step 5 — the menu's reaction row; off for a channel
+    /** ADR-0099 step 5 — the menu's reaction row; off for a channel
      *  moderators removed. */
     val canReact: Boolean = true,
 )
@@ -4760,7 +4760,7 @@ private fun MembersSheet(
     // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
     // block recomposes when any of them moves.
     val rosterViews = remember(members) { viewModel.rosterViews() }
-    // ADR-0098 step 4 / UX 3 — members whose account the moderation log
+    // ADR-0099 step 4 / UX 3 — members whose account the moderation log
     // confirms suspended, marked as the answers arrive. Keyed on the
     // ACCOUNT key (one person, however many devices); a leaf whose
     // credential did not resolve carries none and is not asked about.
@@ -4783,7 +4783,7 @@ private fun MembersSheet(
     // every editing and exit section away and leaves the name readable.
     val settingsVersionForInfo by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
     val hasHandle = remember(settingsVersionForInfo) { viewModel.groupHandle() != null }
-    // ADR-0098 section 4 - no calls and no adding people while suspended.
+    // ADR-0099 section 4 - no calls and no adding people while suspended.
     val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     val sections = remember(canManage, isOwner, canLeave, membershipEnded, transferCandidates, hasHandle, suspendedReadOnlyInfo) {
         me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
@@ -5572,7 +5572,7 @@ private fun MembersSheet(
                 // section rule says nothing about and never will: a section
                 // list answers "is this block here", not "is this control
                 // enabled and why not".
-                // ADR-0098 — Report, first in the exit block, for anyone but
+                // ADR-0099 — Report, first in the exit block, for anyone but
                 // the owner and only for a group with an @name (the rule).
                 if (InfoSection.REPORT in sections) {
                     val handle = viewModel.groupHandle()?.handle
@@ -5982,7 +5982,7 @@ private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
     }
 }
 
-/** ADR-0098 / UX 1.2 — "You blocked {name}." with Unblock, in place of the composer. */
+/** ADR-0099 / UX 1.2 — "You blocked {name}." with Unblock, in place of the composer. */
 @Composable
 private fun BlockedBanner(name: String, onUnblock: () -> Unit) {
     Row(

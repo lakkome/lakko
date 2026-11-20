@@ -691,7 +691,7 @@ async fn refresh_answer(
         FloorVerdict::LoggedOut => return Err(ApiError::RefreshInvalid),
         FloorVerdict::Removed => return Err(ApiError::DeviceRevoked),
     }
-    // ADR-0098 section 4: while the account is suspended the refresh answers
+    // ADR-0099 section 4: while the account is suspended the refresh answers
     // `403 account-suspended` with a fresh restricted session and a fresh
     // refresh credential (the device stays in suspended mode); once it is
     // not, a normal pair.

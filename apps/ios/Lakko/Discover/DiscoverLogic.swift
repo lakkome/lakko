@@ -262,7 +262,7 @@ struct DirectoryCard: Equatable, Identifiable {
     /// Position in the server's list (bucket or search), 0 = first.
     let serverRank: Int
     let followers: GroupFollowers?
-    /// ADR-0098 — the signed listing as shown, for a report's evidence.
+    /// ADR-0099 — the signed listing as shown, for a report's evidence.
     var listingWire: Data? = nil
 
     var id: String { channelIdHex }

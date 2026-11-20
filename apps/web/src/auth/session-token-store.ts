@@ -45,7 +45,7 @@
  * to a future value gains nothing: the server-side HMAC binds the real
  * one). Flag day: a row of the single-token shape reads as absent.
  *
- * ADR-0098 (a suspended account): the same row holds the restricted session
+ * ADR-0099 (a suspended account): the same row holds the restricted session
  * in place of the pair, with `m: 1` in the plaintext; `t` / `e` are then the
  * `s1` restricted token and its expiry. `getSessionPair` reads only a pair
  * and `getSuspendedSession` only a restricted session, so a reader of the
@@ -77,7 +77,7 @@ interface Plain {
   r: string;
   re: number;
   g: string;
-  /** `1` for a restricted session (ADR-0098). */
+  /** `1` for a restricted session (ADR-0099). */
   m?: 1;
 }
 
@@ -123,7 +123,7 @@ export async function putSessionPair(
 }
 
 /**
- * ADR-0098: persist the restricted session of a suspended account in the
+ * ADR-0099: persist the restricted session of a suspended account in the
  * account's one session row, replacing the pair (or an earlier restricted
  * session), so a restart stays in suspended mode.
  */
@@ -202,7 +202,7 @@ export async function getSessionPair(
 }
 
 /**
- * ADR-0098: the persisted restricted session of a suspended account, or
+ * ADR-0099: the persisted restricted session of a suspended account, or
  * `null` when the row holds a pair, nothing, or a dead credential. Throws on
  * a decrypt failure, like {@link getSessionPair}.
  */

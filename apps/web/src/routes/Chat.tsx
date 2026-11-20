@@ -1704,7 +1704,7 @@ function ChatView(props: {
 
   /** What this chat's call buttons (and the in-chat "call in progress"
    *  banner) offer — `calls/group-call-host.ts`. */
-  // ADR-0098 step 3: a suspended account places and joins no call.
+  // ADR-0099 step 3: a suspended account places and joins no call.
   const callAffordance = (): ChatCallAffordance =>
     accountSuspended()
       ? "hidden"
@@ -2102,14 +2102,14 @@ function ChatView(props: {
   // one-to-one never becomes one. The member count above is display only.
   const conversationKind = createMemo<ConversationKind>(() => conversationKindOf(props.entry.group));
   const isGroupChat = (): boolean => conversationKind() === "group";
-  /** ADR-0098 section 6 - the other person of this one-to-one when this
+  /** ADR-0099 section 6 - the other person of this one-to-one when this
    *  account blocked them, else `null` (a group, or nobody blocked). */
   const blockedPeerKey = (): string | null => {
     if (isGroupChat()) return null;
     const peer = oneToOnePeer(props.entry.group, chats.identity());
     return peer !== null && isBlockedKeyB64(peer) ? peer : null;
   };
-  /** ADR-0098 step 4, UX 3 - this one-to-one's other person when the
+  /** ADR-0099 step 4, UX 3 - this one-to-one's other person when the
    *  moderation log confirms their account is suspended and they are not
    *  blocked (a block's banner wins). The chat still works. */
   const suspendedPeer = (): boolean => {
@@ -2119,7 +2119,7 @@ function ChatView(props: {
     return personMark(isBlockedKeyB64(peer), isSuspendedKeyB64(peer)) === "suspended";
   };
   const [unblocking, setUnblocking] = createSignal(false);
-  // ----- ADR-0098 section 2: reporting from this conversation -----------
+  // ----- ADR-0099 section 2: reporting from this conversation -----------
   /** The person this conversation is about, for a report's target. */
   function reportPersonTarget(keyB64: string): { kind: "person"; accountKeyB64: string; name: string } {
     return { kind: "person", accountKeyB64: keyB64, name: memberNameOf(profiles.resolve(keyB64), "a report") };
@@ -2303,7 +2303,7 @@ function ChatView(props: {
     // A membership that ended offers nothing here: the exit block says what
     // is left (ADR-0045 UX 6.2), and the end itself wipes the group.
     if (membershipEnded()) return [];
-    // ADR-0098 step 3: a suspended account adds nobody and invites nobody.
+    // ADR-0099 step 3: a suspended account adds nobody and invites nobody.
     return sectionsWhileSuspended(conversationInfoSectionsFor(uiRules(), {
       kind: "group",
       role: ownRole() ?? "member",
@@ -5584,7 +5584,7 @@ function ChatView(props: {
    */
   async function publishQuiet(
     envelopeBytes: Uint8Array,
-    /** ADR-0098 section 1 - an edit or a delete is attested; a typing
+    /** ADR-0099 section 1 - an edit or a delete is attested; a typing
      *  signal and a read receipt are not. */
     attest: boolean,
   ): Promise<{ messageId: number }> {
@@ -5599,7 +5599,7 @@ function ChatView(props: {
     // ADR-0073 R.7 case 1 — a typing signal or a read receipt is not sent
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
-    // ADR-0098 section 6 - nor to a blocked person.
+    // ADR-0099 section 6 - nor to a blocked person.
     if (signalsWithheldFrom(props.entry.group, chats.identity())) return;
     try {
       // Automatic: held also after a refused read (ADR-0091 live walk 3).
@@ -5991,7 +5991,7 @@ function ChatView(props: {
     // with item ids.
     try {
       const wasm = await loadAttachWasm();
-      // ADR-0098 section 1 - an edit, attested like any edit.
+      // ADR-0099 section 1 - an edit, attested like any edit.
       const sent = await publishQuiet(wasm.composeChecklistEditEnvelope(BigInt(editTarget), content.checklist), true);
       const own = ownSignatureKeyB64();
       const op = own === undefined
@@ -6033,7 +6033,7 @@ function ChatView(props: {
         return;
       }
       // UX 11.3 — the edit replaces the whole article.
-      // ADR-0098 section 1 - an edit, attested like any edit.
+      // ADR-0099 section 1 - an edit, attested like any edit.
       const sent = await publishQuiet(await composeArticleEditEnvelope(editTarget, out.article, refs), true);
       const own = ownSignatureKeyB64();
       if (own !== undefined) {
@@ -6081,7 +6081,7 @@ function ChatView(props: {
     hub,
     async sendOp(bytes) {
       // A named content op (a vote, a tick, a close) is a chat envelope,
-      // attested like an edit or a reaction (ADR-0098 section 1), as on iOS
+      // attested like an edit or a reaction (ADR-0099 section 1), as on iOS
       // and Android. An anonymous ballot never comes here (`enqueueBallot`).
       const sent = await publishQuiet(bytes, true);
       return { messageId: sent.messageId, createdAt: new Date().toISOString() };
@@ -7970,7 +7970,7 @@ function ChatView(props: {
    *  the boundary, so a stale answer here costs a refused envelope, never a
    *  pin nobody agreed to. */
   const maySetSharedPin = (): boolean =>
-    // ADR-0098 step 3: a shared pin or unpin sends; a suspended account has
+    // ADR-0099 step 3: a shared pin or unpin sends; a suspended account has
     // the personal pin alone.
     !accountSuspended() && !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
   /** The stored pin an on-screen row id stands for: the row itself in this
@@ -8272,7 +8272,7 @@ function ChatView(props: {
       </header>
       </Show>
 
-      {/* ADR-0098 step 4, reporting UX section 3 - the other person's account
+      {/* ADR-0099 step 4, reporting UX section 3 - the other person's account
           is suspended: a banner under the header, with no action. It replaces
           nothing (the composer stays), and a block's banner wins over it. */}
       <Show when={suspendedPeer()}>
@@ -8537,7 +8537,7 @@ function ChatView(props: {
               <Show
                 when={!collapsedBlocked(row())}
                 fallback={
-                  // ADR-0098 section 6, UX 1.2 - a blocked person's message in
+                  // ADR-0099 section 6, UX 1.2 - a blocked person's message in
                   // a group: one muted row that shows the message when tapped.
                   <li class="lk-system-row lk-blocked-row">
                     <button
@@ -8874,7 +8874,7 @@ function ChatView(props: {
       <Show when={selecting()}>
         <div class="lk-select-actions" role="toolbar" aria-label={t("chat.select.toolbar")}>
           <div class="lk-select-actions-row">
-            {/* ADR-0098 step 3: Forward and Delete send; a suspended account
+            {/* ADR-0099 step 3: Forward and Delete send; a suspended account
                 is offered Save alone. */}
             <button
               type="button"
@@ -8964,7 +8964,7 @@ function ChatView(props: {
           </For>
         </div>
       </Show>
-      {/* ADR-0098 section 6, UX 1.2 - in the one-to-one with a blocked
+      {/* ADR-0099 section 6, UX 1.2 - in the one-to-one with a blocked
           person a banner replaces the composer. */}
       <Show when={blockedPeerKey()}>
         {(peer) => (
@@ -8981,7 +8981,7 @@ function ChatView(props: {
           </div>
         )}
       </Show>
-      {/* ADR-0098 step 3: a suspended account's composer is the muted line,
+      {/* ADR-0099 step 3: a suspended account's composer is the muted line,
           with no send control. */}
       <SuspendedComposerLine />
       <form
@@ -9880,7 +9880,7 @@ function ChatView(props: {
                       >
                         <span class="lk-row-title">
                           {label()}
-                          {/* ADR-0098 step 4, UX 3 - a member whose account
+                          {/* ADR-0099 step 4, UX 3 - a member whose account
                               is suspended: a muted word after the name. */}
                           <Show when={!isSelf && isSuspendedKeyB64(memberKeyB64)}>
                             <span class="lk-member-suspended">{" "}{t("suspended.member")}</span>
@@ -10013,7 +10013,7 @@ function ChatView(props: {
 
                 Only on the proposal path: a legacy group's core has no
                 self-remove route and no owner to transfer from. */}
-            {/* ADR-0098 section 2 - Report, first in the exit block, for
+            {/* ADR-0099 section 2 - Report, first in the exit block, for
                 anyone but the owner and only for a group with an `@name` (the
                 shared rule). */}
             <Show when={groupSections().includes("report")}>
@@ -10972,7 +10972,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         ...(forward === undefined ? {} : { forward }),
         // ADR-0061 section 6 — a message from a newer Lakko stays one.
         ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
-        // ADR-0098 section 1 - the report evidence captured at receipt.
+        // ADR-0099 section 1 - the report evidence captured at receipt.
         ...(evidence === undefined ? {} : { evidence }),
         // ADR-0087 section 14 — the invitation card, opened offline when drawn.
         ...(cardBytesOf(m.channelInviteB64)),

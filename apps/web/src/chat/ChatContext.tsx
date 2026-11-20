@@ -327,7 +327,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     return entry.group.dsAccessSigner(id);
   });
   onCleanup(unregisterSource);
-  // ADR-0098 step 4 - this account's own keys are never marked suspended
+  // ADR-0099 step 4 - this account's own keys are never marked suspended
   // (its own standing is the suspended screen's).
   installOwnAccountKeys(() => {
     const out: string[] = [];

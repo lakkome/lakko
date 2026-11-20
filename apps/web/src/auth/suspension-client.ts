@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The two routes of auth that exist for a suspended account (ADR-0098
+ * The two routes of auth that exist for a suspended account (ADR-0099
  * section 4): `GET /account/suspension` and `POST /account/suspension/appeal`.
  * Both take the restricted session as their bearer; they go through the
  * session-aware fetch, which sends the live restricted token (refreshed ahead

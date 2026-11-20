@@ -1972,7 +1972,7 @@ public class ContactsRepository(
                     fun rowVerdict(reachPk: ByteArray?, sender: ByteArray): uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict =
                         reachNow?.mailboxRowVerdict(reachPk, isCurrentContact(sender))
                             ?: uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.PROCESS
-                    // ADR-0098 sections 3 and 6 — a request from a blocked
+                    // ADR-0099 sections 3 and 6 — a request from a blocked
                     // account, or from one the moderation log confirms
                     // suspended, is dropped unseen, whichever route it came
                     // by (the inbox, an invite link, through a group), before
@@ -3147,7 +3147,7 @@ public class ContactsRepository(
         for (row in inbox.rows()) {
             if (boundAccountB64 != accountB64) return
             val req = row.request
-            // ADR-0098 step 4 / UX 3 — a request held from before its
+            // ADR-0099 step 4 / UX 3 — a request held from before its
             // sender's suspension (or whose check at fetch did not answer in
             // time) is dropped unseen when the log now confirms it; accepted,
             // it would make a contact with no card.

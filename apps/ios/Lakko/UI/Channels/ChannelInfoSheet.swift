@@ -29,9 +29,9 @@ struct ChannelInfoSheet: View {
 
     @ObservedObject private var l10n = Localization.shared
     @ObservedObject private var reach = ReachCenter.shared
-    /// ADR-0098 step 5 — a channel moderators removed.
+    /// ADR-0099 step 5 — a channel moderators removed.
     @ObservedObject private var removals = ChannelRemovals.shared
-    /// ADR-0098 step 3 — a suspended account invites nobody.
+    /// ADR-0099 step 3 — a suspended account invites nobody.
     @Environment(\.accountSuspended) private var accountSuspended
     @State private var confirmingUnsubscribe = false
     @State private var typeOpen = false
@@ -42,7 +42,7 @@ struct ChannelInfoSheet: View {
     @State private var confirmingDelete = false
     @State private var deleting = false
     @State private var deleteFailed = false
-    /// ADR-0098 / UX 2.1 — the report sheet for the channel.
+    /// ADR-0099 / UX 2.1 — the report sheet for the channel.
     @State private var reportRequest: ReportRequest?
     /// UX 4.5.2 — the header photo (the owner changes it).
     @StateObject private var photo: ChannelPhotoModel
@@ -152,7 +152,7 @@ struct ChannelInfoSheet: View {
             if sections.contains(.membersCanFindMe) {
                 MembersCanFindMeSection(groupIdHex: channelId, kind: .channel)
             }
-            // ADR-0098 / UX 2.1 — a subscriber reports the channel; its posts
+            // ADR-0099 / UX 2.1 — a subscriber reports the channel; its posts
             // may be picked.
             if sections.contains(.report), let id = ChannelsClient.hexToData(channelId), id.count == 16 {
                 Section {
@@ -251,7 +251,7 @@ struct ChannelInfoSheet: View {
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
-                // ADR-0098 step 5 / UX 3 — said only once the log proved it.
+                // ADR-0099 step 5 / UX 3 — said only once the log proved it.
                 if let removal {
                     Text(l10n.t(removal.lineKey))
                         .font(.footnote)
@@ -403,7 +403,7 @@ struct ChannelInfoSheet: View {
 
     private func unsubscribe() {
         if removal != nil, isPublisher {
-            // ADR-0098 step 5 — the owner or a publisher takes a removed
+            // ADR-0099 step 5 — the owner or a publisher takes a removed
             // channel out of the list, on every device of the account (the
             // conversation-end record); the service is not asked (it answers
             // 410 for the channel anyway).

@@ -17,7 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0098 section 4 - a suspended account, seen by its owner: the wire
+ * ADR-0099 section 4 - a suspended account, seen by its owner: the wire
  * parsing, the reason mapping, the appeal sheet's bounds and the suspended
  * mode's state machine (enter, probe, leave, the ten-minute check, the one
  * appeal), plus the token provider's part (a refresh answering the

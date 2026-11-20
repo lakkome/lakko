@@ -200,14 +200,14 @@ public fun ContactDetailScreen(
     val reach = remember(contactsRepository) { me.lakko.app.reach.ReachManager.get(appContext) }
     val visibility by reach.visibility.collectAsStateWithLifecycle()
     val contactsOfContactsOn = visibility?.toModel()?.contactsPartOn == true
-    // ADR-0098 section 6 — the block register's answer for this person.
+    // ADR-0099 section 6 — the block register's answer for this person.
     val blockRegister by me.lakko.app.moderation.BlockRegister.state.collectAsStateWithLifecycle()
     val contactKeyB64 = contact?.request?.fromPubkey?.let { java.util.Base64.getEncoder().encodeToString(it) }
     val isBlocked = blockRegister?.isBlocked(contactKeyB64) == true
-    // ADR-0098 step 4 / UX 3 — whether the moderation log confirms this
+    // ADR-0099 step 4 / UX 3 — whether the moderation log confirms this
     // person's account is suspended; asked when the card opens.
     val isSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(contactKeyB64)
-    // ADR-0098 section 4 - no calls and no adding people while suspended.
+    // ADR-0099 section 4 - no calls and no adding people while suspended.
     val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     val sections = remember(membershipEnded, isContact, contactsOfContactsOn, isBlocked, suspendedReadOnlyInfo) {
         me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
@@ -405,7 +405,7 @@ private fun ContactDetailBody(
     theirContactsRow: @Composable () -> Unit,
     modifier: Modifier = Modifier,
     isBlocked: Boolean = false,
-    /** ADR-0098 step 4 — the moderation log confirms this account suspended. */
+    /** ADR-0099 step 4 — the moderation log confirms this account suspended. */
     isSuspended: Boolean = false,
     onBlock: () -> Unit = {},
     onUnblock: () -> Unit = {},
@@ -447,7 +447,7 @@ private fun ContactDetailBody(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // ADR-0098 / UX 1.4 — a muted line under a blocked person's name.
+            // ADR-0099 / UX 1.4 — a muted line under a blocked person's name.
             if (isBlocked) {
                 Text(
                     t("block.card_line"),
@@ -455,7 +455,7 @@ private fun ContactDetailBody(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // ADR-0098 step 4 / UX 3 — a muted line for a suspended account;
+            // ADR-0099 step 4 / UX 3 — a muted line for a suspended account;
             // the block line wins when both apply.
             if (me.lakko.app.moderation.suspendedCardLineShows(blocked = isBlocked, suspended = isSuspended)) {
                 Text(
@@ -590,7 +590,7 @@ private fun ContactDetailBody(
             }
             // Section 2.1 — who-can-find-me 5.1.
             if (InfoSection.THEIR_CONTACTS_CAN_FIND_ME in sections) theirContactsRow()
-            // ADR-0098 — the danger block: Report, then Block or Unblock, then
+            // ADR-0099 — the danger block: Report, then Block or Unblock, then
             // Remove contact (the order the rule returns).
             if (InfoSection.REPORT in sections) {
                 HorizontalDivider()

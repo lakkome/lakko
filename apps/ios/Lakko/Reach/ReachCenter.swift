@@ -53,7 +53,7 @@ public final class ReachCenter: ObservableObject {
     /// The setting in effect on this device.
     @Published public private(set) var setting: FfiVisibilitySetting = defaultVisibilitySetting()
     @Published public private(set) var status: ReachApplyStatus = .applied
-    /// ADR-0098 step 5 — discovery refused publishing the Everyone record
+    /// ADR-0099 step 5 — discovery refused publishing the Everyone record
     /// (`403 hidden-from-search`): moderators removed this account from
     /// search. Who can find me says so and does not offer Everyone; the
     /// setting itself is not changed. Left when a later Everyone publish
@@ -1956,13 +1956,13 @@ public final class ReachCenter: ObservableObject {
         }
     }
 
-    /// ADR-0098 step 5 — an Everyone record was published: the account is in
+    /// ADR-0099 step 5 — an Everyone record was published: the account is in
     /// search again.
     func noteEveryonePublished(wantPublic: Bool) {
         if wantPublic, hiddenFromSearch { hiddenFromSearch = false }
     }
 
-    /// ADR-0098 step 5 — whether `error` is discovery's `403
+    /// ADR-0099 step 5 — whether `error` is discovery's `403
     /// hidden-from-search` on publishing Everyone; if so the account is held
     /// hidden. Not a failure to retry by hand: the setting's screen says why
     /// and the next sync asks again.

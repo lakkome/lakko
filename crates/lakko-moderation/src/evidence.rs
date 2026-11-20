@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The check that a reported message was written by an account ([ADR-0098]
+//! The check that a reported message was written by an account ([ADR-0099]
 //! section 1, UX section 5.3).
 //!
 //! A message item verifies when:
@@ -25,7 +25,7 @@
 //! their check is not in this module yet, and they report
 //! [`EvidenceVerdict::NotVerified`].
 //!
-//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
+//! [ADR-0099]: ../../../docs/adr/0099-reporting-and-moderation.md
 
 use lakko_attachments::attested;
 

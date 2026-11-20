@@ -184,7 +184,7 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {{ load: (identity: any, groupId: Uint8Array) => any }} Group
  * @property {(bytes: Uint8Array) => any} parseBodyEnvelope
  * @property {(bytes: Uint8Array) => Uint8Array} [unwrapAttested]
- *   ADR-0098 section 1 - the envelope inside an attested chat plaintext, or
+ *   ADR-0099 section 1 - the envelope inside an attested chat plaintext, or
  *   the plaintext unchanged. Run before every classifier below; the
  *   signature is not checked here (a preview is not evidence). Optional so
  *   an older deps object still loads.
@@ -354,7 +354,7 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   "not held", so the message is previewed as any other (the marker's
  *   fail-safe direction: a notification too many, never one too few).
  * @property {(accountId: string, deviceKey: any) => Promise<readonly string[] | null>} [lookupBlockedKeys]
- *   ADR-0098 section 6 - READ-ONLY: the account keys (standard base64) this
+ *   ADR-0099 section 6 - READ-ONLY: the account keys (standard base64) this
  *   account blocked, from the encrypted sync row the app wrote. A frame from
  *   one of them neither rings nor becomes a preview. Read once per wake.
  *   Optional; absent, `null` and a throw mean "none blocked".
@@ -773,7 +773,7 @@ export async function decryptPushWake(wake, deps) {
     const words = readWords(deps.notificationWords ?? null);
     // ADR-0073 R.8 — the retired keys, read once for the batch.
     const retired = await supersededKeySet(deps, accountId);
-    // ADR-0098 section 6 - the blocked people, read once for the batch.
+    // ADR-0099 section 6 - the blocked people, read once for the batch.
     const blocked = await blockedKeySet(deps, accountId, deviceKey);
     // The ids the app's message log holds for this group, read at most once
     // and only when a row does not decrypt.
@@ -801,10 +801,10 @@ export async function decryptPushWake(wake, deps) {
         if (!held.has(message.id)) unreadableRows += 1;
         continue;
       }
-      // ADR-0098 section 1 - every classifier below reads the envelope
+      // ADR-0099 section 1 - every classifier below reads the envelope
       // inside an attested plaintext.
       processed = attestedView(deps.wasm, processed);
-      // ADR-0098 section 6 - nothing from a blocked person acts: no ring, no
+      // ADR-0099 section 6 - nothing from a blocked person acts: no ring, no
       // preview, no reaction notice. Resolved to the PERSON key against the
       // roster of the epoch the frame decrypted at.
       if (blocked.size > 0) {
@@ -1742,7 +1742,7 @@ async function supersededKeySet(deps, accountId) {
 }
 
 /**
- * ADR-0098 section 6 - the account keys this account blocked (standard
+ * ADR-0099 section 6 - the account keys this account blocked (standard
  * base64), as a set, from the encrypted sync row the app wrote. Never
  * throws; every miss is the empty set, so nothing is held back (a missed
  * block costs one notification, never a lost one).
@@ -1766,7 +1766,7 @@ async function blockedKeySet(deps, accountId, deviceKey) {
 }
 
 /**
- * ADR-0098 section 6 - the shared block rule's answer for a notification
+ * ADR-0099 section 6 - the shared block rule's answer for a notification
  * from a blocked person (`drop`). A core without the rule answers `true`: the
  * person blocked them, and a notification is never the safe side of that.
  *
@@ -1783,7 +1783,7 @@ function blockedNotificationDropped(wasm) {
 }
 
 /**
- * ADR-0098 section 1 - a view of a processed frame whose `applicationData`
+ * ADR-0099 section 1 - a view of a processed frame whose `applicationData`
  * is the envelope inside the attested wrapper. Only the three fields this
  * file reads are carried. A frame with no application data, or a core with
  * no `unwrapAttested`, is returned as it is.
@@ -1809,7 +1809,7 @@ export function attestedView(wasm, processed) {
 }
 
 /**
- * ADR-0098 section 6 - the account keys blocked in the decrypted sync row
+ * ADR-0099 section 6 - the account keys blocked in the decrypted sync row
  * (`src/devices/sync/sync-state-store.ts`), as standard base64. Anything
  * unreadable is the empty list.
  *

@@ -120,7 +120,7 @@ internal fun PeopleSearchSection(
         val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
         peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
     }
-    // ADR-0098 step 4 / UX 3 — search does not list a suspended account. The
+    // ADR-0099 step 4 / UX 3 — search does not list a suspended account. The
     // rows show at once; a row leaves as soon as the moderation log confirms
     // its account suspended.
     val foundKeys = remember(foundPeople) { foundPeople.mapTo(HashSet()) { it.keyB64 } }
@@ -280,7 +280,7 @@ private fun PersonRow(
                     )
                 }
             }
-            // ADR-0098 section 4 - a suspended account adds no contacts.
+            // ADR-0099 section 4 - a suspended account adds no contacts.
             val addReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
             when (row.action) {
                 RowAction.OPEN ->

@@ -97,7 +97,7 @@ const SECTION_NAMES = [
   "reactions",
   /* who-can-find-me.md section 5: a channel's info, every role. */
   "members-can-find-me",
-  /* ADR-0098 (reporting-and-moderation.md sections 1.1 and 2.1). */
+  /* ADR-0099 (reporting-and-moderation.md sections 1.1 and 2.1). */
   "block",
   "unblock",
   "report",
@@ -136,7 +136,7 @@ export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
 ];
 
 /**
- * ADR-0098 step 3 (UX `reporting-and-moderation.md` section 4): the blocks a
+ * ADR-0099 step 3 (UX `reporting-and-moderation.md` section 4): the blocks a
  * suspended account is not offered, because each adds someone or starts a
  * call (adding people to a group, an invite link, adding a contact, calling).
  * Applied by the screens on top of the shared rule's answer.
@@ -158,7 +158,7 @@ export function sectionsWhileSuspended(
 }
 
 /**
- * ADR-0098 step 5 (UX `reporting-and-moderation.md` section 3): the only
+ * ADR-0099 step 5 (UX `reporting-and-moderation.md` section 3): the only
  * blocks a channel moderators removed still offers. Everything else names the
  * channel on the service, changes it, or invites someone into it; the
  * `@name` (when the channel has one) and the description stay readable and
@@ -201,7 +201,7 @@ export interface PersonInfoCapabilities {
    *  be named in the setting (`docs/ux/who-can-find-me.md` section 5.1). Left
    *  out it reads off. */
   readonly contactsOfContactsOn?: boolean;
-  /** ADR-0098 section 6 - this account blocked the person (the block
+  /** ADR-0099 section 6 - this account blocked the person (the block
    *  register). Left out it reads not blocked. */
   readonly isBlocked?: boolean;
 }

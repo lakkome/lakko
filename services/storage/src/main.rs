@@ -67,7 +67,7 @@
 //!   `LAKKO_STORAGE_INTERNAL_SECRET` (standard base64, at least 16 bytes),
 //!   `LAKKO_STORAGE_MODERATION_ROOT_KEY` (base64url, the value of
 //!   `LAKKO_MODERATION_ROOT_KEY`) - the internal listener a moderator's
-//!   BlobDelete arrives on (ADR-0098 step 5, [`moderation`]); with the
+//!   BlobDelete arrives on (ADR-0099 step 5, [`moderation`]); with the
 //!   secret or the key unset it does not start; either malformed refuses
 //!   startup
 //! - `LAKKO_STORAGE_VAULT_MAX_BYTES` (67108864),
@@ -86,7 +86,7 @@
 //!   token (unchanged; not indexed, never swept)
 //! - On the moderation listener only (`LAKKO_STORAGE_MODERATION_BIND`):
 //!   `POST /internal/moderation/statement` (a moderator's BlobDelete,
-//!   ADR-0098 step 5)
+//!   ADR-0099 step 5)
 //! - `PUT` / `DELETE /vault/{id}`, `PUT` / `GET /vault/{id}/head`,
 //!   `PUT` / `GET /vault/{id}/chunk/{n}` - the conversation vaults of
 //!   ADR-0064 section 1 ([`vault`] lists the credentials and codes)
@@ -472,7 +472,7 @@ async fn main() -> Result<()> {
         vault_limits,
     };
 
-    // ADR-0098 step 5 - the internal listener a moderator's BlobDelete
+    // ADR-0099 step 5 - the internal listener a moderator's BlobDelete
     // arrives on. Loopback, never proxied.
     spawn_internal_listener(state.clone()).await?;
     // The internal listener auth removes a deleted account's backup through.
@@ -497,7 +497,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// ADR-0098 step 5 - start the internal listener a moderator's statement
+/// ADR-0099 step 5 - start the internal listener a moderator's statement
 /// arrives on, when its secret and root key are set (one warning otherwise).
 ///
 /// # Errors
@@ -548,7 +548,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
             auth::require_session,
         ));
     // `DELETE /backup` also takes a suspended account's restricted session
-    // (ADR-0098 step 3), so deleting the account removes the backup.
+    // (ADR-0099 step 3), so deleting the account removes the backup.
     let backup_delete = Router::new()
         .route("/backup", delete(backup::delete_backup))
         .route_layer(middleware::from_fn_with_state(

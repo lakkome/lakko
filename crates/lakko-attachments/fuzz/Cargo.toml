@@ -29,7 +29,7 @@ test = false
 doc = false
 bench = false
 
-# The attested-message wrapper (ADR-0098 section 1): any group member can
+# The attested-message wrapper (ADR-0099 section 1): any group member can
 # craft the plaintext, and every receiver splits and verifies it before the
 # chat parser runs. Nothing unsigned by the fixed key may verify.
 [[bin]]

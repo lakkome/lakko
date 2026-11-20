@@ -19,7 +19,7 @@ struct ChannelCommentsView: View {
     /// The message menu every message and post uses (quick reactions on top,
     /// then the actions that apply), opened on a comment too.
     @Environment(\.messageMenuPresenter) private var menuPresenter
-    /// ADR-0098 step 3 — a suspended account reads the comments only.
+    /// ADR-0099 step 3 — a suspended account reads the comments only.
     @Environment(\.accountSuspended) private var accountSuspended
     /// Each comment's last on-screen frame, for where the menu draws it.
     @State private var frames = CommentFrames()
@@ -33,7 +33,7 @@ struct ChannelCommentsView: View {
     /// What follows the first two (section 13.2): never a count of
     /// comments this reader hides.
     private var more: ChannelConversationModel.CollapsedMore { model.collapsedMore(item.cursor) }
-    /// ADR-0098 — not for a suspended account, nor in a removed channel.
+    /// ADR-0099 — not for a suspended account, nor in a removed channel.
     private var canWrite: Bool {
         !accountSuspended && model.writable && (model.access == .reading || model.access == .publisher)
     }
@@ -236,7 +236,7 @@ struct ChannelCommentsView: View {
         if accountSuspended {
             SuspendedComposerLine()
         } else if !model.writable {
-            // ADR-0098 step 5 — a removed channel: the line is under the posts.
+            // ADR-0099 step 5 — a removed channel: the line is under the posts.
             EmptyView()
         } else if model.access == .reading || model.access == .publisher {
             VStack(alignment: .leading, spacing: 4) {

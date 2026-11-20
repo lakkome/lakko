@@ -600,7 +600,7 @@ public protocol NsePushDecryptDeps {
     /// `false`: a missing mirror drops nothing.
     func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool
 
-    /// ADR-0098 section 6 — is `senderKeyB64` an account this account
+    /// ADR-0099 section 6 — is `senderKeyB64` an account this account
     /// blocked? READ-ONLY, from the App Group mirror the APP writes
     /// (``BlockedSenderMirror``; the register lives in the synced state this
     /// process does not open). Defaulted `false`: a missing mirror drops
@@ -1047,7 +1047,7 @@ func nseLogMissingSenderName() {
 /// | the row                                                              | dropped |
 /// |----------------------------------------------------------------------|---------|
 /// | any kind, from a key an accepted reset retired                       | yes     |
-/// | any kind, from an account this account blocked (ADR-0098)            | yes     |
+/// | any kind, from an account this account blocked (ADR-0099)            | yes     |
 /// | a chat row carrying a re-send marker whose original the app holds    | yes     |
 /// | a chat row carrying a marker that matches nothing the app holds      | no      |
 /// | anything else                                                        | no      |
@@ -1060,7 +1060,7 @@ public func nseDropsSilently(
     if deps.isSupersededSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
         return true
     }
-    // ADR-0098 section 6 — nothing of a blocked person's is notified: no
+    // ADR-0099 section 6 — nothing of a blocked person's is notified: no
     // preview, no call alert, whatever the kind.
     if deps.isBlockedSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
         return true

@@ -98,7 +98,7 @@ public class ChannelReader(
     }
 
     /**
-     * ADR-0098 step 5 — the timeline from what this device already holds,
+     * ADR-0099 step 5 — the timeline from what this device already holds,
      * with no network read: the posts read this session (by this reader, or
      * kept in [ChannelsUiState.postsByChannel]). `null` when nothing is held.
      */

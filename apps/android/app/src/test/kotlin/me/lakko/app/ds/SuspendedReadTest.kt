@@ -22,7 +22,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * ADR-0098 section 4 - reading while suspended. The transport refuses every
+ * ADR-0099 section 4 - reading while suspended. The transport refuses every
  * write to the Delivery Service before it leaves the device; what a chat
  * READ needs from the DS is a signed GET, so it still goes out, again and
  * again, and a refused write in between (a read receipt, a claim) does not

@@ -465,7 +465,7 @@ private fun format(ms: Long?, language: String): String? {
  * passed.
  */
 /**
- * ADR-0098 section 4 - the usual Delete account confirmation, opened from
+ * ADR-0099 section 4 - the usual Delete account confirmation, opened from
  * the suspended screen of a device that holds no chats of the account
  * (Settings cannot be reached there). [viewModel] deletes with the
  * restricted session ([AuthRepository.accountForDeletion]).

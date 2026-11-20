@@ -177,7 +177,7 @@ class AnonTokenPoolTest {
     private val lookupTarget = anonPoolTargetFor(AnonTokenContext.DISCOVERY_LOOKUP)
     private val push = AnonTokenContext.PUSH_REGISTER
 
-    // ------------------------------------------------------------ a suspended account (ADR-0098 section 4)
+    // ------------------------------------------------------------ a suspended account (ADR-0099 section 4)
 
     @Test
     fun aSuspendedAccountIsIssuedBlobReadOnlyAndTheRestIsNotAskedFor() = runTest {

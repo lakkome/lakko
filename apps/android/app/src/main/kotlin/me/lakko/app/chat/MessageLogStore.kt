@@ -408,7 +408,7 @@ public data class PersistedMessage(
      */
     val membershipJoined: List<String> = emptyList(),
     val membershipLeft: List<String> = emptyList(),
-    /** ADR-0098 section 1 — the report evidence of a received row; absent on
+    /** ADR-0099 section 1 — the report evidence of a received row; absent on
      *  own rows, deleted rows and rows written before reporting existed. */
     val evidence: PersistedEvidence? = null,
     /** ADR-0092 — a content message's body and the ops it collected. */
@@ -419,7 +419,7 @@ public data class PersistedMessage(
     public companion object
 }
 
-/** ADR-0098 section 1 — a stored [me.lakko.app.moderation.MessageEvidence]. */
+/** ADR-0099 section 1 — a stored [me.lakko.app.moderation.MessageEvidence]. */
 @Serializable
 public data class PersistedEvidence(
     val verdict: String,
@@ -608,7 +608,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         lastOpId = msg.lastOpId,
         membershipJoined = msg.membershipJoined,
         membershipLeft = msg.membershipLeft,
-        // ADR-0098 — the evidence holds the message's words, so it goes the
+        // ADR-0099 — the evidence holds the message's words, so it goes the
         // way the words go.
         evidence = if (msg.deleted) {
             null

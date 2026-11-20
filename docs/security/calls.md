@@ -5878,11 +5878,11 @@ reconcile at once, so a leaf whose device is not in its roster is retired in
 the same pass. Closing it needs a seed change on removal. Invariants **#3** /
 **#4**; **#2** and **#5** unchanged.
 
-## A report's message counts as the target's only when its signature checks (C-95)
+## A report's message counts as the target's only when its signature checks (C-96)
 
-### C-95: the panel marks a reported message "Written by this account" only when the attestation verifies to the target
+### C-96: the panel marks a reported message "Written by this account" only when the attestation verifies to the target
 
-[ADR-0098](../adr/0098-reporting-and-moderation.md) sections 1 and 7, built in
+[ADR-0099](../adr/0099-reporting-and-moderation.md) sections 1 and 7, built in
 steps 1 and 5 (2026-11-08 and 2026-11-20, host-tested; the panel walked once
 locally with a software key).
 
@@ -5905,11 +5905,11 @@ them.
 `OpenedReport.evidenceIsByTarget`, and the panel's
 `apps/moderation/src/model/evidence.ts` / `screens/Evidence.tsx`.
 
-## A client shows another person's suspension only with log inclusion (C-97)
+## A client shows another person's suspension only with log inclusion (C-98)
 
-### C-97: a suspension mark needs a verified snapshot bucket from the witnessed moderation log
+### C-98: a suspension mark needs a verified snapshot bucket from the witnessed moderation log
 
-[ADR-0098](../adr/0098-reporting-and-moderation.md) section 5, built in step 4
+[ADR-0099](../adr/0099-reporting-and-moderation.md) section 5, built in step 4
 (2026-11-20, host-tested only).
 
 A client marks another account as suspended (the one-to-one banner, the card
@@ -5951,11 +5951,11 @@ standing service (web `moderation/suspension-marks.ts`, iOS
 `Moderation/SuspensionMarks.swift`, Android `moderation/SuspensionMarks.kt`),
 none of which decides a mark without it.
 
-## No service applies a moderation action without a moderator's signature under the pinned root (C-96)
+## No service applies a moderation action without a moderator's signature under the pinned root (C-97)
 
-### C-96: an applying service verifies the moderator list and the statement itself
+### C-97: an applying service verifies the moderator list and the statement itself
 
-[ADR-0098](../adr/0098-reporting-and-moderation.md) section 4, built in step 3
+[ADR-0099](../adr/0099-reporting-and-moderation.md) section 4, built in step 3
 for the one applying service that exists so far, `services/auth`
 (2026-11-19, host-tested only).
 
@@ -6278,3 +6278,52 @@ deployed.
 counts at 15-second resolution reveal activity timing while users are few
 (ADR-0096 section 8). Invariants **#5** (strengthened for metrics); **#1**,
 **#2**, **#3**, **#4** untouched.
+
+## A deleted account is shown as deleted, and its username never names someone else (C-95)
+
+### C-95: deletion is learned from a signed statement or the directory; a username needs a recent confirmation
+
+When a person deletes their account
+([ADR-0098](../adr/0098-deleted-account.md)), the deleting device, after
+`DELETE /account` succeeded at auth and before the wipe, posts an
+account-deleted statement in every conversation it holds:
+`"lakko/account-deleted/v1\0" || 0x01 || sig(64)`, 90 bytes, the signature by
+the account key its leaves are bound under over the domain, the version, the
+length-prefixed group id and that key. A receiver keeps it only when it
+verifies under the MLS sender's account key resolved at receipt (C-68) for
+this conversation's group id, and then marks the person deleted for good. A
+receiver that never got it asks `GET /discovery/identity/{account_id}` for a
+person on screen, at most weekly and not within an hour of the last attempt
+(`directory_check_due`): a `404` marks them deleted until a later answer
+names the same person again; a bundle under another key is a reset or a
+rotation, never a deletion (`account_deletion_status`).
+
+A `@username` is shown beside a person only while they are not deleted and
+the directory confirmed their account within `USERNAME_CONFIRMATION_VALID_MS`
+(21 days) by this device's clock (`may_show_username`). Discovery holds a
+deleted account's names for the ADR-0076 retired hold (30 days by default)
+instead of freeing them: `purge_account` retires the current row and replaces
+the account id of every row of that account with random bytes, keeping the
+one-namespace claims until the pruner frees both. If the account was
+confirmed at `L`, it was deleted or renamed at `D >= L`, and its name is
+nobody else's before `D + 30 days`; so a name shown only while
+`now < L + 21 days` never names someone else.
+
+**Where it is enforced.** `crates/lakko-contacts/src/account_deleted.rs`, the
+dispatcher arm in `incoming_envelope.rs`, `lakko-ui-rules::info::deleted_person_info_sections`,
+`crates/lakko-ffi-uniffi/src/account_deleted.rs`, `crates/lakko-ffi-wasm/src/account_deleted.rs`,
+`crates/lakko-ffi-extension/src/account_deleted.rs` (recognise only, C-59),
+`services/discovery/src/account.rs` (`hold_usernames`). Pinned by the module's
+unit and property tests, the FFI tests (the statement dispatches as
+`AccountDeleted` and parses as a never-rendered service envelope), the
+DB-gated registry test and fuzz `account_deleted_decode`. Host-tested
+2026-11-20; no client sends or reads it yet.
+
+**Residuals.** The directory is trusted for liveness: it can make a live
+person look deleted until its next answer, and can confirm a dead account as
+alive (it cannot undo a statement). A holder of the account key can mark the
+account deleted in its conversations. The guarantee needs the hold above 21
+days. A renamed name is covered only while the device receives the renamed
+person's profile republish within the journal retention. The pull tells the
+directory which account ids a device views (ADR-0078 class (c), as every
+identity fetch already does). Invariants **#4**, **#5**.

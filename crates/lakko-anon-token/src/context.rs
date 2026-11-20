@@ -92,7 +92,7 @@ pub enum TokenContext {
     /// ([`BETA_PLACE_WINDOW_SECS`]), not the configured one.
     BetaPlace = 16,
     /// `services/moderation`: one report sent to Lakko's moderators
-    /// (ADR-0098 section 2). The report takes no session, so the token is
+    /// (ADR-0099 section 2). The report takes no session, so the token is
     /// what rations it.
     Report = 17,
 }

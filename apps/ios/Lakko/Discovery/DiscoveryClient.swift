@@ -2057,7 +2057,7 @@ public enum DiscoveryClientError: Error {
     /// address to slow down. Never to be shown as "link invalid".
     case rateLimited(endpoint: String)
 
-    /// ADR-0098 step 5 — whether `error` is discovery's
+    /// ADR-0099 step 5 — whether `error` is discovery's
     /// `403 {"error":"hidden-from-search"}`: moderators removed the account
     /// from search, so the Everyone record is not published.
     public static func isHiddenFromSearch(_ error: Error) -> Bool {

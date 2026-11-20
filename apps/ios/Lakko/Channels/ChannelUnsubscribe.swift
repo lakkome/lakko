@@ -33,7 +33,7 @@ enum ChannelUnsubscribe {
     /// ended. A channel this device publishes is not its to drop: unsubscribing
     /// is a subscriber's act.
     ///
-    /// ADR-0098 step 5 — the exception is a channel moderators removed: its
+    /// ADR-0099 step 5 — the exception is a channel moderators removed: its
     /// owner or publisher left it on another device, so it goes here too,
     /// once this device learns the service holds it removed (from what it
     /// already knows, else from one read, which a removed channel answers
@@ -68,7 +68,7 @@ enum ChannelUnsubscribe {
         }
     }
 
-    /// ADR-0098 step 5 — the owner or a publisher takes a channel moderators
+    /// ADR-0099 step 5 — the owner or a publisher takes a channel moderators
     /// removed out of the list: the row, its posts and its keys go here; the
     /// channels service is not asked (it answers 410 for the channel). The
     /// caller tells the account's other devices.

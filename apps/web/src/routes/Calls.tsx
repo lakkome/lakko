@@ -195,7 +195,7 @@ export default function Calls(): JSX.Element {
     <aside class="lk-pane lk-pane-page" aria-label={t("nav.calls")}>
       <div class="lk-pane-head">
         <h1>{t("nav.calls")}</h1>
-        {/* ADR-0098 step 3: a suspended account places no call. */}
+        {/* ADR-0099 step 3: a suspended account places no call. */}
         <div class="lk-actions" style={accountSuspended() ? { display: "none" } : undefined}>
           <button type="button" class="primary" onClick={() => void newCall()}>
             <Icon name="video" size={20} />
@@ -251,7 +251,7 @@ export default function Calls(): JSX.Element {
                             {subLine(row.entry)}
                           </div>
                         </button>
-                        {/* ADR-0098 step 3: a suspended account places no call. */}
+                        {/* ADR-0099 step 3: a suspended account places no call. */}
                         <Show when={look.callButton && !accountSuspended()}>
                           <button
                             type="button"

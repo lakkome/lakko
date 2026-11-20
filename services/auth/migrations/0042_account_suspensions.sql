@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0098 section 4: account suspension.
+-- ADR-0099 section 4: account suspension.
 --
 -- 1. `account_suspensions`: one row per suspended account. Suspended means a
 --    row with `until_ms IS NULL` (no end) or `until_ms > now`; an expired row

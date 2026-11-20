@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 section 6 - what a block does on each path, asked of the ONE
+ * ADR-0099 section 6 - what a block does on each path, asked of the ONE
  * shared rule (`lakko_ui_rules::block`, wasm `blockVerdict`). No path on this
  * client decides it itself: three hand-written copies of one table drift.
  *

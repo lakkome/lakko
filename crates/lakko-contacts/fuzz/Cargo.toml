@@ -397,3 +397,10 @@ path = "fuzz_targets/knock_key_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "account_deleted_decode"
+path = "fuzz_targets/account_deleted_decode.rs"
+test = false
+doc = false
+bench = false

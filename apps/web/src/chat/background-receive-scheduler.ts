@@ -87,6 +87,20 @@ export function backgroundSweepIntervalMs(input: {
   if (input.wakeWindowOpen || input.callInProgress) return BACKGROUND_SWEEP_INTERVAL_MS;
   return input.pushWake === "reachable" ? BACKGROUND_IDLE_PUSH_MS : BACKGROUND_IDLE_NO_PUSH_MS;
 }
+/**
+ * Whether a group appeared that the receive loop has not seen: a chat this
+ * device just joined. Its first messages and its name land within the next
+ * minute and may bring no push wake (this device subscribes to the group's
+ * pushes only once it holds the routing secret), so the caller opens the wake
+ * window and sweeps at once. `null` before the first list of a session (the
+ * groups a session starts with are not new). Walk 7 (2026-11-20): a joined
+ * group read "No messages yet" for over 15 s on iOS; the same long idle pause
+ * applies here.
+ */
+export function groupsAppeared(seen: ReadonlySet<string> | null, now: readonly string[]): boolean {
+  if (seen === null) return false;
+  return now.some((id) => !seen.has(id));
+}
 /** Uniform jitter applied to the pause, in both directions. */
 export const BACKGROUND_SWEEP_JITTER_MS = 1_000;
 /** Background requests in flight at once. */

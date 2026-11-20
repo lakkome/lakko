@@ -242,7 +242,7 @@ export interface PersistedMessage {
    */
   readonly membership?: PersistedMembership;
   /**
-   * ADR-0098 section 1 - on an incoming row only: what a report needs of the
+   * ADR-0099 section 1 - on an incoming row only: what a report needs of the
    * message, captured at receipt (the attestation verdict, the raw attested
    * plaintext, the sender leaf key and its device binding). Optional without
    * a version bump: a row without it is a message whose evidence is gone,
@@ -251,7 +251,7 @@ export interface PersistedMessage {
   readonly evidence?: PersistedEvidence;
 }
 
-/** ADR-0098 section 1 - the report evidence of one received message. */
+/** ADR-0099 section 1 - the report evidence of one received message. */
 export interface PersistedEvidence {
   readonly attestation: "verified" | "failed" | "absent";
   readonly plaintextB64: string;

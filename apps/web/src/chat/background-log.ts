@@ -302,7 +302,7 @@ export function summarizeGroupSlot(
   slot: PersistedGroup | undefined,
   syncedReadUpTo: bigint | null,
   ownPersonKeyB64: string | null = null,
-  /** ADR-0098 section 6 - a blocked author's row (kept, collapsed, in a
+  /** ADR-0099 section 6 - a blocked author's row (kept, collapsed, in a
    *  group) is never unread, so it raises no badge and no notification, and
    *  the preview reads as the collapsed row. Absent: nobody is blocked. */
   isBlockedAuthor?: (keyB64: string) => boolean,
@@ -431,7 +431,7 @@ export function eventToPersistedMessage(
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
-      // ADR-0098 section 1 - the report evidence, captured at receipt.
+      // ADR-0099 section 1 - the report evidence, captured at receipt.
       ...(e.evidence === undefined ? {} : { evidence: e.evidence }),
       // ADR-0092 — the content object, verbatim.
       ...(e.content === undefined ? {} : { content: e.content }),

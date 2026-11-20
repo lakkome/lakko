@@ -6,7 +6,7 @@ package me.lakko.app.moderation
 import java.util.Base64
 
 /*
- * ADR-0098 section 1 — attested chat messages.
+ * ADR-0099 section 1 — attested chat messages.
  *
  * A chat plaintext is `lakko/attested-message/v1\0 || 0x01 || sig(64) ||
  * envelope`, signed by the sending leaf over the group id and the envelope.

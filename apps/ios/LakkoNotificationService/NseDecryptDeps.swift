@@ -85,7 +85,7 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         ContinuityMirror.isSuperseded(senderKeyB64, in: ContinuityMirror.read(accountIdB64: accountIdB64))
     }
 
-    /// ADR-0098 section 6 — an account this account blocked, from the App
+    /// ADR-0099 section 6 — an account this account blocked, from the App
     /// Group mirror the APP writes (``BlockedSenderMirror``). READ-ONLY.
     func isBlockedSender(accountIdB64: String, senderKeyB64: String?) -> Bool {
         BlockedSenderMirror.dropsNotification(

@@ -186,12 +186,12 @@ public fun ChatListScreen(
     /** `docs/ux/identity-recovery.md` 7.2 — what the list says after a restore. */
     restoredChats: me.lakko.app.backup.RestoredChatsHint = me.lakko.app.backup.RestoredChatsHint.NONE,
     onOpenContacts: () -> Unit = {},
-    /** ADR-0098 section 4 - the row at the top of the list while the account
+    /** ADR-0099 section 4 - the row at the top of the list while the account
      *  is suspended opens the suspended screen again. */
     onShowSuspension: () -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
-    // ADR-0098 section 4 - read-only while the account is suspended.
+    // ADR-0099 section 4 - read-only while the account is suspended.
     val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // ADR-0087 section 5 — public groups and channels in search.
     // The groups and channels this device is in, read as snapshot state so a
@@ -930,7 +930,7 @@ private fun CreateMenu(
     onCreateGroup: () -> Unit,
     onCreateChannel: () -> Unit,
     onOpenSaved: (() -> Unit)? = null,
-    /** ADR-0098 section 4 - suspended: nothing to create, Saved only. */
+    /** ADR-0099 section 4 - suspended: nothing to create, Saved only. */
     readOnly: Boolean = false,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {

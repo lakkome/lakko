@@ -147,7 +147,7 @@ struct PersistedChannelPost: Codable, Equatable {
     /// as its envelope; `text` is then its feed line. `nil` for a chat post
     /// and for every row written before the log kept it.
     let contentEnvelopeB64: String?
-    /// ADR-0098 — the post as it was received (base64url ChannelPost wire),
+    /// ADR-0099 — the post as it was received (base64url ChannelPost wire),
     /// so a report from the channel's info can carry it as evidence. `nil`
     /// for a post logged before the field existed.
     let payloadB64: String?

@@ -174,7 +174,7 @@ lakko-mnemonic.workspace = true
 # roots), never native-tls.
 lettre.workspace = true
 
-# ADR-0098 section 4 (account suspension): the moderator list, the signed
+# ADR-0099 section 4 (account suspension): the moderator list, the signed
 # statement and its WebAuthn check, the account target hash and the appeal
 # seal's shape, checked on the internal listener and the appeal route.
 # Already in the lock file (services/moderation, both FFI crates).

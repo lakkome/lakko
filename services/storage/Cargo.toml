@@ -91,7 +91,7 @@ base64 = "0.22"
 # `DELETE /blob/{hex}` (pure; depends on lakko-crypto, thiserror, base64).
 lakko-vault.workspace = true
 
-# ADR-0098 step 5 - a moderator's BlobDelete statement is checked here
+# ADR-0099 step 5 - a moderator's BlobDelete statement is checked here
 # against the moderator list under the pinned root. Already in the lock file
 # (services/auth, services/moderation).
 lakko-moderation.workspace = true
@@ -108,7 +108,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 
 [dev-dependencies]
 lakko-anon-token-server = { workspace = true, features = ["testing"] }
-# ADR-0098 step 5: the statement route tests sign with a software key.
+# ADR-0099 step 5: the statement route tests sign with a software key.
 lakko-moderation = { workspace = true, features = ["software-authenticator"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -195,7 +195,7 @@ public class KtorAnonTokenIssuer(
                 AnonIssueOutcome.QuotaExhausted(retry.coerceAtLeast(1))
             }
             status == 503 && code == "anon-tokens-disabled" -> AnonIssueOutcome.Disabled
-            // ADR-0098 section 4 - a suspended account is issued `blob-read`
+            // ADR-0099 section 4 - a suspended account is issued `blob-read`
             // only; any other context is "not now".
             status == 403 && code == me.lakko.app.auth.ACCOUNT_SUSPENDED -> AnonIssueOutcome.Suspended
             else -> AnonIssueOutcome.Failed(
@@ -302,7 +302,7 @@ public object AnonTokens {
     @Volatile
     private var sessionSource: () -> AnonSession? = { null }
 
-    /** ADR-0098 section 4 - what the issuer answers this device now. */
+    /** ADR-0099 section 4 - what the issuer answers this device now. */
     private fun issuableNow(context: AnonTokenContext): Boolean =
         anonIssuable(context, suspended = me.lakko.app.auth.SuspensionGate.readOnly.value)
 
@@ -425,7 +425,7 @@ public object AnonTokens {
 }
 
 /**
- * ADR-0098 section 4 - while the account is suspended the issuer answers
+ * ADR-0099 section 4 - while the account is suspended the issuer answers
  * `blob-read` only (files in chats still open with the restricted session);
  * every other context is refused, so it is not asked for.
  */

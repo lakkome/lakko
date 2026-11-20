@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 section 2, UX `reporting-and-moderation.md` 2.2 - the one report
+ * ADR-0099 section 2, UX `reporting-and-moderation.md` 2.2 - the one report
  * sheet on this page and what it holds.
  *
  * The sheet is opened from many places (a message menu, a person's card, a

@@ -2041,7 +2041,7 @@ public class ChatViewModel(
             null
         }
 
-    /** ADR-0098 — the other person's account key (base64) in a one-to-one, else `null`. */
+    /** ADR-0099 — the other person's account key (base64) in a one-to-one, else `null`. */
     public fun oneToOnePeerPersonKey(): String? = repo.oneToOnePeerPersonKey(groupIdHex)
 
     public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String {

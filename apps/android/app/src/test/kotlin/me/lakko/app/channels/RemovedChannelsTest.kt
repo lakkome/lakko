@@ -27,7 +27,7 @@ import org.junit.Test
 import uniffi.lakko_ffi_uniffi.InfoSection
 
 /**
- * ADR-0098 step 5 — a channel Lakko's moderators removed (`410
+ * ADR-0099 step 5 — a channel Lakko's moderators removed (`410
  * channel-removed`): it is kept, its held posts stay readable, nothing that
  * writes is offered, reads stop to one per period, the line says "removed"
  * only when the moderation log proves it, and a normal answer restores it.

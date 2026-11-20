@@ -151,7 +151,7 @@ describe("AuthContext wiring", () => {
     expect(src.match(/setStateSignal\(/g)?.length).toBe(1);
     // `logout`, `forgetDevice`, the sign-out that follows a key reset or a
     // device removal elsewhere (`wipeAfterSignOut`), and the end of a
-    // suspended account that deleted itself (ADR-0098,
+    // suspended account that deleted itself (ADR-0099,
     // `finishSuspendedDeletion`).
     expect(src.match(/binding\.signedOut\(\);/g)?.length).toBe(4);
   });
@@ -240,7 +240,7 @@ describe("AuthContext wiring", () => {
     }
     // The only plain openings left: the landing itself, a landing without a
     // route (page-load restore, the sign-ups), the two post-reset paths,
-    // and the suspended landing called without a route (ADR-0098: the
+    // and the suspended landing called without a route (ADR-0099: the
     // routes that have one pass it and open through `flow.openStores`).
     expect(src.match(/openStoresFor\(/g)?.length).toBe(8);
   });

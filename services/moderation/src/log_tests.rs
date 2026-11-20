@@ -90,7 +90,7 @@ fn statement(id: u8, action: Action) -> Statement {
         target,
         reason_commitment: reason_commitment(Reason::Spam, &SALT),
         until_ms: 0,
-        // Within the 24 h a statement stays fresh (ADR-0098 F1).
+        // Within the 24 h a statement stays fresh (ADR-0099 F1).
         issued_at_ms: crate::panel::now_ms(),
         moderator_id: MODERATOR_ID,
         list_version: 2,
@@ -274,7 +274,7 @@ async fn every_refusal_leaves_the_log_untouched() {
         ),
         (
             // The listed moderator's id with another key: the assertion
-            // fails, which is a bad statement (ADR-0098 step 5, the one
+            // fails, which is a bad statement (ADR-0099 step 5, the one
             // check every service runs).
             body(
                 &signed(

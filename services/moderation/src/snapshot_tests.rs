@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Tests of the suspension snapshot builder, its reload and its route
-//! (ADR-0098 step 4), over the in-memory stores.
+//! (ADR-0099 step 4), over the in-memory stores.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

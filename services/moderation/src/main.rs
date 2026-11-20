@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `lakko-svc-moderation`: report intake and receipts (ADR-0098).
+//! `lakko-svc-moderation`: report intake and receipts (ADR-0099).
 //!
 //! ## Configuration
 //!
@@ -28,14 +28,14 @@
 //!   listener taking moderator statements. Secret unset: not started.
 //! - `LAKKO_MODERATION_{AUTH,DISCOVERY,CHANNELS,STORAGE}_INTERNAL_URL` +
 //!   `..._INTERNAL_SECRET` — where each service's actions are applied
-//!   (ADR-0098 step 5): Suspend and Lift at auth; names, search and group
+//!   (ADR-0099 step 5): Suspend and Lift at auth; names, search and group
 //!   handles at discovery; channel actions at channels; a blob delete at
 //!   storage. Both or neither per service. Unset: such a statement is logged
 //!   and answered `{"applied": false, "forwarded": false}`. At startup the
 //!   moderator list is pushed to every configured service (its list floor),
 //!   retried in the background until each answers.
 //! - `LAKKO_MODERATION_PANEL_BIND` (default `127.0.0.1:8099`) — the
-//!   moderators' panel (ADR-0098 step 5): sign-in with a security key and
+//!   moderators' panel (ADR-0099 step 5): sign-in with a security key and
 //!   the panel API at `/panel/api/*`. Started only with a moderator list.
 //! - `LAKKO_MODERATION_METRICS_BIND` — `/metrics` on its own localhost port
 //!   (ADR-0096; e.g. `127.0.0.1:9663`). Unset: no metrics listener.
@@ -46,7 +46,7 @@
 //!   this process never serves the code that drives a moderator's security
 //!   key; a production unit leaves it unset.
 //! - `LAKKO_MODERATION_SNAPSHOT_PERIOD_SECS` (default 86400, at least 60) —
-//!   how often a suspension snapshot is built (ADR-0098 step 4).
+//!   how often a suspension snapshot is built (ADR-0099 step 4).
 //! - `RUST_LOG`.
 
 #![forbid(unsafe_code)]

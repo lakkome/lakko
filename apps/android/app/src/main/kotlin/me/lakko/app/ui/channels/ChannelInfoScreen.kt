@@ -161,9 +161,9 @@ public fun ChannelInfoScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     val deleteScope = rememberCoroutineScope()
     var deleteError by remember { mutableStateOf<UiText?>(null) }
-    // ADR-0098 section 4 - no calls and no adding people while suspended.
+    // ADR-0099 section 4 - no calls and no adding people while suspended.
     val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsState()
-    // ADR-0098 step 5 — a channel moderators removed keeps only what reads
+    // ADR-0099 step 5 — a channel moderators removed keeps only what reads
     // the device, leaves or reports.
     val removedChannels by me.lakko.app.channels.RemovedChannels.state.collectAsState()
     val removal = removedChannels[channelId.lowercase()]
@@ -305,7 +305,7 @@ public fun ChannelInfoScreen(
                                     Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                                 }
                             }
-                            // ADR-0098 — a subscriber reports the channel.
+                            // ADR-0099 — a subscriber reports the channel.
                             InfoSection.REPORT -> {
                                 HorizontalDivider()
                                 Text(
@@ -487,7 +487,7 @@ public fun ChannelInfoScreen(
             confirm = LakkoDialogAction(t("channels.unsubscribe.action"), LakkoDialogTone.Danger) {
                 confirmUnsubscribe = false
                 if (removal != null && publisher) {
-                    // ADR-0098 step 5 — a removed channel's owner or
+                    // ADR-0099 step 5 — a removed channel's owner or
                     // publisher: as an Unsubscribe, without the service call.
                     me.lakko.app.channels.ChannelUnsubscribe.leaveRemoved(state, channelId)
                 } else {

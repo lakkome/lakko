@@ -314,7 +314,7 @@ final class ChannelPostSync: ObservableObject {
                 channels.endDeleted(channel.idHex)
                 continue
             } catch where ChannelsApiError.isChannelRemoved(error) {
-                // ADR-0098 step 5 — moderators removed it: nothing ends, the
+                // ADR-0099 step 5 — moderators removed it: nothing ends, the
                 // logged posts stay; the service is asked again once per
                 // standing period (``ChannelRemovalGate``).
                 continue

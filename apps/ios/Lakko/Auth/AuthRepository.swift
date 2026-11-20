@@ -852,7 +852,7 @@ public final class AuthRepository: ObservableObject {
         tokenProvider.onDeviceRevoked = { [weak self] accountIdB64 in
             Task { @MainActor in self?.handleDeviceRevoked(accountIdB64: accountIdB64) }
         }
-        // ADR-0098 step 3 — suspended mode follows auth's answers.
+        // ADR-0099 step 3 — suspended mode follows auth's answers.
         tokenProvider.onSuspended = { [weak self] landing, accountIdB64 in
             Task { @MainActor in self?.suspendedPairInstalled(landing, accountIdB64: accountIdB64) }
         }
@@ -943,7 +943,7 @@ public final class AuthRepository: ObservableObject {
         case .anon(let cachedUsername):
             identitySecrets = nil
             state = .anon(cachedUsername: cachedUsername)
-            // ADR-0098 step 3 — a suspended account that landed on this
+            // ADR-0099 step 3 — a suspended account that landed on this
             // device without its keys: the suspended screen alone, with the
             // kept `s1` / `r2`, until auth says the suspension is over.
             restoreSuspendedWithoutKeys(marker: marker, nowMs: nowMs)
@@ -955,7 +955,7 @@ public final class AuthRepository: ObservableObject {
             state = .anon(cachedUsername: cachedUsername)
         case .session(let account, let secrets):
             // The pair is installed before anything can make a bearer call.
-            // ADR-0098 step 3 — an account last seen suspended keeps its
+            // ADR-0099 step 3 — an account last seen suspended keeps its
             // `s1` in the access slot and the provider's suspended gate until
             // the launch refresh below says otherwise.
             let suspended = suspension.isFlagged(accountIdB64: account.accountIdB64)
@@ -1182,7 +1182,7 @@ public final class AuthRepository: ObservableObject {
         // before must not be sent now (its floor would end this session).
         logoutOwed.clear()
         tokenProvider.install(pair, accountIdB64: accountIdB64, suspended: suspended)
-        // ADR-0098 step 3 — the pair says whether the account is suspended:
+        // ADR-0099 step 3 — the pair says whether the account is suspended:
         // an `s1` pair enters suspended mode, any normal pair leaves it.
         if suspended {
             suspension.enter(accountIdB64: accountIdB64)
@@ -1196,7 +1196,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - Suspended mode (ADR-0098 step 3)
+    // MARK: - Suspended mode (ADR-0099 step 3)
 
     /// Suspended mode for the account signed in here
     /// (``SuspensionCenter``). The process-wide one; a test replaces it.
@@ -2165,7 +2165,7 @@ public final class AuthRepository: ObservableObject {
                 password: password
             )
         } catch let refused as AccountSuspendedError {
-            // ADR-0098 step 3 — the password was right; the account is
+            // ADR-0099 step 3 — the password was right; the account is
             // suspended.
             try bound.require()
             try landSuspended(refused, username: name.canonical, context: "login", writes: writes)
@@ -2349,7 +2349,7 @@ public final class AuthRepository: ObservableObject {
         do {
             assertion = try await passkeyCeremony(nil)
         } catch let refused as AccountSuspendedError {
-            // ADR-0098 step 3 — the passkey verified; the account is
+            // ADR-0099 step 3 — the passkey verified; the account is
             // suspended. The name: the one cached here, else the hint.
             try bound.require()
             let cached = sessionStore.load()
@@ -2628,7 +2628,7 @@ public final class AuthRepository: ObservableObject {
         } catch let stale as StaleBindingError {
             throw stale
         } catch let refused as AccountSuspendedError {
-            // ADR-0098 step 3 — the words were right; the account is
+            // ADR-0099 step 3 — the words were right; the account is
             // suspended.
             try bound.require()
             try landSuspended(refused, username: name.canonical, context: "three words", writes: writes)
@@ -3343,7 +3343,7 @@ public final class AuthRepository: ObservableObject {
                 newPassword: newPassword
             )
         } catch let refused as AccountSuspendedError {
-            // ADR-0098 step 3 — the phrase was right and the account is
+            // ADR-0099 step 3 — the phrase was right and the account is
             // suspended; the password was not changed.
             try bound.require()
             try landSuspended(refused, username: resolvedUsername, context: "recover", writes: writes)
@@ -3610,10 +3610,10 @@ public final class AuthRepository: ObservableObject {
         rotationAdoptRetry = nil
         sessionExpiredNotice = false
         protectStepOwed = false
-        // ADR-0098 step 3 — no session, no suspended mode; the account's
+        // ADR-0099 step 3 — no session, no suspended mode; the account's
         // flag stays for its next sign-in on this device.
         suspension.bind(accountIdB64: nil)
-        // ADR-0098 step 4 — the suspension marks of other accounts are
+        // ADR-0099 step 4 — the suspension marks of other accounts are
         // memory only; the next account on this device starts empty.
         SuspensionMarks.shared.reset()
         ChannelRemovals.shared.reset()
@@ -3656,7 +3656,7 @@ public final class AuthRepository: ObservableObject {
             // The persisted session token (relaunch restore input), through
             // the injected persistence so a test observes it.
             persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
-            // ADR-0098 step 3 — nothing of the account stays, its
+            // ADR-0099 step 3 — nothing of the account stays, its
             // suspended-mode flag included.
             suspension.forget(accountIdB64: cached.accountIdB64)
         }
@@ -4437,7 +4437,7 @@ public final class AuthRepository: ObservableObject {
         }
         Task { [weak self] in
             guard let self else { return }
-            // ADR-0098 step 3 — a suspended account sends nothing but the
+            // ADR-0099 step 3 — a suspended account sends nothing but the
             // suspension's own routes; the bind and the key record wait for
             // the landing after it.
             guard !self.tokenProvider.isSuspended else { return }
@@ -6288,7 +6288,7 @@ public final class AuthRepository: ObservableObject {
                 accountIdB64: account.accountIdB64,
                 username: account.username)
         }
-        // ADR-0098 step 3 — a suspended account signed in on a device without
+        // ADR-0099 step 3 — a suspended account signed in on a device without
         // its keys: Delete account is on its suspended screen.
         if let keyless = suspendedAccountWithoutKeys {
             return ProofAccount(
@@ -6299,7 +6299,7 @@ public final class AuthRepository: ObservableObject {
         return nil
     }
 
-    /// ADR-0098 step 3 — the suspended account this device signed in
+    /// ADR-0099 step 3 — the suspended account this device signed in
     /// without its keys (``landSuspended(_:username:context:writes:)``), or
     /// `nil`: no keys are needed to delete it.
     var suspendedAccountWithoutKeys: (accountIdBytes: Data, accountIdB64: String, username: String)? {
@@ -6310,7 +6310,7 @@ public final class AuthRepository: ObservableObject {
         return (bytes, account, username)
     }
 
-    /// ADR-0098 step 3 — the account Delete account deletes and the bearer
+    /// ADR-0099 step 3 — the account Delete account deletes and the bearer
     /// it sends: the signed-in account, else a suspended account signed in
     /// without its keys (the `s1`). `nil` when there is neither.
     public func accountForDeletion() -> (accountId: Data, sessionToken: String)? {
@@ -6397,7 +6397,7 @@ public final class AuthRepository: ObservableObject {
         do {
             result = try await proofLoginOperation(handle, password)
         } catch let refused as AccountSuspendedError {
-            // ADR-0098 step 3 — the password was right and the account is
+            // ADR-0099 step 3 — the password was right and the account is
             // suspended: the grant it carries is what Delete account needs.
             try installSuspendedProof(refused, for: account, context: "proof sign-in")
             return
@@ -6849,7 +6849,7 @@ public final class AuthRepository: ObservableObject {
                 accountId: accountId
             )
         } catch {
-            // ADR-0098 F3: an identity-proof refusal logs its code only.
+            // ADR-0099 F3: an identity-proof refusal logs its code only.
             if let code = IdentityProof.refusalCode(of: error) {
                 NSLog("genesis-attest (ADR-0036): mint refused (%@), publishing bundle without attestation", code)
             } else {

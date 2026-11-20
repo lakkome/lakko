@@ -49,7 +49,7 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case channelReact = "channel-react"
     /// ADR-0087 section 13a: one comment write under a channel post.
     case channelComment = "channel-comment"
-    /// ADR-0098 section 2: one report, `POST /moderation/report`.
+    /// ADR-0099 section 2: one report, `POST /moderation/report`.
     case report = "report"
 
     /// Tokens a context keeps on hand: about a day of use plus a reserve, so
@@ -73,7 +73,7 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         // ADR-0087 section 13a. Chosen, not measured; the web number.
         case .channelReact: return 4
         case .channelComment: return 4
-        // ADR-0098 section 2. Chosen, not measured.
+        // ADR-0099 section 2. Chosen, not measured.
         case .report: return 2
         // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
         // one-to-one call. Chosen, not measured.

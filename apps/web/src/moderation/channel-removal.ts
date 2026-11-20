@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 step 5, `docs/ux/reporting-and-moderation.md` section 3 ("A
+ * ADR-0099 step 5, `docs/ux/reporting-and-moderation.md` section 3 ("A
  * channel that was removed") - a channel Lakko's moderators removed, as this
  * page holds it.
  *
@@ -13,7 +13,7 @@
  * offered. What the conversation and the info then SAY depends on the
  * moderation log: `removed` ("This channel was removed for breaking Lakko's
  * rules.") only when `moderationChannelStanding` verified the removal
- * (C-97), `unavailable` ("This channel isn't available.") otherwise.
+ * (C-98), `unavailable` ("This channel isn't available.") otherwise.
  *
  * While a channel is held as removed, no request for it leaves the page,
  * except one check per standing reuse period (the snapshot's own reuse time,

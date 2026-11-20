@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderation log (ADR-0098 section 5).
+//! The moderation log (ADR-0099 section 5).
 //!
 //! An append-only RFC 6962 Merkle log, the KT log's construction
 //! (`lakko_transparency::merkle`), holding every moderator statement and
@@ -44,7 +44,7 @@ use crate::witness_client::WitnessClient;
 pub const LEAF_STATEMENT: u8 = lakko_moderation::snapshot::LOG_LEAF_STATEMENT;
 /// Leaf kind: a root-signed moderator list.
 pub const LEAF_MODERATOR_LIST: u8 = 2;
-/// Leaf kind: a suspension snapshot root (ADR-0098 step 4).
+/// Leaf kind: a suspension snapshot root (ADR-0099 step 4).
 pub const LEAF_SNAPSHOT_ROOT: u8 = lakko_moderation::snapshot::LOG_LEAF_SNAPSHOT_ROOT;
 
 /// Why a log operation failed.

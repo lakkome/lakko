@@ -419,7 +419,7 @@ function JoinGroupFlow() {
             </>
           }
         >
-          {/* ADR-0098 step 3: a suspended account asks to join nothing. */}
+          {/* ADR-0099 step 3: a suspended account asks to join nothing. */}
           <Show when={view() === "request" && !accountSuspended()}>
             <button
               type="button"

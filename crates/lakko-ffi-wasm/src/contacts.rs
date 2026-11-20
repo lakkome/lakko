@@ -2623,6 +2623,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// it only from the owner or an admin, when `knockKeyIsNewer`. Never
     /// render it.
     KnockKey = 36,
+    /// ADR-0098 — the sender's account was deleted. `payload` is the whole
+    /// envelope; check it with `verifyAccountDeletedEnvelope` against the
+    /// sender's account key resolved at receipt (C-68) and this
+    /// conversation's group id, then mark that person deleted for good.
+    /// Never render it.
+    AccountDeleted = 37,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -3008,6 +3014,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::KnockKey(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::KnockKey)
+        },
+        IncomingEnvelope::AccountDeleted(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::AccountDeleted)
         },
         IncomingEnvelope::GroupReactions(value) => WasmIncomingEnvelope {
             group_reactions: Some(value.into()),

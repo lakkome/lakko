@@ -82,7 +82,7 @@ enum WhoCanFindMeCopy {
         (scope.kind == .group ? "g:" : "c:") + scope.id.base64EncodedString()
     }
 
-    /// ADR-0098 step 5 — moderators removed this account from search.
+    /// ADR-0099 step 5 — moderators removed this account from search.
     static var hiddenByModeration: String { t("who_can_find_me.hidden_by_moderation") }
 
     /// What the screen shows while discovery refuses the Everyone record:

@@ -1080,7 +1080,7 @@ async fn login_finish_inner(
     // At the generation read with the state row (see `take_login_state`),
     // never at one read now. No row: the account was deleted meanwhile.
     let key_generation = key_generation.ok_or(crate::webauthn::ApiError::InvalidCredential)?;
-    // ADR-0098 section 4: a suspended account lands in suspended mode, not in
+    // ADR-0099 section 4: a suspended account lands in suspended mode, not in
     // a session. The password sign-in's refusal carries the fresh-auth grant
     // it would have minted (the only use left for it is deleting the account).
     let landing_grant = if expected_kind == KIND_PASSWORD {
@@ -1511,7 +1511,7 @@ pub(crate) async fn password_reset_finish(
     //    under, capture the recall anchor, then replace the envelope.
     let invalid = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
     let proven_generation = key_generation.ok_or_else(invalid)?;
-    // ADR-0098 section 4: a suspended account's password is not replaced; it
+    // ADR-0099 section 4: a suspended account's password is not replaced; it
     // lands in suspended mode.
     crate::suspension::refuse_landing_if_suspended(
         &state,
@@ -2164,7 +2164,7 @@ mod signup_login_limits_e2e_tests {
     /// A fresh real Ed25519 public key on every call: the key reset records
     /// the key it installs and refuses one that is not a usable point
     /// (ADR-0074), and a key belongs to one account forever in a database
-    /// the tests share across runs (ADR-0098 F3). The tag names the key in
+    /// the tests share across runs (ADR-0099 F3). The tag names the key in
     /// the test that asks for it; it does not make two calls agree.
     fn pk(_tag: u8) -> [u8; 32] {
         let mut seed = [0u8; 32];
@@ -2176,7 +2176,7 @@ mod signup_login_limits_e2e_tests {
         public
     }
 
-    /// The identity proof (ADR-0098 F3) of a key [`pk`] handed out, for the
+    /// The identity proof (ADR-0099 F3) of a key [`pk`] handed out, for the
     /// account `token` names; `None` for a key it did not hand out.
     fn proof_for(token: &str, pubkey: &[u8; 32]) -> Option<String> {
         let account: [u8; 16] = URL_SAFE_NO_PAD

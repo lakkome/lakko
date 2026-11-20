@@ -91,7 +91,7 @@
 //!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` / `_EMAIL_VAULT_STORE` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
 //!   the recovery email's limits, each `N/SECS` (defaults chosen, not
 //!   measured; see `src/limits.rs`).
-//! - `LAKKO_AUTH_INTERNAL_BIND` — the internal moderation listener (ADR-0098
+//! - `LAKKO_AUTH_INTERNAL_BIND` — the internal moderation listener (ADR-0099
 //!   section 4; default `127.0.0.1:8101`, loopback, never proxied).
 //! - `LAKKO_AUTH_INTERNAL_SECRET` — standard base64 of at least 16 bytes, the
 //!   `x-lakko-internal-secret` the moderation service presents; compared in
@@ -168,9 +168,9 @@
 //!   its access token and refresh credentials stop at auth at once (ADR-0074 section 2.1,
 //!   bearer-auth, no body)
 //! - `GET  /account/suspension`     — the account's suspension: `{suspended: false}` or reason,
-//!   end and appeal state (ADR-0098 section 4; the access token or the `s1` restricted session)
+//!   end and appeal state (ADR-0099 section 4; the access token or the `s1` restricted session)
 //! - `POST /account/suspension/appeal` — store the appeal sealed to the moderators, once
-//!   (ADR-0098 section 4; the access token or the restricted session)
+//!   (ADR-0099 section 4; the access token or the restricted session)
 //! - While an account is suspended every landing route and the refresh answer `403
 //!   account-suspended` with a restricted session and a refresh credential, every other bearer
 //!   route `403 account-suspended`; the restricted session opens `/account/suspension*`,
@@ -178,14 +178,14 @@
 //!   delete-account action only)
 //! - `POST /internal/moderation/statement` — on the INTERNAL listener only
 //!   (`LAKKO_AUTH_INTERNAL_BIND`): apply a moderator's Suspend, Lift or KeepSuspension
-//!   (ADR-0098 section 4; a statement older than a day or dated ahead is refused, F1)
+//!   (ADR-0099 section 4; a statement older than a day or dated ahead is refused, F1)
 //! - `POST /internal/moderation/list` — INTERNAL listener: raise the moderator-list floor
 //!   to a newer root-signed list (security fix F1) -> `{list_version}`
 //! - Every writer of the account's identity key (`/auth/genesis/attest`,
 //!   `/account/keys/reset/finish`, `/account/keys/rotate/finish`, `/account/recall/finish`)
 //!   requires `identity_proof_b64`, the key's own signature over the account id and the key
 //!   (`400 identity-proof-invalid`), and a key belongs to one account forever (`409
-//!   identity-key-taken`; ADR-0098 security fix F3)
+//!   identity-key-taken`; ADR-0099 security fix F3)
 //! - `POST /auth/session/bind-device` — exchange a pair that names no device for one naming
 //!   the caller's (ADR-0074 section 0.4, bearer-auth, body `device_id_b64` + `refresh_token`)
 //! - `POST /account/devices/revoke`  — remove another device: raise its session floor so its
@@ -681,7 +681,7 @@ async fn main() -> Result<()> {
     // their 60 days.
     let _email_pruner = recovery_email::spawn_pruner(pool.clone());
     let _notice_pruner = account_notices::spawn_pruner(pool.clone());
-    // ADR-0098 section 4 — suspensions whose end has passed.
+    // ADR-0099 section 4 — suspensions whose end has passed.
     let _suspension_sweep = suspension::spawn_sweep(pool.clone());
     // ADR-0032 guest lifecycle — an account nobody named within a day is
     // deleted. Off where sign-in by name is not configured.
@@ -701,7 +701,7 @@ async fn main() -> Result<()> {
         lakko_anon_token_server::spawn_issuance_pruner(pool.clone(), i.server.window_secs)
     });
 
-    // ADR-0098 section 4 — the internal listener the moderation service
+    // ADR-0099 section 4 — the internal listener the moderation service
     // forwards Suspend and Lift statements to. Loud-fail on a malformed
     // setting; off (one warning) when the secret or the root key is unset.
     let internal = suspension::load_internal()
@@ -777,7 +777,7 @@ fn build_app(state: AppState) -> Router {
         // a passkey, else a fresh-auth grant in the `x-lakko-fresh-grant`
         // header. The same transaction queues the purge of the discovery +
         // storage tiers (`purge.rs`). The route itself sits in the router a
-        // suspended account's restricted session reaches (ADR-0098 step 3).
+        // suspended account's restricted session reaches (ADR-0099 step 3).
         // A3 (GDPR data-portability) — export the account's auth-tier metadata
         // + auth-factor existence (never the factor secrets, invariant #1).
         .route("/account/export", get(webauthn::export_account))
@@ -900,7 +900,7 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
-    // ADR-0098 section 4 — the routes a suspended account may call, with its
+    // ADR-0099 section 4 — the routes a suspended account may call, with its
     // restricted session (`s1`) or an access token: read the suspension, send
     // one appeal, delete the account, sign out. The passkey action ceremony
     // is here too because it is how an account with a passkey deletes
@@ -971,7 +971,7 @@ fn build_app(state: AppState) -> Router {
     // matching public-key route is anonymous (public router below).
     let anon_token_routes = Router::new()
         .route("/auth/tokens", post(anon_tokens::issue_tokens))
-        // ADR-0098 step 3: a suspended account may draw `blob-read` passes
+        // ADR-0099 step 3: a suspended account may draw `blob-read` passes
         // with its restricted session; `issue_tokens` refuses every other
         // context to it.
         .route_layer(axum::middleware::from_fn_with_state(

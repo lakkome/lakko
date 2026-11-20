@@ -30,7 +30,7 @@ pub(crate) struct SignedRootWire {
 #[derive(Deserialize)]
 pub(crate) struct CosignReq {
     /// Which log the root belongs to: `"kt"` or `"moderation"` (witness v2,
-    /// ADR-0098 section 5). Required; missing or unknown is a 400.
+    /// ADR-0099 section 5). Required; missing or unknown is a 400.
     #[serde(default)]
     pub(crate) log: Option<String>,
     pub(crate) new_root: SignedRootWire,

@@ -13,7 +13,7 @@ import uniffi.lakko_ffi_uniffi.BlockPath
 import uniffi.lakko_ffi_uniffi.BlockVerdict
 
 /*
- * ADR-0098 section 6, UX `reporting-and-moderation.md` section 1 — the block
+ * ADR-0099 section 6, UX `reporting-and-moderation.md` section 1 — the block
  * register.
  *
  * The register itself lives in the account's synced state (`lakko-sync`),

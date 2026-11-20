@@ -2021,7 +2021,7 @@ pub(crate) async fn password_finish(
     let ticket = load_ticket(&state, &on.config, &req.ticket).await?;
     require_password_mode(&ticket)?;
     let account_id = ticket.account_id;
-    // ADR-0098 section 4: a suspended account's password is not replaced and
+    // ADR-0099 section 4: a suspended account's password is not replaced and
     // the ticket is not spent; the account lands in suspended mode.
     let generation_now = crate::session::key_generation_of(&state.db, &account_id)
         .await

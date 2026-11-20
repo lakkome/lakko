@@ -192,7 +192,7 @@ public class ChannelPostSync(
         val reads = ArrayList<ChannelRead>()
 
         for (channel in readable) {
-            // ADR-0098 step 5 — a removed channel keeps its slot; its posts
+            // ADR-0099 step 5 — a removed channel keeps its slot; its posts
             // are asked once per period only.
             if (!me.lakko.app.channels.RemovedChannels.mayAsk(channel.idHex)) continue
             val deps = channelSyncDeps(client, channel) { id, meta -> channels.adoptSharedMeta(id, meta) }

@@ -1074,7 +1074,7 @@ pub enum SyncEntry {
     /// The account's own choice in one poll (ADR-0092 section 3.6).
     /// Appended last.
     PollChoice(super::poll_choice::PollChoiceEntry),
-    /// A person the account blocked or unblocked (ADR-0098 section 6).
+    /// A person the account blocked or unblocked (ADR-0099 section 6).
     /// Appended last.
     Blocked(super::blocked::BlockedEntry),
 }
@@ -1149,7 +1149,7 @@ pub enum RegisterKey {
     /// The own-choice register of this poll (conversation, poll message id).
     /// Appended last, so the register order of every older kind is unchanged.
     PollChoice(ConversationRef, i64),
-    /// The block register of this account key (ADR-0098 section 6).
+    /// The block register of this account key (ADR-0099 section 6).
     /// Appended last.
     Blocked([u8; super::blocked::BLOCKED_KEY_LEN]),
 }

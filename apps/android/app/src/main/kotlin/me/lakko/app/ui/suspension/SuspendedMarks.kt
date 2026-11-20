@@ -20,7 +20,7 @@ import me.lakko.app.l10n.t
 import me.lakko.app.moderation.SuspensionMarks
 
 /*
- * ADR-0098 step 4, UX `reporting-and-moderation.md` section 3 — the marks a
+ * ADR-0099 step 4, UX `reporting-and-moderation.md` section 3 — the marks a
  * screen shows for ANOTHER person's suspended account. Each asks
  * [SuspensionMarks] when the screen shows the person; an answer it cannot
  * confirm in the moderation log reads as "not suspended".

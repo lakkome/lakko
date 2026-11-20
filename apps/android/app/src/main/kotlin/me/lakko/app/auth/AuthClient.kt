@@ -894,7 +894,7 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0098 section 4 - a suspended account (the `s1` restricted session)
+    // ADR-0099 section 4 - a suspended account (the `s1` restricted session)
     // -----------------------------------------------------------------
 
     /** `GET /account/suspension` with [bearer] (the `s1`, or an access token). */
@@ -1021,7 +1021,7 @@ public class AuthClient(
         freshGrant: String,
         seed: ByteArray,
         newSignaturePubkey: ByteArray,
-        /** ADR-0098 F3: `signIdentityProof` by the NEW key over the account id. */
+        /** ADR-0099 F3: `signIdentityProof` by the NEW key over the account id. */
         identityProof: ByteArray,
     ): KeyResetResult {
         requireSession(sessionToken)
@@ -1140,7 +1140,7 @@ public class AuthClient(
         newPassword: ByteArray,
         newSeed: ByteArray,
         newSignaturePubkey: ByteArray,
-        /** ADR-0098 F3: `signIdentityProof` by the NEW key over [accountId]. */
+        /** ADR-0099 F3: `signIdentityProof` by the NEW key over [accountId]. */
         identityProof: ByteArray,
         deviceId: ByteArray? = null,
         /** ADR-0075 section 8: the 64-byte seed of the OLD recovery phrase.
@@ -1362,7 +1362,7 @@ public class AuthClient(
         newSignaturePubkey: ByteArray,
         supersessionProof: ByteArray,
         revokeDeviceIds: List<ByteArray>,
-        /** ADR-0098 F3: `signIdentityProof` by the NEW key over the account id. */
+        /** ADR-0099 F3: `signIdentityProof` by the NEW key over the account id. */
         identityProof: ByteArray,
         /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
         phraseSaved: Boolean = false,
@@ -2167,7 +2167,7 @@ public class AuthClient(
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
 
-        /** ADR-0098 F3: an identity proof is one Ed25519 signature. */
+        /** ADR-0099 F3: an identity proof is one Ed25519 signature. */
         public const val IDENTITY_PROOF_LEN: Int = 64
 
         private fun requireIdentityProof(proof: ByteArray) {
@@ -2208,7 +2208,7 @@ public class AuthClient(
 /** The length of the error body an [AuthHttpError] keeps. */
 private const val ERROR_BODY_KEEP: Int = 512
 
-/** The status of a suspension refusal (ADR-0098 section 4). */
+/** The status of a suspension refusal (ADR-0099 section 4). */
 private const val HTTP_FORBIDDEN_SUSPENDED: Int = 403
 
 private suspend fun HttpResponse.readBodyOrNull(): String? = try {
@@ -2507,7 +2507,7 @@ public class AuthHttpError(
     public val code: String? = null,
     /** The wait a `429` states (`retry_after_secs` or `Retry-After`). */
     public val retryAfterSecs: Long? = null,
-    /** ADR-0098 section 4 - a landing or the refresh route answered `403
+    /** ADR-0099 section 4 - a landing or the refresh route answered `403
      *  account-suspended` with the restricted session and a refresh
      *  credential (read from the whole body, before [body] is truncated). */
     public val suspended: SuspendedCredentials? = null,

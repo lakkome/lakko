@@ -345,7 +345,7 @@ public final class WebauthnClient {
             )
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            // ADR-0098 step 3 — the passkey sign-in of a suspended account:
+            // ADR-0099 step 3 — the passkey sign-in of a suspended account:
             // read before the body is truncated.
             if let suspended = AccountSuspendedError.from(status: httpResponse.statusCode, body: data) {
                 throw suspended

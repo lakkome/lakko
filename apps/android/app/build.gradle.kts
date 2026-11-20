@@ -288,7 +288,7 @@ android {
             "${(project.findProperty("lakko.release.check.dev.override") as String?)?.toBoolean() ?: false}",
         )
 
-        // ADR-0098 — the pinned root key the moderator list is verified under.
+        // ADR-0099 — the pinned root key the moderator list is verified under.
         //
         // `LAKKO_MODERATION_ROOT_KEY` — base64url (no-pad) of the 32-byte
         // Ed25519 offline moderation root key. Empty when unset → reporting
@@ -298,7 +298,7 @@ android {
             "LAKKO_MODERATION_ROOT_KEY",
             "\"${project.findProperty("lakko.moderation.root.key") as String? ?: ""}\"",
         )
-        // ADR-0098 step 4 — the moderation log's operator key.
+        // ADR-0099 step 4 — the moderation log's operator key.
         //
         // `LAKKO_MODERATION_LOG_KEY` — base64url (no-pad) of the 32-byte
         // Ed25519 key the moderation log's roots are signed with. Empty when

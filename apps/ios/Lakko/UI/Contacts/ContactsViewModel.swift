@@ -105,7 +105,7 @@ public final class ContactsViewModel: ObservableObject {
     private weak var chatRepository: ChatRepository?
     private var cancellables: Set<AnyCancellable> = []
 
-    /// ADR-0098 step 4 — the repository's state with the requests of
+    /// ADR-0099 step 4 — the repository's state with the requests of
     /// senders known suspended left out of `pending`.
     static func hidingSuspended(_ state: ContactsState, isSuspended: (Data) -> Bool) -> ContactsState {
         let visible = SuspensionMarkRules.visibleRequests(state.pending, isSuspended: isSuspended)
@@ -142,7 +142,7 @@ public final class ContactsViewModel: ObservableObject {
             chatRepository?.oneToOneConversation(
                 contactKey: contact.request.fromPubkey, linkedGroupIdHex: contact.groupIdHex)
         }
-        // ADR-0098 step 4 — a held request whose sender the moderation log
+        // ADR-0099 step 4 — a held request whose sender the moderation log
         // shows suspended is not shown (it is kept, and comes back when the
         // suspension ends); the senders are asked about as requests arrive.
         let marks = SuspensionMarks.shared
@@ -446,7 +446,7 @@ public final class ContactsViewModel: ObservableObject {
         conversation(contact)
     }
 
-    /// ADR-0098 / UX 2.1 — Report from a person's card: the person, nothing
+    /// ADR-0099 / UX 2.1 — Report from a person's card: the person, nothing
     /// included at first, their own messages in the one-to-one offered, and
     /// `Also block` checked.
     public func reportRequest(for contact: AcceptedContact, name: String) -> ReportRequest {
@@ -460,7 +460,7 @@ public final class ContactsViewModel: ObservableObject {
             followUp: .block, personName: name)
     }
 
-    /// ADR-0098 — Report a contact request: the requester, with the request
+    /// ADR-0099 — Report a contact request: the requester, with the request
     /// itself included (its wire as it was received; a row stored before
     /// the wire was kept carries none).
     public func reportRequest(forRequest request: IncomingContactRequest, name: String) -> ReportRequest {
@@ -471,7 +471,7 @@ public final class ContactsViewModel: ObservableObject {
             followUp: .block, personName: name)
     }
 
-    /// ADR-0098 / UX 1.2 — block a person from a card or a request row.
+    /// ADR-0099 / UX 1.2 — block a person from a card or a request row.
     public func block(accountKey: Data) { BlockList.shared.block(accountKey) }
 
     /// UX 1.3.

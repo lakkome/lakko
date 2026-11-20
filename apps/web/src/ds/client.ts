@@ -457,7 +457,7 @@ export class DsClient implements StatementSender, CommitSender {
     },
     signer: ProofSigner | null,
   ): Promise<Response> {
-    // ADR-0098 step 3: a suspended account sends nothing from this device.
+    // ADR-0099 step 3: a suspended account sends nothing from this device.
     // The Delivery Service does not know accounts, so the client honours the
     // suspension: every write is refused here as a transport failure (the
     // loops back off and try again once the suspension has ended); reads go

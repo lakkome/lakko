@@ -464,7 +464,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     if (entry === undefined) return;
     // A group this device is no longer in can never carry another message.
     if (readIsActive(entry.group) === false) return;
-    // ADR-0098 section 6 - no profile update goes to a blocked person.
+    // ADR-0099 section 6 - no profile update goes to a blocked person.
     if (signalsWithheldFrom(entry.group, chats.identity())) return;
     // ADR-0060 / ADR-0074 section 3.5a rule 3 - what the grants composed
     // below carry, read BEFORE composing: recorded only once the publish

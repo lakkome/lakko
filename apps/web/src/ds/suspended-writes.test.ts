@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0098 step 3: while this device is in suspended mode the DS client
+ * ADR-0099 step 3: while this device is in suspended mode the DS client
  * sends nothing (the Delivery Service does not know accounts, so the client
  * honours the suspension). A write is refused before it leaves, as a
  * transport failure the loops back off from; a read goes out as before.

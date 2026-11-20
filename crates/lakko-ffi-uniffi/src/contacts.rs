@@ -2593,6 +2593,12 @@ pub enum FfiIncomingEnvelopeKind {
     /// keep it only from the owner or an admin resolved at receipt, when
     /// `knockKeyIsNewer`. Never render it. Appended last.
     KnockKey,
+    /// ADR-0098 — the sender's account was deleted. `payload` is the whole
+    /// envelope; check it with `verifyAccountDeletedEnvelope` against the
+    /// sender's account key resolved at receipt (C-68) and this
+    /// conversation's group id, then mark that person deleted for good.
+    /// Never render it. Appended last.
+    AccountDeleted,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2858,6 +2864,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::KnockKey(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::KnockKey)
+        },
+        IncomingEnvelope::AccountDeleted(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::AccountDeleted)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),

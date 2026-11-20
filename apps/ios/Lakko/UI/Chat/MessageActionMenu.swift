@@ -125,7 +125,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     case closeChecklist
     /// UX 9.3 — a location's coordinates to the clipboard.
     case copyCoordinates
-    /// ADR-0098 / UX `reporting-and-moderation.md` 2.1 — report this message's
+    /// ADR-0099 / UX `reporting-and-moderation.md` 2.1 — report this message's
     /// author (a channel post: the channel). On someone else's message only;
     /// destructive group.
     case report
@@ -246,13 +246,13 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
             if canEdit { actions.append(.edit) }
             actions.append(.delete)
         }
-        // ADR-0098 — Report, in the destructive group, last; never on an own
+        // ADR-0099 — Report, in the destructive group, last; never on an own
         // message (an own message is the one `canEditOrDelete` is about).
         if canReport && !canEditOrDelete { actions.append(.report) }
         return actions
     }
 
-    /// ADR-0098 step 3 — the rows a suspended account is offered: none that
+    /// ADR-0099 step 3 — the rows a suspended account is offered: none that
     /// sends (Reply, Forward, Edit, Delete, Ban, and the ADR-0092 poll and
     /// checklist rows). A control the server or the device would refuse
     /// afterwards is not offered at all.
@@ -479,7 +479,7 @@ final class MessageMenuPresenter: ObservableObject {
     /// second request can only come from a gesture that was already in flight.
     func open(_ request: MessageMenuRequest) {
         guard self.request == nil else { return }
-        // ADR-0098 step 3 — while suspended, no sending row and no reaction
+        // ADR-0099 step 3 — while suspended, no sending row and no reaction
         // bar, whichever screen opened the menu.
         let request = request.narrowed(suspended: isSuspended())
         // The feedback `.contextMenu` used to give at the moment it opened. A

@@ -79,14 +79,14 @@ export function ChannelInfo(props: {
   const publishes = (): boolean => role() === "owner" || role() === "publisher";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(props.id);
   const handle = (): string | null => channelHandleOf(props.id);
-  // ADR-0098 step 5: a channel moderators removed.
+  // ADR-0099 step 5: a channel moderators removed.
   const removalLine = (): ReturnType<typeof channelRemovalLine> => channelRemovalLine(props.id);
   const removed = (): boolean => removalLine() !== null;
 
   const sections = createMemo((): readonly InfoSection[] => {
     const r = role();
     if (r === null) return [];
-    // ADR-0098 step 3: a suspended account invites nobody; step 5: a
+    // ADR-0099 step 3: a suspended account invites nobody; step 5: a
     // removed channel offers nothing that reaches the service. 2026-11-13
     // (UX second-device.md section 4a): on a device of the owner or a
     // publisher that cannot post here, a subscriber's blocks and an empty
@@ -209,7 +209,7 @@ export function ChannelInfo(props: {
 
   const [handleCopy, setHandleCopy] = createSignal<"idle" | "copied" | "failed">("idle");
 
-  /** ADR-0098 UX 2.1 - report the channel from its info; `Unsubscribe` in
+  /** ADR-0099 UX 2.1 - report the channel from its info; `Unsubscribe` in
    *  the sheet ends the subscription as the control below does, without a
    *  second question (the checkbox is the choice). */
   function reportChannel(): void {
@@ -510,7 +510,7 @@ export function ChannelInfo(props: {
         <MembersCanFindMeSwitch kind="channel" idHex={props.id} />
       </Show>
 
-      {/* ADR-0098 UX 2.1 - a subscriber reports the channel (the shared
+      {/* ADR-0099 UX 2.1 - a subscriber reports the channel (the shared
           rule), before Unsubscribe. */}
       <Show when={has("report")}>
         <section class="lk-card danger">

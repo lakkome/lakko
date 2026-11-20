@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0098 section 5 - the moderation log: an append-only Merkle log of
+-- ADR-0099 section 5 - the moderation log: an append-only Merkle log of
 -- every moderator statement and every moderator list, signed by this
 -- service's own operator key and co-signed by the witnesses (witness v2,
 -- log `moderation`).

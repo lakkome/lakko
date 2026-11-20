@@ -19,7 +19,7 @@ struct CallInvitationCard: View {
     let onJoin: () -> Void
 
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0098 step 3 — a suspended account joins no calls: no Join pill.
+    /// ADR-0099 step 3 — a suspended account joins no calls: no Join pill.
     @Environment(\.accountSuspended) private var accountSuspended
 
     var body: some View {

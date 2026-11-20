@@ -297,7 +297,7 @@ export class AuthHttpError extends Error {
 }
 
 /**
- * ADR-0098 section 4: the account is suspended. Auth answers `403
+ * ADR-0099 section 4: the account is suspended. Auth answers `403
  * {"error":"account-suspended"}`; a route that authenticated the person
  * (a sign-in, a recovery, the refresh) adds the restricted session, which
  * `landing` carries. The credentials never reach `body` or the message: an

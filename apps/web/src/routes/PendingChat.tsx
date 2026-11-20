@@ -201,7 +201,7 @@ export default function PendingChat(): JSX.Element {
             </For>
           </ol>
             </div>
-          {/* ADR-0098 step 3: nothing is queued for a contact while suspended. */}
+          {/* ADR-0099 step 3: nothing is queued for a contact while suspended. */}
           <SuspendedComposerLine />
           <form
             class="lk-composer"

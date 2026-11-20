@@ -95,7 +95,7 @@ pub(crate) const MAX_KEEP_BODY: usize = 32 * 1024;
 /// | 400 | `blob-length-mismatch` | the body is not `Content-Length` bytes |
 /// | 400 | `keep-malformed` | the keep body is not `{"ids": [hex, ...]}` with 1..=256 ids |
 /// | 404 | `blob-not-found` | no such blob (never stored, deleted, expired, or deleted by a moderator) |
-/// | 410 | `blob-removed` | an upload of an id a moderator deleted (ADR-0098) |
+/// | 410 | `blob-removed` | an upload of an id a moderator deleted (ADR-0099) |
 /// | 403 | `blob-delete-refused` | any delete refusal (no row, no key, bad or stale proof) |
 /// | 507 | `storage-full` | the upload would leave less free disk than `LAKKO_STORAGE_MIN_FREE_BYTES` (checked before the pass is charged) |
 /// | 503 | `blob-node-unavailable` | the row names another storage node (forwarding is not built) |
@@ -413,7 +413,7 @@ async fn stream_into(
 /// be exactly `Content-Length` bytes. A first upload writes the row with the
 /// delete key and the optional idle life; a repeated upload is an access and
 /// keeps the first key and idle life. An id a moderator deleted is refused
-/// with `410 blob-removed` before the body is read (ADR-0098), and again if
+/// with `410 blob-removed` before the body is read (ADR-0099), and again if
 /// the delete lands while the body streams (the stored file is then removed).
 pub(crate) async fn put_blob(
     State(state): State<AppState>,
@@ -590,7 +590,7 @@ async fn download_blob(
     Ok(response)
 }
 
-/// A blob's ciphertext for the moderators' panel (ADR-0098 step 5), served
+/// A blob's ciphertext for the moderators' panel (ADR-0099 step 5), served
 /// on storage's internal listener behind its shared secret: no pass, and not
 /// an access, so a moderator looking at evidence does not extend the blob's
 /// life. Refusals as `GET /blob/{hex}`: `400 blob-id-malformed`, `404

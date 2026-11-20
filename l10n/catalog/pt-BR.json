@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "O servidor não ativou o suporte a chaves de acesso.",
+      "text": "As chaves de acesso não estão disponíveis agora.",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "Já tem uma conta? {link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "Sua senha nunca sai do seu dispositivo.",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "Aparece para seus contatos. Deixe em branco para mostrar seu nome de usuário.",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "O servidor devolveu um backup alterado ou desatualizado. Sua conta está segura; continuamos sem restaurar os dados antigos.",
+      "text": "O Lakko recebeu uma cópia desatualizada dos seus dados salvos e não a usou. Sua conta está segura.",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "O Lakko está em beta, e sua segurança ainda não foi verificada por uma auditoria independente. Não dependa dele quando sua segurança estiver em jogo.",
+      "text": "O Lakko está em beta. Uma auditoria de segurança independente ainda não terminou; estamos trabalhando nisso. Acreditamos que o Lakko é seguro para usar, mas ainda não podemos provar. Ao continuar, você aceita esse risco.",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "O servidor recusou o pedido. Tente novamente mais tarde.",
+      "text": "O Lakko não conseguiu fazer isso agora. Tente de novo mais tarde.",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "Este canal não existe no servidor.",
+      "text": "Este canal não existe mais.",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "O servidor está sem espaço para novos arquivos agora. Tente mais tarde.",
+      "text": "O Lakko está sem espaço para arquivos novos agora. Tente de novo mais tarde.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "Criptografando \"{name}\"…",
+      "text": "Preparando \"{name}\"…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "Criptografando \"{name}\" ({index}/{total})…",
+      "text": "Preparando \"{name}\" ({index}/{total})…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "Criptografando e enviando…",
+      "text": "Enviando…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "Não foi possível conectar ao servidor. Verifique sua conexão.",
+      "text": "Não foi possível conectar ao Lakko. Verifique sua conexão.",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "O servidor está sem espaço para novos arquivos agora. Tente mais tarde.",
+      "text": "O Lakko está sem espaço para arquivos novos agora. Tente de novo mais tarde.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "Qualquer pessoa que abrir um dos seus links pode enviar um pedido de contato até ele expirar ou ser totalmente usado.",
+      "text": "Quem abrir um dos seus links vira seu contato, até o link expirar ou se esgotar.",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "Quem escanear este código poderá enviar a você um pedido de contato.",
+      "text": "Quem escanear este código vira seu contato.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "O servidor está sem espaço para novos arquivos agora. Tente mais tarde.",
+      "text": "O Lakko está sem espaço para arquivos novos agora. Tente de novo mais tarde.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "Se você esquecer a senha ou perder este celular, é assim que você volta a entrar.",
+      "text": "Se você esquecer sua senha ou perder este dispositivo, é assim que você volta a entrar.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "Se você esquecer a senha ou perder este celular, não poderá voltar a entrar nesta conta.",
+      "text": "Se você esquecer sua senha ou perder este dispositivo, não conseguirá voltar a esta conta.",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "Não foi possível restaurar sua identidade. Tente novamente.",
+      "text": "Não foi possível restaurar sua conta. Tente de novo.",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Mensagens, chamadas e solicitações de contato têm criptografia de ponta a ponta: só as pessoas da conversa podem lê-las. Sua senha nunca sai do seu dispositivo, e cada contato tem um número de segurança que você pode comparar pessoalmente.",
+      "text": "Mensagens, chamadas e pedidos de contato são criptografados de ponta a ponta: só as pessoas da conversa podem lê-los. Cada contato tem um número de segurança que vocês podem comparar pessoalmente.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "Sair mantém seus dados neste dispositivo. Esquecer este dispositivo os remove; você só consegue voltar com outro dispositivo conectado, uma chave de acesso que restaura as chaves da conta ou sua frase de recuperação. Excluir conta apaga a conta no servidor e limpa este dispositivo; não é possível desfazer.",
+      "text": "Sair mantém suas mensagens neste dispositivo. Esquecer este dispositivo as remove deste dispositivo; sua conta continua. Excluir conta apaga sua conta para sempre.",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "Isso apaga sua identidade no servidor — nome de usuário, chaves, fatores de recuperação e backup — e encerra sua sessão em todos os lugares. Suas mensagens locais também são apagadas deste dispositivo. Não é possível desfazer.",
+      "text": "Sua conta, seu nome de usuário, seus contatos e suas mensagens serão excluídos, e todos os dispositivos serão desconectados. Isso não pode ser desfeito.",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "As publicações dos canais podem chegar atrasadas enquanto o Lakko estiver fechado.",
+      "text": "Enquanto o Lakko está fechado, as notificações de novas publicações de canais podem chegar com atraso.",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "Erro do servidor ({status}).",
+      "text": "Algo deu errado ({status}). Tente de novo.",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "O dispositivo que tem a chave privada correspondente não vai mais conseguir entrar com ela. Não é possível desfazer.",
+      "text": "Você não poderá mais entrar com esta chave de acesso. Isso não pode ser desfeito.",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "Escolha uma nova senha para entrar. Este dispositivo já tem as chaves da sua conta, então você só digita a nova senha.",
+      "text": "Escolha uma nova senha para entrar.",
       "status": "machine"
     },
     "settings.password.title": {

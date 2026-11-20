@@ -68,7 +68,7 @@ export function persistedWithOps(
   const reactions = reactionsToPersisted(state.held);
   const opId = state.lastOpId === undefined ? {} : { lastOpId: String(state.lastOpId) };
   if (state.deleted === true) {
-    // ADR-0098 section 1 - the evidence holds the message's plaintext, so a
+    // ADR-0099 section 1 - the evidence holds the message's plaintext, so a
     // deleted row keeps none of it (the reason the text is emptied). The
     // invitation card goes with the text too: it holds the link's secret.
     const { evidence: _evidence, channelInviteB64: _card, ...rest } = m;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0098 end to end: a bound device sends an attested message in a real
+//! ADR-0099 end to end: a bound device sends an attested message in a real
 //! MLS group, the recipient reports it, a moderator opens the report and
 //! checks that the reported account wrote the message.
 

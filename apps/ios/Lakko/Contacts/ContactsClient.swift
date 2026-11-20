@@ -1555,7 +1555,7 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// when it came that way and not through the mailbox: the Requests row
     /// says "Via {group}". `nil` for a mailbox request.
     public let viaGroupIdHex: String?
-    /// ADR-0098 — the signed request wire as received, kept so a report on
+    /// ADR-0099 — the signed request wire as received, kept so a report on
     /// the request can carry it as evidence. `nil` for a row stored before
     /// the field existed.
     public let wire: Data?

@@ -188,7 +188,7 @@ const HELD_WELCOME_RETRY_MS = 30_000;
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
 
-/** ADR-0098 section 6 - whether the shared block rule drops this request:
+/** ADR-0099 section 6 - whether the shared block rule drops this request:
  *  its sender's account key is in the block register. */
 function requestBlocked(request: IncomingContactRequest): boolean {
   return (
@@ -196,7 +196,7 @@ function requestBlocked(request: IncomingContactRequest): boolean {
   );
 }
 
-/** ADR-0098 step 4, UX 3 - whether a request is dropped unseen because the
+/** ADR-0099 step 4, UX 3 - whether a request is dropped unseen because the
  *  moderation log confirms its sender's account is suspended. Waits a few
  *  seconds at most; a timeout or an unchecked standing keeps the request. */
 async function requestFromSuspended(request: IncomingContactRequest): Promise<boolean> {
@@ -348,10 +348,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (opened === null) return true;
     if (scope !== polled) return false;
     const { request, row } = opened;
-    // ADR-0098 section 6 - a request through a group from a blocked account:
+    // ADR-0099 section 6 - a request through a group from a blocked account:
     // dropped unseen, and the row is handled.
     if (requestBlocked(request)) return true;
-    // ADR-0098 step 4 - a request from an account the log confirms is
+    // ADR-0099 step 4 - a request from an account the log confirms is
     // suspended: dropped unseen too.
     if (await requestFromSuspended(request)) return true;
     if (scope !== polled) return false;
@@ -921,7 +921,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         return null;
       };
       const undecided = target.undecidedLinkRequests();
-      // ADR-0098 step 4 - a held request is decided only after its sender's
+      // ADR-0099 step 4 - a held request is decided only after its sender's
       // standing is asked again (the account may have been suspended since
       // it arrived, or the check timed out then): every sender at once,
       // under one bound. Only a verified suspension drops one.
@@ -1330,7 +1330,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     let joined = false;
     const joinedEntries: ActiveGroup[] = [];
     let failed = false;
-    // ADR-0098 step 4 - the senders' standings for the whole batch, asked
+    // ADR-0099 step 4 - the senders' standings for the whole batch, asked
     // at once under one bound (a slow moderation server holds the poll a few
     // seconds at most, not a few seconds per request).
     const standings = await standingsWithin(
@@ -1343,10 +1343,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       for (const ev of events) {
         if (ev.kind === "contact-request") {
           const senderB64 = base64Encode(ev.request.fromPubkey);
-          // ADR-0098 section 6 - a request from a blocked account is dropped
+          // ADR-0099 section 6 - a request from a blocked account is dropped
           // unseen, whichever way it came (the inbox, an invite link).
           if (requestBlocked(ev.request)) continue;
-          // ADR-0098 step 4 - and one from an account the moderation log
+          // ADR-0099 step 4 - and one from an account the moderation log
           // confirms is suspended (verified only; never on a timeout).
           if (dropsRequestFrom(standings.get(senderB64) ?? "unknown")) continue;
           const action = rowAction(ev.reachPk, () => [senderB64]);
@@ -1737,7 +1737,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   });
 
   const api: MailboxApi = {
-    // ADR-0098 section 6 - a request from a blocked account is never listed,
+    // ADR-0099 section 6 - a request from a blocked account is never listed,
     // also one that was held before the block was written.
     pending: () =>
       pending().filter((r) => !requestBlocked(r) && !isSuspendedKeyB64(base64Encode(r.fromPubkey))),
