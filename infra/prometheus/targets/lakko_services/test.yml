@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Lakko services on the test stack (P4) through test.lakko.me:9643. It runs
+# obfs-proxy and no transparency or witness (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/lakko_services/test.yml by infra/monitoring/setup-monitoring.sh
+# only when "test" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: auth, __metrics_path__: /auth/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: ds, __metrics_path__: /ds/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: discovery, __metrics_path__: /discovery/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: storage, __metrics_path__: /storage/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: push-gw, __metrics_path__: /push-gw/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: channels, __metrics_path__: /channels/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: gif-proxy, __metrics_path__: /gif-proxy/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: sfu, __metrics_path__: /sfu/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, service: obfs-proxy, __metrics_path__: /obfs-proxy/metrics}

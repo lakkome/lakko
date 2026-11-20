@@ -78,6 +78,10 @@ pub fn build_router(state: Arc<AppState>, cfg: Config, jwks: JwksCache) -> Route
         )
         .route("/v1/connect", get(signaling::ws_handler))
         .route("/v1/rooms/{room}", get(signaling::room_state_handler))
+        // Requests by route template, method and status class (ADR-0096).
+        // The WebSocket upgrade ends at 101 while the socket lives on, so its
+        // duration says nothing; peers_active counts the sockets.
+        .layer(lakko_metrics::red_layer("sfu").without_duration_for(&["/v1/connect"]))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

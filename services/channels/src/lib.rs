@@ -20,6 +20,7 @@ pub mod feedback;
 pub mod feedback_api;
 mod feedback_sql;
 pub mod internal;
+pub mod metrics;
 pub mod owner_auth;
 pub mod sql_store;
 pub mod storage;

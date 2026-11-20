@@ -72,6 +72,7 @@ use sqlx::QueryBuilder;
 
 use crate::access::{consume_nonce, db_error, now_ms, parts, refused, verify_header, HandlerError};
 use crate::journal::{self, PSEUDONYM_LEN};
+use crate::metrics::{ProofRefusal, Pruned};
 use crate::AppState;
 
 /// The most reach keys one mailbox may hold. Mirrors
@@ -141,10 +142,10 @@ fn parse_reach_proof(headers: &HeaderMap) -> Result<Proof, HandlerError> {
     let value = headers
         .get(PROOF_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(refused)?;
-    let proof = Proof::parse(value).map_err(|_| refused())?;
+        .ok_or_else(|| refused(ProofRefusal::Missing))?;
+    let proof = Proof::parse(value).map_err(|_| refused(ProofRefusal::Malformed))?;
     if proof.epoch != REACH_EPOCH {
-        return Err(refused());
+        return Err(refused(ProofRefusal::WrongEpoch));
     }
     Ok(proof)
 }
@@ -164,16 +165,19 @@ async fn check_delegated(
     let value = headers
         .get(DELEGATION_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(refused)?;
-    let delegation = Delegation::parse_header_value(value).map_err(|_| refused())?;
+        .ok_or_else(|| refused(ProofRefusal::Missing))?;
+    let delegation = Delegation::parse_header_value(value)
+        .map_err(|e| refused(ProofRefusal::of_delegation(&e)))?;
     // 2. Mailbox, expiry, lifetime bound, issuer signature.
-    verify_delegation(&delegation, mailbox, now).map_err(|_| refused())?;
+    verify_delegation(&delegation, mailbox, now)
+        .map_err(|e| refused(ProofRefusal::of_delegation(&e)))?;
     // 3. The issuer is a registered, unexpired reach key of this mailbox.
     if !reach_key_registered(pool, mailbox, &delegation.issuer_pk, now).await? {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     }
     // 4. The request proof names the delegate's key and verifies under it.
-    verify_delegated_proof(&delegation, proof, req, now).map_err(|_| refused())?;
+    verify_delegated_proof(&delegation, proof, req, now)
+        .map_err(|e| refused(ProofRefusal::of_delegation(&e)))?;
     // 5. Both nonces, in one transaction: a replay of either consumes neither.
     let mut tx = pool.begin().await.map_err(db_error("begin delegation"))?;
     let fresh_delegation = sqlx::query(
@@ -188,13 +192,13 @@ async fn check_delegated(
     .rows_affected()
         > 0;
     if !fresh_delegation {
-        return Err(refused());
+        return Err(refused(ProofRefusal::Replay));
     }
     if !consume_nonce(&mut *tx, mailbox, &proof.nonce)
         .await
         .map_err(db_error("record proof nonce"))?
     {
-        return Err(refused());
+        return Err(refused(ProofRefusal::Replay));
     }
     tx.commit().await.map_err(db_error("commit delegation"))?;
     Ok(delegation.issuer_pk)
@@ -216,7 +220,7 @@ pub(crate) async fn gate_mailbox_write(
     if !has_proof {
         // A delegation is only ever presented with the delegate's proof.
         if has_delegation {
-            return Err(refused());
+            return Err(refused(ProofRefusal::Missing));
         }
         return Ok(match open {
             None | Some(true) => MailboxWrite::StoreAfterToken,
@@ -227,7 +231,7 @@ pub(crate) async fn gate_mailbox_write(
     // unclaimed mailbox has no reach keys, so nothing can verify.
     let proof = parse_reach_proof(headers)?;
     if open.is_none() {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     }
     let req = parts(method, uri, body);
     let now = now_ms();
@@ -250,19 +254,22 @@ async fn check_direct(
     now: u64,
 ) -> Result<[u8; 32], HandlerError> {
     // `parse_reach_proof` only returns reach proofs, which always name a key.
-    let named = proof.reach_key.ok_or_else(refused)?;
+    let named = proof
+        .reach_key
+        .ok_or_else(|| refused(ProofRefusal::Malformed))?;
     if !reach_key_registered(pool, mailbox, &named, now).await? {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     }
-    let key = VerifyingKey::from_bytes(&named).map_err(|_| refused())?;
-    lakko_ds_proof::verify(proof, req, &key, now).map_err(|_| refused())?;
+    let key = VerifyingKey::from_bytes(&named).map_err(|_| refused(ProofRefusal::UnknownKey))?;
+    lakko_ds_proof::verify(proof, req, &key, now)
+        .map_err(|e| refused(ProofRefusal::of_proof(&e)))?;
     if consume_nonce(pool, mailbox, &proof.nonce)
         .await
         .map_err(db_error("record proof nonce"))?
     {
         Ok(named)
     } else {
-        Err(refused())
+        Err(refused(ProofRefusal::Replay))
     }
 }
 
@@ -399,7 +406,7 @@ pub(crate) async fn put_mailbox_reach(
             .map_err(db_error("lock mailbox"))?;
     let key = row
         .and_then(|(pk,)| VerifyingKey::from_bytes(&pk).ok())
-        .ok_or_else(refused)?;
+        .ok_or_else(|| refused(ProofRefusal::UnknownKey))?;
     let proof = verify_header(&headers, &req, |epoch| {
         (epoch == MAILBOX_EPOCH).then_some(key)
     })?;
@@ -407,7 +414,7 @@ pub(crate) async fn put_mailbox_reach(
         .await
         .map_err(db_error("record proof nonce"))?
     {
-        return Err(refused());
+        return Err(refused(ProofRefusal::Replay));
     }
 
     // Expired keys first, so they neither count against the cap nor linger.
@@ -495,7 +502,7 @@ pub(crate) async fn post_reach_check(
     let mailbox = journal::decode_pseudonym(&device_hex)?;
     let proof = parse_reach_proof(&headers)?;
     if mailbox_open(&state.db, &mailbox).await?.is_none() {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     }
     let req = parts(&method, &uri, &body);
     check_direct(&state.db, &mailbox, &proof, &req, now_ms()).await?;
@@ -550,7 +557,7 @@ pub(crate) async fn get_mailbox_reach(
     // deletion) reads as the uniform refusal rather than an empty list.
     let open = mailbox_open(&state.db, &mailbox)
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| refused(ProofRefusal::UnknownKey))?;
     let rows: Vec<(Vec<u8>, Option<u64>)> = sqlx::query_as(
         "SELECT reach_pk, expires_at_ms FROM ds_mailbox_reach \
          WHERE mailbox = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?) \
@@ -573,27 +580,35 @@ pub(crate) async fn get_mailbox_reach(
 }
 
 /// Delete expired reach keys and the nonces of expired delegations. Runs on
-/// the journal pruner's tick.
-pub(crate) async fn prune_expired(pool: &MySqlPool) {
+/// the journal pruner's tick. `true` when both statements succeeded.
+pub(crate) async fn prune_expired(pool: &MySqlPool) -> bool {
     let now = now_ms();
-    for (what, sql) in [
+    let mut ok = true;
+    for (kind, sql) in [
         (
-            "reach keys",
+            Pruned::ReachKeys,
             "DELETE FROM ds_mailbox_reach WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?",
         ),
         (
-            "delegation nonces",
+            Pruned::DelegationNonces,
             "DELETE FROM ds_delegation_nonces WHERE expires_at_ms <= ?",
         ),
     ] {
+        let what = kind.as_str();
         match sqlx::query(sql).bind(now).execute(pool).await {
-            Ok(r) if r.rows_affected() > 0 => {
-                tracing::debug!(rows = r.rows_affected(), what, "pruned expired rows");
+            Ok(r) => {
+                crate::metrics::pruned(kind, r.rows_affected());
+                if r.rows_affected() > 0 {
+                    tracing::debug!(rows = r.rows_affected(), what, "pruned expired rows");
+                }
             },
-            Ok(_) => {},
-            Err(e) => tracing::warn!(error = %e, what, "reach prune failed"),
+            Err(e) => {
+                ok = false;
+                tracing::warn!(error = %e, what, "reach prune failed");
+            },
         }
     }
+    ok
 }
 
 // `ds_delegation_nonces.nonce` is BINARY(16).
@@ -1697,7 +1712,7 @@ mod tests {
             // would be named after.
             list_reach(&app, &fresh_name(88), Some((&identity, MAILBOX_EPOCH))).await,
         ];
-        let (_, uniform) = refused();
+        let (_, uniform) = refused(ProofRefusal::Missing);
         for (status, body) in refusals {
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert_eq!(body, uniform.as_bytes());

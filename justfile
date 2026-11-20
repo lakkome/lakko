@@ -1195,7 +1195,7 @@ deploy-coturn:
     @echo "[deploy-coturn] rsyncing repo to {{turn_host}} (root may prompt for sudo)"
     rsync -a --delete --exclude='target/' --exclude='.git/' \
         ./infra/ {{turn_user}}@{{turn_host}}:/root/lakko-infra/
-    ssh {{turn_user}}@{{turn_host}} 'bash /root/lakko-infra/scripts/deploy-coturn.sh'
+    ssh {{turn_user}}@{{turn_host}} 'MONITORING_IP={{monitoring_ip}} bash /root/lakko-infra/scripts/deploy-coturn.sh'
 
 # Restart coturn (drops in-flight relay sessions — operators
 # prefer `reload-coturn` below in 99 % of cases). Use this only
@@ -1212,6 +1212,162 @@ restart-coturn:
 # `turnserver.conf` for everything except listening-port changes.
 reload-coturn:
     ssh {{turn_user}}@{{turn_host}} 'sudo systemctl reload coturn'
+
+# ---- Monitoring (ADR-0096 P3) ---------------------------------------
+# The monitoring VPS (Prometheus, Alertmanager, Grafana, blackbox) and the
+# metrics side of the main VPS. Override via env vars:
+#   LAKKO_MONITORING_USER (default: root)
+#   LAKKO_MONITORING_HOST (default: test.lakko.me, the only server today;
+#                         monitoring runs there next to the test stack)
+#   LAKKO_MONITORING_SSH_KEY  private key for ssh/scp (default
+#                         LAKKO_TEST_SSH_KEY)
+#   LAKKO_MONITORING_STACKS   stacks to scrape (default "test")
+#   LAKKO_MONITORING_COLOCATED 1 when the monitoring host is a Lakko host
+#                         (default 1)
+#   LAKKO_MONITORING_IP   the monitoring VPS's public address, admitted to
+#                         port 9643 on the main VPS (required by setup-metrics)
+monitoring_user := env_var_or_default("LAKKO_MONITORING_USER", "root")
+monitoring_host := env_var_or_default("LAKKO_MONITORING_HOST", "test.lakko.me")
+monitoring_ip := env_var_or_default("LAKKO_MONITORING_IP", "")
+monitoring_ssh_key := env_var_or_default("LAKKO_MONITORING_SSH_KEY", env_var_or_default("LAKKO_TEST_SSH_KEY", ""))
+monitoring_stacks := env_var_or_default("LAKKO_MONITORING_STACKS", "test")
+monitoring_colocated := env_var_or_default("LAKKO_MONITORING_COLOCATED", "1")
+monitoring_ssh := "ssh -o BatchMode=yes" + if monitoring_ssh_key == "" { "" } else { " -i " + monitoring_ssh_key }
+monitoring_scp := "scp -o BatchMode=yes" + if monitoring_ssh_key == "" { "" } else { " -i " + monitoring_ssh_key }
+
+# Bootstrap or refresh the monitoring VPS from the working tree: copies
+# infra/ there and runs infra/monitoring/setup-monitoring.sh (idempotent).
+deploy-monitoring:
+    rsync -a --delete --exclude='docker/' --exclude='test-stack/' -e "{{monitoring_ssh}}" \
+        ./infra/ {{monitoring_user}}@{{monitoring_host}}:/root/lakko-infra-monitoring/
+    {{monitoring_ssh}} {{monitoring_user}}@{{monitoring_host}} 'LAKKO_MONITORING_STACKS="{{monitoring_stacks}}" LAKKO_MONITORING_COLOCATED={{monitoring_colocated}} bash /root/lakko-infra-monitoring/monitoring/setup-monitoring.sh'
+
+# Copy the monitoring CA certificate (made on the monitoring VPS by its
+# first setup) to /etc/lakko/mtls/ on the main VPS and the coturn VPS.
+# The CA key never leaves the monitoring VPS.
+push-monitoring-ca:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    scp {{monitoring_user}}@{{monitoring_host}}:/etc/lakko-monitoring/mtls/monitoring-ca.crt "$tmp/"
+    scp "$tmp/monitoring-ca.crt" {{vps_user}}@{{vps_host}}:/tmp/monitoring-ca.crt
+    ssh {{vps_user}}@{{vps_host}} 'sudo install -d -m 700 /etc/lakko/mtls && sudo install -m 644 /tmp/monitoring-ca.crt /etc/lakko/mtls/monitoring-ca.crt && rm /tmp/monitoring-ca.crt'
+    ssh {{turn_user}}@{{turn_host}} 'install -d -m 700 /etc/lakko/mtls'
+    scp "$tmp/monitoring-ca.crt" {{turn_user}}@{{turn_host}}:/etc/lakko/mtls/monitoring-ca.crt
+
+# The same CA certificate to the test stack (ADR-0096 P4). Env:
+# LAKKO_TEST_DOMAIN, LAKKO_TEST_SSH, LAKKO_TEST_SSH_KEY, as for deploy-test.
+push-monitoring-ca-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="${LAKKO_TEST_SSH:-root@${LAKKO_TEST_DOMAIN:-test.lakko.me}}"
+    opts=(-o BatchMode=yes)
+    if [[ -n ${LAKKO_TEST_SSH_KEY:-} ]]; then opts+=(-i "$LAKKO_TEST_SSH_KEY"); fi
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    {{monitoring_scp}} {{monitoring_user}}@{{monitoring_host}}:/etc/lakko-monitoring/mtls/monitoring-ca.crt "$tmp/"
+    ssh "${opts[@]}" "$target" 'install -d -m 700 /etc/lakko/mtls'
+    scp "${opts[@]}" "$tmp/monitoring-ca.crt" "$target":/etc/lakko/mtls/monitoring-ca.crt
+
+# The metrics side of the main VPS: exporters, the metrics server block on
+# :9643, journald retention, the schema-size and backup timers
+# (infra/scripts/setup-metrics.sh, idempotent). Runs the script from the
+# VPS's checkout of main, like deploy-sfu.
+setup-metrics:
+    @test -n "{{monitoring_ip}}" || (echo "set LAKKO_MONITORING_IP to the monitoring VPS address" >&2; exit 1)
+    ssh {{vps_user}}@{{vps_host}} 'sudo MONITORING_IP={{monitoring_ip}} bash ~/lakko/infra/scripts/setup-metrics.sh'
+
+# Check the monitoring configuration without a server (Docker): the
+# Prometheus config and rules, the rule unit tests, the Alertmanager template
+# rendered with the example secrets, the blackbox modules, and that every
+# dashboard is valid JSON. Image versions are those the checks were first
+# run with; the monitoring VPS runs Ubuntu's packages.
+monitoring-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/mtls"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout "$tmp/mtls/monitoring.key" -out "$tmp/mtls/monitoring.crt" -subj /CN=check -days 1 2>/dev/null
+    chmod -R a+rX "$tmp"
+    docker run --rm --entrypoint promtool \
+        -v "$PWD/infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+        -v "$PWD/infra/prometheus/rules:/etc/prometheus/rules:ro" \
+        -v "$PWD/infra/prometheus/targets:/etc/prometheus/targets:ro" \
+        -v "$tmp/mtls:/etc/prometheus/mtls:ro" \
+        prom/prometheus:v2.53.2 check config /etc/prometheus/prometheus.yml
+    docker run --rm --entrypoint promtool -w /p/tests -v "$PWD/infra/prometheus:/p:ro" \
+        prom/prometheus:v2.53.2 test rules jobs_test.yml canary_test.yml
+    (set -a; . infra/monitoring/secrets.env.example; set +a; \
+        envsubst < infra/monitoring/alertmanager.yml.tmpl > "$tmp/alertmanager.yml"; \
+        sed '/# BEGIN email/,/# END email/d' infra/monitoring/alertmanager.yml.tmpl | envsubst > "$tmp/alertmanager-telegram-only.yml")
+    docker run --rm --entrypoint amtool -v "$tmp/alertmanager.yml:/am.yml:ro" \
+        prom/alertmanager:v0.26.0 check-config /am.yml
+    docker run --rm --entrypoint amtool -v "$tmp/alertmanager-telegram-only.yml:/am.yml:ro" \
+        prom/alertmanager:v0.26.0 check-config /am.yml
+    docker run --rm --entrypoint blackbox_exporter -v "$PWD/infra/monitoring/blackbox.yml:/b.yml:ro" \
+        prom/blackbox-exporter:v0.24.0 --config.file=/b.yml --config.check
+    for f in infra/grafana/dashboards/*.json; do python3 -m json.tool "$f" >/dev/null; done
+    echo "monitoring configuration OK"
+
+# The metrics side of the test stack (ADR-0096 P4): the same script as
+# setup-metrics with STACK=test. The test host has no checkout, so infra/ is
+# copied there first, from the working tree. Then restart lakko-test.target
+# (or run deploy-test) so the services open their listeners. Env as for
+# deploy-test, plus LAKKO_MONITORING_IP.
+setup-metrics-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -n "{{monitoring_ip}}" || { echo "set LAKKO_MONITORING_IP to the monitoring VPS address" >&2; exit 1; }
+    target="${LAKKO_TEST_SSH:-root@${LAKKO_TEST_DOMAIN:-test.lakko.me}}"
+    opts=(-o BatchMode=yes)
+    if [[ -n ${LAKKO_TEST_SSH_KEY:-} ]]; then opts+=(-i "$LAKKO_TEST_SSH_KEY"); fi
+    rsync -a --delete --exclude='docker/' -e "ssh ${opts[*]}" ./infra/ "$target":/root/lakko-infra/
+    ssh "${opts[@]}" "$target" "STACK=test METRICS_DOMAIN=${LAKKO_TEST_DOMAIN:-test.lakko.me} MONITORING_IP={{monitoring_ip}} bash /root/lakko-infra/scripts/setup-metrics.sh"
+
+# The synthetic canary binary (ADR-0096 P5) to the monitoring host. Built on
+# this machine in the test stack's linux/amd64 builder image (Ubuntu 22.04,
+# so it runs on 22.04 and 24.04), from the working tree; installed as
+# /usr/local/bin/lakko-canary; every canary instance that has state is
+# restarted.
+deploy-canary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$PWD/target/canary-amd64"
+    mkdir -p "$out"
+    docker build --platform linux/amd64 -q -t lakko-linux-builder -f infra/test-stack/Dockerfile.builder infra/test-stack >/dev/null
+    target_volume="lakko-amd64-target-$(printf '%s' "$PWD" | shasum | cut -c1-12)"
+    docker run --rm --platform linux/amd64 \
+        -v "$PWD":/src -v lakko-amd64-registry:/opt/cargo/registry -v lakko-amd64-git:/opt/cargo/git \
+        -v "$target_volume":/target -v "$out":/out -e CARGO_TARGET_DIR=/target -w /src \
+        lakko-linux-builder \
+        bash -c 'set -euo pipefail; cargo build --release --locked -p lakko-canary-tool; cp /target/release/lakko-canary /out/'
+    {{monitoring_scp}} "$out/lakko-canary" {{monitoring_user}}@{{monitoring_host}}:/tmp/lakko-canary
+    {{monitoring_ssh}} {{monitoring_user}}@{{monitoring_host}} 'install -m 755 /tmp/lakko-canary /usr/local/bin/lakko-canary && rm /tmp/lakko-canary && for s in prod test; do if [ -f /var/lib/lakko-canary/$s/state.json ]; then systemctl restart lakko-canary@$s; fi; done'
+
+# Create the two canary accounts of a stack and their one-to-one, once, on
+# the monitoring VPS (ADR-0096 P5), then start the canary. Refuses when the
+# stack already has state. Run deploy-monitoring and deploy-canary first.
+#   just canary-init prod
+#   just canary-init test
+# The call step starts a day after init: a younger account gets 8 call-join
+# tokens a day.
+canary-init stack:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{stack}}" in
+        prod) api=https://lakko.me; sfu=wss://sfu.lakko.me ;;
+        test) d="${LAKKO_TEST_DOMAIN:-test.lakko.me}"; api="https://$d"; sfu="wss://$d/sfu" ;;
+        *) echo "stack must be prod or test" >&2; exit 64 ;;
+    esac
+    {{monitoring_ssh}} {{monitoring_user}}@{{monitoring_host}} "sudo -u lakko-canary /usr/local/bin/lakko-canary init --api $api --sfu $sfu --state /var/lib/lakko-canary/{{stack}}/state.json && systemctl enable --now lakko-canary@{{stack}}"
+
+# Grafana on http://127.0.0.1:3000 through an SSH port forward (it listens
+# on the monitoring VPS's loopback only). Ctrl-C ends it.
+grafana:
+    {{monitoring_ssh}} -N -L 3000:127.0.0.1:3000 {{monitoring_user}}@{{monitoring_host}}
 
 # Tail coturn logs. Same posture as `just logs <service>` for the
 # main fleet — `journalctl -u coturn -f` because the systemd

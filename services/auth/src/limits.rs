@@ -235,7 +235,7 @@ pub(crate) enum Scope {
 }
 
 impl Scope {
-    const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -280,6 +280,31 @@ impl Scope {
             Self::EmailVaultStore => 16,
             Self::HandleCheck => 17,
             Self::AnonCredential => 18,
+        }
+    }
+
+    /// The `scope` label of the refusal counter (ADR-0096).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoginPassword => "login_password",
+            Self::LoginRecovery => "login_recovery",
+            Self::PasswordReset => "password_reset",
+            Self::TotpRecover => "totp_recover",
+            Self::DeviceRequestTarget => "device_request_target",
+            Self::DeviceGrantMint => "device_grant_mint",
+            Self::HandleBind => "handle_bind",
+            Self::RecoveryReplace => "recovery_replace",
+            Self::KeyReset => "key_reset",
+            Self::DeviceRevoke => "device_revoke",
+            Self::Recall => "recall",
+            Self::KeyRotate => "key_rotate",
+            Self::EmailLetterHandle => "email_letter_handle",
+            Self::EmailLetterAccount => "email_letter_account",
+            Self::EmailVerify => "email_verify",
+            Self::EmailVaultOpen => "email_vault_open",
+            Self::EmailVaultStore => "email_vault_store",
+            Self::HandleCheck => "handle_check",
+            Self::AnonCredential => "anon_credential",
         }
     }
 
@@ -381,7 +406,7 @@ pub(crate) enum Category {
 }
 
 impl Category {
-    const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Attempt,
         Self::DeviceRequest,
         Self::Signup,
@@ -392,6 +417,18 @@ impl Category {
 
     const fn index(self) -> usize {
         self as usize
+    }
+
+    /// The `category` label of the address-refusal counter (ADR-0096).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Attempt => "attempt",
+            Self::DeviceRequest => "device_request",
+            Self::Signup => "signup",
+            Self::Challenge => "challenge",
+            Self::HandleBind => "handle_bind",
+            Self::Email => "email",
+        }
     }
 
     const fn env_var(self) -> &'static str {
@@ -804,7 +841,8 @@ pub(crate) enum LimitError {
 
 impl IntoResponse for LimitError {
     fn into_response(self) -> Response {
-        match self {
+        let code = self.code();
+        let mut resp = match self {
             Self::Limited {
                 code,
                 retry_after_secs,
@@ -824,6 +862,18 @@ impl IntoResponse for LimitError {
                 Json(json!({ "error": CODE_LIMITER_UNAVAILABLE })),
             )
                 .into_response(),
+        };
+        resp.extensions_mut().insert(lakko_metrics::ErrorCode(code));
+        resp
+    }
+}
+
+impl LimitError {
+    /// The stable body code of the refusal.
+    pub(crate) const fn code(&self) -> &'static str {
+        match self {
+            Self::Limited { code, .. } => code,
+            Self::Unavailable => CODE_LIMITER_UNAVAILABLE,
         }
     }
 }
@@ -856,20 +906,22 @@ pub(crate) async fn charge_name(
     name: &[u8],
 ) -> Result<(), LimitError> {
     let w = limits.name_window(scope);
-    match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
-        Ok((hits, _)) if hits <= w.limit => Ok(()),
+    let refusal = match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
+        Ok((hits, _)) if hits <= w.limit => return Ok(()),
         Ok((_, retry_after_secs)) => {
             tracing::debug!(scope = ?scope, "auth name limit reached");
-            Err(LimitError::Limited {
+            LimitError::Limited {
                 code: scope.refusal_code(),
                 retry_after_secs,
-            })
+            }
         },
         Err(e) => {
             tracing::error!(error = %e, scope = ?scope, "auth name limit store failed; refusing");
-            Err(LimitError::Unavailable)
+            LimitError::Unavailable
         },
-    }
+    };
+    crate::metrics::scope_refused(scope, &refusal);
+    Err(refusal)
 }
 
 /// Atomically bump the fixed-window counter; returns `(hits in the current
@@ -970,6 +1022,7 @@ pub(crate) async fn ip_gate(
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => {
             tracing::debug!(category = ?cat, "auth address limit reached");
+            crate::metrics::address_refused(cat);
             LimitError::Limited {
                 code: cat.refusal_code(),
                 retry_after_secs,
@@ -987,11 +1040,14 @@ pub(crate) async fn ip_gate(
 /// buckets that have refilled, and device-link wrong codes and suspensions
 /// that no longer count.
 pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::LIMITS_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
+            let mut all_ok = true;
             let dropped = limits.prune_idle(Instant::now());
             if dropped > 0 {
                 tracing::debug!(dropped, "auth address buckets pruned");
@@ -1003,6 +1059,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .execute(&pool)
             .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "auth_name_limits prune failed");
             }
             let result = sqlx::query(
@@ -1012,6 +1069,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .execute(&pool)
             .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "device_link_wrong_codes prune failed");
             }
             let result =
@@ -1019,8 +1077,10 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
                     .execute(&pool)
                     .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "device_link_suspensions prune failed");
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }

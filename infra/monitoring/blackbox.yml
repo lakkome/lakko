@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# blackbox_exporter modules on the monitoring VPS (ADR-0096 section 4).
+# Installed as /etc/prometheus/blackbox.yml by setup-monitoring.sh.
+#
+# blackbox_exporter has no STUN prober, so coturn is probed as a TLS
+# connection to TURN-over-TLS on 443 (certificate expiry included); a STUN
+# answer is not checked (left to the canary, ADR-0096 P5).
+
+modules:
+  # Public /health and /ready: HTTPS only, 2xx, certificate checked.
+  http_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      method: GET
+      valid_status_codes: []
+      fail_if_not_ssl: true
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: true
+      follow_redirects: false
+
+  # A TLS handshake to a TCP port (coturn's TURN-over-TLS).
+  tls_connect:
+    prober: tcp
+    timeout: 10s
+    tcp:
+      tls: true
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: true

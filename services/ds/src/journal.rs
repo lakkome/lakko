@@ -29,6 +29,7 @@ use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::MySqlPool;
 use tokio::sync::Notify;
 
+use crate::metrics::{self, Pruned};
 use crate::AppState;
 
 /// Pseudonym length: 32 raw bytes = 64 lowercase hex chars.
@@ -124,7 +125,12 @@ impl Notifiers {
     /// is held only for the HashMap lookup — we clone the `Arc<Notify>`
     /// out before any awaiting.
     fn get_or_create(&self, key: NotifyKey) -> Arc<Notify> {
-        let mut guard = self.inner.lock().expect("notifiers mutex poisoned");
+        // A poisoned lock means a panic while holding it; the map holds only
+        // wake-up handles, so carry on with it.
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .entry(key)
             .or_insert_with(|| Arc::new(Notify::new()))
@@ -244,6 +250,7 @@ pub(crate) async fn publish_admitted(
         )
     })?;
     let id = result.last_insert_id();
+    metrics::appended(queue);
 
     // Fetch created_at — cheap, lets the client display "delivered at".
     let sql = format!("SELECT created_at FROM {} WHERE id = ?", queue.table());
@@ -330,6 +337,7 @@ pub(crate) async fn publish_dropped(
             .await
             .map_err(db)?;
     tx.rollback().await.map_err(db)?;
+    metrics::mailbox_write_dropped();
     Ok(Json(PublishResponse {
         id,
         created_at: row.0,
@@ -534,6 +542,9 @@ pub(crate) async fn fetch_with_wait(
     let wait_secs = wait_secs.min(MAX_WAIT_SECS);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(wait_secs));
     let notify = notifiers.get_or_create((queue, *owner_id));
+    // Counted as open until this function returns, or the request is
+    // dropped mid-wait (ADR-0096).
+    let _open = metrics::long_poll_open(queue);
 
     loop {
         // Register on the notifier BEFORE we re-check — `notified()` is
@@ -604,6 +615,7 @@ pub(crate) async fn post_group(
         if matches!(gated, crate::access::Gated::Proven { .. }) {
             state.waker.fire(&owner, wake, resp.id);
         } else {
+            metrics::wake(metrics::WakeOutcome::Unclaimed);
             tracing::debug!(outcome = "unclaimed", "wake dropped");
         }
     }
@@ -846,51 +858,71 @@ pub(crate) async fn get_rendezvous(
 // ============================================================================
 
 /// Spawn a background task that deletes messages older than
-/// `RETENTION_SECS` from both journals, knocks older than
+/// `RETENTION_SECS` from the group, mailbox and rendezvous journals, knocks older than
 /// `KNOCK_RETENTION_SECS`, and spent proof nonces. Aborted when the service
 /// stops.
+///
+/// Each pass is one run of the job [`metrics::JOB_PRUNER`] (ADR-0096): a
+/// success when every statement in it succeeded, a failure otherwise (the
+/// statements that worked still deleted their rows).
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    lakko_metrics::job_registered(metrics::JOB_PRUNER);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         // Skip the immediate first tick.
         interval.tick().await;
         loop {
             interval.tick().await;
-            crate::access::prune_nonces(&pool).await;
-            crate::reach::prune_expired(&pool).await;
-            crate::access::prune_group_access(&pool, RETENTION_SECS).await;
-            for queue in [
-                Queue::Group,
-                Queue::Mailbox,
-                Queue::Knock,
-                Queue::Rendezvous,
-            ] {
-                let retention = match queue {
-                    Queue::Knock => crate::access::KNOCK_RETENTION_SECS,
-                    Queue::Group | Queue::Mailbox | Queue::Rendezvous => RETENTION_SECS,
-                };
-                let sql = format!(
-                    "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
-                    queue.table(),
-                );
-                match sqlx::query(sqlx::AssertSqlSafe(sql))
-                    .bind(retention)
-                    .execute(&pool)
-                    .await
-                {
-                    Ok(r) if r.rows_affected() > 0 => {
-                        tracing::debug!(
-                            queue = ?queue,
-                            rows = r.rows_affected(),
-                            "pruned expired messages"
-                        );
-                    },
-                    Ok(_) => {},
-                    Err(e) => tracing::warn!(queue = ?queue, error = %e, "prune failed"),
-                }
+            if prune_once(&pool).await {
+                lakko_metrics::job_succeeded(metrics::JOB_PRUNER);
+            } else {
+                lakko_metrics::job_failed(metrics::JOB_PRUNER);
             }
         }
     })
+}
+
+/// One pruner pass. `true` when every statement succeeded.
+pub(crate) async fn prune_once(pool: &MySqlPool) -> bool {
+    let mut ok = crate::access::prune_nonces(pool).await;
+    ok &= crate::reach::prune_expired(pool).await;
+    ok &= crate::access::prune_group_access(pool, RETENTION_SECS).await;
+    for queue in [
+        Queue::Group,
+        Queue::Mailbox,
+        Queue::Knock,
+        Queue::Rendezvous,
+    ] {
+        let retention = match queue {
+            Queue::Knock => crate::access::KNOCK_RETENTION_SECS,
+            Queue::Group | Queue::Mailbox | Queue::Rendezvous => RETENTION_SECS,
+        };
+        let sql = format!(
+            "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
+            queue.table(),
+        );
+        match sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(retention)
+            .execute(pool)
+            .await
+        {
+            Ok(r) => {
+                metrics::pruned(Pruned::of_queue(queue), r.rows_affected());
+                if r.rows_affected() > 0 {
+                    tracing::debug!(
+                        queue = ?queue,
+                        rows = r.rows_affected(),
+                        "pruned expired messages"
+                    );
+                }
+            },
+            Err(e) => {
+                ok = false;
+                tracing::warn!(queue = ?queue, error = %e, "prune failed");
+            },
+        }
+    }
+    ok
 }
 
 // ============================================================================

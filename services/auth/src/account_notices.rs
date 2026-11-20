@@ -230,14 +230,18 @@ pub(crate) async fn list(
 
 /// Hourly pruner: notices older than [`RETENTION_MS`].
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::ACCOUNT_NOTICE_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
-            if let Err(e) = prune(&pool, now_ms()).await {
+            let result = prune(&pool, now_ms()).await;
+            if let Err(e) = &result {
                 tracing::warn!(error = %e, "account_notices prune failed");
             }
+            crate::metrics::job_ran(JOB, result.is_ok());
         }
     })
 }

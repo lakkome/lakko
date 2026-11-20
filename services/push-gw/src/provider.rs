@@ -258,6 +258,13 @@ pub(crate) trait Provider: Send + Sync {
     /// the bytes a sealed subscription carried for it (ADR-0078) — the
     /// provider knows how to interpret them.
     async fn deliver(&self, token: &[u8], payload: &WakePayload) -> Result<(), DeliverError>;
+
+    /// `true` for a stand-in that contacts no remote service
+    /// ([`LogOnlyProvider`]), so its deliveries are counted as `log_only`
+    /// rather than `ok` and are not timed (ADR-0096).
+    fn is_log_only(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================
@@ -284,6 +291,10 @@ pub(crate) struct LogOnlyProvider {
 impl Provider for LogOnlyProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
+    }
+
+    fn is_log_only(&self) -> bool {
+        true
     }
 
     async fn deliver(&self, token: &[u8], payload: &WakePayload) -> Result<(), DeliverError> {

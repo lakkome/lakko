@@ -67,6 +67,7 @@ use crate::access::{
     registration_db_error, verify_header, HandlerError, MAX_ACCESS_EPOCH,
 };
 use crate::journal::{self, PublishResponse, Queue, PSEUDONYM_LEN};
+use crate::metrics::{self, CommitOutcome, ProofRefusal};
 use crate::ownership::{apply_register, is_heard, registration_at, standing_of, Registration};
 use crate::AppState;
 
@@ -159,7 +160,10 @@ pub(crate) async fn post_commit(
     let group_id = journal::decode_pseudonym(&group_hex)?;
     let wake = crate::wake::parse_wake_header(&headers)?;
     let request = parse_body(&body, &group_id)?;
-    request.statement.verify(now_ms()).map_err(|_| refused())?;
+    request
+        .statement
+        .verify(now_ms())
+        .map_err(|e| refused(ProofRefusal::of_statement(e)))?;
 
     let mut conn = state
         .db
@@ -180,15 +184,26 @@ pub(crate) async fn post_commit(
     tx.commit()
         .await
         .map_err(registration_db_error("commit the commit"))?;
-    match decision? {
-        Outcome::Appended(resp) => {
+    match decision {
+        Ok(Outcome::Appended(resp)) => {
+            metrics::commit(CommitOutcome::Appended);
+            metrics::appended(Queue::Group);
             state.notifiers.wake((Queue::Group, group_id));
             if let Some(wake) = wake {
                 state.waker.fire(&group_id, wake, resp.id);
             }
             Ok((StatusCode::CREATED, Json(resp)).into_response())
         },
-        Outcome::Resent(resp) => Ok((StatusCode::OK, Json(resp)).into_response()),
+        Ok(Outcome::Resent(resp)) => {
+            metrics::commit(CommitOutcome::Resent);
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        },
+        Err(refusal) => {
+            if refusal.0 == StatusCode::CONFLICT {
+                metrics::commit(CommitOutcome::Conflict);
+            }
+            Err(refusal)
+        },
     }
 }
 
@@ -205,15 +220,17 @@ async fn decide_commit(
     let keys = group_keys_on(&mut *conn, group_id).await?;
     // Any retained epoch identifies the caller; the write tier is asked below,
     // after a re-send (which writes nothing) has been recognised.
-    let Ok(proof) = verify_header(headers, req_parts, |epoch| {
+    // `verify_header` counts its own refusal; it is passed on as it is.
+    let proof = match verify_header(headers, req_parts, |epoch| {
         keys.iter().find(|k| k.epoch == epoch).map(|k| k.key)
-    }) else {
-        return Ok(Err(refused()));
+    }) {
+        Ok(proof) => proof,
+        Err(refusal) => return Ok(Err(refusal)),
     };
     let signer = &request.statement.signer;
     let standing = standing_of(&mut *conn, group_id, signer).await?;
     if !is_heard(StatementKind::RegisterEpoch, standing) {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::NotHeard)));
     }
     let row_hash = commit_row_hash(&request.row);
     if let Some(resp) = resend_of(&mut *conn, group_id, request, &row_hash).await? {
@@ -246,19 +263,19 @@ async fn decide_commit(
         .enumerate()
         .any(|(index, k)| k.epoch == proof.epoch && in_write_tier(index, k.epoch, floor));
     if !writable {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::WrongEpoch)));
     }
     if !consume_nonce(&mut *conn, group_id, &proof.nonce)
         .await
         .map_err(registration_db_error("record commit proof nonce"))?
     {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::Replay)));
     }
     if !consume_nonce(&mut *conn, group_id, &request.statement.nonce)
         .await
         .map_err(registration_db_error("record commit statement nonce"))?
     {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::Replay)));
     }
     if proof.epoch.checked_add(1) != Some(request.epoch) {
         return Ok(Err(bad_request(
@@ -578,6 +595,7 @@ mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let (gid, root) = claimed(&app, 0x72).await;
         let (status, first) = post(
             &app,
@@ -622,6 +640,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(again["id"].as_u64(), Some(id));
         assert_eq!(rows(&pool, &gid).await.len(), 2);
+        assert!(
+            commit_series_present(&metrics, "resent"),
+            "{}",
+            metrics.render()
+        );
+    }
+
+    /// Whether the commit counter has a series for `outcome` (ADR-0096). The
+    /// recorder is shared by the whole test binary, so this checks presence.
+    fn commit_series_present(metrics: &lakko_metrics::Metrics, outcome: &str) -> bool {
+        let line = format!(r#"lakko_ds_commits_total{{outcome="{outcome}"}}"#);
+        metrics.render().lines().any(|l| l.starts_with(&line))
     }
 
     /// ADR-0090 S2: a PublisherGroup journal is claimed under a root every
@@ -731,6 +761,7 @@ mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let (gid, root) = claimed(&app, 0x73).await;
         let (status, _) = post(
             &app,
@@ -782,6 +813,13 @@ mod tests {
         assert_eq!(payloads.len(), 2);
         assert_eq!(payloads[0], b"winner".to_vec());
         assert!(!payloads.iter().any(|p| p == b"loser" || p == b"late row"));
+        for outcome in ["appended", "conflict"] {
+            assert!(
+                commit_series_present(&metrics, outcome),
+                "{outcome}: {}",
+                metrics.render()
+            );
+        }
     }
 
     /// Open question 2: a member, an admin and the root each commit through
@@ -962,6 +1000,7 @@ mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let (gid, root) = claimed(&app, 0x78).await;
         assert_eq!(
             epochs(&pool, &gid).await,
@@ -1009,6 +1048,15 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(epochs(&pool, &gid).await, vec![1, 2]);
+        // ADR-0096: the refusal carries its code into the request metrics.
+        let text = metrics.render();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("lakko_http_requests_total{")
+                    && l.contains(r#"route="/ds/group/{group_hex}/access""#)
+                    && l.contains(r#"code="append-needs-commit""#)),
+            "{text}"
+        );
     }
 
     /// The nonces are spent by an append: replaying the exact request is the

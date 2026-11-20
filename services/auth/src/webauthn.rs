@@ -689,6 +689,18 @@ pub(crate) async fn auth_start(
     }
 }
 
+/// `POST /webauthn/auth/finish`, counted as a passkey login (ADR-0096); the
+/// flow is [`auth_finish_answer`].
+pub(crate) async fn auth_finish(
+    state: State<AppState>,
+    req: Json<AuthFinishReq>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::Passkey,
+        auth_finish_answer(state, req).await,
+    )
+}
+
 /// Verify the authenticator's signature, identify the account,
 /// bump the credential's signature counter, mint a session token.
 ///
@@ -697,7 +709,7 @@ pub(crate) async fn auth_start(
 /// downstream clients hold a single shape regardless of which auth
 /// path produced the token.
 #[axum::debug_handler]
-pub(crate) async fn auth_finish(
+async fn auth_finish_answer(
     State(state): State<AppState>,
     Json(req): Json<AuthFinishReq>,
 ) -> Result<Json<AuthFinishRes>, ApiError> {
@@ -1019,6 +1031,8 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 /// Background pruner. Sweep expired rows every minute. Aborted via
 /// the `JoinHandle` returned to `main`.
 pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::WEBAUTHN_STATE_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
@@ -1027,6 +1041,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
             let result = sqlx::query("DELETE FROM webauthn_states WHERE expires_at < NOW(3)")
                 .execute(&pool)
                 .await;
+            let mut all_ok = result.is_ok();
             match result {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired webauthn_states");
@@ -1041,6 +1056,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 sqlx::query("DELETE FROM webauthn_action_grants WHERE expires_at < NOW(3)")
                     .execute(&pool)
                     .await;
+            all_ok &= grants.is_ok();
             match grants {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(
@@ -1057,6 +1073,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
             let device_grants = sqlx::query("DELETE FROM device_grants WHERE expires_at < NOW(3)")
                 .execute(&pool)
                 .await;
+            all_ok &= device_grants.is_ok();
             match device_grants {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired device_grants");
@@ -1064,6 +1081,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "device_grants prune failed"),
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }
@@ -1487,8 +1505,58 @@ pub(crate) enum ApiError {
 }
 
 impl IntoResponse for ApiError {
-    #[allow(clippy::too_many_lines)] // a flat variant-to-answer table
     fn into_response(self) -> axum::response::Response {
+        if matches!(self, Self::FreshAuthRequired) {
+            crate::metrics::fresh_auth_refused();
+        }
+        let code = self.body_code();
+        let mut response = self.render();
+        if let Some(code) = code {
+            response
+                .extensions_mut()
+                .insert(lakko_metrics::ErrorCode(code));
+        }
+        response
+    }
+}
+
+impl ApiError {
+    /// The stable `{"error": <code>}` body code of the answer, for the
+    /// metrics `code` label (ADR-0096); `None` for the plain-text answers.
+    const fn body_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Limit(e) => Some(e.code()),
+            Self::LoginByNameDisabled => Some("login-by-name-disabled"),
+            Self::HandleTaken => Some("handle-taken"),
+            Self::KeyGenerationSuperseded => Some(CODE_KEY_GENERATION_SUPERSEDED),
+            Self::RefreshInvalid => Some(CODE_REFRESH_INVALID),
+            Self::FreshAuthRequired => Some(CODE_FRESH_AUTH_REQUIRED),
+            Self::DeviceRevoked => Some(CODE_DEVICE_REVOKED),
+            Self::AccountKeyRequired => Some(CODE_ACCOUNT_KEY_REQUIRED),
+            Self::IdentityKeyMismatch => Some(CODE_IDENTITY_KEY_MISMATCH),
+            Self::DeviceAlreadyBound => Some(CODE_DEVICE_ALREADY_BOUND),
+            Self::RecallRefused => Some(CODE_RECALL_REFUSED),
+            Self::WrongPassword => Some(CODE_WRONG_PASSWORD),
+            Self::StatementStale { .. } => Some(CODE_STATEMENT_STALE),
+            Self::RecallWindowOpen { .. } => Some(CODE_RECALL_WINDOW_OPEN),
+            Self::Coded(_, code) => Some(*code),
+            Self::Disabled
+            | Self::BadInput(_)
+            | Self::StateMissing
+            | Self::NoCredentials
+            | Self::ActionRequired
+            | Self::InvalidCredential
+            | Self::RateLimited
+            | Self::TotpAlreadyEnabled
+            | Self::Internal
+            | Self::Db(_)
+            | Self::Webauthn(_)
+            | Self::SerdeJson(_) => None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // a flat variant-to-answer table
+    fn render(self) -> axum::response::Response {
         let (code, msg) = match self {
             Self::Disabled => (StatusCode::SERVICE_UNAVAILABLE, "webauthn-disabled"),
             Self::BadInput(m) => (StatusCode::BAD_REQUEST, m),

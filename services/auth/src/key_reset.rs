@@ -281,6 +281,17 @@ pub(crate) async fn start(
     Ok(Json(ResetStartRes { recovery_response }))
 }
 
+/// `POST /account/keys/reset/finish`, counted as a key reset (ADR-0096); the
+/// flow is [`finish_answer`].
+pub(crate) async fn finish(
+    state: State<AppState>,
+    auth: Extension<AuthenticatedAccount>,
+    caller: Extension<AuthenticatedDevice>,
+    payload: Json<ResetFinishReq>,
+) -> axum::response::Response {
+    crate::metrics::key_reset(finish_answer(state, auth, caller, payload).await)
+}
+
 /// `POST /account/keys/reset/finish` — bearer-auth. The transaction of the
 /// module doc, then the attestation and the new pair.
 ///
@@ -295,7 +306,7 @@ pub(crate) async fn start(
 /// with no row to update and is answered with the enumeration-safe `401`.
 #[axum::debug_handler]
 #[allow(clippy::too_many_lines)] // one transaction, its steps numbered as in the module doc
-pub(crate) async fn finish(
+async fn finish_answer(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
     Extension(caller): Extension<AuthenticatedDevice>,

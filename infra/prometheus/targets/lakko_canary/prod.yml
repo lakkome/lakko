@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# The prod canary instance on the monitoring host (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/lakko_canary/prod.yml by infra/monitoring/setup-monitoring.sh
+# only when "prod" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['127.0.0.1:9661']
+  labels: {stack: prod}

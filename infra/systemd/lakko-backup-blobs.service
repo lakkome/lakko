@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Lakko backup: blob mirror (ADR-0096 P2). Started by lakko-backup-blobs.timer.
+# The script, its configuration and the heartbeat it writes are described in
+# infra/scripts/backup.sh (installed as /usr/local/bin/lakko-backup).
+#
+# Run once by hand:  sudo systemctl start lakko-backup-blobs.service
+# Last run:          sudo journalctl -u lakko-backup-blobs -n 50
+
+[Unit]
+Description=Lakko backup (blob mirror)
+Documentation=https://github.com/lakkome/lakko
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: reads the blob directory, which the service user owns.
+User=root
+EnvironmentFile=/etc/lakko/lakko.env
+ExecStart=/usr/local/bin/lakko-backup blobs
+Nice=10
+IOSchedulingClass=idle
+
+# --- Security hardening ----------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/node_exporter/textfile_collector
+ReadOnlyPaths=/var/lib/lakko/blobs
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

@@ -53,6 +53,7 @@ mod auth;
 mod config;
 mod giphy;
 mod handlers;
+mod metrics;
 mod rate_limit;
 mod rendition_cache;
 
@@ -123,6 +124,13 @@ async fn main() -> Result<()> {
     let dotenv_loaded = dotenvy::dotenv().is_ok();
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "gif-proxy",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_GIF_PROXY_METRICS_BIND",
+    )
+    .await?;
 
     #[cfg(debug_assertions)]
     if dotenv_loaded {
@@ -171,6 +179,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/version", get(version))
         .merge(gif_routes)
         .layer(middleware::from_fn(access_log::log_request))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("gif-proxy"))
         .with_state(state)
 }
 

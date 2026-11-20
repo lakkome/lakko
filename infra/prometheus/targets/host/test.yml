@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Host exporters on the test stack (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/host/test.yml by infra/monitoring/setup-monitoring.sh
+# only when "test" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, host: test, exporter: node, __metrics_path__: /node/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, host: test, exporter: mysqld, __metrics_path__: /mysqld/metrics}
+- targets: ['test.lakko.me:9643']
+  labels: {stack: test, host: test, exporter: nginx, __metrics_path__: /nginx/metrics}

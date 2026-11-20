@@ -175,17 +175,20 @@ pub(crate) fn spawn_floor_pruner(
     pool: MySqlPool,
     refresh_token_ttl_ms: i64,
 ) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::SESSION_FLOOR_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(FLOOR_PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
             let cutoff = now_ms().saturating_sub(refresh_token_ttl_ms);
-            match sqlx::query("DELETE FROM device_session_floors WHERE not_before_ms < ?")
+            let result = sqlx::query("DELETE FROM device_session_floors WHERE not_before_ms < ?")
                 .bind(cutoff)
                 .execute(&pool)
-                .await
-            {
+                .await;
+            crate::metrics::job_ran(JOB, result.is_ok());
+            match result {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(
                         rows = r.rows_affected(),
@@ -571,6 +574,15 @@ fn upgrade_verdict(
     }
 }
 
+/// `POST /auth/session/refresh`, counted by outcome (ADR-0096); the flow is
+/// [`refresh_answer`].
+pub(crate) async fn refresh(
+    state: State<AppState>,
+    req: Json<RefreshReq>,
+) -> axum::response::Response {
+    crate::metrics::session_refresh(refresh_answer(state, req).await)
+}
+
 /// `POST /auth/session/refresh` — anonymous; the refresh credential is the
 /// authorisation. Per-address limited (`Category::Attempt`).
 ///
@@ -623,7 +635,7 @@ fn upgrade_verdict(
 /// [`ApiError::KeyGenerationSuperseded`], [`ApiError::StatementStale`],
 /// [`ApiError::Db`].
 #[axum::debug_handler]
-pub(crate) async fn refresh(
+async fn refresh_answer(
     State(state): State<AppState>,
     Json(req): Json<RefreshReq>,
 ) -> Result<Json<SessionPair>, ApiError> {

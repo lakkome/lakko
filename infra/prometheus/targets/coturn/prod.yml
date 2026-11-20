@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# coturn's exporter and node_exporter on the coturn VPS, behind turn.lakko.me:9642 (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/coturn/prod.yml by infra/monitoring/setup-monitoring.sh
+# only when "prod" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['turn.lakko.me:9642']
+  labels: {stack: prod, host: turn, service: coturn, __metrics_path__: /metrics}
+- targets: ['turn.lakko.me:9642']
+  labels: {stack: prod, host: turn, exporter: node, __metrics_path__: /node/metrics}

@@ -168,6 +168,7 @@ mod key_reset;
 mod keypackage;
 mod ledger_id;
 mod locate;
+mod metrics;
 mod oprf;
 mod rate_limit;
 mod registry;
@@ -309,6 +310,13 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "discovery",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_DISCOVERY_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -329,6 +337,10 @@ async fn main() -> Result<()> {
         .context("connect to MariaDB")?;
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let pool_for_gauge = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (pool_for_gauge.size(), pool_for_gauge.num_idle()));
 
     let oprf_server = oprf::load_or_init_server_setup(&pool)
         .await
@@ -702,6 +714,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
     open.merge(rate_limited)
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("discovery"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

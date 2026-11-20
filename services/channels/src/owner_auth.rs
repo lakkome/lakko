@@ -39,7 +39,7 @@
 //! [ADR-0059]: ../../../docs/adr/0059-channel-discover.md
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Response};
 use lakko_channels::copublisher::{
     verify_copublisher_proof, CoPublisherProof, COPUBLISHER_PROOF_HEADER_NAME,
 };
@@ -48,7 +48,8 @@ use lakko_channels::owner::{
 };
 use lakko_crypto::signing::VerifyingKey;
 
-use crate::api::{err, unix_ms, AppState};
+use crate::api::{err, unix_ms, AppState, ErrJson};
+use crate::metrics::{proof_refused, ProofKind, RefusalReason};
 use crate::storage::ChannelId;
 
 /// How long a nonce is remembered: twice the proof window, so a proof can
@@ -60,7 +61,7 @@ pub const OWNER_NONCE_RETENTION_MS: u64 = 2 * OWNER_PROOF_WINDOW_MS;
 fn refused() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(err(
+        ErrJson(err(
             "owner-proof-required",
             "this route needs a valid channel owner proof",
         )),
@@ -71,7 +72,7 @@ fn refused() -> Response {
 fn internal() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(err("internal", "unexpected error")),
+        ErrJson(err("internal", "unexpected error")),
     )
         .into_response()
 }
@@ -94,17 +95,22 @@ pub async fn require_owner(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| OwnerProof::parse(v).ok())
     else {
+        proof_refused(ProofKind::Owner, RefusalReason::Malformed);
         return Err(refused());
     };
     let owner = match state.store.owner_pubkey(channel).await {
         Ok(Some(key)) => key,
-        Ok(None) => return Err(refused()),
+        Ok(None) => {
+            proof_refused(ProofKind::Owner, RefusalReason::UnknownKey);
+            return Err(refused());
+        },
         Err(e) => {
             tracing::error!(error = %e, "owner key lookup failed");
             return Err(internal());
         },
     };
     let Ok(key) = VerifyingKey::from_bytes(&owner) else {
+        proof_refused(ProofKind::Owner, RefusalReason::UnknownKey);
         return Err(refused());
     };
     let req = OwnerRequest {
@@ -115,19 +121,24 @@ pub async fn require_owner(
     };
     let now = unix_ms();
     if verify_owner_proof(&proof, &req, &key, now).is_err() {
+        proof_refused(ProofKind::Owner, RefusalReason::Invalid);
         return Err(refused());
     }
-    consume_nonce(state, proof.nonce, now).await
+    consume_nonce(state, ProofKind::Owner, proof.nonce, now).await
 }
 
 async fn consume_nonce(
     state: &AppState,
+    kind: ProofKind,
     nonce: [u8; lakko_channels::owner::OWNER_PROOF_NONCE_LEN],
     now: u64,
 ) -> Result<(), Response> {
     match state.store.consume_owner_nonce(nonce, now).await {
         Ok(true) => Ok(()),
-        Ok(false) => Err(refused()),
+        Ok(false) => {
+            proof_refused(kind, RefusalReason::Replayed);
+            Err(refused())
+        },
         Err(e) => {
             tracing::error!(error = %e, "owner nonce store failed; refusing");
             Err(internal())
@@ -158,6 +169,7 @@ pub async fn require_publisher(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| CoPublisherProof::parse(v).ok())
     else {
+        proof_refused(ProofKind::CoPublisher, RefusalReason::Malformed);
         return Err(refused());
     };
     match state
@@ -166,7 +178,10 @@ pub async fn require_publisher(
         .await
     {
         Ok(true) => {},
-        Ok(false) => return Err(refused()),
+        Ok(false) => {
+            proof_refused(ProofKind::CoPublisher, RefusalReason::UnknownKey);
+            return Err(refused());
+        },
         Err(e) => {
             tracing::error!(error = %e, "co-publisher key lookup failed");
             return Err(internal());
@@ -180,7 +195,8 @@ pub async fn require_publisher(
     };
     let now = unix_ms();
     if verify_copublisher_proof(&proof, &req, now).is_err() {
+        proof_refused(ProofKind::CoPublisher, RefusalReason::Invalid);
         return Err(refused());
     }
-    consume_nonce(state, proof.proof.nonce, now).await
+    consume_nonce(state, ProofKind::CoPublisher, proof.proof.nonce, now).await
 }

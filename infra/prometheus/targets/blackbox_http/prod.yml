@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Public /health and /ready probes of the prod names (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/blackbox_http/prod.yml by infra/monitoring/setup-monitoring.sh
+# only when "prod" is in LAKKO_MONITORING_STACKS.
+
+- targets:
+    - https://lakko.me/health
+    - https://api.lakko.me/health
+    - https://api.lakko.me/auth/ready
+    - https://api.lakko.me/ds/ready
+    - https://api.lakko.me/discovery/ready
+    - https://api.lakko.me/storage/ready
+    - https://api.lakko.me/push-gw/ready
+    - https://api.lakko.me/channels/health
+    - https://api.lakko.me/gifs/ready
+    - https://sfu.lakko.me/ready
+  labels: {stack: prod}

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use crate::blob::blob_path;
 use crate::index::{today, BlobId, BlobIndex, BlobRow, IndexError};
+use crate::metrics;
 
 /// Ids taken from the index per sweep round. Chosen.
 const SWEEP_BATCH: usize = 500;
@@ -71,19 +72,26 @@ pub(crate) fn spawn_sweeper(
     interval: Duration,
     after_sweep: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> tokio::task::JoinHandle<()> {
+    lakko_metrics::job_registered(metrics::JOB_BLOB_SWEEP);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
             match sweep_once(index.as_ref(), &root, &node, today(), lifetime_days).await {
-                Ok(0) => {},
                 Ok(n) => {
-                    tracing::info!(deleted = n, "blob lifetime sweep");
-                    if let Some(f) = &after_sweep {
-                        f();
+                    lakko_metrics::job_succeeded(metrics::JOB_BLOB_SWEEP);
+                    metrics::sweep_removed(n);
+                    if n > 0 {
+                        tracing::info!(deleted = n, "blob lifetime sweep");
+                        if let Some(f) = &after_sweep {
+                            f();
+                        }
                     }
                 },
-                Err(e) => tracing::warn!(error = %e, "blob lifetime sweep failed"),
+                Err(e) => {
+                    lakko_metrics::job_failed(metrics::JOB_BLOB_SWEEP);
+                    tracing::warn!(error = %e, "blob lifetime sweep failed");
+                },
             }
         }
     })

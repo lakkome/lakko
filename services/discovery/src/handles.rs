@@ -107,7 +107,10 @@ const CODE_NO_HANDLE: &str = "no-such-handle";
 const CODE_KEY_IN_USE: &str = "key-in-use";
 
 fn coded(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(serde_json::json!({ "error": code }))).into_response()
+    crate::metrics::with_code(
+        (status, Json(serde_json::json!({ "error": code }))).into_response(),
+        code,
+    )
 }
 
 fn bad_request(what: impl Into<String>) -> Response {
@@ -1001,12 +1004,16 @@ async fn free_held_batch(pool: &MySqlPool, hold: i64) -> Result<(usize, u64), sq
 
 /// Hourly pruner: lapsed leases, held names past the hold, old nonces.
 pub(crate) fn spawn_pruner(pool: MySqlPool, hold_secs: u64) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::{job_run, jobs};
+    lakko_metrics::job_registered(jobs::HANDLE_PRUNE);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
-            match prune(&pool, hold_secs).await {
+            let result = prune(&pool, hold_secs).await;
+            job_run(jobs::HANDLE_PRUNE, &result);
+            match result {
                 Ok((0, 0)) => {},
                 Ok((lapsed, freed)) => tracing::info!(lapsed, freed, "handles pruned"),
                 Err(e) => tracing::warn!(error = %e, "handles prune failed"),

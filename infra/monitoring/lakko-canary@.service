@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# The synthetic canary (ADR-0096 section 5, P5) on the monitoring VPS, one
+# instance per stack: lakko-canary@prod, lakko-canary@test.
+#
+# State (both canary accounts' secrets, their MLS state, the journal cursor):
+#   /var/lib/lakko-canary/<stack>/state.json, mode 0600, user lakko-canary.
+# It is written by `lakko-canary init` (just canary-init <stack>); the unit
+# does not start without it.
+#
+# Settings: /etc/lakko-monitoring/canary-<stack>.env, written by
+# infra/monitoring/setup-monitoring.sh:
+#   LAKKO_CANARY_METRICS_BIND  127.0.0.1:9661 (prod), 127.0.0.1:9662 (test)
+#   LAKKO_CANARY_INTERVAL_SECS 600
+#   LAKKO_CANARY_CALL_EVERY    3 (a call every third run: call-join tokens
+#                              are 100 a day per account)
+#   RUST_LOG                   info
+
+[Unit]
+Description=Lakko synthetic canary (%i)
+After=network-online.target time-sync.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/lakko-canary/%i/state.json
+
+[Service]
+Type=simple
+User=lakko-canary
+Group=lakko-canary
+EnvironmentFile=/etc/lakko-monitoring/canary-%i.env
+ExecStart=/usr/local/bin/lakko-canary run --state /var/lib/lakko-canary/%i/state.json --interval-secs ${LAKKO_CANARY_INTERVAL_SECS} --call-every ${LAKKO_CANARY_CALL_EVERY}
+Restart=on-failure
+RestartSec=30
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lakko-canary/%i
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

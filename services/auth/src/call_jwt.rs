@@ -167,7 +167,11 @@ fn random_peer_id() -> String {
 }
 
 fn refusal(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(json!({ "error": code }))).into_response()
+    let mut response = (status, Json(json!({ "error": code }))).into_response();
+    response
+        .extensions_mut()
+        .insert(lakko_metrics::ErrorCode(code));
+    response
 }
 
 /// Issue a call admission token for the requested room, paid for by one

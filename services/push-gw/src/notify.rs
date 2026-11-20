@@ -77,6 +77,7 @@ use lakko_contacts::push_wake::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::{DeliveryResult, WakeOutcome};
 use crate::provider::{DeliverError, ProviderKind, WakeKind, WakePayload};
 use crate::wake_guard::GuardRefusal;
 use crate::AppState;
@@ -291,17 +292,33 @@ pub(crate) async fn notify_group(
 /// Decode, open and admit one forwarded wake: the shape, the seal, the
 /// signature, the clock, the nonce and the group's budget.
 fn open_and_admit(state: &AppState, header: &str) -> Result<OpenedPushWake, HandlerError> {
+    let wake = admit(state, header).map_err(|(outcome, error)| {
+        crate::metrics::wake(outcome);
+        error
+    })?;
+    crate::metrics::wake(WakeOutcome::Accepted);
+    Ok(wake)
+}
+
+/// [`open_and_admit`] without the count: each refusal carries the outcome
+/// it is counted under.
+fn admit(state: &AppState, header: &str) -> Result<OpenedPushWake, (WakeOutcome, HandlerError)> {
+    let malformed = || {
+        (
+            WakeOutcome::Malformed,
+            refused(StatusCode::BAD_REQUEST, "malformed wake"),
+        )
+    };
     if header.len() != PUSH_WAKE_HEADER_LEN {
-        return Err(refused(StatusCode::BAD_REQUEST, "malformed wake"));
+        return Err(malformed());
     }
-    let blob = B64URL
-        .decode(header)
-        .map_err(|_| refused(StatusCode::BAD_REQUEST, "malformed wake"))?;
+    let blob = B64URL.decode(header).map_err(|_| malformed())?;
     let wake = open_push_wake(&state.wake_key, &blob).map_err(|e| match e {
-        PushWakeError::BadLength | PushWakeError::UnknownVersion(_) => {
-            refused(StatusCode::BAD_REQUEST, "malformed wake")
-        },
-        _ => refused(StatusCode::FORBIDDEN, "wake refused"),
+        PushWakeError::BadLength | PushWakeError::UnknownVersion(_) => malformed(),
+        _ => (
+            WakeOutcome::NotOpened,
+            refused(StatusCode::FORBIDDEN, "wake refused"),
+        ),
     })?;
     state
         .wake_guard
@@ -313,9 +330,22 @@ fn open_and_admit(state: &AppState, header: &str) -> Result<OpenedPushWake, Hand
             Instant::now(),
         )
         .map_err(|r| match r {
-            GuardRefusal::Stale => refused(StatusCode::FORBIDDEN, "wake refused"),
-            GuardRefusal::Replay => refused(StatusCode::CONFLICT, "wake replayed"),
-            GuardRefusal::Capped => refused(StatusCode::TOO_MANY_REQUESTS, "wake capped"),
+            GuardRefusal::Stale => (
+                WakeOutcome::Stale,
+                refused(StatusCode::FORBIDDEN, "wake refused"),
+            ),
+            GuardRefusal::Replay => (
+                WakeOutcome::Replayed,
+                refused(StatusCode::CONFLICT, "wake replayed"),
+            ),
+            GuardRefusal::NonceSetFull => (
+                WakeOutcome::NonceSetFull,
+                refused(StatusCode::CONFLICT, "wake replayed"),
+            ),
+            GuardRefusal::Capped => (
+                WakeOutcome::Capped,
+                refused(StatusCode::TOO_MANY_REQUESTS, "wake capped"),
+            ),
         })?;
     Ok(wake)
 }
@@ -382,29 +412,51 @@ async fn dispatch_one(
             provider = kind.as_str(),
             "no provider configured for this kind — skipping",
         );
+        crate::metrics::delivery(kind, DeliveryResult::NotConfigured);
         return DeliveryOutcome {
             provider: kind,
             status: "transport",
             detail: Some(format!("no provider configured for {}", kind.as_str())),
         };
     };
-    match provider.deliver(token, payload).await {
-        Ok(()) => DeliveryOutcome {
-            provider: kind,
-            status: "ok",
-            detail: None,
-        },
-        Err(DeliverError::TokenInvalid) => DeliveryOutcome {
-            provider: kind,
-            status: "token_invalid",
-            detail: None,
-        },
-        Err(DeliverError::Transport(msg)) => DeliveryOutcome {
-            provider: kind,
-            status: "transport",
-            detail: Some(msg),
-        },
+    let started = Instant::now();
+    let result = provider.deliver(token, payload).await;
+    let log_only = provider.is_log_only();
+    if !log_only {
+        crate::metrics::provider_send(kind, started.elapsed());
     }
+    let (outcome, counted) = match result {
+        Ok(()) => (
+            DeliveryOutcome {
+                provider: kind,
+                status: "ok",
+                detail: None,
+            },
+            if log_only {
+                DeliveryResult::LogOnly
+            } else {
+                DeliveryResult::Ok
+            },
+        ),
+        Err(DeliverError::TokenInvalid) => (
+            DeliveryOutcome {
+                provider: kind,
+                status: "token_invalid",
+                detail: None,
+            },
+            DeliveryResult::TokenInvalid,
+        ),
+        Err(DeliverError::Transport(msg)) => (
+            DeliveryOutcome {
+                provider: kind,
+                status: "transport",
+                detail: Some(msg),
+            },
+            DeliveryResult::Transport,
+        ),
+    };
+    crate::metrics::delivery(kind, counted);
+    outcome
 }
 
 #[cfg(test)]

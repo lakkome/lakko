@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# The test stack's TURN-over-TLS (HAProxy in front of coturn, reached
+# through the SNI router on 443) (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/blackbox_tls/test.yml by infra/monitoring/setup-monitoring.sh
+# only when "test" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['edge.lakko.me:443']
+  labels: {stack: test}

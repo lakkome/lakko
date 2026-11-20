@@ -337,6 +337,7 @@ pub(crate) async fn backup_head(
     if check_mint_rate(&state.db, state.backup_head_mint_rate, &auth.0).await
         == MintRateDecision::Limited
     {
+        crate::metrics::backup_head_mint_limited();
         return Err(ApiError::RateLimited);
     }
 

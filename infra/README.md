@@ -541,12 +541,155 @@ sudo systemctl restart lakko-svc-discovery   # the file is read once at startup
 
 ## Backup / restore
 
-Phase 2 sprint task. Bare minimum:
+Two systemd timers run `infra/scripts/backup.sh` (ADR-0096 P2):
 
-- MariaDB dump → Hetzner Storage Box daily: `mariadb-dump --single-transaction lakko | zstd > /backup/lakko-$(date +%F).sql.zst`
-- `/var/lib/lakko/blobs` — weekly rsync snapshot to Storage Box
-- `/etc/lakko/` — back up whenever secrets change
-- `/etc/letsencrypt/` — back up before renewal
+- `lakko-backup-db.timer`, daily at 03:15 UTC: every `lakko_*` database is
+  dumped with `mariadb-dump --single-transaction`, compressed with zstd and
+  encrypted to an age public key; the last `LAKKO_BACKUP_KEEP_DAYS` days
+  (default 7) are kept in `/var/backups/lakko/db/` and mirrored to the
+  Storage Box, so the box holds the same days.
+- `lakko-backup-blobs.timer`, Sundays at 04:15 UTC: `/var/lib/lakko/blobs`
+  is mirrored to the Storage Box. The blobs are client-encrypted
+  attachments; nothing is added to them.
+
+Each successful run writes `lakko_job_last_success_timestamp_seconds{task}`
+to node_exporter's textfile directory; the monitoring host alerts when it
+is older than 26 hours (dumps) or 8 days (blobs), and when no dump has ever
+reported. A failed run writes nothing.
+
+`just setup-metrics` (section "Monitoring" below) installs the script and the
+timers and enables the timers once `LAKKO_BACKUP_TARGET` is set. The rest of
+the one-time setup on the VPS:
+
+```bash
+sudo apt-get install -y age zstd rsync
+sudo install -m 0755 infra/scripts/backup.sh /usr/local/bin/lakko-backup
+sudo cp infra/systemd/lakko-backup-*.service infra/systemd/lakko-backup-*.timer /etc/systemd/system/
+sudo mkdir -p /var/backups/lakko /var/lib/node_exporter/textfile_collector
+# ssh key the Storage Box accepts, and its host key (port 23):
+sudo ssh-keygen -t ed25519 -N '' -f /etc/lakko/backup_ssh_key
+ssh-keyscan -p 23 u123456.your-storagebox.de | sudo tee /etc/lakko/backup_known_hosts
+# In /etc/lakko/lakko.env: LAKKO_BACKUP_TARGET and LAKKO_BACKUP_AGE_RECIPIENT
+# (an age public key whose private half is NOT on the VPS).
+sudo systemctl daemon-reload
+sudo systemctl enable --now lakko-backup-db.timer lakko-backup-blobs.timer
+sudo systemctl start lakko-backup-db.service   # one run now, then check the journal
+```
+
+**A restore is a security incident, not a routine step.** A dump puts back
+state that must only ever move forward: key generations and device session
+floors (ADR-0073, ADR-0074: revoked devices and reset accounts come back),
+the anonymous-token spent set (spent tokens work again), recall anchors,
+the backup-head version counter (ADR-0037: version numbers reused), DS epoch
+registrations and journal rows (ADR-0053, ADR-0057), and, once they run
+here, the KT log and witness high-water marks (ADR-0020, ADR-0039). The
+procedure:
+
+1. Stop `lakko.target`. Restore **every** `lakko_*` database from the same
+   night, never one alone: auth older than discovery makes discovery refuse
+   every client's identity write as `key-generation-superseded`, and a
+   client that receives that answer wipes itself (ADR-0073).
+   `age -d -i <private key> lakko_ds.sql.zst.age | zstd -d | sudo mariadb`,
+   once per database.
+2. Before starting the services, in `/etc/lakko/lakko.env` replace
+   `LAKKO_SESSION_TOKEN_SECRET` and `LAKKO_ANON_TOKEN_MASTER_SECRET`
+   (`openssl rand -hex 32` each; the services that share a value must get
+   the same new one). Every session and every outstanding anonymous token
+   then fails: clients see `refresh-invalid` and ask the person to sign in
+   again, which does not wipe them, and refill their tokens.
+3. Move the backup-head counters past anything a client may have seen:
+   `UPDATE lakko_auth.backup_head_versions SET version = version + 1000000;`.
+4. A KT log or witness database restored shorter than what clients already
+   verified is refused by every client that pinned a later root (no-rollback,
+   fail closed); do not serve one without checking its size against the
+   last published root.
+5. Start `lakko.target`. What happened after the dump is gone: device
+   revocations, key resets and account deletions made since then must be
+   made again by the people who made them (the server cannot tell who),
+   and conversations whose epoch moved past the dump need their devices to
+   rejoin.
+
+The age private key belongs offline, never on the main VPS or the Storage
+Box: on that host it would undo the encryption for anyone who seizes it.
+Dumps keep what was deleted: an account deleted today stays in up to
+`LAKKO_BACKUP_KEEP_DAYS` days of dumps on the VPS and on the Storage Box, and
+a blob deleted or swept stays on the Storage Box until the next weekly
+mirror (`rsync --delete`).
+
+Not backed up by the timers: `/etc/lakko/` (copy it whenever a secret
+changes) and `/etc/letsencrypt/` (reissued by certbot if lost).
+
+## Monitoring (ADR-0096 P3)
+
+A separate small VPS runs Prometheus, Alertmanager, Grafana and
+blackbox_exporter. It scrapes the Lakko hosts over client-certificate TLS
+and sends alerts to a Telegram bot and e-mail, never through Lakko. Nothing
+on it listens publicly; Grafana is reached over an SSH port forward.
+
+| Host | What runs | Reached at |
+|---|---|---|
+| monitoring VPS (Ubuntu 24.04, x86_64) | Prometheus 127.0.0.1:9090 (30 days), Alertmanager :9093, blackbox :9115, node_exporter :9100, Grafana :3000, the canary :9661 (prod) and :9662 (test) | ssh only |
+| main VPS | every service's `/metrics` on 127.0.0.1:9641 (SFU) and 9651-9660, node_exporter :9100, mysqld_exporter :9104, nginx exporter :9113 | `metrics.lakko.me:9643/<target>/metrics`, client certificate required, firewall admits the monitoring VPS only |
+| coturn VPS | coturn's exporter :9641, node_exporter :9100 | `turn.lakko.me:9642/metrics` and `/node/metrics`, client certificate required, firewall admits the monitoring VPS only (when `deploy-coturn` ran with `LAKKO_MONITORING_IP`) |
+| test stack (`stack="test"`, ADR-0096 P4) | as the main VPS, without transparency and witness; coturn there exports nothing | `test.lakko.me:9643/<target>/metrics`; see `infra/test-stack/README.md` |
+
+Configuration in the repository: `infra/prometheus/` (scrape config, alert
+rules, rule tests), `infra/monitoring/` (setup script, Alertmanager template,
+blackbox modules, secrets example), `infra/grafana/` (datasource, six
+dashboards as code), `infra/nginx/sites-available/metrics.conf`,
+`infra/scripts/setup-metrics.sh`, `infra/journald/lakko.conf`.
+
+**First setup, in this order:**
+
+1. Create the monitoring VPS (Ubuntu 24.04, its own encrypted disk) and a DNS
+   name for it; add an A record `metrics.lakko.me` pointing at the MAIN VPS.
+2. On the monitoring VPS, as root: copy `infra/monitoring/secrets.env.example`
+   to `/etc/lakko-monitoring/secrets.env` (mode 0600) and fill in the Telegram
+   bot token, chat id and the SMTP relay.
+3. From a checkout: `LAKKO_MONITORING_HOST=<name> just deploy-monitoring`.
+   The first run makes the monitoring CA and Prometheus's client certificate
+   in `/etc/lakko-monitoring/mtls` (the CA key stays there).
+4. `just push-monitoring-ca` copies the CA certificate (not the key) to
+   `/etc/lakko/mtls/monitoring-ca.crt` on the main and coturn VPSes.
+5. `LAKKO_MONITORING_IP=<its address> just setup-metrics` on the main VPS
+   (runs the script from the VPS checkout of `main`): exporters, the metrics
+   server block and its certificate, journald retention, the schema-size and
+   backup timers, the `LAKKO_<SVC>_METRICS_BIND` lines in `lakko.env`. Then
+   `just restart` so the services open their listeners.
+6. `LAKKO_MONITORING_IP=<its address> just deploy-coturn` once more:
+   node_exporter moves to loopback behind the coturn vhost, its old public
+   port 9100 is closed, and 9642 admits the monitoring VPS only.
+7. `just grafana`, then http://127.0.0.1:3000 (user `admin`, password in
+   `/etc/lakko-monitoring/grafana-admin-password` on the monitoring VPS). The
+   Prometheus targets page is at `ssh -L 9090:127.0.0.1:9090`.
+
+**After editing** rules, dashboards or the Alertmanager template: `just
+deploy-monitoring` again. Dashboards edited in the Grafana UI are not kept;
+change the JSON in `infra/grafana/dashboards/`.
+
+**Checks that need no server** (Docker): `just monitoring-check` runs
+`promtool check config`, the rule unit tests, `amtool check-config` on the
+rendered template with the example secrets, and the blackbox config check.
+
+**The canary (ADR-0096 P5).** `lakko-canary@prod` and `lakko-canary@test`
+run on the monitoring VPS (`tools/canary`, metrics on 127.0.0.1:9661 and
+:9662). Each holds two dedicated accounts that only talk to each other and
+every 10 minutes signs both in, sends a message from one and decrypts it on
+the other, moves an encrypted attachment between them and deletes it, and
+every third run places a call whose SFrame-sealed audio must reach the
+other side. The accounts' secrets and MLS state are in
+`/var/lib/lakko-canary/<stack>/state.json` (mode 0600, user `lakko-canary`);
+losing the file means running init again with new accounts. Setup, after
+step 3 above: `just deploy-canary` (builds on the main VPS from `main`,
+copies the binary), then `just canary-init prod` and `just canary-init test`.
+The call step starts a day after init (a young account gets 8 call-join
+tokens a day). Settings per stack in `/etc/lakko-monitoring/canary-<stack>.env`.
+A step that fails twice in a row alerts (`LakkoCanaryStepFailing`).
+
+**Not covered yet:** a STUN answer from coturn (blackbox has no STUN
+prober; only the TLS handshake on 443 is probed), the obfs listeners, and an
+alert when the monitoring VPS itself is down (nothing outside it watches
+it).
 
 ## Out of scope for Phase 1
 

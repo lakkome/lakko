@@ -223,6 +223,7 @@ mod key_rotate;
 mod limits;
 mod login_handle;
 mod mail;
+mod metrics;
 mod opaque;
 mod passkey_vault;
 mod phrase_saved;
@@ -401,6 +402,9 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env("auth", env!("CARGO_PKG_VERSION"), "LAKKO_AUTH_METRICS_BIND")
+        .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -424,6 +428,10 @@ async fn main() -> Result<()> {
 
     // Apply embedded migrations on startup. Idempotent.
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let gauge_pool = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (gauge_pool.size(), gauge_pool.num_idle()));
 
     // Load (or initialize on first run) the server-static OPAQUE setup.
     // Runs AFTER migrations so opaque_server_setup table exists.
@@ -1032,6 +1040,8 @@ fn build_app(state: AppState) -> Router {
             get(anon_credential::public_key),
         )
         .merge(anon_cred_routes)
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("auth"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

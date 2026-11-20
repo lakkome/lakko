@@ -40,6 +40,7 @@ members = [
     "crates/lakko-open-items",
     "crates/lakko-l10n",
     "crates/lakko-log-hygiene",
+    "crates/lakko-metrics",
     "crates/lakko-noise",
     "crates/lakko-noise-wasm",
     "crates/lakko-segment",
@@ -67,6 +68,7 @@ members = [
     "tools/donations",
     "tools/bootstrap-config",
     "tools/l10n",
+    "tools/canary",
 ]
 # Fuzz crates require nightly + libfuzzer-sys; they opt out of this
 # workspace via their own `[workspace]` block and are listed here only so
@@ -208,6 +210,7 @@ lakko-anon-token = { path = "crates/lakko-anon-token", version = "0.0.0" }
 lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "0.0.0" }
 lakko-anon-cred = { path = "crates/lakko-anon-cred", version = "0.0.0" }
 lakko-log-hygiene = { path = "crates/lakko-log-hygiene", version = "0.0.0" }
+lakko-metrics = { path = "crates/lakko-metrics", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
 lakko-noise = { path = "crates/lakko-noise", version = "0.0.0" }

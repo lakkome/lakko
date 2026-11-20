@@ -65,6 +65,33 @@ Optional SFU switches, set by hand in `/etc/lakko-test/lakko.env` and followed b
   changed (the negotiation differs). Read `services/sfu/README.md`, "Bitrate control": not
   yet seen against a real browser.
 
+## Monitoring (ADR-0096 P4)
+
+The monitoring VPS (`infra/README.md`, "Monitoring") scrapes this host under
+`stack="test"`, through the same metrics server block as production, on
+`test.lakko.me:9643` with the test stack's existing certificate. Each
+service's `/metrics` listener (`LAKKO_<SVC>_METRICS_BIND`, 127.0.0.1:9641 and
+9651-9660), node_exporter, mysqld_exporter and the nginx exporter listen on
+127.0.0.1 only; the firewall opens 9643 to the monitoring VPS alone, and a
+client certificate from the monitoring CA is required. The test coturn
+instances (edge, edge2) export no metrics; edge's TURN-over-TLS on 443 is
+probed instead. Test-stack alerts go to Telegram only, never to e-mail.
+
+Setup, once the monitoring VPS exists:
+
+```bash
+just push-monitoring-ca-test
+LAKKO_MONITORING_IP=<monitoring VPS address> just setup-metrics-test
+just deploy-test        # restarts lakko-test.target, so the listeners open
+```
+
+`setup-metrics-test` copies `infra/` from the working tree to
+`/root/lakko-infra/` on the server and runs `infra/scripts/setup-metrics.sh`
+with `STACK=test`: the exporters, journald retention, the schema-size timer,
+the metrics lines in `/etc/lakko-test/lakko.env`, the server block
+(`/etc/nginx/sites-available/lakko-metrics.conf`) and the firewall rule. No
+backup timers: the test stack's data is disposable.
+
 ## One-time setup
 
 1. DNS: an `A` record for the domain, **not** proxied by Cloudflare (the SFU media port and

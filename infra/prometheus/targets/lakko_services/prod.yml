@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Lakko services on the main VPS through the metrics server block metrics.lakko.me:9643.
+# transparency, witness and obfs-proxy have no systemd unit on the main VPS
+# yet; add their targets when they are deployed (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/lakko_services/prod.yml by infra/monitoring/setup-monitoring.sh
+# only when "prod" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: auth, __metrics_path__: /auth/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: ds, __metrics_path__: /ds/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: discovery, __metrics_path__: /discovery/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: storage, __metrics_path__: /storage/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: push-gw, __metrics_path__: /push-gw/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: channels, __metrics_path__: /channels/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: gif-proxy, __metrics_path__: /gif-proxy/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, service: sfu, __metrics_path__: /sfu/metrics}

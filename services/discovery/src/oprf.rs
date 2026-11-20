@@ -124,6 +124,7 @@ pub(crate) async fn evaluate(
 
     let evaluation = state.oprf.blind_evaluate(&blinded);
     let bytes = evaluation.serialize();
+    crate::metrics::oprf_evaluated(crate::metrics::OprfKind::Single, 1);
 
     Ok(Json(OprfResponse {
         evaluated: B64.encode(bytes),
@@ -157,11 +158,14 @@ pub(crate) struct OprfBatchResponse {
 }
 
 fn batch_refusal(code: &'static str) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": code })),
+    crate::metrics::with_code(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": code })),
+        )
+            .into_response(),
+        code,
     )
-        .into_response()
 }
 
 /// `POST /discovery/oprf/batch` — evaluate up to [`MAX_OPRF_BATCH`] blinded
@@ -217,6 +221,7 @@ pub(crate) async fn evaluate_batch(
         .iter()
         .map(|element| B64.encode(state.oprf.blind_evaluate(element).serialize()))
         .collect();
+    crate::metrics::oprf_evaluated(crate::metrics::OprfKind::Batch, blinded.len());
     Json(OprfBatchResponse { evaluated }).into_response()
 }
 
@@ -228,6 +233,17 @@ pub(crate) async fn evaluate_batch(
 mod tests {
     use super::*;
     use voprf::OprfClient;
+
+    /// A batch refusal carries its code for the RED counter (ADR-0096).
+    #[test]
+    fn a_batch_refusal_carries_its_code() {
+        let res = batch_refusal("oprf-batch-empty");
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            res.extensions().get::<lakko_metrics::ErrorCode>(),
+            Some(&lakko_metrics::ErrorCode("oprf-batch-empty"))
+        );
+    }
 
     /// Full client-server VOPRF round-trip in memory: blind → server
     /// blind_evaluate → unblind. Confirms the ciphersuite + seed-based

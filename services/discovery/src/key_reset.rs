@@ -112,13 +112,19 @@ impl IntoResponse for RouteError {
     fn into_response(self) -> Response {
         match self {
             Self::Text(status, message) => (status, message).into_response(),
-            Self::Code(status, code) => (status, Json(json!({ "error": code }))).into_response(),
-            Self::RetryAfter(status, code, secs) => (
-                status,
-                [(axum::http::header::RETRY_AFTER, secs.to_string())],
-                Json(json!({ "error": code, "retry_after_secs": secs })),
-            )
-                .into_response(),
+            Self::Code(status, code) => crate::metrics::with_code(
+                (status, Json(json!({ "error": code }))).into_response(),
+                code,
+            ),
+            Self::RetryAfter(status, code, secs) => crate::metrics::with_code(
+                (
+                    status,
+                    [(axum::http::header::RETRY_AFTER, secs.to_string())],
+                    Json(json!({ "error": code, "retry_after_secs": secs })),
+                )
+                    .into_response(),
+                code,
+            ),
         }
     }
 }
