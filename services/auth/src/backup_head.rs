@@ -531,6 +531,56 @@ mod tests {
     //   LAKKO_AUTH_TEST_DATABASE_URL=mysql://lakko:devpass@127.0.0.1:3306/lakko_auth \
     //     cargo test -p lakko-svc-auth backup_head
 
+    /// A fresh account row (the backup-head tables reference `accounts` since
+    /// migration 0038).
+    async fn new_account(pool: &MySqlPool) -> [u8; 16] {
+        let id: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+            .bind(id.as_slice())
+            .execute(pool)
+            .await
+            .expect("insert account");
+        id
+    }
+
+    /// Migration 0038: deleting the account deletes its backup-head rows.
+    #[tokio::test]
+    async fn deleting_the_account_deletes_its_backup_head_rows() {
+        let Some(pool) = test_pool("deleting_the_account_deletes_its_backup_head_rows").await
+        else {
+            return;
+        };
+        let acct = new_account(&pool).await;
+        bump_backup_version(&pool, &acct).await.expect("bump");
+        sqlx::query("INSERT INTO backup_head_mint_limits (account_id, mint_count) VALUES (?, 1)")
+            .bind(acct.as_slice())
+            .execute(&pool)
+            .await
+            .expect("insert limit row");
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(acct.as_slice())
+            .execute(&pool)
+            .await
+            .expect("delete account");
+        for (table, sql) in [
+            (
+                "backup_head_versions",
+                "SELECT COUNT(*) FROM backup_head_versions WHERE account_id = ?",
+            ),
+            (
+                "backup_head_mint_limits",
+                "SELECT COUNT(*) FROM backup_head_mint_limits WHERE account_id = ?",
+            ),
+        ] {
+            let left: i64 = sqlx::query_scalar(sql)
+                .bind(acct.as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+            assert_eq!(left, 0, "{table} kept a row of a deleted account");
+        }
+    }
+
     /// Connect + migrate a fresh test pool, or `None` when the gating env var is
     /// unset (skip).
     async fn test_pool(test_name: &str) -> Option<MySqlPool> {
@@ -557,8 +607,8 @@ mod tests {
         };
         // Fresh random account ids so the test is re-runnable against a
         // persistent dev DB (mirrors throttle.rs's per-run uuids).
-        let acct_a: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
-        let acct_b: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        let acct_a: [u8; 16] = new_account(&pool).await;
+        let acct_b: [u8; 16] = new_account(&pool).await;
 
         // First mint for account A → version 1; second → 2; third → 3.
         assert_eq!(
@@ -609,7 +659,7 @@ mod tests {
             limit: 3,
             window_secs: 3_600,
         };
-        let acct: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        let acct: [u8; 16] = new_account(&pool).await;
 
         // Counts 1, 2, 3 are all <= limit -> Allow.
         for _ in 0..3 {
@@ -641,8 +691,8 @@ mod tests {
             limit: 2,
             window_secs: 3_600,
         };
-        let acct_a: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
-        let acct_b: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        let acct_a: [u8; 16] = new_account(&pool).await;
+        let acct_b: [u8; 16] = new_account(&pool).await;
 
         // Trip account A (counts 1, 2 allowed; 3 limited).
         assert_eq!(
@@ -682,7 +732,7 @@ mod tests {
             limit: 1,
             window_secs: 1,
         };
-        let acct: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        let acct: [u8; 16] = new_account(&pool).await;
 
         // Count 1 -> Allow; count 2 in the same window -> Limited.
         assert_eq!(
@@ -711,7 +761,7 @@ mod tests {
             return;
         };
         let cfg = MintRateConfig::disabled();
-        let acct: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        let acct: [u8; 16] = new_account(&pool).await;
         for _ in 0..12 {
             assert_eq!(
                 check_mint_rate(&pool, cfg, &acct).await,

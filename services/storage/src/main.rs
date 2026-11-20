@@ -9,8 +9,16 @@
 //! so the server cannot deduplicate across people who encrypt the same
 //! plaintext under different keys.
 //!
-//! Backend: the local filesystem rooted at `LAKKO_BLOB_DIR`, laid out
-//! `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`, with one storage node today.
+//! Backend ([`store`]): the local filesystem rooted at `LAKKO_BLOB_DIR`, laid
+//! out `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`, or an S3-compatible bucket when
+//! the `LAKKO_STORAGE_S3_*` variables are set (ADR-0065 amendment of
+//! 2026-11-19); one storage node today. Upload temporaries and the account
+//! backups stay under `LAKKO_BLOB_DIR` with either backend.
+//!
+//! `lakko-svc-storage migrate-to-s3` copies every blob file under
+//! `LAKKO_BLOB_DIR` into the configured bucket (skipping objects already
+//! there at the same length, checking each copy by `HEAD`), prints the
+//! counts and exits non-zero on any failure. It deletes nothing locally.
 //!
 //! # ADR-0065: lifetime, owner delete, a gate
 //!
@@ -33,7 +41,12 @@
 //! # Configuration (environment; `/etc/lakko/lakko.env` under systemd)
 //!
 //! - `LAKKO_BIND` - `host:port` (default `127.0.0.1:8083`)
-//! - `LAKKO_BLOB_DIR` - blob root (default `./target/dev-blobs/`)
+//! - `LAKKO_BLOB_DIR` - blob root (default `./target/dev-blobs/`); with S3,
+//!   the upload temporaries and the backups only
+//! - `LAKKO_STORAGE_S3_ENDPOINT`, `LAKKO_STORAGE_S3_BUCKET`,
+//!   `LAKKO_STORAGE_S3_REGION`, `LAKKO_STORAGE_S3_ACCESS_KEY`,
+//!   `LAKKO_STORAGE_S3_SECRET_KEY`, `LAKKO_STORAGE_S3_PATH_STYLE` - the
+//!   bucket ([`store::s3`]); all unset = the local directory
 //! - `LAKKO_SESSION_TOKEN_SECRET` - the session-token key (backup routes)
 //! - `LAKKO_STORAGE_DATABASE_URL` - MariaDB for the index and the token
 //!   spent-set; unset = the file index at `<LAKKO_BLOB_DIR>/.lakko-index/`
@@ -65,8 +78,11 @@
 mod auth;
 mod backup;
 mod blob;
+mod disk;
 mod index;
+mod internal;
 mod pass;
+mod store;
 mod stream;
 mod sweep;
 
@@ -88,6 +104,7 @@ use tokio::signal;
 
 use crate::index::BlobIndex;
 use crate::pass::{BudgetLedger, PassLimits, PassSecret, PASS_SECRET_VAR};
+use crate::store::{BlobStore, FsStore};
 
 /// Default bind address if `LAKKO_BIND` is not set.
 const DEFAULT_BIND: &str = "127.0.0.1:8083";
@@ -97,6 +114,10 @@ const DEFAULT_BLOB_DIR: &str = "./target/dev-blobs";
 
 /// Per-blob ceiling. Mirrored in nginx `client_max_body_size`.
 pub(crate) const MAX_BLOB_BYTES: usize = 50 * 1024 * 1024;
+
+/// Upload temporaries of the S3 backend, under the blob root. A dot
+/// directory, so the import and the migration never take it for a shard.
+const S3_TEMP_DIR: &str = ".lakko-upload";
 
 /// The index file of the file-backed index, under the blob root. A dot
 /// directory, so the import never takes it for a blob shard.
@@ -108,7 +129,10 @@ pub(crate) static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrat
 /// Shared application state. Cheap to clone.
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// Local directory: upload temporaries, backups, the free-space check.
     pub(crate) blob_root: Arc<PathBuf>,
+    /// Where blob bytes rest.
+    pub(crate) store: Arc<dyn BlobStore>,
     /// Session-token key for the per-account backup routes.
     pub(crate) session_token_secret: Arc<TokenSecret>,
     /// The blob index.
@@ -152,6 +176,7 @@ fn pass_limits_from_env() -> Result<PassLimits> {
         upload_bytes: env_u64("LAKKO_STORAGE_UPLOAD_PASS_BYTES", d.upload_bytes)?,
         read_downloads: env_u64("LAKKO_STORAGE_READ_PASS_DOWNLOADS", d.read_downloads)?,
         read_keeps: env_u64("LAKKO_STORAGE_READ_PASS_KEEPS", d.read_keeps)?,
+        min_free_bytes: env_u64(crate::disk::MIN_FREE_VAR, d.min_free_bytes)?,
     };
     if limits.ttl_secs == 0 {
         bail!("LAKKO_STORAGE_PASS_TTL_SECS must be positive");
@@ -218,7 +243,60 @@ async fn open_index(
     Ok((f.clone(), TokenVerifier::in_memory(token_config), Some(f)))
 }
 
+/// The S3 store, checked, or `None` when no bucket is configured.
+async fn open_s3(blob_root: &std::path::Path) -> Result<Option<Arc<store::s3::S3Store>>> {
+    let Some(config) = store::s3::S3Config::from_env().context("S3 storage config")? else {
+        return Ok(None);
+    };
+    let s3 = store::s3::S3Store::new(&config, blob_root.join(S3_TEMP_DIR))
+        .context("S3 storage config")?;
+    s3.check()
+        .await
+        .context("S3 bucket check (HEAD bucket must be 200, HEAD of an absent key 404)")?;
+    Ok(Some(Arc::new(s3)))
+}
+
+/// Whether the command line asks for `migrate-to-s3` (the only argument
+/// accepted).
+fn wants_migration() -> Result<bool> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => Ok(false),
+        [one] if one == "migrate-to-s3" => Ok(true),
+        _ => bail!("usage: lakko-svc-storage [migrate-to-s3]"),
+    }
+}
+
+/// The blob store: the bucket when configured, else the local directory.
+async fn open_store(blob_root: &std::path::Path) -> Result<Arc<dyn BlobStore>> {
+    if let Some(s3) = open_s3(blob_root).await? {
+        tracing::info!(bucket = s3.bucket_name(), "blob store: S3");
+        return Ok(s3);
+    }
+    tracing::info!("blob store: local directory");
+    Ok(Arc::new(FsStore::new(blob_root.to_path_buf())))
+}
+
+/// `migrate-to-s3`: copy the local blob files into the bucket.
+async fn migrate_to_s3(blob_root: &std::path::Path) -> Result<()> {
+    let s3 = open_s3(blob_root)
+        .await?
+        .context("migrate-to-s3 needs the LAKKO_STORAGE_S3_* variables")?;
+    let report = store::s3::migrate_files(&s3, blob_root).await?;
+    tracing::info!(
+        copied = report.copied,
+        already_there = report.present,
+        failed = report.failed,
+        "migrate-to-s3 done"
+    );
+    if report.failed > 0 {
+        bail!("migrate-to-s3: {} file(s) failed", report.failed);
+    }
+    Ok(())
+}
+
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // flat startup wiring reads best whole
 async fn main() -> Result<()> {
     // Load `.env` from the workspace root in debug builds. Production
     // picks up env vars from the systemd `EnvironmentFile=` directive.
@@ -242,9 +320,15 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&blob_root)
         .await
         .with_context(|| format!("create LAKKO_BLOB_DIR at {}", blob_root.display()))?;
-    blob::probe_writable(&blob_root)
+    store::probe_writable(&blob_root)
         .await
         .with_context(|| format!("LAKKO_BLOB_DIR not writable: {}", blob_root.display()))?;
+
+    if wants_migration()? {
+        return migrate_to_s3(&blob_root).await;
+    }
+
+    let store = open_store(&blob_root).await?;
 
     let session_token_secret_raw = std::env::var("LAKKO_SESSION_TOKEN_SECRET").context(
         "LAKKO_SESSION_TOKEN_SECRET env var must be set (base64-encoded HMAC-SHA256 key, \
@@ -297,7 +381,7 @@ async fn main() -> Result<()> {
         });
         Some(sweep::spawn_sweeper(
             index.clone(),
-            blob_root.clone(),
+            store.clone(),
             node.clone(),
             lifetime_days,
             Duration::from_secs(sweep_interval),
@@ -307,6 +391,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         blob_root: blob_root.clone(),
+        store,
         session_token_secret: Arc::new(session_token_secret),
         index,
         node,
@@ -315,6 +400,13 @@ async fn main() -> Result<()> {
         ledger: Arc::new(BudgetLedger::default()),
         tokens,
     };
+
+    // The internal listener auth removes a deleted account's backup through.
+    // Both variables or neither; one alone refuses startup.
+    let internal_config = internal::load_config()
+        .map_err(anyhow::Error::msg)
+        .context("internal listener")?;
+    let _internal = internal::spawn(blob_root.clone(), internal_config).await?;
 
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(bind)
@@ -383,12 +475,17 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok\n")
 }
 
-/// Readiness probe - confirms the blob root is writable.
+/// Readiness probe - the local blob root is writable and the blob store is
+/// usable (with S3: the bucket answers `HEAD`).
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    match blob::probe_writable(&state.blob_root).await {
+    if let Err(e) = store::probe_writable(&state.blob_root).await {
+        tracing::warn!(error = %e, "readiness probe: blob root not writable");
+        return (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response();
+    }
+    match state.store.ready().await {
         Ok(()) => (StatusCode::OK, "ready\n").into_response(),
         Err(e) => {
-            tracing::warn!(error = %e, "readiness probe: blob root not writable");
+            tracing::warn!(error = %e, store = state.store.name(), "readiness probe: blob store not usable");
             (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
         },
     }
@@ -458,6 +555,7 @@ pub(crate) mod test_support {
             AnonTokenServerConfig::from_values(Some(&master_hex()), None).expect("config");
         let state = AppState {
             blob_root: Arc::new(tmp.path().to_path_buf()),
+            store: Arc::new(FsStore::new(tmp.path().to_path_buf())),
             session_token_secret: Arc::new(secret),
             index: Arc::new(index),
             node: Arc::from("local"),
@@ -471,7 +569,16 @@ pub(crate) mod test_support {
 
     /// [`state_with`] at the default limits, passes enabled.
     pub(crate) fn state() -> (AppState, tempfile::TempDir) {
-        state_with(PassLimits::default(), true)
+        state_with(no_disk_floor(PassLimits::default()), true)
+    }
+
+    /// `limits` without the free-space floor, so a test does not depend on
+    /// how full the machine running it is.
+    pub(crate) const fn no_disk_floor(limits: PassLimits) -> PassLimits {
+        PassLimits {
+            min_free_bytes: 0,
+            ..limits
+        }
     }
 }
 

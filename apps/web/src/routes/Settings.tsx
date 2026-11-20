@@ -29,6 +29,8 @@ import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs"
 import { useProfiles } from "../profile/ProfileContext";
 import { appLicense, appVersion } from "../ui/app-version";
 import { Avatar } from "../ui/Avatar";
+import { BetaNoticeRow } from "../ui/BetaNotice";
+import { LegalAnchor } from "../legal/LegalLink";
 import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
 import { currentLanguage, supportedLanguages, t } from "../l10n";
@@ -43,6 +45,8 @@ import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { TranslationSettingsSection } from "../translation/TranslationSettings";
 import { paths } from "./paths";
+import { SupportersPage, SupportersRow } from "../supporters/Supporters";
+import { pinnedReleaseKey } from "../update/release-check";
 import { isDesktop } from "../platform";
 import {
   AntiCensorshipCard,
@@ -65,7 +69,14 @@ type Section =
   | "media"
   | "about"
   | "account";
-type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts" | "translation" | "text-size";
+type Page =
+  | Section
+  | "recovery"
+  | "privacy-groups"
+  | "privacy-contacts"
+  | "translation"
+  | "text-size"
+  | "supporters";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
 const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
@@ -99,6 +110,9 @@ function pageOf(s: string | undefined): Page | null {
   if (s === "translation") return "translation";
   // docs/ux/text-size.md - a sub-screen of Appearance.
   if (s === "text-size") return "text-size";
+  // docs/ux/supporters.md section 2 - a sub-screen of About; none without a
+  // pinned release key (no list can be verified).
+  if (s === "supporters") return pinnedReleaseKey() === null ? null : "supporters";
   // The former Data section: its export card now sits under Account.
   if (s === "data") return "account";
   return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
@@ -127,6 +141,7 @@ export default function Settings(): JSX.Element {
     if (p === "recovery") return "security";
     if (p === "translation") return "language";
     if (p === "text-size") return "appearance";
+    if (p === "supporters") return "about";
     return p === "privacy-groups" || p === "privacy-contacts" ? "privacy" : p;
   };
 
@@ -233,6 +248,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "about"}>
             <AboutSection />
+          </Show>
+          <Show when={shown() === "supporters"}>
+            <SupportersPage />
           </Show>
           <Show when={shown() === "account"}>
             <div class="lk-page-head">
@@ -548,6 +566,9 @@ function AboutSection(): JSX.Element {
         <p>{t("settings.about.lede_web")}</p>
       </div>
       <section class="lk-card">
+        {/* docs/ux/beta-notice.md: first, so the protection claim below is
+            read with the caveat. */}
+        <BetaNoticeRow />
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="info" size={18} />
@@ -575,6 +596,26 @@ function AboutSection(): JSX.Element {
             <span class="lk-card-row-sub">{t("settings.about.protection.body")}</span>
           </div>
         </div>
+        {/* docs/ux/supporters.md section 2.1: after "How Lakko protects you",
+            only while a verified list with names is held. */}
+        <SupportersRow />
+        {/* docs/ux/legal-pages.md section 2: each opens its page outside the app. */}
+        <LegalAnchor page="terms" class="lk-card-row lk-card-row-link">
+          <span class="lk-card-row-icon">
+            <Icon name="book" size={18} />
+          </span>
+          <span class="lk-card-row-body">
+            <span class="lk-card-row-title">{t("legal.terms_title")}</span>
+          </span>
+        </LegalAnchor>
+        <LegalAnchor page="privacy" class="lk-card-row lk-card-row-link">
+          <span class="lk-card-row-icon">
+            <Icon name="shield" size={18} />
+          </span>
+          <span class="lk-card-row-body">
+            <span class="lk-card-row-title">{t("legal.privacy_title")}</span>
+          </span>
+        </LegalAnchor>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="globe" size={18} />

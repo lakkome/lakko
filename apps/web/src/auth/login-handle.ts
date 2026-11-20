@@ -156,6 +156,42 @@ export class UsernameTakenError extends Error {
   }
 }
 
+/** The beta is full (`docs/ux/beta-account-cap.md`): auth refused the
+ *  account's FIRST login-handle bind with `403 registration-closed`. The
+ *  account was made but holds no name. */
+export class RegistrationClosedError extends Error {
+  override name = "RegistrationClosedError";
+  constructor() {
+    super("registration closed");
+  }
+}
+
+/** `true` when `err` is auth's `403 {"error":"registration-closed"}`. */
+export function isRegistrationClosed(err: unknown): boolean {
+  return (
+    err instanceof RegistrationClosedError ||
+    (err instanceof AuthHttpError && err.status === 403 && err.errorCode === "registration-closed")
+  );
+}
+
+/** ADR-0097 (`docs/ux/supporters.md` 1.2): the first bind past the beta cap
+ *  carried a supporter place that was already spent (`403
+ *  supporter-code-used`). The account was made but holds no name. */
+export class SupporterCodeUsedError extends Error {
+  override name = "SupporterCodeUsedError";
+  constructor() {
+    super("supporter code already used");
+  }
+}
+
+/** `true` when `err` is auth's `403 {"error":"supporter-code-used"}`. */
+export function isSupporterCodeUsed(err: unknown): boolean {
+  return (
+    err instanceof SupporterCodeUsedError ||
+    (err instanceof AuthHttpError && err.status === 403 && err.errorCode === "supporter-code-used")
+  );
+}
+
 /** `true` when `err` is auth's `409 handle-taken`. */
 export function isHandleTaken(err: unknown): boolean {
   return err instanceof AuthHttpError && err.status === 409;
@@ -169,7 +205,8 @@ export function isHandleTaken(err: unknown): boolean {
  *   discovery is never asked; any other bind failure, auth's `429
  *   handle-bind-limited` included (anti-abuse section 2: its own copy via
  *   `authLimitMessage`, the form keeps its contents), is rethrown as it is,
- *   and discovery is not asked either.
+ *   and discovery is not asked either; auth's `403 registration-closed`
+ *   (the beta account cap) throws {@link RegistrationClosedError}.
  * - `register` failing (taken, or anything else) calls `release` (drop the
  *   handle, or re-bind the previous one on a rename) before rethrowing; a
  *   discovery `409` is rethrown as {@link UsernameTakenError}.
@@ -186,6 +223,10 @@ export async function claimUsername<T>(args: {
     await args.bind();
   } catch (err) {
     if (isHandleTaken(err)) throw new UsernameTakenError(args.username);
+    // The beta is full: nothing was bound, discovery is not asked.
+    if (isRegistrationClosed(err)) throw new RegistrationClosedError();
+    // ADR-0097: the held supporter place was already spent.
+    if (isSupporterCodeUsed(err)) throw new SupporterCodeUsedError();
     throw err;
   }
   try {

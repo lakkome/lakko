@@ -27,6 +27,8 @@
 //!   per-name and per-address attempt limits that replaced proof of work on
 //!   every other route, each `N/SECS` (see `src/limits.rs` for the names and
 //!   the defaults, which are chosen, not measured)
+//! - `LAKKO_AUTH_MAX_ACCOUNTS` — the beta cap on accounts with a username
+//!   (ADR-0046 amendment; `0` or unset = no cap; see `src/account_cap.rs`)
 //! - `LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS` — minimum seconds between
 //!   two binds of one account that change its login handle (default 60;
 //!   restoring the handle held just before is exempt; 0 = no minimum)
@@ -196,6 +198,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_cap;
 mod account_notices;
 mod anon_tokens;
 mod backup_head;
@@ -215,6 +218,7 @@ mod opaque;
 mod passkey_vault;
 mod phrase_saved;
 mod pow;
+mod purge;
 mod recall;
 #[cfg(test)]
 mod recall_tests;
@@ -223,6 +227,7 @@ mod recovery_email;
 mod recovery_email_tests;
 mod room_cap;
 mod session;
+mod supporter_codes;
 mod totp;
 mod turn;
 mod unclaimed;
@@ -384,6 +389,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ADR-0097 — the operator command `supporter-codes mint --count N`. Runs
+    // before tracing so stdout carries the codes and nothing else.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("supporter-codes") {
+        return supporter_codes::run_cli(&args[2..]).await;
+    }
+
     init_tracing();
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
@@ -538,6 +550,12 @@ async fn main() -> Result<()> {
     // master secret / window / quota; dormant (with a warning) when unset.
     let anon_tokens = anon_tokens::load_anon_tokens().context("load anonymous-token config")?;
     anon_tokens::log_startup(anon_tokens.as_ref());
+    // ADR-0097 — the supporter-code pepper rides with the issuer (the redeem
+    // evaluates under the anonymous-token master). Loud-fail when malformed.
+    let supporter_pepper =
+        supporter_codes::load_pepper().context("load LAKKO_AUTH_SUPPORTER_CODE_PEPPER")?;
+    let anon_tokens = anon_tokens.map(|i| i.with_supporter_pepper(supporter_pepper));
+    supporter_codes::log_startup(anon_tokens.as_ref());
 
     // ADR-0054 S5 — the login-handle pepper. Loud-fail on a malformed value;
     // dormant (with a warning) when unset.
@@ -557,6 +575,11 @@ async fn main() -> Result<()> {
     // on a malformed pepper or SMTP setting; dormant (with a warning) when the
     // pepper is unset.
     let recovery_email = recovery_email::load().context("load the recovery-email config")?;
+
+    // Account deletion purges discovery and storage through an outbox. A
+    // partial or malformed configuration refuses startup; none at all leaves
+    // the worker off (rows still queue).
+    let purge_config = purge::PurgeConfig::from_env().context("load the account purge config")?;
 
     let state = AppState {
         db: pool.clone(),
@@ -601,6 +624,8 @@ async fn main() -> Result<()> {
     // deleted. Off where sign-in by name is not configured.
     let _unclaimed_pruner =
         unclaimed::spawn_pruner(pool.clone(), names_enabled, unclaimed_ttl_secs);
+    // Deleted accounts: purge their discovery rows and backup blob.
+    let _purge_worker = purge::spawn_worker(pool.clone(), purge_config);
     // ADR-0078 section 2 — the `call-join` spent-set `POST /call/jwt` writes.
     let _call_join_spent_pruner = anon_tokens.as_ref().map(|i| {
         lakko_anon_token_server::TokenVerifier::new(pool.clone(), Some(i.server.clone()))
@@ -660,8 +685,8 @@ fn build_app(state: AppState) -> Router {
         // auth state). Bearer-auth + ONE fresh proof (ADR-0073, amended
         // 2026-10-06): the ADR-0014 passkey action grant when the account has
         // a passkey, else a fresh-auth grant in the `x-lakko-fresh-grant`
-        // header (the discovery + storage tiers are purged by the client via
-        // their own bearer-auth'd deletes).
+        // header. The same transaction queues the purge of the discovery +
+        // storage tiers (`purge.rs`).
         .route("/account", delete(webauthn::delete_account))
         // A3 (GDPR data-portability) — export the account's auth-tier metadata
         // + auth-factor existence (never the factor secrets, invariant #1).
@@ -847,6 +872,11 @@ fn build_app(state: AppState) -> Router {
             "/pow/challenge",
             post(pow::issue_challenge).route_layer(ip(limits::Category::Challenge)),
         )
+        // ADR-0046 amendment: asked before the proof of work.
+        .route(
+            "/signup/open",
+            get(account_cap::status).route_layer(ip(limits::Category::Challenge)),
+        )
         .route(
             "/signup/start",
             post(opaque::signup_start).route_layer(ip(limits::Category::Signup)),
@@ -985,6 +1015,14 @@ fn build_app(state: AppState) -> Router {
             get(anon_tokens::public_key),
         )
         .merge(anon_token_routes)
+        // ADR-0097 — redeem a supporter code for one `beta-place` token
+        // evaluation. ANONYMOUS (the person has no account yet); the address
+        // bucket and the per-code counter run inside, after the body is
+        // validated.
+        .route(
+            "/auth/supporter-code/redeem",
+            post(supporter_codes::redeem),
+        )
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

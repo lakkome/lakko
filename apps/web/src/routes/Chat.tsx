@@ -86,7 +86,7 @@ import {
   type Selection,
 } from "../chat/selection";
 import { blobIdsOfRefs, bytesToHex as blobHex } from "../chat/blob-ids";
-import { goneLines, isSendLimit, openFailureOf, openLimitText, sendLimitText } from "../chat/attachment-failure";
+import { goneLines, openFailureOf, openLimitText, sendRefusalText } from "../chat/attachment-failure";
 import {
   chunkSaveEdits,
   saveEdit,
@@ -5565,9 +5565,9 @@ function ChatView(props: {
                 limit: formatAttachmentSize(max),
               }),
             );
-          } else if (isSendLimit(err)) {
-            // UX 4.2 — the text stays in the composer.
-            setError(() => sendLimitText());
+          } else if (sendRefusalText(err) !== null) {
+            // UX 4.2 and docs/ux/storage-full.md — the text stays in the composer.
+            setError(() => sendRefusalText(err) ?? "");
           } else {
             const name = file.name;
             console.warn("[chat] attachment upload failed", err);
@@ -5899,7 +5899,7 @@ function ChatView(props: {
       }
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
-      if (isSendLimit(err)) setError(() => sendLimitText());
+      if (sendRefusalText(err) !== null) setError(() => sendRefusalText(err) ?? "");
       if (err instanceof AttachmentSizeError) {
         const { got, max } = err;
         setError(() =>

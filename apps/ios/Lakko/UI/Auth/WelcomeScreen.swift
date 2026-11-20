@@ -35,6 +35,8 @@ struct WelcomeScreen: View {
                     Spacer(minLength: 40)
 
                     VStack(spacing: 12) {
+                        BetaNoticeBanner()
+                            .padding(.bottom, 8)
                         AuthPrimaryButton(title: l10n.t("auth.signup.submit"), action: onCreateAccount)
                         AuthSecondaryButton(title: l10n.t("auth.login.submit"), action: onLogIn)
                     }

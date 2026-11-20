@@ -156,7 +156,7 @@ public class KtorAnonTokenIssuer(
         HttpClient(engine ?: lakkoHttpEngine())
     private val anonClient: HttpClient = HttpClient(anonEngine ?: engine ?: AnonymousHttp.engine)
 
-    private val keyCache = HashMap<Pair<AnonTokenContext, Long>, Pair<String, Long>>()
+    private val keyCache = HashMap<Pair<String, Long>, Pair<String, Long>>()
 
     override suspend fun issue(session: AnonSession, bodyJson: String): AnonIssueOutcome {
         val response: HttpResponse = try {
@@ -201,15 +201,22 @@ public class KtorAnonTokenIssuer(
         }
     }
 
-    override suspend fun publicKey(context: AnonTokenContext, epoch: Long): String? {
-        val cacheKey = context to epoch
+    override suspend fun publicKey(context: AnonTokenContext, epoch: Long): String? =
+        publicKeyForWire(context.wire, epoch)
+
+    /**
+     * The key route for a context named by its wire string: also serves
+     * `beta-place` (ADR-0097), which is not a pooled [AnonTokenContext].
+     */
+    public suspend fun publicKeyForWire(contextWire: String, epoch: Long): String? {
+        val cacheKey = contextWire to epoch
         synchronized(keyCache) {
             keyCache[cacheKey]?.let { (key, at) ->
                 if (nowMs() - at < KEY_CACHE_MS) return key
             }
         }
         val response: HttpResponse = try {
-            anonClient.get("$baseUrl/auth/tokens/key/${context.wire}/$epoch")
+            anonClient.get("$baseUrl/auth/tokens/key/$contextWire/$epoch")
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
@@ -221,7 +228,7 @@ public class KtorAnonTokenIssuer(
         } catch (_: Throwable) {
             return null
         }
-        if (parsed.context != context.wire || parsed.epoch != epoch) return null
+        if (parsed.context != contextWire || parsed.epoch != epoch) return null
         synchronized(keyCache) { keyCache[cacheKey] = parsed.public_key to nowMs() }
         return parsed.public_key
     }
@@ -380,6 +387,18 @@ public object AnonTokens {
         }
         pool?.accountLanded(key)
     }
+
+    /** [AnonTokenPool.reserve] on the shared pool: [count] tokens of
+     *  [context] taken out now, issued with the live session as needed.
+     *  Never throws; an empty list when no pool can be built. */
+    public suspend fun reserve(context: AnonTokenContext, count: Int): List<PooledAnonToken> =
+        try {
+            pool().reserve(context, count)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            emptyList()
+        }
 
     /** What the spending clients use by default. Nothing native is touched
      *  until a token is actually needed. */

@@ -18,6 +18,7 @@ import App from "./App";
 import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
+import { refreshSupportersList } from "./supporters/Supporters";
 import { bootstrapTheme } from "./ui/theme";
 import { bootstrapTextSize } from "./ui/text-size";
 import { bootstrapVideoSurfaces } from "./calls/video-surface";
@@ -100,3 +101,5 @@ void registerServiceWorker();
 // is the shared-core landing + a dormant future hook. Dormant unless
 // VITE_LAKKO_RELEASE_KEY is pinned; swallows its own errors.
 void runBootUpdateCheck();
+// docs/ux/supporters.md 2.1: the list at most once a day outside About.
+void refreshSupportersList(false);

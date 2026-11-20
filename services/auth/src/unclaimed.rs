@@ -14,7 +14,9 @@
 //! This module is for the third case: the person closed the tab and decided
 //! nothing. An account that still has **no login handle and no passkey** a
 //! day after it was created cannot be signed into by anyone, so it is
-//! removed. The foreign keys cascade over every account-keyed auth table.
+//! removed. The foreign keys cascade over every account-keyed auth table,
+//! and the purge of what the account left in discovery and storage is
+//! queued in the same transaction (`crate::purge`).
 //!
 //! Two guards keep the rule from deleting accounts it does not describe:
 //!
@@ -117,24 +119,55 @@ pub(crate) async fn is_past_unclaimed_lifetime(
 }
 
 /// Delete up to [`PRUNE_BATCH`] accounts older than `ttl_secs` that have no
-/// login handle and no passkey. Returns how many were deleted.
+/// login handle and no passkey, and queue the purge of each one's discovery
+/// rows and backup blob (`crate::purge`) in the same transaction. Returns how
+/// many were deleted.
+///
+/// The candidates are locked first; each delete re-checks the rule, so an
+/// account that gained a handle or a passkey before its lock was taken is
+/// left alone (both tables reference `accounts`, so a bind after the lock
+/// waits for this transaction).
 ///
 /// # Errors
 ///
-/// A database error; nothing is deleted then.
+/// A database error; nothing is deleted or queued then.
 pub(crate) async fn prune_unclaimed(pool: &MySqlPool, ttl_secs: u64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM accounts \
+    let mut conn = crate::session::read_committed_conn(pool).await?;
+    let mut tx = sqlx::Acquire::begin(&mut conn).await?;
+    let candidates: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT id FROM accounts \
          WHERE created_at < NOW() - INTERVAL ? SECOND \
            AND NOT EXISTS (SELECT 1 FROM login_handles h WHERE h.account_id = accounts.id) \
            AND NOT EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.account_id = accounts.id) \
-         LIMIT ?",
+         LIMIT ? FOR UPDATE",
     )
     .bind(ttl_secs)
     .bind(PRUNE_BATCH)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(result.rows_affected())
+
+    let mut deleted = 0u64;
+    for raw in candidates {
+        let Ok(id) = <[u8; 16]>::try_from(raw.as_slice()) else {
+            continue;
+        };
+        let gone = sqlx::query(
+            "DELETE FROM accounts WHERE id = ? \
+               AND NOT EXISTS (SELECT 1 FROM login_handles h WHERE h.account_id = accounts.id) \
+               AND NOT EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.account_id = accounts.id)",
+        )
+        .bind(id.as_slice())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if gone == 0 {
+            continue;
+        }
+        crate::purge::enqueue(&mut tx, &id).await?;
+        deleted += 1;
+    }
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Start the pruner, or not: `None` when sign-in by name is not configured or
@@ -253,6 +286,21 @@ mod tests {
             !exists(&pool, &abandoned).await,
             "an abandoned account stays"
         );
+        assert!(
+            crate::purge::is_queued(&pool, &abandoned).await,
+            "the deleted account's purge is not queued"
+        );
+        for kept in [&fresh_guest, &named, &with_passkey] {
+            assert!(
+                !crate::purge::is_queued(&pool, kept).await,
+                "a kept account was queued for purge"
+            );
+        }
+        sqlx::query("DELETE FROM account_purges WHERE account_id = ?")
+            .bind(abandoned.as_slice())
+            .execute(&pool)
+            .await
+            .expect("cleanup purge row");
         assert!(
             exists(&pool, &fresh_guest).await,
             "a guest of a minute ago was deleted"

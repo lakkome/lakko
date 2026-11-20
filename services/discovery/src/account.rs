@@ -26,13 +26,32 @@ use crate::AppState;
 /// verified session token (not the request body), so a caller can only erase
 /// their OWN discovery footprint. Idempotent — each `DELETE` is a no-op when the
 /// row is already absent, so a retry after a partial failure completes cleanly.
+///
+/// `services/auth` also purges these rows itself after it deleted an account,
+/// through the internal listener (`crate::internal`), which runs the same
+/// [`purge_account`].
 pub(crate) async fn delete_account(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let account_id = authed.0;
-    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}"));
+    purge_account(&state.db, &authed.0)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
+/// Delete every account-keyed discovery row of `account_id`: its names (and
+/// their one-namespace claims), its identity bundle, and everything
+/// [`purge_owned_rows`] removes. Idempotent.
+///
+/// # Errors
+///
+/// A database error; the deletes already run stay done, and running it again
+/// finishes the rest.
+pub(crate) async fn purge_account(
+    pool: &sqlx::MySqlPool,
+    account_id: &[u8; 16],
+) -> Result<(), sqlx::Error> {
     // The username binding and the published identity bundle are keyed on
     // `account_id`; so is everything `purge_owned_rows` removes.
     for sql in [
@@ -46,15 +65,9 @@ pub(crate) async fn delete_account(
         "DELETE FROM usernames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
     ] {
-        delete_keyed(&state.db, sql, &account_id)
-            .await
-            .map_err(db_err)?;
+        delete_keyed(pool, sql, account_id).await?;
     }
-    purge_owned_rows(&state.db, &account_id)
-        .await
-        .map_err(db_err)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    purge_owned_rows(pool, account_id).await
 }
 
 /// Everything an account owns here besides its username binding and its

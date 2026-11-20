@@ -224,7 +224,17 @@ pub(crate) struct ChangeTerms {
     pub(crate) previous_key: Option<[u8; 32]>,
     /// Move the recovery email to the new handle instead of dropping it.
     pub(crate) rekey: Option<crate::recovery_email::RekeyPlan>,
+    /// The beta account cap (`crate::account_cap`), applied to a FIRST bind
+    /// only; 0 = no cap.
+    pub(crate) max_accounts: u32,
+    /// ADR-0097: a verified `beta-place` token the bind carried. Spent in the
+    /// bind's transaction, and only when the cap refuses a first bind.
+    pub(crate) supporter: Option<crate::supporter_codes::SupporterPlace>,
 }
+
+/// Error code of a first bind past the cap whose supporter place was already
+/// spent (ADR-0097).
+pub(crate) const CODE_SUPPORTER_CODE_USED: &str = "supporter-code-used";
 
 /// How a bind ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +260,12 @@ pub(crate) enum BindOutcome {
     /// A re-key was asked for and the address is not the stored one's;
     /// nothing changed (`403 address-mismatch`).
     AddressMismatch,
+    /// A first bind found the beta account cap reached; nothing changed
+    /// (`403 registration-closed`, `crate::account_cap`).
+    RegistrationClosed,
+    /// A first bind past the cap carried a `beta-place` token that was
+    /// already spent; nothing changed (`403 supporter-code-used`, ADR-0097).
+    SupporterCodeUsed,
 }
 
 /// Attempts at a bind that lost a race: a concurrent bind of the same
@@ -337,6 +353,32 @@ pub(crate) async fn bind(
     ))
 }
 
+/// ADR-0097: a first bind the cap refused may still go through on a
+/// supporter place, which is spent here, in the bind's transaction, so it
+/// goes with the bind or not at all. `Some(outcome)` refuses the bind.
+async fn take_supporter_place(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    terms: &ChangeTerms,
+) -> Result<Option<BindOutcome>, AttemptError> {
+    let Some(place) = terms.supporter else {
+        return Ok(Some(BindOutcome::RegistrationClosed));
+    };
+    match lakko_anon_token_server::spend_on(
+        tx,
+        lakko_anon_token::TokenContext::BetaPlace,
+        &place.spend_id,
+        place.epoch,
+    )
+    .await
+    {
+        Ok(()) => Ok(None),
+        Err(lakko_anon_token_server::SpendError::AlreadySpent) => {
+            Ok(Some(BindOutcome::SupporterCodeUsed))
+        },
+        Err(lakko_anon_token_server::SpendError::Db(e)) => Err(e.into()),
+    }
+}
+
 /// One bind attempt, in one transaction.
 ///
 /// **Lock order.** The account row first (`FOR UPDATE`), then the account's
@@ -410,6 +452,13 @@ async fn bind_once(
             .execute(&mut *tx)
             .await
     } else {
+        // ADR-0046 amendment: a first handle takes a place under the beta
+        // cap. Decided under the cap lock, after the account row's lock.
+        if !crate::account_cap::admits_one_more(&mut tx, terms.max_accounts).await? {
+            if let Some(refused) = take_supporter_place(&mut tx, terms).await? {
+                return Ok(refused);
+            }
+        }
         sqlx::query("INSERT INTO login_handles (handle_key, account_id) VALUES (?, ?)")
             .bind(key.as_slice())
             .bind(account_id.as_slice())
@@ -512,6 +561,7 @@ async fn current_key(
 pub(crate) async fn put(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<PutReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pepper = pepper(&state)?;
@@ -559,6 +609,8 @@ pub(crate) async fn put(
         grant,
         previous_key: previous.as_ref().map(|p| handle_key(&pepper, p)),
         rekey,
+        max_accounts: state.limits.max_accounts(),
+        supporter: crate::supporter_codes::place_from_headers(state.anon_tokens.as_ref(), &headers),
     };
     let outcome = bind(
         &state.db,
@@ -584,6 +636,20 @@ pub(crate) async fn put(
             return Err(ApiError::Coded(
                 axum::http::StatusCode::FORBIDDEN,
                 "address-mismatch",
+            ));
+        },
+        BindOutcome::RegistrationClosed => {
+            tracing::info!("login handle first bind refused: account cap reached");
+            return Err(ApiError::Coded(
+                axum::http::StatusCode::FORBIDDEN,
+                crate::account_cap::CODE_REGISTRATION_CLOSED,
+            ));
+        },
+        BindOutcome::SupporterCodeUsed => {
+            tracing::info!("login handle first bind refused: supporter place already used");
+            return Err(ApiError::Coded(
+                axum::http::StatusCode::FORBIDDEN,
+                CODE_SUPPORTER_CODE_USED,
             ));
         },
         BindOutcome::TooSoon { retry_after_secs } => {
@@ -806,6 +872,85 @@ mod bind_concurrency_tests {
     /// [`bind_once`] directly, so a deadlock the retry in [`bind`] would
     /// hide fails the test. Under the schema of migration `0021` both
     /// rounds were rolled back with `1213` (see [`bind_once`]).
+    /// ADR-0046 amendment: at the cap a FIRST bind is refused and nothing is
+    /// written, while a change of an existing handle still goes through. The
+    /// database is shared with other tests, so the cap is set to 1 after this
+    /// test bound one handle of its own: the count is at least 1 whatever
+    /// else runs.
+    #[tokio::test]
+    async fn the_account_cap_refuses_a_first_bind_and_never_a_change() {
+        let Ok(url) = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping the_account_cap_refuses_a_first_bind_and_never_a_change: \
+                 LAKKO_AUTH_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect");
+        crate::MIGRATIONS.run(&pool).await.expect("migrate");
+        let a: [u8; ACCOUNT_ID_LEN] = *Uuid::now_v7().as_bytes();
+        let b: [u8; ACCOUNT_ID_LEN] = *Uuid::now_v7().as_bytes();
+        for id in [a, b] {
+            sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+                .bind(id.as_slice())
+                .execute(&pool)
+                .await
+                .expect("insert account");
+        }
+        let capped = |max| ChangeTerms {
+            grant: true,
+            max_accounts: max,
+            ..ChangeTerms::default()
+        };
+        let (h1, _) = random_handle();
+        assert_eq!(
+            bind(&pool, &TEST_PEPPER, &a, &h1, 0, &capped(0))
+                .await
+                .expect("bind a"),
+            BindOutcome::Bound
+        );
+        let (h2, _) = random_handle();
+        assert_eq!(
+            bind(&pool, &TEST_PEPPER, &b, &h2, 0, &capped(1))
+                .await
+                .expect("bind b"),
+            BindOutcome::RegistrationClosed
+        );
+        assert_eq!(current_key(&pool, &b).await.expect("read b"), None);
+        let (h3, _) = random_handle();
+        assert_eq!(
+            bind(&pool, &TEST_PEPPER, &a, &h3, 0, &capped(1))
+                .await
+                .expect("change a"),
+            BindOutcome::Bound
+        );
+        assert_eq!(
+            bind(&pool, &TEST_PEPPER, &a, &h3, 0, &capped(1))
+                .await
+                .expect("rebind a"),
+            BindOutcome::Unchanged
+        );
+        assert!(!crate::account_cap::is_open_for_test(&pool, 1).await);
+        assert!(crate::account_cap::is_open_for_test(&pool, 0).await);
+        assert_eq!(
+            bind(&pool, &TEST_PEPPER, &b, &h2, 0, &capped(0))
+                .await
+                .expect("bind b uncapped"),
+            BindOutcome::Bound
+        );
+        for id in [a, b] {
+            sqlx::query("DELETE FROM accounts WHERE id = ?")
+                .bind(id.as_slice())
+                .execute(&pool)
+                .await
+                .expect("delete account");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn first_binds_of_different_accounts_do_not_deadlock() {
         const ACCOUNTS: usize = 24;

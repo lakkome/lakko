@@ -1545,6 +1545,12 @@ public struct ChatScreen: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            } else if media.sendStorageFull {
+                // UX storage-full — the server has no room for new files.
+                Text(l10n.t("chat.attachment.full.send"))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoDanger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             // 1.19c3 — pending-attachments tray. Renders only
             // when ≥1 file is staged or an upload is in

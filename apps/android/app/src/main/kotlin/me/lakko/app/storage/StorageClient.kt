@@ -176,10 +176,13 @@ public class StorageClient(
         if (status == 200 || status == 201) {
             return
         }
+        val body = response.safeReadBody()
+        // docs/ux/storage-full.md — also reached without a pass source.
+        if (classifyBlobRefusal(status, body, renewed = true) == BlobRefusal.FULL) throw StorageFullError(endpoint)
         throw StorageHttpError(
             status = status,
             endpoint = endpoint,
-            body = response.safeReadBody(),
+            body = body,
         )
     }
 
@@ -225,6 +228,7 @@ public class StorageClient(
                     source.refused(kind, pass)
                     throw StorageLimitError(kind)
                 }
+                BlobRefusal.FULL -> throw StorageFullError(endpoint)
                 BlobRefusal.GONE -> return response
                 BlobRefusal.OTHER -> throw StorageHttpError(status, endpoint, body)
             }

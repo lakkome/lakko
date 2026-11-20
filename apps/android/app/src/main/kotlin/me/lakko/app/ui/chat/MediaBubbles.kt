@@ -968,10 +968,12 @@ internal fun PendingMediaBubble(
                 }
             }
         }
-        if (row.failed && row.limited) {
-            // UX 4.2 — the sending limit, in place of the generic failure.
+        val refusal = row.refusal
+        if (row.failed && refusal != null) {
+            // UX 4.2 — the sending limit, or docs/ux/storage-full.md — no
+            // room on the server, in place of the generic failure.
             Text(
-                t("chat.attachment.limit.send"),
+                t(me.lakko.app.media.uploadRefusalSendKey(refusal)),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
             )

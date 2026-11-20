@@ -418,8 +418,10 @@ pub(crate) async fn delete_credential(
 /// only means the stricter branch was taken.
 ///
 /// The discovery + storage tiers (username binding, identity bundle, KeyPackage,
-/// owned invites, backup blob) are account-keyed in their own DBs; the client
-/// purges them via their bearer-auth'd delete endpoints. The DS / push /
+/// search terms, public record, backup blob) are account-keyed in their own
+/// DBs. The transaction that deletes the account also queues its purge there
+/// (`account_purges`, worked by `crate::purge`), so it is owed exactly when
+/// the account is gone and never for a refused delete. The DS / push /
 /// channels / transparency tiers are account-opaque (invariant #5) and hold
 /// nothing to delete.
 pub(crate) async fn delete_account(
@@ -508,6 +510,12 @@ pub(crate) async fn delete_account(
     sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(auth.0.as_slice())
         .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
+    // In the transaction that deletes the account: committed together, or
+    // not at all. A second delete racing this one finds no row and queues
+    // the same purge again, which changes nothing.
+    crate::purge::enqueue(&mut tx, &auth.0)
         .await
         .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;

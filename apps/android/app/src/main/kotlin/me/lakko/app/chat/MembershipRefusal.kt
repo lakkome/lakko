@@ -590,6 +590,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0074 part 3 - a key-rotation envelope or a root
                 // endorsement that could not be made; never a refusal.
                 is FfiException.KeyRotation,
+                is FfiException.SupportersList,
                 -> null
             }
         }

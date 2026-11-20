@@ -247,9 +247,7 @@ impl TokenVerifier {
                 spend(pool, verified.context, &verified.spend_id, verified.epoch).await
             },
             SpentSet::Memory(set) => {
-                let current =
-                    lakko_anon_token::epoch_at(now_unix_secs, config.window_secs).unwrap_or(0);
-                spend_in_memory(set, &verified, current)
+                spend_in_memory(set, &verified, now_unix_secs, config.window_secs)
             },
         };
         match recorded {
@@ -278,20 +276,25 @@ impl TokenVerifier {
 }
 
 /// Record `verified` in a process-local spent-set, dropping entries older
-/// than the previous epoch (they no longer verify, so they cannot be
-/// replayed). A poisoned lock is recovered: the set holds only spend
+/// than the previous epoch of their own context's window (they no longer
+/// verify, so they cannot be replayed). A poisoned lock is recovered: the set holds only spend
 /// identifiers, and dropping the whole set would let every token be spent
 /// again.
 fn spend_in_memory(
     set: &Mutex<HashMap<(u8, SpendId), u64>>,
     verified: &VerifiedToken,
-    current_epoch: u64,
+    now_unix_secs: u64,
+    window_secs: u64,
 ) -> Result<(), SpendError> {
     let mut guard = set
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let floor = current_epoch.saturating_sub(1);
-    guard.retain(|_, epoch| *epoch >= floor);
+    guard.retain(|(context, _), epoch| {
+        let window =
+            TokenContext::from_u8(*context).map_or(window_secs, |c| c.window_secs(window_secs));
+        let current = lakko_anon_token::epoch_at(now_unix_secs, window).unwrap_or(0);
+        *epoch >= current.saturating_sub(1)
+    });
     let key = (verified.context.as_u8(), verified.spend_id);
     if guard.contains_key(&key) {
         return Err(SpendError::AlreadySpent);

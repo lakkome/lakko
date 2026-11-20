@@ -284,7 +284,11 @@ final class SignupCancelTests: XCTestCase {
         XCTAssertEqual(
             SignupViewModel.workingNote,
             "This takes a little while, once. You will not wait like this again.")
-        let solving = await waitUntil { SignupAuthRecorder.requests(host) == ["/pow/challenge"] }
+        // `docs/ux/beta-account-cap.md` — the open check runs before the
+        // proof of work (the recorder answers it as 503: open).
+        let solving = await waitUntil {
+            SignupAuthRecorder.requests(host) == ["/signup/open", "/pow/challenge"]
+        }
         XCTAssertTrue(solving)
 
         viewModel.onCancel()
@@ -296,7 +300,7 @@ final class SignupCancelTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(viewModel.busy, "the cancelled attempt does not come back")
         XCTAssertNil(viewModel.error)
-        XCTAssertEqual(SignupAuthRecorder.requests(host), ["/pow/challenge"])
+        XCTAssertEqual(SignupAuthRecorder.requests(host), ["/signup/open", "/pow/challenge"])
     }
 }
 

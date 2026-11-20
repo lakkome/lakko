@@ -11,7 +11,7 @@
     "build:noise": "node scripts/build-noise-wasm.mjs",
     "build:segment": "node scripts/build-segment-wasm.mjs",
     "dev": "npm run build:wasm:dev && vite",
-    "build": "npm run build:wasm && tsc --noEmit && vite build && node scripts/post-build.mjs && node scripts/link-previews.mjs && node scripts/build-sw.mjs",
+    "build": "npm run build:wasm && tsc --noEmit && vite build && node scripts/post-build.mjs && node scripts/legal-pages.mjs && node scripts/link-previews.mjs && node scripts/build-sw.mjs",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",

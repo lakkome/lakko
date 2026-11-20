@@ -29,6 +29,7 @@ import { requestConfirm } from "../ui/confirm-dialog";
 import { AvatarCamera, AvatarCrop, AvatarMenu, UnsavedChangesDialog, type CropSource } from "../profile/AvatarEditor";
 import { releaseLocalAvatar, type LocalAvatar } from "../profile/avatar-media";
 import { uploadLocalAvatar } from "../profile/avatar-upload";
+import { groupPhotoUploadErrorText } from "./attachment-failure";
 import { copyMessageText } from "./copy-message";
 import { EmojiPicker } from "../media/EmojiPicker";
 import { loadWasm } from "../wasm";
@@ -132,10 +133,7 @@ export function GroupInfoExtras(props: {
       releaseLocalAvatar(local);
       setLastLocal(null);
     } catch (err) {
-      const text = err instanceof Error ? err.message : "";
-      setPhotoError(
-        /limit/i.test(text) || /429/.test(text) ? t("group_photo.error.limit") : t("group_photo.error.upload"),
-      );
+      setPhotoError(groupPhotoUploadErrorText(err));
     } finally {
       setUploading(null);
     }

@@ -18,6 +18,11 @@
 //!   [`RELEASE_MANIFEST_LEN`]-byte blob (binary, NOT JSON — it carries a 64-byte
 //!   Ed25519 signature) to a file the maintainer copies to the static host.
 //!
+//! - `supporters` — sign the ADR-0097 supporters list from a plain text file
+//!   (one name per line; blank lines skipped, each line trimmed) under the same
+//!   release key and its own domain, and write the blob served at
+//!   `/.well-known/lakko-supporters`.
+//!
 //! This is a maintainer CLI, not a service: it prints human-readable output to
 //! stdout/stderr (English, no emoji) rather than logging via `tracing`, and it
 //! MAY read the wall clock. The signing key is a dedicated publisher key —
@@ -33,7 +38,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use lakko_attest::{verify_release_manifest, ReleaseManifest, RELEASE_MANIFEST_LEN};
+use lakko_attest::{
+    verify_release_manifest, verify_supporters_list, ReleaseManifest, SupportersList,
+    RELEASE_MANIFEST_LEN,
+};
 use lakko_crypto::signing::SigningKey;
 
 /// Default path for the private release-signing seed (32 bytes, mode `0600`).
@@ -50,6 +58,13 @@ const PINNED_SERVE_PATH: &str = "/.well-known/lakko-release";
 /// SPA, so `just deploy-web`'s `rsync --delete` cannot wipe the manifest).
 const SERVER_TARGET: &str = "/var/www/lakko-release/lakko-release.bin";
 
+/// The URL path the clients fetch the supporters list from (ADR-0097).
+const SUPPORTERS_SERVE_PATH: &str = "/.well-known/lakko-supporters";
+
+/// The on-disk target of the supporters list (the same separate root as the
+/// release manifest).
+const SUPPORTERS_SERVER_TARGET: &str = "/var/www/lakko-release/lakko-supporters.bin";
+
 /// Length of an Ed25519 seed / signing key in bytes.
 const SEED_LEN: usize = 32;
 
@@ -59,10 +74,13 @@ lakko-release-manifest — offline publisher tool for the ADR-0038 update notice
 usage:
   lakko-release-manifest keygen [--out <seedfile>]
   lakko-release-manifest mint --latest <N> --min-supported <N> [--key <seedfile>] [--out <path>]
+  lakko-release-manifest supporters --version <N> --names <file> [--seed <seedfile>] [--out <path>]
 
 keygen  generate the Ed25519 release-signing keypair (private seed -> file 0600,
         public key -> stdout as base64url for the client build configs)
-mint    sign a release manifest and write the raw 89-byte blob to a file";
+mint    sign a release manifest and write the raw 89-byte blob to a file
+supporters
+        sign the supporters list (one name per line) and write the blob";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -84,6 +102,7 @@ fn run(args: &[String]) -> Result<(), String> {
     match sub.as_str() {
         "keygen" => cmd_keygen(rest),
         "mint" => cmd_mint(rest),
+        "supporters" => cmd_supporters(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(())
@@ -165,6 +184,56 @@ fn cmd_mint(args: &[String]) -> Result<(), String> {
     );
     println!("See infra/README.md :: \"Release manifest (ADR-0038)\" for the full runbook.");
     Ok(())
+}
+
+/// `supporters` — read the names, sign the list under the release key, write
+/// the blob, self-verify it, and print the publish reminder (ADR-0097).
+fn cmd_supporters(args: &[String]) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    reject_unknown(&flags, &["version", "names", "seed", "out"])?;
+    let version = parse_u64(&flags, "version")?;
+    let names_path = flag(&flags, "names").ok_or("missing required flag --names")?;
+    let key_path = flag(&flags, "seed").unwrap_or(DEFAULT_SEED_FILE);
+    let out = flag(&flags, "out").unwrap_or("lakko-supporters.bin");
+
+    let text = fs::read_to_string(names_path)
+        .map_err(|e| format!("cannot read names file `{names_path}`: {e}"))?;
+    let names = names_from_text(&text);
+    let signing = read_signing_key(Path::new(key_path))?;
+    let list = SupportersList {
+        list_version: version,
+        signed_at_unix_millis: now_unix_millis()?,
+        names,
+    };
+    let wire = list
+        .sign(&signing)
+        .map_err(|e| format!("cannot sign the supporters list: {e}"))?;
+    fs::write(out, &wire).map_err(|e| format!("cannot write list `{out}`: {e}"))?;
+    let got = verify_supporters_list(&wire, &signing.verifying_key())
+        .map_err(|e| format!("internal: the signed list failed self-verification: {e}"))?;
+    if got != list {
+        return Err("internal: the signed list did not read back as written".into());
+    }
+
+    println!("Supporters list signed ({} bytes).", wire.len());
+    println!();
+    println!("  list_version = {version}");
+    println!("  names        = {}", list.names.len());
+    println!("  written to   = {out}");
+    println!();
+    println!("Publish:");
+    println!("  scp {out} lakkome@lakko.me:{SUPPORTERS_SERVER_TARGET}");
+    println!("  served at https://lakko.me{SUPPORTERS_SERVE_PATH}");
+    Ok(())
+}
+
+/// One name per line: each line trimmed, blank lines skipped.
+fn names_from_text(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Write the 32-byte seed atomically, refusing to overwrite an existing file
@@ -373,6 +442,53 @@ mod tests {
         assert!(parse_flags(&["--".into(), "x".into()]).is_err());
         let ok = parse_flags(&["--latest".into(), "42".into()]).unwrap();
         assert_eq!(flag(&ok, "latest"), Some("42"));
+    }
+
+    #[test]
+    fn supporters_file_round_trips_and_refuses_a_bad_name() {
+        let dir = unique_tmpdir("rmt-supporters");
+        let seed_path = dir.join("key.seed");
+        let names = dir.join("names.txt");
+        let out = dir.join("list.bin");
+        cmd_keygen(&["--out".into(), seed_path.display().to_string()]).unwrap();
+        fs::write(&names, "Ada\r\n\n  Grace Hopper  \n").unwrap();
+        cmd_supporters(&[
+            "--version".into(),
+            "4".into(),
+            "--names".into(),
+            names.display().to_string(),
+            "--seed".into(),
+            seed_path.display().to_string(),
+            "--out".into(),
+            out.display().to_string(),
+        ])
+        .unwrap();
+        let seed: [u8; SEED_LEN] = fs::read(&seed_path).unwrap().as_slice().try_into().unwrap();
+        let got = verify_supporters_list(
+            &fs::read(&out).unwrap(),
+            &SigningKey::from_seed(&seed).verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(got.list_version, 4);
+        assert_eq!(
+            got.names,
+            vec!["Ada".to_string(), "Grace Hopper".to_string()]
+        );
+
+        fs::write(&names, "ok\nbad\u{200B}name\n").unwrap();
+        let err = cmd_supporters(&[
+            "--version".into(),
+            "5".into(),
+            "--names".into(),
+            names.display().to_string(),
+            "--seed".into(),
+            seed_path.display().to_string(),
+            "--out".into(),
+            out.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("name 1"), "unexpected error: {err}");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

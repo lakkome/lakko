@@ -1,0 +1,88 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "owner",
+    "name": "VVG",
+    "email": "info@lakko.me",
+    "description": "VVG is the Dutch sole proprietorship (eenmanszaak) of Valentin Goncharov, an independent developer based in the Netherlands. Its product is Lakko, an end-to-end encrypted messenger with a zero-trust server.",
+    "webpageUrl": {
+      "url": "https://lakko.me"
+    }
+  },
+  "projects": [
+    {
+      "guid": "lakko",
+      "name": "Lakko",
+      "description": "Lakko is a secure messenger in which everything is end-to-end encrypted by default: one-to-one chats, groups, channels, and audio and video calls. Every conversation uses MLS (RFC 9420); call media is encrypted with SFrame (RFC 9605) under keys derived from MLS. The server is designed to be zero-trust: it stores no phone numbers or email addresses, sees only ciphertext, and does not hold the social graph. Usernames are found through OPRF-blinded lookups, identity keys are published in a key transparency log designed for witness co-signing, and anonymous tokens replace per-request proof of work. Clients for iOS, Android and the web share one Rust core; a desktop client is in progress. The network layer includes censorship-resistant transports (REALITY, Shadowsocks-2022, WebTransport) for people in countries that block messengers. The code is open under AGPLv3. Lakko is starting a public beta capped at 1000 users, marked as not yet independently audited. The funds requested here pay for an independent external security audit of the cryptographic core, which must be done before the beta leaves its cap, and for the server infrastructure needed to run the service.",
+      "webpageUrl": {
+        "url": "https://lakko.me"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/lakkome/lakko"
+      },
+      "licenses": [
+        "spdx:AGPL-3.0-or-later"
+      ],
+      "tags": [
+        "communication",
+        "privacy",
+        "security",
+        "cryptography",
+        "networking",
+        "mobile",
+        "ios",
+        "android",
+        "censorship-circumvention"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "bank",
+        "type": "bank",
+        "description": "Bank transfer (SEPA) to the maintainer's Dutch business account. Account details are sent on request."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "security-audit",
+        "status": "active",
+        "name": "Independent security audit",
+        "description": "An external cryptographic and implementation review by an independent security firm, about 135 person-days: the MLS group protocol and state machine, the cryptographic constructions (call media keys, attestations, key transparency, anonymous tokens, device linking, backups), the three client implementations, the servers' zero-trust claims, the censorship-resistant transports, and a retest of the fixes. Until this review is done, Lakko runs only as a beta capped at 1000 users and marked as unaudited. The review can be done in parts, the MLS group protocol and the cryptographic core first. The scope document is docs/security/external-review-scope.md in the repository.",
+        "amount": 310000,
+        "currency": "EUR",
+        "frequency": "one-time",
+        "channels": [
+          "bank"
+        ]
+      },
+      {
+        "guid": "launch",
+        "status": "active",
+        "name": "Initial launch",
+        "description": "One-time costs of bringing the service up for the public: setup of the production servers (delivery service, calls with SFU and TURN relays, file storage, key transparency log and witness, push gateway, censorship-resistant relays), the first three months of their operation, app store registration, an EU trademark for the product name, legal review of the terms of service and privacy policy, and Windows and Linux machines to test the desktop client on.",
+        "amount": 15000,
+        "currency": "EUR",
+        "frequency": "one-time",
+        "channels": [
+          "bank"
+        ]
+      },
+      {
+        "guid": "operations",
+        "status": "active",
+        "name": "Ongoing operation",
+        "description": "Monthly cost of running the service after launch: server hosting, bandwidth for calls and file transfer, push delivery, and maintenance.",
+        "amount": 1800,
+        "currency": "EUR",
+        "frequency": "monthly",
+        "channels": [
+          "bank"
+        ]
+      }
+    ]
+  }
+}

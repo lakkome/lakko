@@ -28,87 +28,158 @@ public struct SignupScreen: View {
 
     public var body: some View {
         AuthScreen {
-            AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("auth.signup.lede"))
+            // `docs/ux/beta-notice.md` section 3: above the form, and above
+            // the "Lakko is full" state when that replaces the form.
+            BetaNoticeBanner()
+            if viewModel.mode == .form {
+                // `docs/ux/supporters.md` section 1.2 — a supporter place is
+                // held on this device for this sign-up.
+                if viewModel.placeHeld {
+                    AuthHint(text: l10n.t("auth.signup.code.held"))
+                }
+                AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("auth.signup.lede"))
 
-            VStack(alignment: .leading, spacing: 6) {
-                AuthTextField(
-                    label: l10n.t("auth.username.label"),
-                    text: $viewModel.username,
-                    contentType: .username,
+                VStack(alignment: .leading, spacing: 6) {
+                    AuthTextField(
+                        label: l10n.t("auth.username.label"),
+                        text: $viewModel.username,
+                        contentType: .username,
+                        disabled: viewModel.busy
+                    )
+                    // ADR-0048 section 4: the reason, as the user types.
+                    if let hint = viewModel.usernameHint {
+                        AuthHint(text: hint, isError: true)
+                    } else {
+                        AuthHint(text: l10n.t("auth.signup.username.hint"))
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    AuthTextField(
+                        label: l10n.t("auth.signup.name.label"),
+                        placeholder: viewModel.username,
+                        text: $viewModel.displayName,
+                        contentType: .name,
+                        capitalization: .words,
+                        autocorrect: false,
+                        disabled: viewModel.busy
+                    )
+                    if let nameError = viewModel.displayNameError {
+                        AuthHint(text: nameError, isError: true)
+                    } else {
+                        AuthHint(text: l10n.t("auth.signup.name.hint"))
+                    }
+                }
+
+                AuthSecureField(
+                    label: l10n.t("auth.password.label"),
+                    text: $viewModel.password,
+                    contentType: .newPassword,
                     disabled: viewModel.busy
                 )
-                // ADR-0048 section 4: the reason, as the user types.
-                if let hint = viewModel.usernameHint {
-                    AuthHint(text: hint, isError: true)
-                } else {
-                    AuthHint(text: l10n.t("auth.signup.username.hint"))
-                }
-            }
+                AuthHint(text: l10n.t(
+                    "auth.password.hint", counts: ["count": UInt64(SignupViewModel.minPasswordLength)]))
 
-            VStack(alignment: .leading, spacing: 6) {
-                AuthTextField(
-                    label: l10n.t("auth.signup.name.label"),
-                    placeholder: viewModel.username,
-                    text: $viewModel.displayName,
-                    contentType: .name,
-                    capitalization: .words,
-                    autocorrect: false,
-                    disabled: viewModel.busy
+                AuthSecureField(
+                    label: l10n.t("auth.password.confirm.label"),
+                    text: $viewModel.confirm,
+                    contentType: .newPassword,
+                    disabled: viewModel.busy,
+                    submitLabel: .go,
+                    onSubmit: viewModel.onSubmit
                 )
-                if let nameError = viewModel.displayNameError {
-                    AuthHint(text: nameError, isError: true)
-                } else {
-                    AuthHint(text: l10n.t("auth.signup.name.hint"))
+
+                if let error = viewModel.error {
+                    AuthHint(text: error, isError: true)
                 }
-            }
 
-            AuthSecureField(
-                label: l10n.t("auth.password.label"),
-                text: $viewModel.password,
-                contentType: .newPassword,
-                disabled: viewModel.busy
-            )
-            AuthHint(text: l10n.t(
-                "auth.password.hint", counts: ["count": UInt64(SignupViewModel.minPasswordLength)]))
-
-            AuthSecureField(
-                label: l10n.t("auth.password.confirm.label"),
-                text: $viewModel.confirm,
-                contentType: .newPassword,
-                disabled: viewModel.busy,
-                submitLabel: .go,
-                onSubmit: viewModel.onSubmit
-            )
-
-            if let error = viewModel.error {
-                AuthHint(text: error, isError: true)
-            }
-
-            // ADR-0054 S4 / `docs/ux/anti-abuse.md` section 1: the one heavy
-            // wait in the app. The button becomes a disabled working row, one
-            // line below it, and `Cancel` back to the filled-in form.
-            AuthPrimaryButton(
-                title: l10n.t(viewModel.rateLimited ? "common.try_again" : "auth.signup.submit"),
-                busy: viewModel.busy,
-                busyTitle: SignupViewModel.workingTitle,
-                action: viewModel.rateLimited ? viewModel.onTryAgain : viewModel.onSubmit
-            )
-            if viewModel.busy {
-                AuthHint(text: SignupViewModel.workingNote)
-                if viewModel.cancellable {
-                    AuthSecondaryButton(title: l10n.t("common.cancel"), action: viewModel.onCancel)
+                // ADR-0054 S4 / `docs/ux/anti-abuse.md` section 1: the one heavy
+                // wait in the app. The button becomes a disabled working row, one
+                // line below it, and `Cancel` back to the filled-in form.
+                AuthPrimaryButton(
+                    title: l10n.t(viewModel.rateLimited ? "common.try_again" : "auth.signup.submit"),
+                    busy: viewModel.busy,
+                    busyTitle: SignupViewModel.workingTitle,
+                    action: viewModel.rateLimited ? viewModel.onTryAgain : viewModel.onSubmit
+                )
+                LegalSignupNotice()
+                if viewModel.busy {
+                    AuthHint(text: SignupViewModel.workingNote)
+                    if viewModel.cancellable {
+                        AuthSecondaryButton(title: l10n.t("common.cancel"), action: viewModel.onCancel)
+                    }
                 }
-            }
 
-            AuthLinkRow(
-                message: "auth.signup.have_account",
-                title: l10n.t("auth.login.submit"),
-                disabled: viewModel.busy,
-                action: onNavigateToLogin
-            )
+                AuthLinkRow(
+                    message: "auth.signup.have_account",
+                    title: l10n.t("auth.login.submit"),
+                    disabled: viewModel.busy,
+                    action: onNavigateToLogin
+                )
+            } else if viewModel.mode == .supporterCode {
+                // `docs/ux/supporters.md` section 1.1 — the code entry, in
+                // place of the full state.
+                AuthTitle(title: l10n.t("auth.signup.code.title"))
+                VStack(alignment: .leading, spacing: 6) {
+                    // The body line labels the field.
+                    AuthTextField(
+                        label: l10n.t("auth.signup.code.body"),
+                        text: $viewModel.supporterCode,
+                        contentType: .oneTimeCode,
+                        capitalization: .characters,
+                        autocorrect: false,
+                        disabled: viewModel.codeChecking,
+                        submitLabel: .go,
+                        onSubmit: viewModel.onSubmitSupporterCode
+                    )
+                    if let line = viewModel.codeLine {
+                        AuthHint(text: l10n.t(line.key), isError: true)
+                    }
+                }
+                AuthPrimaryButton(
+                    title: l10n.t("auth.signup.code.continue"),
+                    busy: viewModel.codeChecking,
+                    busyTitle: l10n.t("auth.signup.code.checking"),
+                    disabled: !viewModel.canContinueCode,
+                    action: viewModel.onSubmitSupporterCode
+                )
+                AuthSecondaryButton(
+                    title: l10n.t("auth.signup.code.back"),
+                    disabled: viewModel.codeChecking,
+                    action: viewModel.onSupporterCodeBack
+                )
+            } else {
+                // `docs/ux/beta-account-cap.md` section 2 — the beta is full.
+                // `docs/ux/supporters.md` section 1.2 — a held place another
+                // account already spent says so above it.
+                if viewModel.codeUsed {
+                    AuthHint(text: l10n.t("auth.signup.code.used"), isError: true)
+                }
+                AuthTitle(
+                    title: l10n.t("auth.signup.closed.title"),
+                    subtitle: l10n.t("auth.signup.closed.body"))
+                AuthPrimaryButton(
+                    title: l10n.t("auth.signup.closed.retry"),
+                    busy: viewModel.mode == .checking,
+                    busyTitle: l10n.t("auth.signup.closed.checking"),
+                    action: viewModel.onRetryOpen
+                )
+                AuthSecondaryButton(
+                    title: l10n.t("auth.signup.closed.log_in"),
+                    disabled: viewModel.mode == .checking,
+                    action: onNavigateToLogin
+                )
+                AuthLinkRow(
+                    title: l10n.t("auth.signup.code.link"),
+                    disabled: viewModel.mode == .checking,
+                    action: viewModel.onOpenSupporterCode
+                )
+            }
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        // The beta account cap: asked when the screen opens.
+        .task { await viewModel.onAppear() }
         // Leaving the screen while working cancels the work.
         .onDisappear { viewModel.onCancel() }
     }

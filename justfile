@@ -1056,6 +1056,16 @@ mint-release-manifest latest min_supported:
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
 
+# ADR-0097 - sign the supporters list from a plain text file (one name per
+# line) with the release key, writing lakko-supporters.bin. Copy it to the
+# server (the tool prints the scp line; served at
+# https://lakko.me/.well-known/lakko-supporters). `version` must be higher
+# than the list clients hold. Example: just sign-supporters 3 supporters.txt
+sign-supporters version names:
+    cargo run -q -p lakko-release-manifest-tool -- \
+        supporters --version {{version}} --names {{names}} \
+        --seed release-signing-key.seed --out lakko-supporters.bin
+
 # ADR-0026 - put the anti-censorship tunnel on the test stack: obfs-proxy
 # alone, no other service restarted, and a freshly signed bootstrap config.
 deploy-test-obfs:
@@ -1135,6 +1145,31 @@ restart-sfu:
 logs-sfu:
     ssh {{vps_user}}@{{vps_host}} 'journalctl -u lakko-sfu -f'
 
+# ---- Backups (infra/README.md "Backup / restore") -----------------------
+# On the lakko.me server (the production layout), reached by
+# infra/scripts/host-ops.sh (LAKKO_HOST_SSH, LAKKO_HOST_SSH_KEY).
+# One-time: restic, /etc/lakko/backup.env, the repository password, the
+# nightly timer. The Storage Box sftp access must be set up first.
+backup-setup:
+    infra/scripts/host-ops.sh backup-setup
+
+# Run a backup now and show its log.
+backup-now:
+    infra/scripts/host-ops.sh backup-now
+
+# When the last backup succeeded, the timer, the snapshots, the repository
+# size, and how full the server disk is.
+backup-status:
+    infra/scripts/host-ops.sh backup-status
+
+# Monthly: restore the newest snapshot to a scratch dir and verify it.
+backup-restore-check:
+    infra/scripts/host-ops.sh backup-restore-check
+
+# Local end-to-end test of the backup and restore scripts, in Docker.
+backup-test:
+    ./infra/scripts/backup-test.sh
+
 # G3-turn-deploy — bootstrap or refresh the coturn VPS.
 # Idempotent — safe to re-run after editing turnserver.conf or
 # the systemd override; the script reloads coturn at the end.
@@ -1157,6 +1192,11 @@ deploy-coturn:
     rsync -a --delete --exclude='target/' --exclude='.git/' \
         ./infra/ {{turn_user}}@{{turn_host}}:/root/lakko-infra/
     ssh {{turn_user}}@{{turn_host}} 'bash /root/lakko-infra/scripts/deploy-coturn.sh'
+
+# Keep logs that can name a client address for 7 days (journald, nginx error
+# log) on the lakko.me server (the whole machine). Idempotent.
+log-retention:
+    infra/scripts/host-ops.sh log-retention
 
 # Restart coturn (drops in-flight relay sessions — operators
 # prefer `reload-coturn` below in 99 % of cases). Use this only

@@ -151,6 +151,14 @@ if ! grep -q '^LAKKO_AUTH_HANDLE_PEPPER=' $ENV_FILE; then
   echo "login-handle pepper added to the env file"
 fi
 
+# Supporter codes (ADR-0097) arrived later: an older env file gains the
+# pepper keying the stored code hashes, generated once and then kept
+# (regenerating it makes every minted code unknown).
+if ! grep -q '^LAKKO_AUTH_SUPPORTER_CODE_PEPPER=' $ENV_FILE; then
+  echo "LAKKO_AUTH_SUPPORTER_CODE_PEPPER=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "supporter-code pepper added to the env file"
+fi
+
 # The recovery email (ADR-0075) arrived later: an older env file gains the
 # pepper that keys the stored (login handle, address) values, generated once
 # and then kept (regenerating it turns every recovery email off). The SMTP
@@ -224,6 +232,27 @@ if ! grep -q '^LAKKO_PUSH_GW_INTERNAL_SECRET=' $ENV_FILE; then
   } >> $ENV_FILE
   unset WAKE_SECRET
   echo "wake forward secret added to the env file"
+fi
+
+# The account purge (auth -> discovery + storage internal listeners) arrived
+# later: an env file gains one shared secret, the two internal binds and
+# auth's two URLs here, all at once (a half-configured set stops the
+# services from starting).
+if ! grep -q '^LAKKO_INTERNAL_PURGE_SECRET=' $ENV_FILE; then
+  PURGE_SECRET=$(openssl rand -base64 32)
+  sed -i -e '/^LAKKO_DISCOVERY_INTERNAL_BIND=/d' -e '/^LAKKO_STORAGE_INTERNAL_BIND=/d' \
+    -e '/^LAKKO_AUTH_DISCOVERY_INTERNAL_URL=/d' -e '/^LAKKO_AUTH_STORAGE_INTERNAL_URL=/d' $ENV_FILE
+  {
+    echo
+    echo "# Account deletion: auth purges discovery + storage over internal listeners."
+    echo "LAKKO_INTERNAL_PURGE_SECRET=${PURGE_SECRET}"
+    echo "LAKKO_DISCOVERY_INTERNAL_BIND=127.0.0.1:8094"
+    echo "LAKKO_STORAGE_INTERNAL_BIND=127.0.0.1:8095"
+    echo "LAKKO_AUTH_DISCOVERY_INTERNAL_URL=http://127.0.0.1:8094"
+    echo "LAKKO_AUTH_STORAGE_INTERNAL_URL=http://127.0.0.1:8095"
+  } >> $ENV_FILE
+  unset PURGE_SECRET
+  echo "account purge secret and internal listeners added to the env file"
 fi
 
 # The storage blob index and pass gate (ADR-0065) arrived later: an env file

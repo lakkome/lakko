@@ -51,6 +51,10 @@ pub enum AnonTokenError {
     /// The master secret is not 32 bytes of hex.
     #[error("master secret must be 64 hex characters (32 bytes)")]
     InvalidMasterSecret,
+    /// Supporter-code text that is not 16 Crockford base32 symbols
+    /// (spaces and dashes aside) (ADR-0097).
+    #[error("supporter code must be 16 letters and digits")]
+    BadSupporterCode,
     /// An internal VOPRF failure that valid inputs cannot reach (key
     /// derivation or proof generation). Surfaced rather than panicking.
     #[error("internal VOPRF failure")]
@@ -76,6 +80,7 @@ impl AnonTokenError {
             Self::CountMismatch => "count-mismatch",
             Self::InvalidWindow => "invalid-window",
             Self::InvalidMasterSecret => "invalid-master-secret",
+            Self::BadSupporterCode => "bad-supporter-code",
             Self::Internal => "internal",
         }
     }
@@ -104,6 +109,7 @@ mod tests {
             E::CountMismatch,
             E::InvalidWindow,
             E::InvalidMasterSecret,
+            E::BadSupporterCode,
             E::Internal,
         ];
         let codes: std::collections::HashSet<_> = all.iter().map(|e| e.code()).collect();

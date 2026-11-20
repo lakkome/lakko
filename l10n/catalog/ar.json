@@ -165,6 +165,70 @@
       "text": "إظهار كلمة المرور",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "النسخة التجريبية تتسع لعدد محدود من الأشخاص، وكل الأماكن مشغولة. تتاح أماكن عندما يغادر أحد. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "جارٍ التحقق...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "تسجيل الدخول",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "حاول مجددًا",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko ممتلئ حاليًا",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "رجوع",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "أدخل الرمز الموجود في بريدك الإلكتروني.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "جارٍ التحقق...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "متابعة",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "تعذّر التحقق من الرمز. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "مكانك كداعم محجوز لهذا التسجيل.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "محاولات كثيرة جدًا. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "لدي رمز داعم",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "رمز الداعم",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "هذا الرمز لا يعمل. تحقق منه وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "سبق استخدام رمز الداعم هذا.",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "أدخل اسم مستخدم.",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "هل تريد استعادة هذه النسخة الاحتياطية الأقدم؟",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko في مرحلة تجريبية، ولم يتحقق أي تدقيق مستقل من أمانه بعد. لا تعتمد عليه حيث تتوقف سلامتك على ذلك.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "نسخة تجريبية",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "مكالمة جماعية في {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko ممتلئ حاليًا، لذا لا يمكن الاحتفاظ بحساب الضيف هذا. تتاح أماكن عندما يغادر أحد.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "حسنًا",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "تعذّر رفع «{name}». حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "مجموعة عامة · {count, plural, one {عضو واحد} two {عضوان} few {# أعضاء} many {# عضوًا} other {# عضو}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "بلغت حد إرسال الملفات. حاول لاحقًا.",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "الصينية (المبسطة)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "سياسة الخصوصية",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "سياسة الخصوصية",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "بإنشاء حساب، فإنك توافق على {terms} و{privacy}.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "شروط الخدمة",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "شروط الخدمة",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "المكالمات",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "فتح في التطبيق",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "اختصارات لوحة المفاتيح",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "الداعمون",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "تم تحديث الترجمات {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "الترجمة غير متاحة في هذا المتصفح",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "يموّل Lakko الأشخاص الذين يدعمونه. شكرًا لكم.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "تعذّر تحميل القائمة. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "إعادة المحاولة",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "الداعمون",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

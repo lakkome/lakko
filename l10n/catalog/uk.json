@@ -165,6 +165,70 @@
       "text": "Показати пароль",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "У беті обмежена кількість місць, і всі вони зайняті. Місця звільняються, коли хтось іде. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "Перевіряємо...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "Увійти",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "Спробувати ще",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Місць поки немає",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "Назад",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "Введіть код із листа.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "Перевіряємо...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "Продовжити",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "Не вдалося перевірити код. Спробуйте знову.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "Ваше місце прихильника закріплено за цією реєстрацією.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "Забагато спроб. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "У мене є код підтримки",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "Код підтримки",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "Цей код не підходить. Перевірте його і спробуйте знову.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "Цей код підтримки вже використано.",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "Введіть ім’я користувача.",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "Відновити цю старішу резервну копію?",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko перебуває в бета-версії, і його безпеку ще не перевіряв незалежний аудит. Не покладайтеся на нього там, де від цього залежить ваша безпека.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "Бета",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "Груповий дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Місць поки немає, тому цей гостьовий акаунт не можна зберегти. Місця звільняються, коли хтось іде.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "OK",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "Не вдалося вивантажити «{name}». Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "На сервері зараз немає місця для нових файлів. Спробуйте пізніше.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "Відкрита група · {count, plural, one {# учасник} few {# учасники} many {# учасників} other {# учасника}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "На сервері зараз немає місця для нових файлів. Спробуйте пізніше.",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "Ви досягли ліміту на надсилання файлів. Спробуйте пізніше.",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "Китайська (спрощена)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "Політикою конфіденційності",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "Політика конфіденційності",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "Створюючи акаунт, ви погоджуєтеся з {terms} та {privacy}.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "Умовами використання",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "Умови використання",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "Дзвінки",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "Відкрити в застосунку",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "На сервері зараз немає місця для нових файлів. Спробуйте пізніше.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "Комбінації клавіш",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "Прихильники",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переклади оновлено {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "Переклад недоступний у цьому браузері",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "Lakko існує завдяки тим, хто його підтримує. Дякуємо.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "Не вдалося завантажити список. Спробуйте знову.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "Спробувати знову",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "Прихильники",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

@@ -681,6 +681,11 @@ data class DeviceRevokeRequest(
 // ADR-0075: the recovery email, and the account's notices
 // -----------------------------------------------------------------
 
+/** `GET /signup/open` (anonymous): whether sign-up has room now
+ *  (`docs/ux/beta-account-cap.md`). */
+@Serializable
+data class SignupOpenResponse(val open: Boolean)
+
 /** `GET /recovery-email/available` (anonymous). */
 @Serializable
 data class RecoveryEmailAvailableResponse(val available: Boolean = false)

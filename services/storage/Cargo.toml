@@ -52,6 +52,10 @@ hex = "0.4"
 # Atomic file persist (write to tempfile, rename into place).
 tempfile = "3"
 
+# Free space on the blob filesystem (src/disk.rs); already in the tree
+# through tempfile.
+rustix = { version = "1", features = ["fs"] }
+
 # Body streaming via futures Stream.
 futures = "0.3"
 bytes = "1"
@@ -85,6 +89,17 @@ base64 = "0.22"
 # ADR-0065 section 6: the `x-lakko-storage-proof` verifier for
 # `DELETE /blob/{hex}` (pure; depends on lakko-crypto, thiserror, base64).
 lakko-vault.workspace = true
+
+# ADR-0065 amendment (2026-11-19): blob bytes in an S3-compatible bucket.
+# `rusty-s3` only signs requests (sans-IO); `rustcrypto` is its HMAC/SHA-2
+# backend, so no `aws-lc` enters the build (the ADR-0026 lesson).
+rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto"] }
+# The HTTP client for the bucket, as the other services use it (rustls on
+# ring); `stream` for the streamed PUT body and the streamed GET.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+] }
 
 [dev-dependencies]
 lakko-anon-token-server = { workspace = true, features = ["testing"] }

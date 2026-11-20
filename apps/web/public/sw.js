@@ -222,6 +222,12 @@ async function cacheFirst(req) {
 }
 
 async function networkFirstWithCacheFallback(req) {
+  // The Terms of Service and the Privacy Policy (docs/ux/legal-pages.md) are
+  // static pages of their own, not the app: never stored as the shell, and
+  // never answered with the shell when offline.
+  if (/^\/(?:terms|privacy)(?:\/|\/index\.html)?$/.test(new URL(req.url).pathname)) {
+    return fetch(req);
+  }
   try {
     const fresh = await fetch(req);
     // Only the HTML shell refreshes the shell entry. A navigation to

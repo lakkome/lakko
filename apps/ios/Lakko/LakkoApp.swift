@@ -881,6 +881,8 @@ struct AppRoot: View, Equatable {
             // AppRoot appear (view identity is stable across auth-state flips).
             .task {
                 await releaseChecker.checkOnLaunch()
+                // ADR-0097 — the supporters list, at most once a day.
+                await SupportersListCenter.shared.refreshIfDue()
             }
             .onReceive(services.deviceGroupSync.$deviceRemoved.removeDuplicates()) { removed in
                 if deviceRemoved != removed { deviceRemoved = removed }
@@ -1235,6 +1237,8 @@ enum TabRoute: Hashable {
     case chatFolders(reorder: Bool)
     /// Settings > Privacy > Who can find me (ADR-0060).
     case whoCanFindMe
+    /// Settings > About > Supporters (ADR-0097 section 2).
+    case supporters
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -2490,6 +2494,8 @@ private struct SessionRoot: View, Equatable {
                 })
         case .language:
             LanguageScreen(showsTranslationSettings: true)
+        case .supporters:
+            SupportersScreen(center: SupportersListCenter.shared)
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
                 startInReorder: reorder, viewModel: chatListVM, channels: channelsState,

@@ -200,7 +200,8 @@ private suspend fun PointerInputScope.watchLongPress(current: () -> (() -> Unit)
 /** `CATEGORY_BROWSABLE` so that only what a browser could open is reached, and
  *  a normalised scheme because the rule accepts `HTTPS://` while an intent
  *  filter matches the scheme exactly. The address is not logged. */
-private fun openInSystemBrowser(context: Context, url: String) {
+/** Open [url] in the system's default browser; no in-app web view. */
+internal fun openInSystemBrowser(context: Context, url: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url).normalizeScheme())
         .addCategory(Intent.CATEGORY_BROWSABLE)
     try {

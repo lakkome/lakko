@@ -85,7 +85,9 @@ worth knowing before trusting a count that no tool produced.
 
 **[G-39](./known-gaps.md) — the external cryptographic review has not happened.** It
 is security invariant #3's third clause, and it is a **release gate**: no build
-reaches users, no store submission, no GA tag, while it is open. It is owned by
+reaches users, no store submission, no GA tag, while it is open. Since 2026-11-18 the
+one exception is a public beta capped at 1000 accounts, on beta channels only and marked
+as unaudited (ADR-0046 amendment). It is owned by
 [ADR-0046](../adr/0046-external-crypto-review.md), which moved it out of four
 scattered ADR sentences into one tracked place, and scoped for an engagement in
 [`external-review-scope.md`](./external-review-scope.md).

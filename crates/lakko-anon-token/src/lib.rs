@@ -41,7 +41,16 @@
 //! padding>` ([`TOKEN_HEADER`]); every binary field of the issuance exchange
 //! travels as base64url without padding too ([`encode_b64url`]).
 //!
+//! # Supporter codes
+//!
+//! [`SupporterCode`] ([ADR-0097]) is the one place a token is issued without
+//! a session: an 80-bit code redeemed once for a `beta-place` token whose
+//! nonce and blinding factor are derived from the code, so a retry repeats
+//! the same request. `beta-place` has a fixed 30-day window
+//! ([`BETA_PLACE_WINDOW_SECS`]).
+//!
 //! [ADR-0054]: ../../../docs/adr/0054-anti-abuse-without-client-work.md
+//! [ADR-0097]: ../../../docs/adr/0097-supporter-codes-and-list.md
 
 #![forbid(unsafe_code)]
 
@@ -49,13 +58,17 @@ mod client;
 mod context;
 mod error;
 mod issuer;
+mod supporter_code;
 mod token;
 mod wire;
 
 pub use client::TokenRequest;
-pub use context::{epoch_accepted, epoch_at, TokenContext, DEFAULT_WINDOW_SECS};
+pub use context::{
+    epoch_accepted, epoch_at, TokenContext, BETA_PLACE_WINDOW_SECS, DEFAULT_WINDOW_SECS,
+};
 pub use error::{AnonTokenError, Result};
 pub use issuer::{validate_blinded_batch, Issuance, IssuerKey, MasterSecret, MASTER_SECRET_LEN};
+pub use supporter_code::{SupporterCode, SUPPORTER_CODE_LEN, SUPPORTER_CODE_SYMBOLS};
 pub use token::{token_input, verify_token, SpendId, Token, VerifiedToken, SPEND_ID_LEN};
 pub use wire::{
     decode_b64url_fixed, decode_header_value, encode_b64url, TOKEN_HEADER, TOKEN_HEADER_VALUE_LEN,

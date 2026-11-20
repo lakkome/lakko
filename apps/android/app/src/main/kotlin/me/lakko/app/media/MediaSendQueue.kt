@@ -104,7 +104,7 @@ public class MediaSendQueue(
     }
 
     private fun run(job: Job) {
-        update(job) { it.copy(progress = 0.02f, failed = false, limited = false) }
+        update(job) { it.copy(progress = 0.02f, failed = false, limited = false, refusal = null) }
         scope.launch {
             try {
                 if (job.uploaded == null) {
@@ -143,7 +143,8 @@ public class MediaSendQueue(
                 onLog("media send failed: ${e.javaClass.simpleName}")
                 // UX 4.2 — the sending limit is said as such. Once the message
                 // has its row in the conversation, that row says "Not sent".
-                update(job) { it.copy(failed = true, limited = isUploadLimit(e)) }
+                val refusal = uploadRefusalOf(e)
+                update(job) { it.copy(failed = true, limited = refusal == UploadRefusal.LIMIT, refusal = refusal) }
             }
         }
     }
@@ -216,4 +217,7 @@ public data class PendingMediaRow(
     val failed: Boolean,
     /** UX 4.2 — the failure was the sending limit. */
     val limited: Boolean = false,
+    /** The told refusal behind the failure (the limit, or the server has no
+     *  room for new files), `null` for any other. */
+    val refusal: UploadRefusal? = null,
 )

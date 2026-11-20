@@ -2159,6 +2159,10 @@ async fn account_deletion_is_refused_while_a_recall_window_is_open() {
         2,
         "the account is still there"
     );
+    assert!(
+        !crate::purge::is_queued(&pool, &account.id).await,
+        "a delete refused for the recall window queued a purge"
+    );
     // Without the grant it is the grant's refusal, as before: the window is
     // not an oracle for a bare session.
     let (st, body) = call(

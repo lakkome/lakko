@@ -336,9 +336,11 @@ public class PasskeysViewModel(
      *     that is not an error.
      *
      * A plain `403` for an account this screen thought had no passkey runs
-     * the action ceremony once and retries, fail-closed. Then the best-effort
-     * discovery purge and [onAccountDeleted], the same local wipe + sign-out
-     * Forget device runs. Every failure is left on
+     * the action ceremony once and retries, fail-closed. Only once auth has
+     * deleted the account, the bounded best-effort cleanups only this device
+     * can do (its push subscriptions, the backup blob, the directory rows),
+     * then [onAccountDeleted], the same local wipe + sign-out Forget device
+     * runs ([me.lakko.app.account.AccountDeletion]). Every failure is left on
      * [PasskeysUiState.deleteError], inside the dialog, which stays open.
      */
     public fun deleteAccount(context: Context, hasPasskey: Boolean, onProofRequired: () -> Unit) {
@@ -383,32 +385,45 @@ public class PasskeysViewModel(
                 } catch (e: Throwable) {
                     me.lakko.app.rethrowIfCancelled(e) {}
                 }
-                try {
-                    client.deleteAccount(grant)
-                } catch (e: WebauthnHttpError) {
-                    when {
-                        me.lakko.app.auth.isFreshAuthRequired(e) -> throw e
-                        e.status == 403 && !hasPasskey -> {
-                            // The account has a passkey this screen did not
-                            // know of: the action ceremony, then once more.
-                            assertDeletion()
+                // The push subscriptions name no account, so only this
+                // device can remove them, and only after auth deleted the
+                // account (a refusal must leave them). Each removal spends a
+                // push-register token, which auth issues to a session: they
+                // are taken in `prepare`, while the account still has one.
+                val accountIdB64 = me.lakko.app.auth.base64Encode(secrets.accountId)
+                val subscriptionIds = me.lakko.app.push.PushRouteStore(context).subscriptionIds(accountIdB64)
+                val pushTokens = me.lakko.app.anon.PrefetchedAnonTokens(emptyList(), me.lakko.app.anon.AnonTokens.shared)
+                me.lakko.app.account.AccountDeletion(
+                    prepare = {
+                        val needed = me.lakko.app.account.AccountDeletion.pushTokensNeeded(subscriptionIds.size)
+                        val got = me.lakko.app.anon.AnonTokens.reserve(
+                            me.lakko.app.anon.AnonTokenContext.PUSH_REGISTER, needed,
+                        )
+                        pushTokens.add(got)
+                        if (got.size < needed) Log.w("PasskeysViewModel", "WARN delete account: ${got.size} of $needed push tokens")
+                    },
+                    deleteAtAuth = {
+                        try {
                             client.deleteAccount(grant)
+                        } catch (e: WebauthnHttpError) {
+                            when {
+                                me.lakko.app.auth.isFreshAuthRequired(e) -> throw e
+                                e.status == 403 && !hasPasskey -> {
+                                    // The account has a passkey this screen did
+                                    // not know of: the action ceremony, then
+                                    // once more.
+                                    assertDeletion()
+                                    client.deleteAccount(grant)
+                                }
+                                else -> throw e
+                            }
                         }
-                        else -> throw e
-                    }
-                }
-                // Best-effort discovery purge — the auth tier is the critical
-                // erasure; the session token is about to be invalidated anyway.
-                try {
-                    val discovery = DiscoveryClient()
-                    discovery.setSessionToken(secrets.sessionToken)
-                    discovery.deleteAccount()
-                } catch (_: Throwable) {
-                    // best-effort
-                }
-                // Local wipe + full sign-out on this device: the same path
-                // Forget device takes (every per-account store, push first).
-                onAccountDeleted()
+                    },
+                    cleanups = accountDeletionCleanups(subscriptionIds, pushTokens, secrets.sessionToken),
+                    // Local wipe + full sign-out on this device: the same path
+                    // Forget device takes (every per-account store, push first).
+                    wipe = onAccountDeleted,
+                ).run()
             } catch (e: Throwable) {
                 me.lakko.app.rethrowIfCancelled(e) {
                     mutableState.update { it.copy(busy = false) }
@@ -511,6 +526,41 @@ public class PasskeysViewModel(
     private fun failure(e: Throwable, generic: UiText): UiText {
         Log.w("PasskeysViewModel", "WARN failed: ${e.javaClass.simpleName}")
         return if (e is java.io.IOException) UiText("settings.passkeys.error.network") else generic
+    }
+
+    /**
+     * What Delete account removes on the servers after auth deleted the
+     * account, before the device is wiped ([me.lakko.app.account.AccountDeletion]).
+     * The storage and directory calls carry the session token taken before
+     * the delete: both services verify it on its own, with no account row,
+     * until it expires. A push unsubscribe carries no session, only a token
+     * from [pushTokens].
+     */
+    private fun accountDeletionCleanups(
+        subscriptionIds: List<ByteArray>,
+        pushTokens: me.lakko.app.anon.AnonTokenSource,
+        sessionToken: String,
+    ): List<me.lakko.app.account.AccountDeletion.Cleanup> {
+        val push = me.lakko.app.push.PushSubscriptionsRemoval(subscriptionIds)
+        return listOf(
+            me.lakko.app.account.AccountDeletion.Cleanup("push subscriptions") {
+                me.lakko.app.push.PushClient(anonTokens = pushTokens).use { pushGw ->
+                    push.run { subId -> pushGw.unsubscribe(subId) }
+                }
+            },
+            me.lakko.app.account.AccountDeletion.Cleanup("backup") {
+                me.lakko.app.storage.StorageClient().use { storage ->
+                    storage.setSessionToken(sessionToken)
+                    storage.deleteBackup()
+                }
+            },
+            me.lakko.app.account.AccountDeletion.Cleanup("directory") {
+                DiscoveryClient().use { discovery ->
+                    discovery.setSessionToken(sessionToken)
+                    discovery.deleteAccount()
+                }
+            },
+        )
     }
 
     private companion object {

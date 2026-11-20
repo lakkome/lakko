@@ -152,6 +152,26 @@ impl AnonTokenServerConfig {
             .saturating_add(1)
             .saturating_mul(self.window_secs)
     }
+
+    /// The epoch window `context` uses here: its own fixed window
+    /// (`beta-place`, ADR-0097) or the configured one.
+    #[must_use]
+    pub const fn window_for(&self, context: TokenContext) -> u64 {
+        context.window_secs(self.window_secs)
+    }
+
+    /// The current epoch of `context` by the system clock.
+    #[must_use]
+    pub fn current_epoch_for(&self, context: TokenContext) -> u64 {
+        current_epoch(self.window_for(context))
+    }
+
+    /// The unix second at which `context`'s current epoch ends.
+    #[must_use]
+    pub fn current_epoch_ends_at_for(&self, context: TokenContext) -> u64 {
+        let w = self.window_for(context);
+        current_epoch(w).saturating_add(1).saturating_mul(w)
+    }
 }
 
 /// Seconds since the unix epoch by the system clock (0 if the clock is before
@@ -327,18 +347,83 @@ pub async fn spend(
     }
 }
 
-/// Delete spent rows older than the previous epoch: those tokens no longer
-/// verify, so they cannot be replayed.
+/// [`spend`] on a connection the caller holds, typically inside its own
+/// transaction, so the spend commits or rolls back with the work it pays
+/// for (ADR-0097: a `beta-place` token is spent in the same transaction as
+/// the username bind it admits).
+///
+/// # Errors
+///
+/// [`SpendError::AlreadySpent`] on a duplicate, [`SpendError::Db`] otherwise.
+/// After `AlreadySpent` the caller's transaction is still usable (the
+/// failed INSERT changed nothing), but the caller normally rolls it back.
+pub async fn spend_on(
+    conn: &mut sqlx::MySqlConnection,
+    context: TokenContext,
+    spend_id: &SpendId,
+    epoch: u64,
+) -> Result<(), SpendError> {
+    let res =
+        sqlx::query("INSERT INTO anon_token_spent (context, spend_id, epoch) VALUES (?, ?, ?)")
+            .bind(context.as_u8())
+            .bind(&spend_id[..])
+            .bind(epoch)
+            .execute(conn)
+            .await;
+    match res {
+        Ok(_) => Ok(()),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(SpendError::AlreadySpent),
+        Err(e) => Err(SpendError::Db(e)),
+    }
+}
+
+/// Delete spent rows of the contexts that follow the configured window and
+/// whose epoch is older than the previous one: those tokens no longer
+/// verify, so they cannot be replayed. Rows of a context with a window of
+/// its own (`beta-place`) are left to [`prune_spent_fixed`]: their epoch
+/// numbers are on another scale.
 ///
 /// # Errors
 ///
 /// Any `sqlx::Error` from the DELETE.
 pub async fn prune_spent(pool: &MySqlPool, current_epoch: u64) -> Result<u64, sqlx::Error> {
-    sqlx::query("DELETE FROM anon_token_spent WHERE epoch < ?")
-        .bind(current_epoch.saturating_sub(1))
-        .execute(pool)
-        .await
-        .map(|r| r.rows_affected())
+    let mut total = 0;
+    for context in TokenContext::ALL {
+        if context.fixed_window_secs().is_some() {
+            continue;
+        }
+        total += sqlx::query("DELETE FROM anon_token_spent WHERE context = ? AND epoch < ?")
+            .bind(context.as_u8())
+            .bind(current_epoch.saturating_sub(1))
+            .execute(pool)
+            .await?
+            .rows_affected();
+    }
+    Ok(total)
+}
+
+/// Delete spent rows of each context with a fixed window whose epoch, on
+/// that context's own scale, is older than the previous one at
+/// `now_unix_secs`.
+///
+/// # Errors
+///
+/// Any `sqlx::Error` from a DELETE.
+pub async fn prune_spent_fixed(pool: &MySqlPool, now_unix_secs: u64) -> Result<u64, sqlx::Error> {
+    let mut total = 0;
+    for context in TokenContext::ALL {
+        let Some(window) = context.fixed_window_secs() else {
+            continue;
+        };
+        let current = epoch_at(now_unix_secs, window).unwrap_or(0);
+        total += sqlx::query("DELETE FROM anon_token_spent WHERE context = ? AND epoch < ?")
+            .bind(context.as_u8())
+            .bind(current.saturating_sub(1))
+            .execute(pool)
+            .await?
+            .rows_affected();
+    }
+    Ok(total)
 }
 
 /// Spawn the hourly spent-set pruner. Aborts with the returned handle.
@@ -351,6 +436,11 @@ pub fn spawn_spent_pruner(pool: MySqlPool, window_secs: u64) -> tokio::task::Joi
                 Ok(n) if n > 0 => tracing::debug!(rows = n, "pruned anon_token_spent"),
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "prune anon_token_spent"),
+            }
+            match prune_spent_fixed(&pool, now_unix_secs()).await {
+                Ok(n) if n > 0 => tracing::debug!(rows = n, "pruned fixed-window anon_token_spent"),
+                Ok(_) => {},
+                Err(e) => tracing::warn!(error = %e, "prune fixed-window anon_token_spent"),
             }
         }
     })

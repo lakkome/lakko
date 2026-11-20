@@ -125,6 +125,9 @@ function main() {
     // for the fetchers of other apps, never for the app offline.
     if (rel.startsWith("link-preview/") || rel.startsWith("link-preview\\")) continue;
     if (/^assets[\\/]link-preview-[0-9a-f]+\.png$/.test(rel)) continue;
+    // The legal pages (scripts/legal-pages.mjs) are pages of their own, not
+    // part of the app.
+    if (/^(terms|privacy)[\\/]/.test(rel)) continue;
     if (rel === "index.html") continue; // already covered by ROOT_ASSETS
     precache.add("/" + rel);
   }

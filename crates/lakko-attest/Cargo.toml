@@ -18,3 +18,12 @@ workspace = true
 [dependencies]
 lakko-crypto.workspace = true
 thiserror.workspace = true
+# ADR-0097: the supporters list checks every name with the ADR-0048
+# display-name rule, defined once in `lakko-contacts` (which depends only on
+# `lakko-crypto`, `thiserror` and `tracing`, so no cycle and nothing new in
+# the tree).
+lakko-contacts.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+

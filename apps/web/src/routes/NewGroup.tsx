@@ -27,6 +27,7 @@ import { LakkoPicker } from "../ui/LakkoPicker";
 import { AvatarCamera, AvatarCrop, AvatarMenu, type CropSource } from "../profile/AvatarEditor";
 import { releaseLocalAvatar, type LocalAvatar } from "../profile/avatar-media";
 import { uploadLocalAvatar } from "../profile/avatar-upload";
+import { groupPhotoUploadErrorText } from "../chat/attachment-failure";
 import type { AvatarData } from "../profile/avatar-model";
 import { loadWasm } from "../wasm";
 import { useLocation, useNavigate } from "@solidjs/router";
@@ -168,8 +169,7 @@ export default function NewGroup(): JSX.Element {
         try {
           avatar = await uploadLocalAvatar(local);
         } catch (err) {
-          const text = err instanceof Error ? err.message : "";
-          setPhotoError(/limit|429/i.test(text) ? t("group_photo.error.limit") : t("group_photo.error.upload"));
+          setPhotoError(groupPhotoUploadErrorText(err));
           setBusy(false);
           return;
         }

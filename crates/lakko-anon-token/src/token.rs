@@ -143,7 +143,8 @@ pub struct VerifiedToken {
 ///
 /// Checks, in order: the wire layout ([`Token::decode`]), that the context is
 /// `expected`, that the epoch is the current or the previous one at
-/// `now_unix_secs` under `window_secs`, and that the output equals the VOPRF
+/// `now_unix_secs` under `window_secs` (or the context's fixed window,
+/// [`TokenContext::fixed_window_secs`]), and that the output equals the VOPRF
 /// evaluation of the token input under the `(context, epoch)` key derived from
 /// `master` - compared in constant time. Pure: the double-spend check is the
 /// caller's (see [`VerifiedToken`]).
@@ -165,7 +166,9 @@ pub fn verify_token(
     if token.context != expected {
         return Err(AnonTokenError::WrongContext);
     }
-    let current = epoch_at(now_unix_secs, window_secs)?;
+    // A context with a window of its own (`beta-place`) ignores the
+    // configured one, so every verifier agrees on its epoch.
+    let current = epoch_at(now_unix_secs, expected.window_secs(window_secs))?;
     if !epoch_accepted(token.epoch, current) {
         return Err(AnonTokenError::EpochOutOfWindow);
     }

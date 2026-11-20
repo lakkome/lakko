@@ -236,6 +236,7 @@ fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::CircleClaim), 10);
     assert_eq!(default_quota(TokenContext::ChannelReact), 500);
     assert_eq!(default_quota(TokenContext::ChannelComment), 200);
+    assert_eq!(default_quota(TokenContext::BetaPlace), 0);
 }
 
 #[test]

@@ -110,6 +110,23 @@ class AccountDirectoryTest {
     }
 
     @Test
+    fun `a bind refused at the beta cap stops the claim before discovery`() = runTest {
+        // docs/ux/beta-account-cap.md section 2 item 4: no name is left in
+        // the directory, and nothing was bound, so nothing is released.
+        val binder = FakeBinder(onBind = { LoginHandleBinding.Closed })
+        val directory = FakeDirectory()
+        try {
+            claimUsernameAtSignup(directory, binder, handles, "token", accountId, "alice")
+            fail("a closed registration must fail signup")
+        } catch (_: RegistrationClosed) {
+            // expected
+        }
+        assertEquals(listOf("handle:alice", "bind"), calls)
+        assertTrue(directory.registrations.isEmpty())
+        assertEquals(0, binder.unbinds)
+    }
+
+    @Test
     fun `a handle-bind limit stops the claim before discovery with its own copy`() = runTest {
         // docs/ux/anti-abuse.md section 2 — `PUT /auth/login-handle` answered
         // `429 handle-bind-limited`: nothing is asked of discovery and the

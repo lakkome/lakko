@@ -184,7 +184,7 @@ public class ProfileEditViewModel : ViewModel() {
                 AvatarRefs(still, video, if (video != null) photo.videoDurationMs else null)
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                return SaveOutcome.Failed(UiText("profile.save.error.upload"))
+                return SaveOutcome.Failed(UiText(me.lakko.app.media.profilePhotoUploadFailureKey(e)))
             }
             edit = edit?.copy(photo = photo.copy(uploaded = uploaded))
         }

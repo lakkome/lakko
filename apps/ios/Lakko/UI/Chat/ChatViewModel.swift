@@ -1668,6 +1668,8 @@ public final class ChatViewModel: ObservableObject {
         case uploading
         case failed
         case limited
+        /// UX storage-full — the server has no room for new files.
+        case full
         case owed
         case notAllowed
     }
@@ -1696,6 +1698,9 @@ public final class ChatViewModel: ObservableObject {
                 avatar = try await ProfileAvatarUpload.upload(media)
             } catch AttachmentBridgeError.uploadLimited {
                 groupPhotoStatus = .limited
+                return
+            } catch AttachmentBridgeError.storageFull {
+                groupPhotoStatus = .full
                 return
             } catch {
                 groupPhotoStatus = .failed

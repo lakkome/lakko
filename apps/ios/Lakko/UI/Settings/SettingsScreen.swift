@@ -18,8 +18,11 @@ struct SettingsScreen: View {
     @ObservedObject private var profiles = ProfileDirectory.shared
     /// ADR-0061 — the interface language; every catalog string here follows it.
     @ObservedObject private var l10n = Localization.shared
+    @Environment(\.openURL) private var openURL
     /// ADR-0080 — the "Show my city to my other devices" switch.
     @ObservedObject private var deviceCards = DeviceCardCenter.shared
+    /// ADR-0097 — the supporters list; fetched when About is shown.
+    @ObservedObject private var supporters = SupportersListCenter.shared
     /// The existing delete-account flow (auth `DELETE /account`, the passkey
     /// action ceremony on a 403, the discovery purge, then the local wipe)
     /// lives on ``PasskeysViewModel``; the danger zone drives that same
@@ -320,6 +323,24 @@ struct SettingsScreen: View {
             }
 
             Section(l10n.t("settings.section.about")) {
+                // `docs/ux/beta-notice.md` section 4: first in About, so any
+                // claim about protection is read with the caveat. Static
+                // text, one accessibility element, not a button.
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l10n.t(BetaNoticeBanner.titleKey))
+                            .foregroundStyle(Color.lakkoText)
+                        Text(l10n.t(BetaNoticeBanner.bodyKey))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } icon: {
+                    Image(systemName: "info.circle")
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(
+                    l10n.t(BetaNoticeBanner.titleKey) + ". " + l10n.t(BetaNoticeBanner.bodyKey)))
                 HStack {
                     Label(l10n.t("settings.about.version"), systemImage: "info.circle")
                         .foregroundStyle(Color.lakkoText)
@@ -333,6 +354,40 @@ struct SettingsScreen: View {
                     Spacer()
                     Text("AGPL-3.0-or-later")
                         .foregroundStyle(Color.lakkoTextMuted)
+                }
+                // The same row as web and Android, after the licence: static
+                // text, one accessibility element.
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l10n.t("settings.about.protection.title"))
+                            .foregroundStyle(Color.lakkoText)
+                        Text(l10n.t("settings.about.protection.body"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } icon: {
+                    Image(systemName: "lock")
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(
+                    l10n.t("settings.about.protection.title") + ". "
+                        + l10n.t("settings.about.protection.body")))
+                // ADR-0097 / `docs/ux/supporters.md` section 2.1 — only while
+                // a checked list with at least one name is held.
+                if supporters.showsRow {
+                    row(l10n.t("settings.about.supporters"), systemImage: "heart") {
+                        onOpen(.supporters)
+                    }
+                }
+                // `docs/ux/legal-pages.md` section 2: the two pages, opened
+                // in the system browser.
+                ForEach([LegalPage.terms, LegalPage.privacy], id: \.path) { page in
+                    if let url = page.url() {
+                        row(l10n.t(page.titleKey), systemImage: "doc.plaintext") {
+                            openURL(url)
+                        }
+                    }
                 }
                 // ADR-0080 — the city database's attribution (CC BY 4.0).
                 Text(l10n.t("settings.about.city_data"))
@@ -385,6 +440,7 @@ struct SettingsScreen: View {
         // follow the server. On the list, not on a row of it: a row with no
         // content still takes a row's height.
         .task { await accountProtection?.refresh() }
+        .task { await supporters.aboutOpened() }
         // A UIKit-backed List keeps the mirroring it was built with when the
         // environment's layout direction flips under it (its glyphs come out
         // mirrored), so the list is rebuilt when the direction changes.

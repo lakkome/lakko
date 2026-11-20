@@ -42,13 +42,15 @@ infra/
 |---|---|---|
 | auth | 127.0.0.1:8081 | `journalctl -u lakko-svc-auth` |
 | ds | 127.0.0.1:8082 | `journalctl -u lakko-svc-ds` |
-| storage | 127.0.0.1:8083 | `journalctl -u lakko-svc-storage` |
-| discovery | 127.0.0.1:8084 | `journalctl -u lakko-svc-discovery` |
+| storage | 127.0.0.1:8083 (public API) + 127.0.0.1:8095 (internal, account purge) | `journalctl -u lakko-svc-storage` |
+| discovery | 127.0.0.1:8084 (public API) + 127.0.0.1:8094 (internal, account purge) | `journalctl -u lakko-svc-discovery` |
 | push-gw | 127.0.0.1:8085 (public API) + 127.0.0.1:8092 (internal, DS wake forward) | `journalctl -u lakko-svc-push-gw` |
 | channels | 127.0.0.1:8086 (public API) + 127.0.0.1:8093 (internal, directory moderation) | `journalctl -u lakko-svc-channels` |
 | gif-proxy | 127.0.0.1:8091 | `journalctl -u lakko-svc-gif-proxy` |
 
 channels' second listener (`LAKKO_CHANNELS_INTERNAL_BIND`, default 127.0.0.1:8093) is **never** proxied: it serves only `POST /internal/v1/channels/{channel_id}/moderation` (`{"action": "remove"|"block"|"unblock", "reason": "<a-z0-9->"}`, ADR-0059 section 7), authenticated by `x-lakko-internal-secret` = `LAKKO_CHANNELS_INTERNAL_SECRET` (base64, at least 16 bytes). With the secret unset the listener does not start and listings cannot be removed by the operator. The service also needs `LAKKO_ANON_TOKEN_MASTER_SECRET` (the value auth and the other verifiers share) for subscribe and directory search; unset, both answer `503 anon-tokens-disabled`.
+
+discovery's and storage's second listeners (`LAKKO_DISCOVERY_INTERNAL_BIND` 127.0.0.1:8094, `LAKKO_STORAGE_INTERNAL_BIND` 127.0.0.1:8095) are **never** proxied: they serve only `POST /internal/accounts/{hex}/purge` and `DELETE /internal/accounts/{hex}/backup`, which auth's account-purge worker calls after an account is deleted (`services/auth/src/purge.rs`, outbox table `account_purges`), authenticated by `x-lakko-internal-secret` = `LAKKO_INTERNAL_PURGE_SECRET` (one value in all three services). Auth reaches them through `LAKKO_AUTH_DISCOVERY_INTERNAL_URL` / `LAKKO_AUTH_STORAGE_INTERNAL_URL`. A service with only some of its variables set refuses to start; with none, the listener (or auth's worker) is off and purge rows wait in auth's database.
 
 system-nginx listens on 80/443 → reverse proxies to 127.0.0.1:808X. Services are not exposed externally.
 
@@ -403,6 +405,7 @@ Two `server_name`s share one nginx config (`infra/nginx/sites-available/lakko.co
 |---|---|---|
 | `lakko.me` | `/`, `/assets/*`, `/sw.js`, `/manifest.webmanifest` | The web SPA root + hashed assets + the service worker + the PWA manifest |
 | `lakko.me` | `/.well-known/lakko-release` (ADR-0038) | The signed "update available" manifest — a raw 89-byte Ed25519 blob served from a **separate** root `/var/www/lakko-release/` (NOT the SPA root) with `Cache-Control: no-store` |
+| `lakko.me` | `/.well-known/lakko-supporters` (ADR-0097) | The signed supporters list, signed with the release key, same separate root `/var/www/lakko-release/`, `Cache-Control: no-store` |
 | `lakko.me` | `/api/auth/*`, `/api/ds/*`, `/api/discovery/*`, `/api/storage/*` (1.19c1), `/api/push/*` (1.20b), `/api/gifs/*` (ADR-0047) | Same-origin proxy to the backend services so the web client's `connect-src 'self'` CSP stays valid |
 | `api.lakko.me` | `/auth/*`, `/ds/*`, `/storage/*`, `/discovery/*`, `/push-gw/*`, `/gifs/*` | Canonical external API entry point for the iOS / Android / Tauri clients (different CSP boundary; CORS not needed because Lakko clients never cross the `lakko.me ↔ api.lakko.me` origin pair) |
 
@@ -463,6 +466,31 @@ scp translation-bundle.bin lakkome@lakko.me:/var/www/lakko-release/lakko-transla
 
 `version` must be greater than the `version` in `l10n/catalog/en.json` that the builds in the field were compiled with. Served immediately, no reload.
 
+### Supporters list (ADR-0097)
+
+The names in Settings > About > Supporters come from one Ed25519-signed blob served at **`https://lakko.me/.well-known/lakko-supporters`** (an nginx `alias` to `/var/www/lakko-release/lakko-supporters.bin`, `no-store`, the release-manifest directory above). It is signed with the **release key** above under its own domain (`lakko/supporters-list/v1`), so the clients' release-key pin verifies it and nothing new is pinned. A client keeps the highest `version` it verified; an absent or bad file means no Supporters row.
+
+**Sign + publish** (source: a plain text file, one name per line):
+
+```bash
+just sign-supporters <version> supporters.txt   # e.g. 3 supporters.txt
+scp lakko-supporters.bin lakkome@lakko.me:/var/www/lakko-release/lakko-supporters.bin
+```
+
+`version` must be higher than the last published one. Served immediately, no reload.
+
+### Supporter codes (ADR-0097)
+
+A supporter code holds a beta place past `LAKKO_AUTH_MAX_ACCOUNTS`. Auth needs `LAKKO_AUTH_SUPPORTER_CODE_PEPPER` (and the anonymous-token master secret). Mint on the server, where the auth database is:
+
+```bash
+sudo systemd-run --pipe --wait --quiet -p User=lakkome \
+    -p EnvironmentFile=/etc/lakko/lakko.env \
+    /usr/local/bin/lakko-svc-auth supporter-codes mint --count 500 > codes.txt
+```
+
+The command prints the codes once, one per line, and stores only their keyed hashes; keep `codes.txt` with the backer list, mail each backer one code, and delete the file from the server.
+
 ### City database for device cards (ADR-0080)
 
 `GET /discovery/locate` (anonymous, behind the existing `/discovery/` and `/api/discovery/` locations; no nginx change) answers the city and country of the request's own address so a device can put them in its end-to-end encrypted device card. Discovery reads **DB-IP City Lite** in MaxMind format from the path in `LAKKO_DISCOVERY_CITY_DB`. Unset or unreadable: the route answers `{}` and discovery logs one warning at startup; nothing else depends on it.
@@ -481,14 +509,144 @@ sudo systemctl restart lakko-svc-discovery   # the file is read once at startup
 
 **Licence:** DB-IP City Lite is CC BY 4.0. The attribution "City data: DB-IP.com, CC BY 4.0" is in each client's Settings > About (`settings.about.city_data`). The route keeps no record of who asked; nginx access logging is already off on the discovery locations.
 
+## Blob bytes in object storage (ADR-0065 amendment)
+
+Since 2026-11-19 the storage service can keep blob bytes in an S3-compatible bucket
+instead of `/var/lib/lakko/blobs` (`services/storage/src/store/s3.rs`). Clients do not
+change: they still talk only to `storage.lakko.me`. Tested against a SeaweedFS S3 gateway
+in Docker; **not yet run against Hetzner Object Storage**.
+
+**Create the bucket (Hetzner Cloud Console > Object Storage):** location **NBG1**, the
+same as the server (traffic between them is free), private (no public access), a name
+such as `lakko-blobs`. Create S3 credentials for the project; the secret is shown once.
+
+**Configure** `/etc/lakko/lakko.env` (all five or none; partial = the service refuses to
+start):
+
+```
+LAKKO_STORAGE_S3_ENDPOINT=https://nbg1.your-objectstorage.com
+LAKKO_STORAGE_S3_BUCKET=lakko-blobs
+LAKKO_STORAGE_S3_REGION=nbg1
+LAKKO_STORAGE_S3_ACCESS_KEY=...
+LAKKO_STORAGE_S3_SECRET_KEY=...
+# LAKKO_STORAGE_S3_PATH_STYLE=false
+```
+
+The endpoint and region shown in the console are the ones to use; the values above are
+what is expected for NBG1 and were not checked. At startup the service checks the bucket
+answers and the credentials work, else it exits with the reason (the secret is never
+logged).
+
+**Move the blobs already on disk (once):**
+
+1. `sudo systemctl stop lakko-svc-storage` (no uploads during the copy).
+2. Add the variables above, then run as `lakkome` with the service's environment:
+   `set -a; . /etc/lakko/lakko.env; set +a; LAKKO_BLOB_DIR=/var/lib/lakko/blobs ~/.cargo/bin/lakko-svc-storage migrate-to-s3`
+   (the binary path is where `deploy.sh` installs it). It copies every blob file that is
+   not in the bucket yet, checks each copy's length, prints copied / already there /
+   failed, exits non-zero on any failure and deletes nothing. Running it again is safe.
+3. `sudo systemctl start lakko-svc-storage`; check `/ready`, open an old attachment in a
+   client.
+4. After a few days, remove the local blob shards (`/var/lib/lakko/blobs/??/`); keep
+   `backup/` and the index directory.
+
+Objects are named `blobs/<64-hex id>`. Upload temp files stay on the local disk under
+`/var/lib/lakko/blobs/.lakko-upload/` and are removed after each write; account backups
+stay local and in the nightly restic backup. Blob bytes in the bucket are not in that
+backup: losing them loses attachments, not accounts.
+
+## Log retention
+
+Logs that can name a client address are kept **7 days** (the privacy policy states the
+same period): `just log-retention` runs `infra/scripts/log-retention.sh` on the lakko.me
+server (through `infra/scripts/host-ops.sh`; it applies to the whole machine, the test
+stack on it included), which installs
+`infra/journald/lakko-retention.conf` (journal 7 days, at most 2G, nothing forwarded to
+rsyslog) and sets the nginx logrotate to daily with 7 kept. coturn keeps no connection
+log (`log-file=/dev/null`, `infra/test-stack/turn/`). Because nothing is forwarded,
+`/var/log/syslog` and `/var/log/auth.log` stop growing: read the journal (`journalctl`)
+instead. Tested in an Ubuntu 22.04 container (the nginx part); not yet run on the server.
+
 ## Backup / restore
 
-Phase 2 sprint task. Bare minimum:
+Built 2026-11-19: `infra/scripts/backup.sh` (nightly, `lakko-backup.timer` 03:30 UTC),
+`restore-check.sh` (monthly) and `backup-setup.sh` (one-time). Tested end to end in Docker
+with `just backup-test` (backup, restore, reload into an empty MariaDB, row and file
+comparison). **Not yet set up on any server.**
 
-- MariaDB dump → Hetzner Storage Box daily: `mariadb-dump --single-transaction lakko | zstd > /backup/lakko-$(date +%F).sql.zst`
-- `/var/lib/lakko/blobs` — weekly rsync snapshot to Storage Box
-- `/etc/lakko/` — back up whenever secrets change
-- `/etc/letsencrypt/` — back up before renewal
+**What is saved,** into one encrypted [restic](https://restic.net/) repository on a Hetzner
+Storage Box:
+
+- every MariaDB database named `lakko_*`, one `--single-transaction` dump each, taken
+  first. The keys the services make on first boot live in these databases, so the dumps
+  carry them: auth's password-login (OPAQUE) server setup, without which no one can sign
+  in again; discovery's username-lookup (OPRF) key, without which no username is found
+  again; the attestation, call-token, username-certificate, push wake, transparency
+  operator and witness keys;
+- `/var/lib/lakko` (the blobs and the city database), after the dumps, so the storage
+  index never names a blob the snapshot lacks;
+- `/etc/lakko` (`lakko.env`, the APNs / FCM / VAPID files), `/etc/letsencrypt` and
+  `/etc/nginx/sites-available`.
+
+Kept: 7 daily, 4 weekly, 3 monthly snapshots. **Data of a deleted account stays in the
+backups for up to about three months**; the privacy policy must say so.
+
+**The repository password** (`/etc/lakko/backup-password`) is the only key to the
+backups and is not inside them. Keep a copy off the server. Anyone with the password and
+access to the Storage Box can read `lakko.env` and every database: treat the pair like
+the server's root.
+
+### Set up (once)
+
+1. Order a Storage Box (Hetzner Robot), enable SSH, and give root on the VPS a key for it:
+
+   ```bash
+   sudo ssh-keygen -t ed25519 -N '' -f /root/.ssh/storagebox
+   # add /root/.ssh/storagebox.pub to the Storage Box (Robot > Storage Box > SSH keys)
+   sudo tee -a /root/.ssh/config >/dev/null <<'CFG'
+   Host storagebox
+       HostName uXXXXXX.your-storagebox.de
+       User uXXXXXX
+       Port 23
+       IdentityFile /root/.ssh/storagebox
+   CFG
+   sudo ssh storagebox ls   # accept the host key once
+   ```
+
+2. `just backup-setup`, after Lakko is deployed on lakko.me (it refuses while
+   `/etc/lakko/lakko.env` is missing), via `infra/scripts/host-ops.sh`
+   (`LAKKO_HOST_SSH`, default `root@test.lakko.me`: lakko.me is behind Cloudflare, which
+   does not carry ssh, and the test stack runs on the same machine). It copies `infra/` to
+   `/root/lakko-infra`, installs restic, writes `/etc/lakko/backup.env` from
+   `infra/etc-lakko/backup.env.example` and a random repository password, initialises
+   the repository and enables the timer. Copy the password off the server when it says
+   so. The test stack's databases (`lakko_test_*`) and files are not backed up.
+3. `just backup-now`, then `just backup-status`.
+
+### Routine
+
+- `just backup-status`: time of the last successful run (`/var/backups/lakko/last-success`)
+  and the snapshot list. There is no alert when a run fails yet; check this weekly, or
+  `journalctl -u lakko-backup`.
+- `just backup-restore-check` monthly: restores the newest snapshot to a scratch
+  directory, checks each dump finished and the files are there, and reads one tenth of the
+  repository data back.
+
+### Disaster restore (new server)
+
+1. Provision the server as in this README (MariaDB, nginx, the `lakkome` user, the repo).
+2. Install restic, recreate the Storage Box SSH alias, and put the saved password in a
+   file.
+3. `restic -r sftp:storagebox:lakko-restic restore latest --tag lakko --target /restore`
+4. Load the dumps (each one creates its database):
+   `for f in /restore/var/backups/lakko/db/*.sql; do sudo mariadb < "$f"; done`,
+   then re-create the `lakko` MariaDB user and its grants.
+5. Copy back `/restore/etc/lakko`, `/restore/etc/letsencrypt` and
+   `/restore/var/lib/lakko` (owner `lakkome` for `/var/lib/lakko`), install the units,
+   `just deploy`.
+
+Everything written after the last snapshot is lost: messages still on the Delivery
+Service since then, accounts made since then. Clients keep their own state and re-sync.
 
 ## Out of scope for Phase 1
 

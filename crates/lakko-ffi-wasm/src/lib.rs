@@ -116,6 +116,7 @@ pub mod sframe;
 pub mod sfu_signaling;
 pub mod storage;
 pub mod supersession;
+pub mod supporters;
 pub mod sync;
 pub mod synced_state;
 pub mod translation;

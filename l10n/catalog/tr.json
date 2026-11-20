@@ -165,6 +165,70 @@
       "text": "Şifreyi göster",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "Beta sınırlı sayıda kişiye açık ve tüm yerler dolu. Biri ayrıldığında yer açılır. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "Kontrol ediliyor...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "Giriş yap",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "Tekrar dene",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko şimdilik dolu",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "Geri",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "E-postanızdaki kodu girin.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "Kontrol ediliyor...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "Devam",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "Kod kontrol edilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "Destekçi yeriniz bu kayıt için ayrıldı.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "Çok fazla deneme. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "Destekçi kodum var",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "Destekçi kodu",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "Bu kod çalışmıyor. Kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "Bu destekçi kodu zaten kullanılmış.",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "Bir kullanıcı adı girin.",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "Bu eski yedek geri yüklensin mi?",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko beta aşamasında ve güvenliği henüz bağımsız bir denetimle kontrol edilmedi. Güvenliğinizin buna bağlı olduğu durumlarda ona güvenmeyin.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "Beta",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "Grup araması: {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko şimdilik dolu, bu yüzden bu misafir hesabı saklanamaz. Biri ayrıldığında yer açılır.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "Tamam",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "Yüklenemedi: \"{name}\". Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "Sunucuda şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "Herkese açık grup · {count, plural, one {# üye} other {# üye}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "Sunucuda şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "Dosya gönderme sınırına ulaştınız. Daha sonra tekrar deneyin.",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "Çince (Basitleştirilmiş)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "Gizlilik Politikasını",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "Gizlilik Politikası",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "Hesap oluşturarak {terms} ve {privacy} kabul etmiş olursunuz.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "Hizmet Şartlarını",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "Hizmet Şartları",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "Aramalar",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "Uygulamada aç",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "Sunucuda şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "Klavye kısayolları",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "Destekçiler",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Çeviriler güncellendi: {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "Bu tarayıcıda çeviri kullanılamıyor",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "Lakko'yu destekleyenler finanse ediyor. Teşekkürler.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "Liste yüklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "Tekrar dene",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "Destekçiler",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

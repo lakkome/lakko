@@ -191,6 +191,9 @@ pub(crate) struct PassLimits {
     pub(crate) read_downloads: u64,
     /// Blob ids kept per read pass. Default 5000.
     pub(crate) read_keeps: u64,
+    /// Free space an upload must leave on the blob filesystem
+    /// (`crate::disk`); 0 = no guard. Default 10 GiB.
+    pub(crate) min_free_bytes: u64,
 }
 
 impl Default for PassLimits {
@@ -201,6 +204,7 @@ impl Default for PassLimits {
             upload_bytes: 2 * 1024 * 1024 * 1024,
             read_downloads: 3_000,
             read_keeps: 5_000,
+            min_free_bytes: crate::disk::DEFAULT_MIN_FREE_BYTES,
         }
     }
 }

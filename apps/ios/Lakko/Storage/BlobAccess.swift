@@ -80,6 +80,13 @@ enum BlobAnswer: Equatable {
     static func isLimit(status: Int, code: String?) -> Bool {
         status == 429 && (code == "blob-upload-budget-exhausted" || code == "blob-read-budget-exhausted")
     }
+
+    /// UX storage-full section 1 — `507 {"error":"storage-full"}`: the
+    /// server has no room for new files. Shown where the limit is shown; the
+    /// person tries again.
+    static func isStorageFull(status: Int, code: String?) -> Bool {
+        status == 507 && code == "storage-full"
+    }
 }
 
 /// The per-device holder of the two passes and the delete-key source.

@@ -378,31 +378,56 @@ public final class PasskeysViewModel: ObservableObject {
                 accountIdB64: base64Encode(secrets.accountId),
                 discovery: DiscoveryClient(
                     sessionToken: authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken))
-            do {
-                try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
-            } catch let error as WebauthnClientError {
-                // A `403` that is not the fresh-auth refusal: the account
-                // has a passkey this device did not know of. Make the
-                // gesture and retry once, fail-closed.
-                if case .http(403, _, _) = error, !FreshAuthRefusal.isRequired(error), !hasPasskey {
-                    try await assertDeleteAction(actionHashB64)
-                    try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
-                } else {
-                    throw error
-                }
-            }
-            // Best-effort discovery purge — the auth tier is the critical
-            // erasure; the session token is about to be invalidated anyway.
+            let accountIdB64 = base64Encode(secrets.accountId)
             let token = authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken
-            do {
-                let discovery = DiscoveryClient(sessionToken: token)
-                try await discovery.deleteAccount()
-            } catch {
-                // best-effort
-            }
-            // The local wipe + sign-out Forget device runs: every store of
-            // the account on this device, chats included.
-            wipeAfterDeletion(base64Encode(secrets.accountId))
+            // `POST /push/unsubscribe` takes no session, but each one spends
+            // a `push-register` token, which auth issues only to a live
+            // session: the run's `prepare` tops them up to one per
+            // subscription before the auth delete. The ids are read now (the
+            // wipe clears the route rows).
+            let subscriptionIds = PushRoutingStore().subscriptionIds(accountIdB64: accountIdB64)
+            let pushTokens = ReservedAnonTokens([])
+            let hasPasskey = hasPasskey
+            let client = self.client
+            let authRepository = self.authRepository
+            let assertDeleteAction = self.assertDeleteAction
+            let wipeAfterDeletion = self.wipeAfterDeletion
+            // Auth first; only once it accepted, the cleanups only this
+            // device can do (discovery and storage verify the session token
+            // statelessly, so it still works for them after the auth row is
+            // gone, within its lifetime), then the local wipe + sign-out
+            // Forget device also runs: every store of the account on this
+            // device, chats included.
+            try await AccountDeletionRun(
+                prepare: {
+                    await pushTokens.fill(
+                        .pushRegister,
+                        count: ReservedAnonTokens.countForDeletion(subscriptions: subscriptionIds.count),
+                        takeAvailable: { AnonTokenPool.shared.takeIfAvailable(.pushRegister) },
+                        issuer: AuthAnonTokenIssuer(),
+                        sessionToken: token)
+                },
+                deleteAtAuth: {
+                    do {
+                        try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
+                    } catch let error as WebauthnClientError {
+                        // A `403` that is not the fresh-auth refusal: the
+                        // account has a passkey this device did not know of.
+                        // Make the gesture and retry once, fail-closed.
+                        if case .http(403, _, _) = error, !FreshAuthRefusal.isRequired(error), !hasPasskey {
+                            try await assertDeleteAction(actionHashB64)
+                            try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
+                        } else {
+                            throw error
+                        }
+                    }
+                },
+                cleanups: Self.deletionCleanups(
+                    sessionToken: token,
+                    subscriptionIds: subscriptionIds,
+                    pushTokens: pushTokens),
+                wipe: { wipeAfterDeletion(accountIdB64) }
+            ).run()
             return true
         } catch let error as WebauthnAssertion.AssertionError {
             switch error {
@@ -435,6 +460,47 @@ public final class PasskeysViewModel: ObservableObject {
             message = .error(.key("settings.account.delete.error.generic"))
         }
         return false
+    }
+
+    /// The server-side cleanups after `DELETE /account` (best-effort, run by
+    /// ``AccountDeletionRun``): the directory rows, the backup blob, and this
+    /// device's push-gw subscriptions, which no server can name.
+    static func deletionCleanups(
+        sessionToken: String,
+        subscriptionIds: [Data],
+        pushTokens: ReservedAnonTokens
+    ) -> [AccountDeletionCleanup] {
+        var cleanups = [
+            AccountDeletionCleanup(name: "discovery") {
+                try await DiscoveryClient(sessionToken: sessionToken).deleteAccount()
+            },
+            AccountDeletionCleanup(name: "backup") {
+                let storage = StorageClient()
+                storage.setSessionToken(sessionToken)
+                try await storage.deleteBackup()
+            },
+        ]
+        if !subscriptionIds.isEmpty {
+            // One client for every attempt, so an id removed by an earlier
+            // attempt is not sent again.
+            let push = PushClient(tokens: pushTokens)
+            var remaining = subscriptionIds
+            cleanups.append(AccountDeletionCleanup(name: "push") {
+                var failed: [Data] = []
+                var lastError: Error?
+                for subId in remaining {
+                    do {
+                        try await push.unsubscribe(subId: subId)
+                    } catch {
+                        failed.append(subId)
+                        lastError = error
+                    }
+                }
+                remaining = failed
+                if let lastError { throw lastError }
+            })
+        }
+        return cleanups
     }
 
     /// `settings.account.delete.blocked` with the date the server named.

@@ -165,6 +165,70 @@
       "text": "نمایش رمز عبور",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "نسخه آزمایشی ظرفیت محدودی دارد و همه جاها پر شده است. وقتی کسی برود جا باز می‌شود. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "در حال بررسی...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "ورود",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "دوباره امتحان کنید",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko فعلاً پر است",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "بازگشت",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "کدی را که در ایمیل‌تان آمده وارد کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "در حال بررسی...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "ادامه",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "بررسی کد ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "جای حامی شما برای این ثبت‌نام نگه داشته شده است.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "تلاش‌های زیادی انجام شد. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "کد حامی دارم",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "کد حامی",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "این کد کار نمی‌کند. آن را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "این کد حامی قبلاً استفاده شده است.",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "یک نام کاربری وارد کنید.",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "این نسخه پشتیبان قدیمی‌تر بازیابی شود؟",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko در نسخه آزمایشی است و امنیت آن هنوز با یک ممیزی مستقل بررسی نشده است. جایی که امنیت شما به آن بستگی دارد به آن تکیه نکنید.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "نسخه آزمایشی",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "تماس گروهی در {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko فعلاً پر است، پس این حساب مهمان نگه داشته نمی‌شود. وقتی کسی برود جا باز می‌شود.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "باشه",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "بارگذاری «{name}» ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "گروه عمومی · {count, plural, one {# عضو} other {# عضو}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "به سقف ارسال فایل رسیده‌اید. بعداً دوباره امتحان کنید.",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "چینی (ساده‌شده)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "سیاست حریم خصوصی",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "سیاست حریم خصوصی",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "با ساختن حساب، {terms} و {privacy} را می‌پذیرید.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "شرایط استفاده",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "شرایط استفاده",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "تماس‌ها",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "باز کردن در برنامه",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "میان‌برهای صفحه‌کلید",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "حامیان",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "ترجمه‌ها به‌روز شد {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "ترجمه در این مرورگر در دسترس نیست",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "هزینه‌ی Lakko را کسانی می‌پردازند که از آن حمایت می‌کنند. سپاس.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "بارگیری فهرست ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "دوباره امتحان کنید",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "حامیان",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

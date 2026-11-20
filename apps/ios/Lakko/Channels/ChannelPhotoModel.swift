@@ -49,6 +49,9 @@ final class ChannelPhotoModel: ObservableObject, ConversationPhotoModel {
             } catch AttachmentBridgeError.uploadLimited {
                 photoStatus = .limited
                 return
+            } catch AttachmentBridgeError.storageFull {
+                photoStatus = .full
+                return
             } catch {
                 photoStatus = .failed
                 return

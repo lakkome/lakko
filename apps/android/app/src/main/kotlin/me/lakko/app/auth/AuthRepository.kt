@@ -1612,6 +1612,9 @@ public class AuthRepository(
         username: String,
         password: ByteArray,
         onProofSolved: () -> Unit = {},
+        /** ADR-0097: a held supporter place (the `x-lakko-anon-token`
+         *  value) carried by the first bind, or `null`. */
+        placeToken: String? = null,
     ): SignupOutcome {
         val trimmed = username.trim()
         if (trimmed.isEmpty()) {
@@ -1649,14 +1652,25 @@ public class AuthRepository(
                 // fails the signup with the form's message; the OPAQUE account
                 // then exists server-side with no username, which web accepts
                 // too (the user retries with another name).
-                val normalisedUsername = claimUsernameAtSignup(
-                    directory = accountDirectory,
-                    binder = loginHandleBinder,
-                    handles = loginHandleSource,
-                    sessionToken = result.sessionToken,
-                    accountId = result.accountId,
-                    username = trimmed,
-                )
+                val normalisedUsername = try {
+                    claimUsernameAtSignup(
+                        directory = accountDirectory,
+                        binder = loginHandleBinder,
+                        handles = loginHandleSource,
+                        sessionToken = result.sessionToken,
+                        accountId = result.accountId,
+                        username = trimmed,
+                        placeToken = placeToken,
+                    )
+                } catch (closed: RegistrationClosed) {
+                    // `docs/ux/beta-account-cap.md` section 2 item 4: the beta
+                    // filled between `/signup/open` and the bind. The account
+                    // just made has no username: delete it at once and leave
+                    // nothing of it here. The bind is the first claim step,
+                    // so discovery holds no name for it.
+                    discardRefusedSignup(accountIdB64, result.sessionToken)
+                    throw closed
+                }
                 // The claim above bound the handle for this session; the
                 // session landing below need not repeat it.
                 loginHandleRebinder.markBound(result.sessionToken, normalisedUsername)
@@ -1834,6 +1848,45 @@ public class AuthRepository(
                 result.exportKey.fill(0)
             }
         }
+    }
+
+    /**
+     * `GET /signup/open` (`docs/ux/beta-account-cap.md`): whether sign-up has
+     * room now. A failed question answers `true` ([AuthClient.signupOpen]).
+     */
+    public suspend fun signupOpen(): Boolean = authClientFactory().use { it.signupOpen() }
+
+    /**
+     * The account a sign-up made was refused its username at the cap: delete
+     * it on auth (`DELETE /account`; an account with no login handle and no
+     * passkey needs no fresh-auth proof, the sign-up's grant is sent along
+     * anyway) and wipe what the sign-up wrote for it on this device, the
+     * per-account wipe a declined guest goes through. A failed delete still
+     * wipes here; the server sweeps an unnamed account within a day. Nothing
+     * of it was persisted as a session, so no other account on the device is
+     * touched.
+     */
+    private suspend fun discardRefusedSignup(accountIdB64: String, sessionToken: String) {
+        val grant = freshAuth.live(accountIdB64, System.currentTimeMillis())?.grant
+        try {
+            WebauthnClient().use { client ->
+                client.setSessionToken(sessionToken)
+                client.deleteAccount(grant)
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "registration closed; the unnamed account was not deleted: ${cause.javaClass.simpleName}")
+        }
+        if (freshAuth.hasLive(accountIdB64, System.currentTimeMillis())) freshAuth.clear()
+        try {
+            me.lakko.app.account.AccountStoreGate.seal(accountIdB64) {
+                me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+            }
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "registration closed; local wipe failed: ${cause.javaClass.simpleName}")
+        }
+        Log.i("lakko-auth", "registration closed")
     }
 
     /**
@@ -3413,6 +3466,8 @@ public class AuthRepository(
         if (outcome == LoginHandleBinding.Taken) {
             throw AuthClientArgError("the username is taken", me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
         }
+        // Never answered for a rename; should it come, nothing was bound.
+        if (outcome == LoginHandleBinding.Closed) throw RegistrationClosed()
         // The handle of this session is known: the sync does not ask again.
         loginHandleRebinder.markBound(token, to)
     }

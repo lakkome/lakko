@@ -170,6 +170,70 @@
       "text": "Show password",
       "comment": "Accessibility label of the button that reveals the typed password."
     },
+    "auth.signup.closed.body": {
+      "text": "The beta has room for a limited number of people, and all places are taken. Places open up when people leave. Try again later.",
+      "comment": "Text under 'Lakko is full for now' on the sign-up screen."
+    },
+    "auth.signup.closed.checking": {
+      "text": "Checking...",
+      "comment": "The 'Try again' button while the check runs."
+    },
+    "auth.signup.closed.log_in": {
+      "text": "Log in",
+      "comment": "Button on the full sign-up screen that opens the sign-in screen."
+    },
+    "auth.signup.closed.retry": {
+      "text": "Try again",
+      "comment": "Button that checks again whether sign-up has reopened."
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko is full for now",
+      "comment": "Heading shown in place of the sign-up form when the beta has no free places."
+    },
+    "auth.signup.code.back": {
+      "text": "Back",
+      "comment": "Button that leaves the supporter code entry and returns to the 'Lakko is full' state."
+    },
+    "auth.signup.code.body": {
+      "text": "Enter the code from your email.",
+      "comment": "Line under 'Supporter code'. The code was mailed to a Kickstarter backer."
+    },
+    "auth.signup.code.checking": {
+      "text": "Checking...",
+      "comment": "The Continue button while the supporter code is being checked."
+    },
+    "auth.signup.code.continue": {
+      "text": "Continue",
+      "comment": "Button that checks the typed supporter code."
+    },
+    "auth.signup.code.failed": {
+      "text": "Could not check the code. Try again.",
+      "comment": "Under the code field when there is no connection or the server failed."
+    },
+    "auth.signup.code.held": {
+      "text": "Your supporter place is held for this sign-up.",
+      "comment": "Line above the sign-up form after a supporter code worked; the place is held on this device for 30 days."
+    },
+    "auth.signup.code.limited": {
+      "text": "Too many tries. Try again later.",
+      "comment": "Under the code field when the server limited tries from this address or for this code."
+    },
+    "auth.signup.code.link": {
+      "text": "I have a supporter code",
+      "comment": "Link under the two buttons of the 'Lakko is full for now' sign-up state; opens the supporter code entry."
+    },
+    "auth.signup.code.title": {
+      "text": "Supporter code",
+      "comment": "Heading of the supporter code entry shown when the beta is full."
+    },
+    "auth.signup.code.unknown": {
+      "text": "This code does not work. Check it and try again.",
+      "comment": "Under the code field when the server does not know the code."
+    },
+    "auth.signup.code.used": {
+      "text": "This supporter code has already been used.",
+      "comment": "Line above the 'Lakko is full' state when the sign-up was refused because the code was already used for another account."
+    },
     "auth.signup.error.enter_username": {
       "text": "Enter a username.",
       "comment": "Sign-up submitted without a username."
@@ -299,6 +363,16 @@
     "backup.stale_restore.title": {
       "text": "Restore this older backup?",
       "comment": "Confirmation dialog title when the backup found is older than the newest one this account has made (a possible rollback).",
+      "security_critical": true
+    },
+    "beta.notice.body": {
+      "text": "Lakko is in beta, and its security has not yet been checked by an independent audit. Do not rely on it where your safety depends on it.",
+      "comment": "Body of the beta notice. A warning: keep both sentences and their meaning exact.",
+      "security_critical": true
+    },
+    "beta.notice.title": {
+      "text": "Beta",
+      "comment": "Title of the notice that Lakko is a beta whose security has not been independently audited; on the welcome, sign-in and sign-up screens and in Settings > About.",
       "security_critical": true
     },
     "call.alert.title": {
@@ -792,6 +866,14 @@
     "call.group_banner.title": {
       "text": "Group call in {name}",
       "comment": "Banner shown on any screen while a group call is going on in a chat that is not open; {name} is the chat."
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko is full for now, so this guest account cannot be kept. Places open up when people leave.",
+      "comment": "Shown to a guest after a call instead of the 'Create an account' question when the beta has no free places."
+    },
+    "call.guest.closed.ok": {
+      "text": "OK",
+      "comment": "Closes the 'Lakko is full' question after a call; deletes the guest account, as 'No, thanks' does."
     },
     "call.guest.default_name": {
       "text": "Guest",
@@ -2467,6 +2549,10 @@
     "chat.attachment.error.upload": {
       "text": "Could not upload \"{name}\". Try again.",
       "comment": "Encrypting or uploading an attached file failed; {name} is the file."
+    },
+    "chat.attachment.full.send": {
+      "text": "The server has no room for new files right now. Try again later.",
+      "comment": "Composer note when an upload was refused because the server is out of disk space; the message text stays."
     },
     "chat.attachment.gone.body": {
       "text": "Files nobody opens for a year are removed. Save or pin a message to keep its files.",
@@ -6790,6 +6876,10 @@
       "text": "Public group · {count, plural, one {# member} other {# members}}",
       "comment": "Header line of a public group's info screen."
     },
+    "group_photo.error.full": {
+      "text": "The server has no room for new files right now. Try again later.",
+      "comment": "Under the group photo when the upload was refused because the server is out of disk space."
+    },
     "group_photo.error.limit": {
       "text": "You have reached the limit for sending files. Try again later.",
       "comment": "Under the group photo when the upload is over the file-sending limit."
@@ -7637,6 +7727,26 @@
       "text": "Chinese (Simplified)",
       "comment": "Name of Simplified Chinese, shown under its own name in the language list."
     },
+    "legal.privacy": {
+      "text": "Privacy Policy",
+      "comment": "Link and Settings > About row that opens the Privacy Policy page."
+    },
+    "legal.privacy_title": {
+      "text": "Privacy Policy",
+      "comment": "Settings > About row that opens the Privacy Policy page (a title, not inside a sentence)."
+    },
+    "legal.signup_notice": {
+      "text": "By creating an account, you agree to the {terms} and the {privacy}.",
+      "comment": "Muted line under the Create account button. {terms} is the link 'Terms of Service' (legal.terms), {privacy} the link 'Privacy Policy' (legal.privacy)."
+    },
+    "legal.terms": {
+      "text": "Terms of Service",
+      "comment": "Link and Settings > About row that opens the Terms of Service page."
+    },
+    "legal.terms_title": {
+      "text": "Terms of Service",
+      "comment": "Settings > About row that opens the Terms of Service page (a title, not inside a sentence)."
+    },
     "nav.calls": {
       "text": "Calls",
       "comment": "Primary navigation: recent calls."
@@ -7860,6 +7970,10 @@
     "profile.save.done": {
       "text": "Saved. Your contacts will see the change.",
       "comment": "Shown under Save in Settings > Profile after a successful save."
+    },
+    "profile.save.error.full": {
+      "text": "The server has no room for new files right now. Try again later.",
+      "comment": "Under the profile photo when the upload was refused because the server is out of disk space."
     },
     "profile.save.error.generic": {
       "text": "Couldn't save. Try again.",
@@ -9125,6 +9239,10 @@
       "text": "Keyboard shortcuts",
       "comment": "Card title in Settings > About, desktop app."
     },
+    "settings.about.supporters": {
+      "text": "Supporters",
+      "comment": "Row in Settings > About after 'How Lakko protects you'; opens the list of backers."
+    },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
       "comment": "Settings > About, shown when a signed translation update is active. {date} is a date formatted for the locale."
@@ -10150,6 +10268,22 @@
     "settings.translation.unavailable.translation_web": {
       "text": "Translation isn't available in this browser",
       "comment": "Web variant of the line above."
+    },
+    "supporters.body": {
+      "text": "Lakko is paid for by the people who back it. Thank you.",
+      "comment": "Line at the top of the Supporters screen, above the names."
+    },
+    "supporters.failed": {
+      "text": "Could not load the list. Try again.",
+      "comment": "Shown on the Supporters screen when the list could not be loaded and none is held."
+    },
+    "supporters.retry": {
+      "text": "Try again",
+      "comment": "Button that loads the supporters list again."
+    },
+    "supporters.title": {
+      "text": "Supporters",
+      "comment": "Title of the screen listing the people who back Lakko."
     },
     "tokens.action_allowance_used": {
       "text": "You have used today's allowance for this. Try again tomorrow.",

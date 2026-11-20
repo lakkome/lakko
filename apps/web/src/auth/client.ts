@@ -293,6 +293,13 @@ export class AuthHttpError extends Error {
   }
 }
 
+/** The answer of `GET /signup/open`: `false` only for an explicit
+ *  `{"open": false}`; anything else reads as open. */
+export function signupOpenFromBody(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return true;
+  return (body as { open?: unknown }).open !== false;
+}
+
 /** Read `{"error": code, "retry_after_secs": N}` leniently. */
 function parseLimitBody(body: string): { error: string | null; retryAfterSecs: number | null } {
   try {
@@ -337,6 +344,28 @@ export class AuthClient {
   // -----------------------------------------------------------------
   // Low-level: 1:1 HTTP endpoints
   // -----------------------------------------------------------------
+
+  /** `GET /signup/open` (ADR-0046 amendment, `docs/ux/beta-account-cap.md`):
+   *  whether a new account with a username fits under the beta cap now.
+   *  Anonymous. Any failure (no connection, a non-2xx such as an older
+   *  server's `404`, a body that is not `{"open": boolean}`) reads as open:
+   *  the first login-handle bind decides later. */
+  async signupOpen(): Promise<boolean> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/signup/open`, { method: "GET" });
+    } catch {
+      return true;
+    }
+    if (!response.ok) return true;
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      return true;
+    }
+    return signupOpenFromBody(body);
+  }
 
   /** `POST /pow/challenge` — used by signup only. */
   async powChallenge(): Promise<PowChallengeResponse> {
@@ -1719,6 +1748,9 @@ export class AuthClient {
         readonly sealedEntropy?: string;
       };
     },
+    /** ADR-0097: a held supporter place (`x-lakko-anon-token` header
+     *  value) for a first bind past the beta cap. */
+    supporterPlace?: string,
   ): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
@@ -1743,6 +1775,7 @@ export class AuthClient {
       "/auth/login-handle",
       body,
       sessionToken,
+      supporterPlace !== undefined ? { "x-lakko-anon-token": supporterPlace } : undefined,
     );
   }
 
@@ -1780,9 +1813,10 @@ export class AuthClient {
     endpoint: string,
     body: Req,
     bearer: string,
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Res> {
     const url = `${this.baseUrl}${endpoint}`;
-    const headers: Record<string, string> = { authorization: `Bearer ${bearer}` };
+    const headers: Record<string, string> = { ...extraHeaders, authorization: `Bearer ${bearer}` };
     if (body !== undefined) {
       headers["content-type"] = "application/json";
     }

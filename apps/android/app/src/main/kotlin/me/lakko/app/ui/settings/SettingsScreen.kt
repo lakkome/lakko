@@ -22,12 +22,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Password
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
@@ -36,6 +39,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +70,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.l10n.t
+import me.lakko.app.ui.auth.LegalPages
+import me.lakko.app.ui.components.openInSystemBrowser
 import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE_KEY
 import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE_KEY
 import me.lakko.app.ui.chat.AutoplayVideoNotesSetting
@@ -118,9 +124,16 @@ public fun SettingsScreen(
     /** reactions-and-emoji D3 / D4 — Appearance > Quick reaction: save the
      *  account's quick reaction (synced to its other devices). */
     onSetQuickReaction: (String) -> Unit = {},
+    /** `docs/ux/supporters.md` section 2.1 — About > Supporters. */
+    onOpenSupporters: () -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // `docs/ux/supporters.md` section 2.1: About is shown with Settings, so
+    // the list is fetched when Settings is (dormant with no release key).
+    val supporters = remember(context) { me.lakko.app.updates.SupportersListController.get(context) }
+    val supportersState by supporters.state.collectAsStateWithLifecycle()
+    androidx.compose.runtime.LaunchedEffect(supporters) { supporters.refresh() }
     // docs/ux/calls.md section 2.1 — whether a wake can reach this phone at
     // all. Read every time Settings is resumed, never cached at process start:
     // the row below sends the person to system settings, so the state they
@@ -300,6 +313,12 @@ public fun SettingsScreen(
             SettingsRow(t("settings.anti_censorship.title"), Icons.Filled.Shield, onOpenAntiCensorship)
 
             SectionLabel(t("settings.section.about"))
+            // docs/ux/beta-notice.md section 3 item 4: first in About.
+            InfoRow(
+                title = t("beta.notice.title"),
+                value = t("beta.notice.body"),
+                icon = Icons.Filled.Info,
+            )
             InfoRow(
                 title = t("settings.about.version"),
                 value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
@@ -310,6 +329,32 @@ public fun SettingsScreen(
                 title = t("settings.about.licence"),
                 value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
                 icon = Icons.Filled.Gavel,
+            )
+            // The order of web's About: after Licence.
+            InfoRow(
+                title = t("settings.about.protection.title"),
+                value = t("settings.about.protection.body"),
+                icon = Icons.Filled.Lock,
+            )
+            // `docs/ux/supporters.md` section 2.1: after "How Lakko protects
+            // you", only for a checked list with a name in it.
+            if (supportersState.rowVisible) {
+                SettingsRow(
+                    title = t("settings.about.supporters"),
+                    icon = Icons.Filled.Favorite,
+                    onClick = onOpenSupporters,
+                )
+            }
+            // docs/ux/legal-pages.md section 2 item 3: after "How Lakko protects you".
+            SettingsRow(
+                title = t("legal.terms_title"),
+                icon = Icons.Filled.Description,
+                onClick = { openInSystemBrowser(context, LegalPages.termsUrl()) },
+            )
+            SettingsRow(
+                title = t("legal.privacy_title"),
+                icon = Icons.Filled.Policy,
+                onClick = { openInSystemBrowser(context, LegalPages.privacyUrl()) },
             )
             // ADR-0080 - the city database's attribution (CC BY 4.0).
             Text(

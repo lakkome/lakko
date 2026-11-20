@@ -41,6 +41,12 @@ const SERVICES: &[&str] = &[
     "gifs",
 ];
 
+/// Signed static files on the Lakko origin the web client fetches from its
+/// own origin (ADR-0038 release manifest, ADR-0097 supporters list). Each is
+/// forwarded on GET alone; any other path under `/.well-known/` stays a
+/// bundled asset.
+const FORWARDED_WELL_KNOWN: &[&str] = &["/.well-known/lakko-release", "/.well-known/lakko-supporters"];
+
 /// Request headers never forwarded: the connection's own, and the ones that
 /// would name the page's origin to the server.
 const DROP_REQUEST_HEADERS: &[HeaderName] = &[
@@ -134,6 +140,10 @@ pub async fn handle<R: Runtime>(
         debug!(service, method = %request.method(), "forward");
         return forward(config, request).await;
     }
+    if forwards_well_known(&path, request.method()) {
+        debug!(path = %path, "forward well-known");
+        return forward(config, request).await;
+    }
     if path.starts_with(probe::PROBE_PATH) {
         return probe::handle(request).await;
     }
@@ -167,6 +177,11 @@ fn api_service(path: &str) -> Option<&'static str> {
     let rest = path.strip_prefix("/api/")?;
     let name = rest.split('/').next()?;
     SERVICES.iter().copied().find(|s| *s == name)
+}
+
+/// Whether `path` is one of [`FORWARDED_WELL_KNOWN`], asked with GET.
+fn forwards_well_known(path: &str, method: &Method) -> bool {
+    *method == Method::GET && FORWARDED_WELL_KNOWN.contains(&path)
 }
 
 async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -303,7 +318,17 @@ pub fn plain(status: StatusCode, text: &str) -> Response<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::api_service;
+    use super::{api_service, forwards_well_known};
+    use http::Method;
+
+    #[test]
+    fn only_the_signed_well_known_files_are_forwarded() {
+        assert!(forwards_well_known("/.well-known/lakko-supporters", &Method::GET));
+        assert!(forwards_well_known("/.well-known/lakko-release", &Method::GET));
+        assert!(!forwards_well_known("/.well-known/lakko-supporters", &Method::POST));
+        assert!(!forwards_well_known("/.well-known/other", &Method::GET));
+        assert!(!forwards_well_known("/.well-known/lakko-supporters/x", &Method::GET));
+    }
 
     #[test]
     fn only_known_services_are_forwarded() {

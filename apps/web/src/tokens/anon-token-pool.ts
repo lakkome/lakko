@@ -871,15 +871,50 @@ export class AnonTokenPool {
     return run;
   }
 
-  private async runRefill(context: AnonTokenContext, bucket: Bucket): Promise<void> {
+  /**
+   * Hold at least `count` live tokens of `context`, issuing now as many
+   * batches as that takes (the pool cap is raised to `count` for this).
+   * For a known burst of spends that cannot wait for a refill: an account
+   * deletion unsubscribes every push subscription after auth no longer
+   * issues. Returns how many are held after; never throws.
+   */
+  async ensureAtLeast(context: AnonTokenContext, count: number): Promise<number> {
+    const bucket = this.bucket(context);
+    try {
+      await this.ready();
+      if (bucket.refill !== null) await bucket.refill.catch(() => undefined);
+      const wasm = await this.wasmLoader();
+      const current = this.currentEpoch(wasm);
+      bucket.tokens = bucket.tokens.filter((t) => wasm.anonTokenIsLive(t.epoch, current));
+      while (bucket.tokens.length < count) {
+        const before = bucket.tokens.length;
+        const run = this.runRefill(context, bucket, count).finally(() => {
+          bucket.refill = null;
+        });
+        bucket.refill = run;
+        await run;
+        if (bucket.tokens.length <= before) break;
+      }
+    } catch {
+      /* best-effort: the caller proceeds with what is held */
+    }
+    return bucket.tokens.length;
+  }
+
+  private async runRefill(
+    context: AnonTokenContext,
+    bucket: Bucket,
+    want?: number,
+  ): Promise<void> {
     const session = this.sessionToken;
     if (session === null) throw new AnonTokenUnavailableError(context, "no session");
     const generation = this.generation;
     const wasm = await this.wasmLoader();
+    const cap = Math.max(MAX_POOL, want ?? 0);
     // A top-up to the target, in one issuance.
     const count = Math.min(
-      poolTarget(context) - bucket.tokens.length,
-      MAX_POOL - bucket.tokens.length,
+      (want ?? poolTarget(context)) - bucket.tokens.length,
+      cap - bucket.tokens.length,
       wasm.anonTokenMaxBatch(),
     );
     if (count <= 0) return;
@@ -921,7 +956,7 @@ export class AnonTokenPool {
           if (generation !== this.generation) return; // signed out meanwhile
           bucket.lastFailure = null;
           bucket.tokens.push(...pooled);
-          if (bucket.tokens.length > MAX_POOL) bucket.tokens.length = MAX_POOL;
+          if (bucket.tokens.length > cap) bucket.tokens.length = cap;
           this.persist(context);
           return;
         } finally {

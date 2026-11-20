@@ -137,6 +137,35 @@ describe("refill on a schedule, take without drawing (ADR-0078 section 8)", () =
   });
 });
 
+describe("ensureAtLeast: a known burst of spends", () => {
+  it("issues now until the bucket holds the asked count, above the pool cap", async () => {
+    const { pool, issuer } = fakeTokenPool();
+    await pool.ready();
+    await settle();
+    const before = issuances(issuer, "push-register").length;
+    const held = await pool.ensureAtLeast("push-register", 40);
+    expect(held).toBeGreaterThanOrEqual(40);
+    expect(pool.size("push-register")).toBe(held);
+    expect(issuances(issuer, "push-register").length).toBeGreaterThan(before);
+  });
+
+  it("issues nothing when the bucket already holds enough", async () => {
+    const { pool, issuer } = fakeTokenPool();
+    await pool.ready();
+    await settle();
+    const before = issuances(issuer, "push-register").length;
+    const held = await pool.ensureAtLeast("push-register", 1);
+    expect(held).toBe(POOL_TARGET["push-register"]);
+    expect(issuances(issuer, "push-register")).toHaveLength(before);
+  });
+
+  it("never throws without a session; reports what is held", async () => {
+    const { pool } = fakeTokenPool();
+    pool.unbind();
+    await expect(pool.ensureAtLeast("push-register", 5)).resolves.toBe(0);
+  });
+});
+
 describe("the issuance is verified against the key route's key", () => {
   it("fetches the key anonymously and finalizes under IT, not the response's public_key", async () => {
     const { pool, issuer, wasm } = fakeTokenPool({ responseKey: "a-key-from-the-response" });

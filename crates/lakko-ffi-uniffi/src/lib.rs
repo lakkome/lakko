@@ -80,6 +80,7 @@ pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
+pub mod supporters;
 pub mod synced_state;
 pub mod translation;
 pub mod transport;
@@ -792,6 +793,15 @@ pub enum FfiError {
     /// know which journal to read. Nothing else is ever in it.
     #[error("{0}")]
     MembershipGroupStillActive(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0097 supporters list. APPENDED last: a `flat_error` lowers by
+    // ordinal.
+    // ------------------------------------------------------------------
+    /// A supporters list did not verify (wrong key, tampered, malformed, a
+    /// bad name or a bad key argument). The client shows no list.
+    #[error("supporters list: {0}")]
+    SupportersList(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

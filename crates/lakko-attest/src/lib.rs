@@ -122,6 +122,16 @@
 //! separator.
 //!
 //! [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+//!
+//! # Supporters list
+//!
+//! The ninth format, [`SupportersList`] (see the [`supporters_list`] module,
+//! [ADR-0097] section 2): the backer names shown in the app, signed offline
+//! by the ADR-0038 release publisher key under its own domain
+//! (`lakko/supporters-list/v1`). Variable length, global, client-verified
+//! only.
+//!
+//! [ADR-0097]: ../../../docs/adr/0097-supporter-codes-and-list.md
 
 #![forbid(unsafe_code)]
 
@@ -131,6 +141,7 @@ pub mod genesis;
 pub mod handle_cert;
 pub mod key_reset;
 pub mod release_manifest;
+pub mod supporters_list;
 pub mod username_cert;
 
 pub use account_statement::{
@@ -157,6 +168,10 @@ pub use key_reset::{
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
     ReleaseManifestError, UpdateStatus, RELEASE_MANIFEST_LEN,
+};
+pub use supporters_list::{
+    verify_supporters_list, SupportersList, SupportersListError, MAX_SUPPORTERS,
+    MAX_SUPPORTERS_LIST_LEN, MIN_SUPPORTERS_LIST_LEN,
 };
 pub use username_cert::{
     verify_username_binding, UsernameCertError, UsernameCertificate, OPRF_HASH_LEN,
@@ -469,6 +484,20 @@ pub mod fuzz_api {
     pub fn open_release_manifest(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         ReleaseManifest::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`SupportersList::open`](crate::SupportersList::open) the bytes
+    /// against a FIXED verifying key. The bytes are attacker-controlled - the
+    /// list is fetched from a static host a malicious network or operator
+    /// could tamper (ADR-0097) - and the parser must stay panic-free on any
+    /// input, with its count and length bounds checked before allocation.
+    /// The fuzzer cannot forge a signature, so it exercises the length /
+    /// version / count / signature-refusal path. Returns `true` on a
+    /// (vanishingly rare) success.
+    #[must_use]
+    pub fn open_supporters_list(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        crate::SupportersList::open(bytes, &vk).is_ok()
     }
 
     /// Try to [`UsernameCertificate::open`] the bytes against a FIXED verifying

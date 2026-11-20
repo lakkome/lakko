@@ -122,10 +122,11 @@ public class LoginHandleSessionRebinder(
                     HandleSyncAction.WaitForRegister ->
                         log("login-handle sync: the account holds another handle; waiting for the name")
                     HandleSyncAction.Bind ->
-                        if (binder.bind(sessionToken, handle) == LoginHandleBinding.Taken) {
-                            log("login-handle bind: status $HTTP_CONFLICT")
-                        } else {
-                            confirm(handle)
+                        when (binder.bind(sessionToken, handle)) {
+                            LoginHandleBinding.Taken -> log("login-handle bind: status $HTTP_CONFLICT")
+                            LoginHandleBinding.Closed -> log("login-handle bind: registration closed")
+                            LoginHandleBinding.SupporterCodeUsed -> log("login-handle bind: supporter code used")
+                            LoginHandleBinding.Bound -> confirm(handle)
                         }
                 }
             } catch (cause: CancellationException) {

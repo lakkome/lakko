@@ -111,6 +111,23 @@ describe("sw.js navigation caching", () => {
     await expect(offline.handler(new Request("https://lakko.test/chat/x"))).rejects.toThrow("offline");
   });
 
+  it("the legal pages are never stored as the shell, nor answered with it offline", async () => {
+    const { handler, store } = load(async (req) =>
+      html(new URL(req.url).pathname === "/" ? "<shell>" : "<terms page>"),
+    );
+    await handler(new Request("https://lakko.test/"));
+    const res = await handler(new Request("https://lakko.test/terms"));
+    await handler(new Request("https://lakko.test/privacy/"));
+    await settle();
+    expect(await res.text()).toBe("<terms page>");
+    expect(await store.get(shellKey())?.text()).toBe("<shell>");
+    const offline = load(async () => {
+      throw new TypeError("offline");
+    });
+    for (const [k, v] of store) offline.store.set(k, v);
+    await expect(offline.handler(new Request("https://lakko.test/terms"))).rejects.toThrow("offline");
+  });
+
   it("the precache seeds the shell key", () => {
     const build = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "../../scripts/build-sw.mjs"),

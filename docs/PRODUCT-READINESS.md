@@ -255,7 +255,8 @@ a correct production env template.
 and forward are built and walked); in-chat search; avatars; group rename;
 member self-leave that completes; badges and a message sound; localisation.
 
-**H. The G-39 external review** before any build reaches users, with the
+**H. The G-39 external review** before the beta leaves its 1000-account cap or a build
+is listed in a store for production (ADR-0046 amendment of 2026-11-18), with the
 surface after B included.
 
 ## 6. How this was missed

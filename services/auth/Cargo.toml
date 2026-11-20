@@ -164,6 +164,13 @@ lakko-mnemonic.workspace = true
 # roots), never native-tls.
 lettre.workspace = true
 
+# Account purge worker (`src/purge.rs`): calls the internal listeners of
+# discovery and storage. Same posture as the other services that depend on
+# reqwest (no default features, rustls).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # ADR-0078 section 2: the `/call/jwt` tests mint spendable `call-join`

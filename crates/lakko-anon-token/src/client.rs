@@ -11,7 +11,7 @@
 //! `(context, epoch)` - which the caller must obtain from the published key
 //! endpoint, not from the same response it is checking.
 
-use rand_core::OsRng;
+use rand_core::{CryptoRng, OsRng, RngCore};
 use voprf::{EvaluationElement, Group, Proof, Ristretto255, VoprfClient};
 
 use crate::context::TokenContext;
@@ -77,6 +77,32 @@ impl TokenRequest {
             nonces,
             clients,
             blinded,
+        })
+    }
+
+    /// A request for ONE token whose nonce and blinding factor the caller
+    /// supplies: `nonce` as is, the blinding factor drawn from `blind_rng`.
+    /// With a deterministic `blind_rng` the same inputs give the same
+    /// blinded element, which is what lets a supporter code be redeemed
+    /// again after a lost response without a second evaluation (ADR-0097,
+    /// [`crate::SupporterCode::token_request`]).
+    pub(crate) fn single_with<R: RngCore + CryptoRng>(
+        context: TokenContext,
+        epoch: u64,
+        nonce: [u8; NONCE_LEN],
+        blind_rng: &mut R,
+    ) -> Result<Self> {
+        let input = token_input(context, epoch, &nonce);
+        let res = VoprfClient::<Ristretto255>::blind(&input, blind_rng)
+            .map_err(|_| AnonTokenError::Internal)?;
+        let mut b = [0u8; BLINDED_ELEMENT_LEN];
+        b.copy_from_slice(&res.message.serialize());
+        Ok(Self {
+            context,
+            epoch,
+            nonces: vec![nonce],
+            clients: vec![res.state],
+            blinded: vec![b],
         })
     }
 

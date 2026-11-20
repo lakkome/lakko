@@ -103,7 +103,7 @@ import { anonTokenQuotaExhausted, isAnonTokenNetworkFailure } from "../tokens/an
 import { uploadLocalAvatar } from "../profile/avatar-upload";
 import { reuploadedPhoto } from "../chat/GroupInfoExtras";
 import type { LocalAvatar } from "../profile/avatar-media";
-import { isSendLimit } from "../chat/attachment-failure";
+import { isSendLimit, isStorageFull } from "../chat/attachment-failure";
 import { bytesToB64, b64ToBytes, type AvatarData } from "../profile/avatar-model";
 
 export type { ChannelVisibility } from "./channel-access-record";
@@ -122,6 +122,7 @@ export type ChannelErrorCode =
   | "setup-failed"
   | "photo-upload"
   | "photo-limit"
+  | "photo-full"
   | "link-invalid"
   | "link-damaged"
   | "not-publisher"
@@ -427,7 +428,8 @@ async function uploadPhoto(photo: LocalAvatar): Promise<AvatarData> {
   try {
     return await uploadLocalAvatar(photo);
   } catch (err) {
-    throw new ChannelError(isSendLimit(err) ? "photo-limit" : "photo-upload", { cause: err });
+    const code = isStorageFull(err) ? "photo-full" : isSendLimit(err) ? "photo-limit" : "photo-upload";
+    throw new ChannelError(code, { cause: err });
   }
 }
 

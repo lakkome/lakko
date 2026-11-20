@@ -165,6 +165,70 @@
       "text": "पासवर्ड दिखाएँ",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "बीटा में सीमित जगह है, और सभी जगहें भर चुकी हैं। किसी के जाने पर जगह खुलती है। बाद में फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "जाँच हो रही है...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "लॉग इन करें",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "फिर कोशिश करें",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko अभी भरा हुआ है",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "वापस",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "अपने ईमेल से कोड दर्ज करें।",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "जाँच हो रही है...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "जारी रखें",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "कोड की जाँच नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "आपकी समर्थक जगह इस साइन-अप के लिए सुरक्षित है।",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "बहुत अधिक प्रयास। बाद में फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "मेरे पास समर्थक कोड है",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "समर्थक कोड",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "यह कोड काम नहीं करता। जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "यह समर्थक कोड पहले ही इस्तेमाल हो चुका है।",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "यूज़रनेम डालें।",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "यह पुराना बैकअप रीस्टोर करें?",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko बीटा में है, और इसकी सुरक्षा की अभी तक किसी स्वतंत्र ऑडिट ने जाँच नहीं की है। जहाँ आपकी सुरक्षा इस पर निर्भर हो, वहाँ इस पर भरोसा न करें।",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "बीटा",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "{name} में ग्रुप कॉल",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko अभी भरा हुआ है, इसलिए यह मेहमान खाता नहीं रखा जा सकता। किसी के जाने पर जगह खुलती है।",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "ठीक है",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "\"{name}\" अपलोड नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "सर्वर पर अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "सार्वजनिक समूह · {count, plural, one {# सदस्य} other {# सदस्य}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "सर्वर पर अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "आप फ़ाइलें भेजने की सीमा तक पहुँच गए हैं। बाद में फिर कोशिश करें।",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "चीनी (सरलीकृत)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "गोपनीयता नीति",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "गोपनीयता नीति",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "खाता बनाकर, आप {terms} और {privacy} से सहमत होते हैं।",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "सेवा की शर्तों",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "सेवा की शर्तें",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "कॉल",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "ऐप में खोलें",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "सर्वर पर अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "कीबोर्ड शॉर्टकट",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "समर्थक",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "अनुवाद अपडेट किए गए {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "इस ब्राउज़र में अनुवाद उपलब्ध नहीं है",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "Lakko का खर्च इसका समर्थन करने वाले लोग उठाते हैं। धन्यवाद।",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "सूची लोड नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "समर्थक",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

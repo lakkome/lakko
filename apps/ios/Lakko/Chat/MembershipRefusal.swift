@@ -464,6 +464,8 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .EmailVaultNotOpened, .EmailVault, .RecoveryEmail,
                 // The conversation-backup vault (main's ADR-0064).
                 .Vault,
+                // ADR-0097 the signed supporters list.
+                .SupportersList,
                 // ADR-0078 sealed mailbox rows and bindings; section 2 the
                 // sealed call relay and peer announcements; section 3 sealed
                 // push wakes and subscriptions.

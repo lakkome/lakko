@@ -305,6 +305,52 @@ async fn pruning_keeps_the_current_and_previous_epoch() {
     prune_spent(&pool, base + 2).await.unwrap();
 }
 
+#[tokio::test]
+async fn a_fixed_window_context_is_pruned_on_its_own_scale() {
+    let Some(pool) = test_pool("a_fixed_window_context_is_pruned_on_its_own_scale").await else {
+        return;
+    };
+    // A beta-place token of the current 30-day epoch carries a small epoch
+    // number; the daily prune must leave it, the fixed-window prune keeps it
+    // until its own window passes (ADR-0097).
+    let now = crate::now_unix_secs();
+    let window = lakko_anon_token::BETA_PLACE_WINDOW_SECS;
+    let current = now / window;
+    let live = random::<32>();
+    let old = random::<32>();
+    spend(&pool, TokenContext::BetaPlace, &live, current)
+        .await
+        .unwrap();
+    spend(&pool, TokenContext::BetaPlace, &old, current - 2)
+        .await
+        .unwrap();
+    prune_spent(&pool, now / 86_400).await.unwrap();
+    let count = |id: [u8; 32]| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM anon_token_spent WHERE context = ? AND spend_id = ?",
+            )
+            .bind(TokenContext::BetaPlace.as_u8())
+            .bind(&id[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(count(live).await, 1);
+    assert_eq!(count(old).await, 1);
+    crate::prune_spent_fixed(&pool, now).await.unwrap();
+    assert_eq!(count(live).await, 1);
+    assert_eq!(count(old).await, 0);
+    sqlx::query("DELETE FROM anon_token_spent WHERE context = ? AND spend_id = ?")
+        .bind(TokenContext::BetaPlace.as_u8())
+        .bind(&live[..])
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 // ---- The spend gate ----------------------------------------------------------
 
 fn gate_config() -> AnonTokenServerConfig {

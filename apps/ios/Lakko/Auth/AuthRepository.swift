@@ -1024,6 +1024,12 @@ public final class AuthRepository: ObservableObject {
 
     // MARK: - Flows
 
+    /// `GET /signup/open` (`docs/ux/beta-account-cap.md`): whether sign-up
+    /// is open now. Any failure answers `true`; the bind decides later.
+    public func signupOpen() async -> Bool {
+        await authClientFactory().signupOpen()
+    }
+
     /// Drive the full OPAQUE-PAKE signup flow.
     ///
     /// Steps:
@@ -1045,6 +1051,7 @@ public final class AuthRepository: ObservableObject {
     public func signup(
         username: String,
         password: Data,
+        supporterToken: String? = nil,
         onCommitting: (@MainActor () -> Void)? = nil
     ) async throws -> SignupOutcome {
         // ADR-0048 §4 — refuse a name that fails the username rule BEFORE the
@@ -1069,7 +1076,8 @@ public final class AuthRepository: ObservableObject {
             onCommitting: onCommitting)
         // A fresh unstructured task does not inherit the caller's cancellation.
         return try await Task { @MainActor in
-            try await self.completeSignup(result: result, username: canonical, writes: writes)
+            try await self.completeSignup(
+                result: result, username: canonical, writes: writes, supporterToken: supporterToken)
         }.value
     }
 
@@ -1114,7 +1122,8 @@ public final class AuthRepository: ObservableObject {
     func completeSignup(
         result: SignupResult,
         username: String,
-        writes: SignInKeyWrites = SignInKeyWrites()
+        writes: SignInKeyWrites = SignInKeyWrites(),
+        supporterToken: String? = nil
     ) async throws -> SignupOutcome {
         // ADR-0017: the canonical AccountIdentity is derived from the stable
         // BIP39 recovery-phrase seed, NOT the password export key — so a
@@ -1149,9 +1158,27 @@ public final class AuthRepository: ObservableObject {
                 username: username,
                 sessionToken: result.sessionToken,
                 directory: accountDirectory,
-                binder: authClientFactory()
+                binder: authClientFactory(),
+                supporterToken: supporterToken
             )
         } catch {
+            // `docs/ux/beta-account-cap.md` section 2 item 4 — the beta filled
+            // between the open check and the bind: the account just made has
+            // no username, so it is deleted at once, on auth and here. The
+            // same for a held supporter place spent by another account
+            // (`docs/ux/supporters.md` section 1.2).
+            if SignupCap.isRegistrationClosed(error) || SignupCap.isSupporterCodeUsed(error) {
+                let accountIdB64 = base64Encode(result.accountId)
+                let environment = guestEnvironment
+                freshAuth.clear()
+                await SignupRefusedCleanup.run(
+                    deleteAtAuth: {
+                        try await environment.deleteAccountAtAuth(
+                            result.sessionToken, result.freshGrant?.grant)
+                    },
+                    wipeLocal: { [wipeAccountStores] in wipeAccountStores(accountIdB64) }
+                )
+            }
             // The account never lands on this device: nothing it drew stays.
             AnonTokenPool.shared.forget(accountKey: base64Encode(result.accountId))
             AnonTokenPool.shared.configure(

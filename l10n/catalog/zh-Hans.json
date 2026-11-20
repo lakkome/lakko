@@ -165,6 +165,70 @@
       "text": "显示密码",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "测试版名额有限，且已全部占满。有人离开时会空出名额。请稍后再试。",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "正在检查...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "登录",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "重试",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko 目前已满",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "返回",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "输入邮件中的代码。",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "正在检查...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "继续",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "无法检查代码。请重试。",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "你的支持者名额已为本次注册保留。",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "尝试次数过多。请稍后再试。",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "我有支持者代码",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "支持者代码",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "此代码无效。请检查后重试。",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "此支持者代码已被使用。",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "请输入用户名。",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "恢复这个较旧的备份？",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko 处于测试阶段，其安全性尚未经过独立审计。在你的安全依赖于它的场合，请不要依赖它。",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "测试版",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "{name} 中的群组通话",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko 目前已满，因此无法保留此访客账号。有人离开时会空出名额。",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "好",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "无法上传“{name}”。请重试。",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "服务器目前没有空间存放新文件。请稍后再试。",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "公开群组 · {count, plural, other {# 名成员}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "服务器目前没有空间存放新文件。请稍后再试。",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "你已达到发送文件的上限。请稍后再试。",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "中文（简体）",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "隐私政策",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "隐私政策",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "创建账号即表示你同意{terms}和{privacy}。",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "服务条款",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "服务条款",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "通话",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "在应用中打开",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "服务器目前没有空间存放新文件。请稍后再试。",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "键盘快捷键",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "支持者",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "翻译已更新 {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "此浏览器不支持翻译",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "Lakko 由支持它的人们出资维持。谢谢你们。",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "无法加载列表。请重试。",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "重试",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "支持者",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

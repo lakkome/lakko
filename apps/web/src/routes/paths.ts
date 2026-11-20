@@ -78,7 +78,8 @@ export const paths = {
       | "account"
       | "recovery"
       | "translation"
-      | "text-size",
+      | "text-size"
+      | "supporters",
   ): string {
     return `/settings/${section}`;
   },

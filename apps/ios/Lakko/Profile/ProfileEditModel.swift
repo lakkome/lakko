@@ -383,6 +383,11 @@ final class ProfileEditModel: ObservableObject {
                     let avatar = try await ports.upload(media)
                     uploaded = (media.id, avatar)
                     avatarAfter = avatar
+                } catch AttachmentBridgeError.storageFull {
+                    // UX storage-full — the server has no room for new files.
+                    self.error = .key("profile.save.error.full")
+                    afterSave = nil
+                    return
                 } catch {
                     self.error = .key("profile.save.error.upload")
                     afterSave = nil

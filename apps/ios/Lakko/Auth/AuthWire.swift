@@ -672,6 +672,11 @@ struct LoginHandleCheckResponse: Codable, Equatable {
     let state: String
 }
 
+/// `GET /signup/open` response body (`docs/ux/beta-account-cap.md`).
+public struct SignupOpenResponse: Codable, Equatable {
+    public let open: Bool
+}
+
 /// `PUT /auth/login-handle` response body.
 public struct LoginHandleBindResponse: Codable, Equatable {
     public let bound: Bool

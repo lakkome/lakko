@@ -233,7 +233,9 @@ names; iOS / Android use the same names.
     focusable. The text it carries is always also offered another way
     (Copy link, the typed six-digit code, the secret key line).
 - **Banner**: inline, sunken surface, icon + one sentence + one action.
-  Used for the incoming-call prompt, update notice, identity change.
+  Used for the incoming-call prompt, update notice, identity change. A banner
+  that only informs (the beta notice, `docs/ux/beta-notice.md`) has a short
+  title and a body, no action and no close button, and is not focusable.
 - **Empty state**: centred, one line of muted text and one primary
   action. No illustration needed.
 - **Nav rail (desktop web)**: 72px, icons with 11px labels, selected =

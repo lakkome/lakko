@@ -15,6 +15,13 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.auth.RegistrationClosed
+import me.lakko.app.auth.SupporterCodeUsed
+import me.lakko.app.auth.SupporterPlaces
+import me.lakko.app.auth.SupporterRedeemOutcome
+import me.lakko.app.auth.supporterCodeComplete
+import me.lakko.app.auth.SignupGate
+import me.lakko.app.auth.signupGate
 import me.lakko.app.auth.SIGNUP_RATE_LIMITED_TEXT
 import me.lakko.app.l10n.UiText
 import me.lakko.app.auth.SignupOutcome
@@ -51,6 +58,11 @@ public class SignupViewModel internal constructor(
     private val normalizeDisplayName: (String) -> String?,
     /** Persist this account's own profile once signup has created it. */
     private val saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit,
+    /** `GET /signup/open` (`docs/ux/beta-account-cap.md`); a failed question
+     *  answers `true`. */
+    private val signupOpen: suspend () -> Boolean = { true },
+    /** Supporter codes (ADR-0097, `docs/ux/supporters.md` section 1). */
+    private val supporterPlaces: SupporterPlaces = SupporterPlaces.None,
 ) : ViewModel() {
 
     public constructor(
@@ -61,12 +73,19 @@ public class SignupViewModel internal constructor(
         normalizeDisplayName: (String) -> String? = { uniffi.lakko_ffi_uniffi.normalizeDisplayName(it) },
         /** No-op by default (tests); `MainActivity` writes the [OwnProfileStore]. */
         saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit = { _, _ -> },
+        /** ADR-0097: the device's supporter places. */
+        supporterPlaces: SupporterPlaces = SupporterPlaces.None,
     ) : this(
-        runSignup = { username, password, onProofSolved -> repo.signup(username, password, onProofSolved) },
+        runSignup = { username, password, onProofSolved ->
+            // ADR-0097: a held place rides on the first bind; read at submit.
+            repo.signup(username, password, onProofSolved, placeToken = supporterPlaces.held()?.headerValue)
+        },
         createdAccountId = { repo.identitySecrets.value?.accountId },
         validateUsername = validateUsername,
         normalizeDisplayName = normalizeDisplayName,
         saveOwnProfile = saveOwnProfile,
+        signupOpen = { repo.signupOpen() },
+        supporterPlaces = supporterPlaces,
     )
 
     /** The running signup, so [onCancel] can stop it. */
@@ -76,6 +95,104 @@ public class SignupViewModel internal constructor(
         MutableStateFlow(SignupUiState())
 
     public val state: StateFlow<SignupUiState> = mutableState.asStateFlow()
+
+    /** The question of [onShown] already ran for this screen. */
+    private var askedOnShow = false
+
+    /**
+     * The sign-up screen has opened (`docs/ux/beta-account-cap.md` section 2
+     * item 1): ask whether sign-up has room. Closed replaces the form with
+     * the full state; open, or a failed question, leaves the form.
+     */
+    public fun onShown() {
+        if (askedOnShow) return
+        askedOnShow = true
+        // ADR-0097: a place held on this device keeps the form even when the
+        // beta is full (UX 1.2 "The code works").
+        val placeHeld = heldPlace()
+        if (placeHeld) mutableState.update { it.copy(placeHeld = true) }
+        viewModelScope.launch {
+            val open = signupOpen()
+            if (signupGate(open) == SignupGate.CLOSED && !mutableState.value.busy && !mutableState.value.placeHeld) {
+                mutableState.update { it.copy(closed = true) }
+            }
+        }
+    }
+
+    /**
+     * `Try again` on the full state: ask again. While it runs the button
+     * reads `Checking...`; open returns to the form with everything typed
+     * kept, still closed stays with no extra message.
+     */
+    public fun onRetryOpen() {
+        val snapshot = mutableState.value
+        if (!snapshot.closed || snapshot.checking) return
+        mutableState.update { it.copy(checking = true) }
+        viewModelScope.launch {
+            val open = try {
+                signupOpen()
+            } finally {
+                mutableState.update { it.copy(checking = false) }
+            }
+            if (signupGate(open) == SignupGate.FORM) {
+                mutableState.update { it.copy(closed = false, error = null) }
+            }
+        }
+    }
+
+    private fun heldPlace(): Boolean = try {
+        supporterPlaces.held() != null
+    } catch (_: Throwable) {
+        false
+    }
+
+    /** `I have a supporter code` on the full state (UX 1.1). */
+    public fun onOpenSupporterCode() {
+        if (!mutableState.value.closed || mutableState.value.checking) return
+        mutableState.update { it.copy(codeEntry = true, codeError = null, codeUsed = false) }
+    }
+
+    /** `Back` on the code view: the full state again. */
+    public fun onSupporterCodeBack() {
+        if (mutableState.value.codeChecking) return
+        mutableState.update { it.copy(codeEntry = false, codeError = null) }
+    }
+
+    public fun onSupporterCodeChange(value: String) {
+        mutableState.update { it.copy(code = value, codeError = null) }
+    }
+
+    /** `Continue` on the code view: exchange the code for a held place. */
+    public fun onSupporterCodeContinue() {
+        val snapshot = mutableState.value
+        if (!snapshot.codeEntry || snapshot.codeChecking || !supporterCodeComplete(snapshot.code)) return
+        mutableState.update { it.copy(codeChecking = true, codeError = null) }
+        viewModelScope.launch {
+            val outcome = try {
+                supporterPlaces.redeem(snapshot.code)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (_: Throwable) {
+                SupporterRedeemOutcome.Failed
+            }
+            mutableState.update {
+                when (outcome) {
+                    is SupporterRedeemOutcome.Held -> it.copy(
+                        codeChecking = false,
+                        codeEntry = false,
+                        code = "",
+                        closed = false,
+                        placeHeld = true,
+                        codeUsed = false,
+                        error = null,
+                    )
+                    SupporterRedeemOutcome.Unknown -> it.copy(codeChecking = false, codeError = CODE_UNKNOWN)
+                    SupporterRedeemOutcome.Limited -> it.copy(codeChecking = false, codeError = CODE_LIMITED)
+                    SupporterRedeemOutcome.Failed -> it.copy(codeChecking = false, codeError = CODE_FAILED)
+                }
+            }
+        }
+    }
 
     /** ADR-0048 §4 — validated as the user types; the reason shows at once. */
     public fun onUsernameChange(value: String) {
@@ -162,6 +279,15 @@ public class SignupViewModel internal constructor(
         // has been sent, so Cancel returns to the filled-in form.
         mutableState.update { it.copy(busy = true, solving = true, error = null, rateLimited = false) }
         signupJob = viewModelScope.launch {
+            // `docs/ux/beta-account-cap.md` section 2 item 1: asked again on
+            // submit, before the proof of work, so nobody solves it only to
+            // be refused. The bind still decides.
+            // A place held on this device (ADR-0097) is what lets this
+            // sign-up past the cap: the bind decides.
+            if (!heldPlace() && signupGate(signupOpen()) == SignupGate.CLOSED) {
+                mutableState.update { it.copy(busy = false, solving = false, closed = true, placeHeld = false) }
+                return@launch
+            }
             val passwordBytes = pwd.toByteArray(Charsets.UTF_8)
             try {
                 runSignup(normalizedUsername, passwordBytes) {
@@ -200,6 +326,23 @@ public class SignupViewModel internal constructor(
                         confirm = "",
                     )
                 }
+            } catch (_: SupporterCodeUsed) {
+                // UX 1.2: the place was already used for another account. The
+                // repository deleted and wiped the account just made; the
+                // held token is spent, so it goes too.
+                try {
+                    supporterPlaces.drop()
+                } catch (_: Throwable) {
+                    // best-effort
+                }
+                mutableState.update {
+                    it.copy(busy = false, solving = false, error = null, closed = true, placeHeld = false, codeUsed = true)
+                }
+            } catch (_: RegistrationClosed) {
+                // Refused at the bind: the repository deleted the account it
+                // had just made and wiped it here. The full state; the form
+                // keeps what was typed for a later `Try again`.
+                mutableState.update { it.copy(busy = false, solving = false, error = null, closed = true) }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
                     it.copy(busy = false, solving = false, error = err.text ?: GENERIC)
@@ -314,6 +457,9 @@ public class SignupViewModel internal constructor(
         public const val MIN_PASSWORD_LEN: Int = 8
 
         private val GENERIC = UiText("auth.signup.error.generic")
+        private val CODE_UNKNOWN = UiText("auth.signup.code.unknown")
+        private val CODE_LIMITED = UiText("auth.signup.code.limited")
+        private val CODE_FAILED = UiText("auth.signup.code.failed")
         private val OFFLINE = UiText("common.error.offline")
     }
 }
@@ -343,4 +489,21 @@ public data class SignupUiState(
     /** The last attempt met `signup-rate-limited`: the button reads
      *  `Try again`. The form keeps its contents. */
     val rateLimited: Boolean = false,
+    /** The beta is full (`docs/ux/beta-account-cap.md`): the full state
+     *  replaces the form, whose fields are kept. */
+    val closed: Boolean = false,
+    /** `Try again` on the full state is asking `/signup/open`. */
+    val checking: Boolean = false,
+    /** ADR-0097: the supporter-code view replaces the full state. */
+    val codeEntry: Boolean = false,
+    /** The typed supporter code (kept on a failed check). */
+    val code: String = "",
+    /** `Continue` is checking the code. */
+    val codeChecking: Boolean = false,
+    /** The line under the code field, or `null`. */
+    val codeError: UiText? = null,
+    /** A supporter place is held on this device: the line above the form. */
+    val placeHeld: Boolean = false,
+    /** The held code was already used: the line above the full state. */
+    val codeUsed: Boolean = false,
 )

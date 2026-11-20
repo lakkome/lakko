@@ -93,6 +93,7 @@ internal fun ChannelPhotoHeader(
         val seen = HashSet<Throwable>()
         while (c != null && seen.add(c)) {
             if (c is me.lakko.app.storage.StorageHttpError && c.status == 429) return UiText("group_photo.error.limit")
+            me.lakko.app.media.groupPhotoRefusalKey(c)?.let { return UiText(it) }
             c = c.cause
         }
         return UiText("group_photo.error.upload")

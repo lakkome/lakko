@@ -158,10 +158,17 @@ public final class AuthAnonTokenIssuer: AnonTokenIssuing, @unchecked Sendable {
 
     /// The key from the anonymous key route, cached for ``keyCacheSeconds``.
     func publicKey(context: AnonTokenContext, epoch: UInt64) async throws -> String {
-        let cacheKey = "\(context.rawValue)/\(epoch)"
+        try await publicKey(contextName: context.rawValue, epoch: epoch)
+    }
+
+    /// The key route for a context named on the wire: also the `beta-place`
+    /// context of a supporter code (ADR-0097), which is no pool context and
+    /// so has no ``AnonTokenContext`` case.
+    func publicKey(contextName: String, epoch: UInt64) async throws -> String {
+        let cacheKey = "\(contextName)/\(epoch)"
         if let cached = cachedKey(cacheKey) { return cached }
 
-        guard let url = URL(string: baseURL + "/auth/tokens/key/\(context.rawValue)/\(epoch)") else {
+        guard let url = URL(string: baseURL + "/auth/tokens/key/\(contextName)/\(epoch)") else {
             throw AnonTokenUnavailable.issuanceFailed("bad base URL")
         }
         var http = URLRequest(url: url)
@@ -174,7 +181,7 @@ public final class AuthAnonTokenIssuer: AnonTokenIssuing, @unchecked Sendable {
             throw AnonTokenUnavailable.issuanceFailed("GET key -> \(response.statusCode)")
         }
         guard let parsed = try? JSONDecoder().decode(KeyResponse.self, from: data),
-              parsed.context == context.rawValue, parsed.epoch == epoch
+              parsed.context == contextName, parsed.epoch == epoch
         else {
             throw AnonTokenUnavailable.issuanceFailed("malformed key response")
         }

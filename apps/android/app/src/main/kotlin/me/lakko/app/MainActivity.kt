@@ -347,6 +347,11 @@ class MainActivity : ComponentActivity() {
         // pinned translation key; an accepted bundle switches the live strings.
         me.lakko.app.l10n.TranslationUpdater(applicationContext, lifecycleScope).checkOnLaunch()
 
+        // ADR-0097 — the signed supporters list, at most once a day at
+        // launch (and when Settings > About is shown). Dormant with no
+        // release key pinned.
+        me.lakko.app.updates.SupportersListController.get(applicationContext).refreshIfDue()
+
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
         // `intent.data`; a cold-start tap on a Lakko push
@@ -720,6 +725,7 @@ private fun AppRoot(
                             authRepository.guestAccount.value,
                         )?.claimedUsername
                     },
+                    signupOpen = { authRepository.signupOpen() },
                 )
             },
         )
@@ -2675,6 +2681,7 @@ private fun SessionRoot(
                         onOpenChannelsIShare = { navController.navigate(Routes.CHANNELS_I_SHARE) },
                         onOpenLanguage = { navController.navigate(Routes.LANGUAGE) },
                         onOpenTextSize = { navController.navigate(Routes.TEXT_SIZE) },
+                        onOpenSupporters = { navController.navigate(Routes.SUPPORTERS) },
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
@@ -3169,6 +3176,10 @@ private fun SessionRoot(
                 composable(Routes.TEXT_SIZE) {
                     me.lakko.app.ui.settings.TextSizeScreen(onBack = { navController.popBackStack() })
                 }
+                // `docs/ux/supporters.md` section 2.2.
+                composable(Routes.SUPPORTERS) {
+                    me.lakko.app.ui.settings.SupportersScreen(onBack = { navController.popBackStack() })
+                }
                 composable(Routes.ANTI_CENSORSHIP) {
                     AntiCensorshipSettingsScreen(
                         manager = antiCensorship,
@@ -3394,6 +3405,8 @@ private object Routes {
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"
     const val TEXT_SIZE = "settings/text-size"
+    /** `docs/ux/supporters.md` section 2.2. */
+    const val SUPPORTERS = "settings/supporters"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
     const val SAVED = "chats/saved"
@@ -3581,12 +3594,20 @@ private fun AnonRoot(
                         saveOwnProfile = { accountId, profile ->
                             me.lakko.app.profile.OwnProfileStore.save(appContext, accountId, profile)
                         },
+                        // ADR-0097 - supporter codes on the full state.
+                        supporterPlaces = me.lakko.app.auth.SupporterPlacesOnDevice.get(appContext),
                     )
                 },
             )
             SignupScreen(
                 viewModel = signupVm,
                 onBack = { nav.popBackStack() },
+                onLogIn = {
+                    nav.navigate(AnonRoutes.LOGIN) {
+                        popUpTo(AnonRoutes.SIGNUP) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable(AnonRoutes.RECOVER) {

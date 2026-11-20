@@ -8803,6 +8803,15 @@ button.lk-folder-new {
     outline-color: var(--accent-soft);
   }
 }
+/* A Settings row that opens a page outside the app (docs/ux/legal-pages.md). */
+a.lk-card-row-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.lk-card-row-link:hover .lk-card-row-title {
+  text-decoration: underline;
+}
 button.lk-card-row-button {
   display: flex;
   align-items: center;
@@ -9352,4 +9361,40 @@ button.lk-card-row-button {
   justify-content: center;
   gap: 12px;
   color: var(--surface-muted);
+}
+
+/* An informing banner (design-system Banner without an action; the beta
+   notice, docs/ux/beta-notice.md): sunken surface, the info icon, a title
+   and a body. Nothing in it is focusable; it wraps and never truncates. */
+.lk-info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+}
+.lk-info-banner-icon {
+  color: var(--surface-muted);
+  padding-top: 1px;
+}
+.lk-info-banner-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+}
+.lk-info-banner-title {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.lk-info-banner-body {
+  display: block;
 }

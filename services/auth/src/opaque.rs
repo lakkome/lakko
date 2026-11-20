@@ -4866,6 +4866,10 @@ mod signup_login_limits_e2e_tests {
         assert_password_required(st, &body, "the grant in a body, not the header");
         assert!(account_exists(&pool, &a).await);
         assert!(account_exists(&pool, &b).await);
+        assert!(
+            !crate::purge::is_queued(&pool, &a).await,
+            "a refused delete queued a purge"
+        );
         assert_eq!(export(&state, &a_token).await.0, StatusCode::OK);
 
         // Deleting does not spend a grant another way: the same live grant
@@ -4878,6 +4882,10 @@ mod signup_login_limits_e2e_tests {
             String::from_utf8_lossy(&body)
         );
         assert!(!account_exists(&pool, &a).await);
+        assert!(
+            crate::purge::is_queued(&pool, &a).await,
+            "the delete queued no purge of discovery and storage"
+        );
 
         // A grant minted before a key reset is refused for delete after it.
         let sibling = grant_by_password(&state, &hb, b"b's password").await;
@@ -4894,7 +4902,15 @@ mod signup_login_limits_e2e_tests {
         let (st, _) = delete_account(&state, &b_token2, Some(&fresh)).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert!(!account_exists(&pool, &b).await);
+        assert!(crate::purge::is_queued(&pool, &b).await);
 
+        for id in [a, b] {
+            sqlx::query("DELETE FROM account_purges WHERE account_id = ?")
+                .bind(id.as_slice())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
         drop_accounts(&pool, &[a, b]).await;
     }
 

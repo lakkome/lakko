@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+#
+# Nightly encrypted backup (infra/scripts/backup.sh). Started by
+# lakko-backup.timer; run by hand with `systemctl start lakko-backup`.
+# Not part of lakko.target: a backup failure must not stop the services.
+
+[Unit]
+Description=Lakko nightly backup to the restic repository
+Documentation=https://github.com/lakkome/lakko
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=LAKKO_BACKUP_CONFIG=/etc/lakko/backup.env
+ExecStart=/home/lakkome/lakko/infra/scripts/backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

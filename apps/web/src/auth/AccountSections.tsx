@@ -30,6 +30,8 @@ import {
   actionHashForDeleteAccount,
 } from "./webauthn-client";
 import { DiscoveryClient } from "../discovery/client";
+import { runAccountDeletion } from "./account-deletion";
+import { buildDeletionCleanups, prepareDeletionTokens } from "./account-deletion-cleanups";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
 import { t, type L10nArgs } from "../l10n";
@@ -274,33 +276,40 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       } catch {
         /* best-effort: the deletion does not wait on a link */
       }
-      try {
-        await c.deleteAccount(grant);
-      } catch (err) {
-        // An account whose passkey list could not be read: the server
-        // names the missing gesture with a `403` that is not the proof's.
-        if (
-          err instanceof WebauthnHttpError &&
-          err.status === 403 &&
-          proofFailureFromError(err).kind !== "required" &&
-          !steps.actionGesture
-        ) {
-          await assertDeletion(secrets.accountId);
-          await c.deleteAccount(grant);
-        } else {
-          throw err;
-        }
-      }
-      try {
-        const d = new DiscoveryClient();
-        d.setSessionToken(secrets.sessionToken);
-        await d.deleteAccount();
-      } catch {
-        /* best-effort */
-      }
-      gate.clear();
-      // Wipes this device and lands on the sign-in screen.
-      await auth.forgetDevice();
+      // The push tokens the cleanups will spend are bought first (auth issues
+      // none once the account is gone). Then auth: it can refuse (the recall window), and then nothing else
+      // is removed. After it, what only this device can remove from the
+      // servers goes (its push subscriptions), then the backup blob and the
+      // directory entry, each with a short bounded retry, then the wipe.
+      await runAccountDeletion({
+        beforeAuth: () => prepareDeletionTokens(base64Encode(secrets.accountId)),
+        deleteAtAuth: async () => {
+          try {
+            await c.deleteAccount(grant);
+          } catch (err) {
+            // An account whose passkey list could not be read: the server
+            // names the missing gesture with a `403` that is not the proof's.
+            if (
+              err instanceof WebauthnHttpError &&
+              err.status === 403 &&
+              proofFailureFromError(err).kind !== "required" &&
+              !steps.actionGesture
+            ) {
+              await assertDeletion(secrets.accountId);
+              await c.deleteAccount(grant);
+            } else {
+              throw err;
+            }
+          }
+        },
+        cleanups: () =>
+          buildDeletionCleanups(base64Encode(secrets.accountId), secrets.sessionToken),
+        wipe: async () => {
+          gate.clear();
+          // Wipes this device and lands on the sign-in screen.
+          await auth.forgetDevice();
+        },
+      });
     } catch (err) {
       // ADR-0074 section 1.3: while the account can still be taken back
       // after a key reset, the server refuses the deletion and names the

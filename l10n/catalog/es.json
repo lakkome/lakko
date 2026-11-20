@@ -165,6 +165,70 @@
       "text": "Mostrar contraseña",
       "status": "machine"
     },
+    "auth.signup.closed.body": {
+      "text": "La beta tiene plazas limitadas y todas están ocupadas. Se liberan plazas cuando alguien se va. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "Comprobando...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "Iniciar sesión",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "Reintentar",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko está lleno por ahora",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "Atrás",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "Introduce el código de tu correo.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "Comprobando...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "Continuar",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "No se pudo comprobar el código. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "Tu plaza de apoyo está reservada para este registro.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "Demasiados intentos. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "Tengo un código de apoyo",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "Código de apoyo",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "Este código no funciona. Revísalo e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "Este código de apoyo ya se ha usado.",
+      "status": "machine"
+    },
     "auth.signup.error.enter_username": {
       "text": "Escribe un nombre de usuario.",
       "status": "machine"
@@ -283,6 +347,14 @@
     },
     "backup.stale_restore.title": {
       "text": "¿Restaurar esta copia de seguridad antigua?",
+      "status": "machine"
+    },
+    "beta.notice.body": {
+      "text": "Lakko está en beta y su seguridad aún no ha sido revisada por una auditoría independiente. No confíes en él cuando tu seguridad dependa de ello.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "Beta",
       "status": "machine"
     },
     "call.alert.title": {
@@ -759,6 +831,14 @@
     },
     "call.group_banner.title": {
       "text": "Llamada de grupo en {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko está lleno por ahora, así que esta cuenta de invitado no se puede conservar. Se liberan plazas cuando alguien se va.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "Aceptar",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -2307,6 +2387,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "No se pudo subir «{name}». Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "El servidor no tiene espacio para archivos nuevos en este momento. Inténtalo más tarde.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -6429,6 +6513,10 @@
       "text": "Grupo público · {count, plural, one {# miembro} other {# miembros}}",
       "status": "machine"
     },
+    "group_photo.error.full": {
+      "text": "El servidor no tiene espacio para archivos nuevos en este momento. Inténtalo más tarde.",
+      "status": "machine"
+    },
     "group_photo.error.limit": {
       "text": "Has alcanzado el límite de envío de archivos. Inténtalo más tarde.",
       "status": "machine"
@@ -7265,6 +7353,26 @@
       "text": "Chino (simplificado)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "Política de privacidad",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "Política de privacidad",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "Al crear una cuenta, aceptas los {terms} y la {privacy}.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "Términos del servicio",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "Términos del servicio",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "Llamadas",
       "status": "machine"
@@ -7403,6 +7511,10 @@
     },
     "open_in_app.button": {
       "text": "Abrir en la app",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "El servidor no tiene espacio para archivos nuevos en este momento. Inténtalo más tarde.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -8469,6 +8581,10 @@
       "text": "Atajos de teclado",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "Patrocinadores",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Traducciones actualizadas {date}",
       "status": "machine"
@@ -9399,6 +9515,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "La traducción no está disponible en este navegador",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "Lakko lo pagan las personas que lo apoyan. Gracias.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "No se pudo cargar la lista. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "Reintentar",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "Patrocinadores",
       "status": "machine"
     },
     "tokens.action_allowance_used": {

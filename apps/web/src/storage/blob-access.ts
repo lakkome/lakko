@@ -49,6 +49,30 @@ export class StorageLimitError extends Error {
   }
 }
 
+/**
+ * docs/ux/storage-full.md — the server refused an upload because its disk is
+ * too full (`507 {"error":"storage-full"}`). Not retried: trying again is the
+ * person's choice (or, for background uploads, the next scheduled attempt).
+ */
+export class StorageFullError extends Error {
+  override name = "StorageFullError";
+  constructor() {
+    super("storage: the server has no room for new files");
+  }
+}
+
+/** Whether an error, or one of its causes, is {@link StorageFullError}
+ *  (matched by name, since the error crosses module lines). */
+export function isStorageFull(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth += 1) {
+    const r = current as { name?: unknown; cause?: unknown };
+    if (r.name === "StorageFullError") return true;
+    current = r.cause;
+  }
+  return false;
+}
+
 /** What a refusal of a blob request means for the caller. */
 export type BlobRefusal =
   /** The pass is no good (missing, unknown after a restart, expired): take a
@@ -59,6 +83,9 @@ export type BlobRefusal =
   | "budget"
   /** 404: the blob is gone (UX 4.1, no Retry). */
   | "gone"
+  /** 507 `storage-full`: the server has no room for new files
+   *  (docs/ux/storage-full.md). Not retried. */
+  | "full"
   /** Anything else: the generic failure, with Try again. */
   | "failed";
 
@@ -85,6 +112,7 @@ export function blobRefusalOf(status: number, code: string | null): BlobRefusal 
   if (status === 429 && (code === "blob-upload-budget-exhausted" || code === "blob-read-budget-exhausted")) {
     return "budget";
   }
+  if (status === 507 && code === "storage-full") return "full";
   return "failed";
 }
 

@@ -115,6 +115,10 @@ lakko-attest.workspace = true
 # ADR-0080 - reads the city database behind `GET /discovery/locate`.
 maxminddb.workspace = true
 
+# Constant-time compare of the internal listener's shared secret
+# (`src/internal.rs`), as push-gw and storage do.
+subtle = "2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

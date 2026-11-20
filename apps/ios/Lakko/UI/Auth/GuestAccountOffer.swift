@@ -50,6 +50,10 @@ final class GuestAccountOfferModel: ObservableObject {
     @Published private(set) var deleteFailed = false
     /// This device no longer holds the account's phrase, so it cannot be kept.
     @Published private(set) var cannotKeep = false
+    /// `docs/ux/beta-account-cap.md` section 3 — the question as asked, or
+    /// "Lakko is full for now" with one `OK` (which does what `No, thanks`
+    /// does).
+    @Published private(set) var variant: GuestOfferVariant = .ask
 
     // MARK: - Form fields
 
@@ -154,6 +158,15 @@ final class GuestAccountOfferModel: ObservableObject {
                     cannotKeep = true
                     step = .ask
                 }
+                // The beta is full: the form gives way to the closed
+                // question. The refusal deletes nothing; `OK` does.
+                if SignupCap.isRegistrationClosed(error), takenName == nil {
+                    variant = GuestOfferVariant.afterClaimFailure(
+                        error, current: variant, holdsUsername: takenName != nil)
+                    step = .ask
+                    busy = .none
+                    return
+                }
                 errorText = UiText { AuthErrorCopy.guestClaim(error) }
                 busy = .none
             }
@@ -169,6 +182,18 @@ final class GuestAccountOfferModel: ObservableObject {
     func expireIfDue() async {
         guard busy == .none else { return }
         await repository.expireGuestIfDue()
+    }
+
+    /// The question is about to show: ask whether sign-up is open. Closed
+    /// asks the closed question; open, or a failed question, the ordinary
+    /// one. Once closed it stays closed for this model.
+    func checkSignupOpen() async {
+        guard variant == .ask else { return }
+        // A guest already holding a username holds a place: no question.
+        if takenName != nil { return }
+        let open = await repository.signupOpen()
+        guard variant == .ask else { return }
+        variant = GuestOfferVariant.after(open: open, holdsUsername: takenName != nil)
     }
 
     // MARK: - No, thanks
@@ -202,31 +227,61 @@ struct GuestOfferQuestion: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            AuthTitle(title: l10n.t("guest.offer.title"), subtitle: l10n.t("guest.offer.body"))
-            if let error = model.error {
-                AuthHint(text: error, isError: true)
+            switch model.variant {
+            case .ask: question
+            case .closed: closed
             }
-            if model.deleteFailed {
-                AuthHint(text: l10n.t("guest.offer.delete_failed"), isError: true)
-            }
-            if !model.cannotKeep {
-                AuthPrimaryButton(
-                    title: l10n.t("auth.signup.submit"),
-                    disabled: model.busy != .none,
-                    action: model.openForm
-                )
-            }
-            AuthSecondaryButton(
-                title: l10n.t(model.busy == .deleting ? "guest.offer.deleting" : "guest.offer.decline"),
-                disabled: model.busy != .none,
-                action: model.decline
-            )
-            AuthHint(text: l10n.t("guest.offer.decline_note"))
         }
         .frame(maxWidth: 480)
         // Both places that draw the question (the guest screen and the
         // call-link landing) draw it only while no call is running.
-        .task { await model.expireIfDue() }
+        .task {
+            await model.expireIfDue()
+            await model.checkSignupOpen()
+        }
+    }
+
+    /// `docs/ux/beta-account-cap.md` section 3 — the beta is full: the
+    /// account cannot be kept, and `OK` deletes it as `No, thanks` does.
+    @ViewBuilder
+    private var closed: some View {
+        Text(l10n.t("call.guest.closed.body"))
+            .font(.body)
+            .foregroundStyle(Color.lakkoText)
+            .fixedSize(horizontal: false, vertical: true)
+        if model.deleteFailed {
+            AuthHint(text: l10n.t("guest.offer.delete_failed"), isError: true)
+        }
+        AuthPrimaryButton(
+            title: l10n.t("call.guest.closed.ok"),
+            busy: model.busy == .deleting,
+            busyTitle: l10n.t("guest.offer.deleting"),
+            action: model.decline
+        )
+    }
+
+    @ViewBuilder
+    private var question: some View {
+        AuthTitle(title: l10n.t("guest.offer.title"), subtitle: l10n.t("guest.offer.body"))
+        if let error = model.error {
+            AuthHint(text: error, isError: true)
+        }
+        if model.deleteFailed {
+            AuthHint(text: l10n.t("guest.offer.delete_failed"), isError: true)
+        }
+        if !model.cannotKeep {
+            AuthPrimaryButton(
+                title: l10n.t("auth.signup.submit"),
+                disabled: model.busy != .none,
+                action: model.openForm
+            )
+        }
+        AuthSecondaryButton(
+            title: l10n.t(model.busy == .deleting ? "guest.offer.deleting" : "guest.offer.decline"),
+            disabled: model.busy != .none,
+            action: model.decline
+        )
+        AuthHint(text: l10n.t("guest.offer.decline_note"))
     }
 }
 
@@ -242,6 +297,9 @@ struct GuestClaimFormScreen: View {
 
     var body: some View {
         AuthScreen {
+            // `docs/ux/beta-notice.md` section 3: a guest who creates an
+            // account is signing up, so the beta notice comes first.
+            BetaNoticeBanner()
             // The lede is the claim's own (ADR-0076): no phrase screen follows.
             AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("username.claim.body"))
 
@@ -294,6 +352,7 @@ struct GuestClaimFormScreen: View {
                 disabled: !model.canSubmit,
                 action: model.create
             )
+            LegalSignupNotice()
             AuthSecondaryButton(
                 title: l10n.t("common.back"),
                 disabled: working,

@@ -185,6 +185,9 @@ struct NewChannelScreen: View {
             } catch AttachmentBridgeError.uploadLimited {
                 photoError = "group_photo.error.limit"
                 return
+            } catch AttachmentBridgeError.storageFull {
+                photoError = "group_photo.error.full"
+                return
             } catch {
                 photoError = "group_photo.error.upload"
                 return

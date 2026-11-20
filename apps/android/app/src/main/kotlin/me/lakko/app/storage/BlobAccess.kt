@@ -102,6 +102,10 @@ public enum class BlobRefusal {
     /** The person's limit is reached (UX 4.2). */
     LIMIT,
 
+    /** 507 `storage-full`: the server has no room for new files
+     *  (docs/ux/storage-full.md). Not retried. */
+    FULL,
+
     /** Anything else, a nginx 429 with an HTML body included: the generic
      *  failure with Try again. */
     OTHER,
@@ -113,6 +117,7 @@ public fun classifyBlobRefusal(status: Int, body: String?, renewed: Boolean): Bl
     val code = errorCodeOf(body)
     return when {
         status == 404 -> BlobRefusal.GONE
+        status == 507 && code == STORAGE_FULL_CODE -> BlobRefusal.FULL
         status == 401 && code in PASS_STALE_CODES -> if (renewed) BlobRefusal.OTHER else BlobRefusal.RENEW_PASS
         status == 429 && code in BUDGET_CODES -> if (renewed) BlobRefusal.LIMIT else BlobRefusal.RENEW_PASS
         else -> BlobRefusal.OTHER
@@ -121,6 +126,14 @@ public fun classifyBlobRefusal(status: Int, body: String?, renewed: Boolean): Bl
 
 private val PASS_STALE_CODES = setOf("blob-pass-required", "blob-pass-invalid", "blob-pass-expired")
 private val BUDGET_CODES = setOf("blob-upload-budget-exhausted", "blob-read-budget-exhausted")
+
+/** The storage service's code for "no room for new files". */
+public const val STORAGE_FULL_CODE: String = "storage-full"
+
+/** docs/ux/storage-full.md — the server refused an upload because its disk
+ *  is too full (`507 storage-full`). Said where the sending limit is said. */
+public class StorageFullError(public val endpoint: String) :
+    RuntimeException("storage $endpoint: server has no room for new files")
 
 /** The person's limit for sending or opening files is reached (UX 4.2),
  *  either the hour's pass budget or the day's tokens. */

@@ -143,6 +143,10 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::CircleClaim, 10),
     (TokenContext::ChannelReact, 500),
     (TokenContext::ChannelComment, 200),
+    // ADR-0097: never issued to a session; only the supporter-code redeem
+    // route evaluates it. The 0 is belt and braces under the explicit
+    // refusal in `issue_tokens`.
+    (TokenContext::BetaPlace, 0),
 ];
 
 /// The `call-join` quota per epoch of a young account (ADR-0078 section 2,
@@ -181,6 +185,9 @@ pub(crate) struct AnonTokenIssuer {
     young_call_join_quota: u32,
     /// The age under which an account is young, in seconds.
     young_age_secs: u64,
+    /// ADR-0097: the supporter-code pepper. `None`: the redeem route answers
+    /// `503 supporter-codes-disabled`.
+    supporter_pepper: Option<crate::supporter_codes::SupporterPepper>,
 }
 
 impl AnonTokenIssuer {
@@ -195,6 +202,7 @@ impl AnonTokenIssuer {
             quotas,
             young_call_join_quota: DEFAULT_YOUNG_CALL_JOIN_QUOTA,
             young_age_secs: DEFAULT_YOUNG_ACCOUNT_AGE_SECS,
+            supporter_pepper: None,
         }
     }
 
@@ -210,6 +218,22 @@ impl AnonTokenIssuer {
         self.young_call_join_quota = quota;
         self.young_age_secs = age_secs;
         self
+    }
+
+    /// Attach the supporter-code pepper (ADR-0097).
+    pub(crate) fn with_supporter_pepper(
+        mut self,
+        pepper: Option<crate::supporter_codes::SupporterPepper>,
+    ) -> Self {
+        self.supporter_pepper = pepper;
+        self
+    }
+
+    /// The supporter-code pepper, if configured.
+    pub(crate) const fn supporter_pepper(
+        &self,
+    ) -> Option<&crate::supporter_codes::SupporterPepper> {
+        self.supporter_pepper.as_ref()
     }
 
     /// The quota for `context`.
@@ -249,6 +273,7 @@ pub(crate) fn load_anon_tokens() -> anyhow::Result<Option<AnonTokenIssuer>> {
         quotas,
         young_call_join_quota,
         young_age_secs,
+        supporter_pepper: None,
     }))
 }
 
@@ -348,6 +373,9 @@ pub(crate) enum TokenApiError {
     Disabled,
     /// Not a known context (400 `unknown-context`).
     UnknownContext,
+    /// A context this route never issues: `beta-place`, which only the
+    /// supporter-code redeem evaluates (400 `context-not-issuable`).
+    ContextNotIssuable,
     /// Empty or oversized batch (400 `bad-batch-size`).
     BadBatchSize,
     /// A blinded element that is not valid base64url or not a valid point
@@ -378,6 +406,10 @@ impl IntoResponse for TokenApiError {
             Self::UnknownContext => (
                 StatusCode::BAD_REQUEST,
                 json!({ "error": "unknown-context" }),
+            ),
+            Self::ContextNotIssuable => (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": "context-not-issuable" }),
             ),
             Self::BadBatchSize => (
                 StatusCode::BAD_REQUEST,
@@ -478,7 +510,10 @@ pub(crate) async fn issue_tokens(
     let issuer = issuer(&state)?;
     let context =
         TokenContext::from_name(&req.context).map_err(|_| TokenApiError::UnknownContext)?;
-    let epoch = issuer.server.current_epoch();
+    if !context.is_session_issuable() {
+        return Err(TokenApiError::ContextNotIssuable);
+    }
+    let epoch = issuer.server.current_epoch_for(context);
     if let Some(e) = req.epoch {
         if e != epoch {
             return Err(TokenApiError::EpochNotIssuable {
@@ -530,7 +565,7 @@ pub(crate) async fn issue_tokens(
                 remaining,
                 retry_after_secs: issuer
                     .server
-                    .current_epoch_ends_at()
+                    .current_epoch_ends_at_for(context)
                     .saturating_sub(now)
                     .max(1),
             });
@@ -561,7 +596,7 @@ pub(crate) async fn issue_tokens(
         proof: URL_SAFE_NO_PAD.encode(issuance.proof),
         public_key: URL_SAFE_NO_PAD.encode(key.public_key()),
         remaining,
-        epoch_ends_at: issuer.server.current_epoch_ends_at(),
+        epoch_ends_at: issuer.server.current_epoch_ends_at_for(context),
     }))
 }
 
@@ -590,7 +625,8 @@ pub(crate) async fn public_key(
 ) -> Result<Response, TokenApiError> {
     let issuer = issuer(&state)?;
     let context = TokenContext::from_name(&context).map_err(|_| TokenApiError::UnknownContext)?;
-    let current = issuer.server.current_epoch();
+    // `beta-place` counts its epochs in its own 30-day window (ADR-0097).
+    let current = issuer.server.current_epoch_for(context);
     if epoch.saturating_add(1) < current || epoch > current.saturating_add(1) {
         return Err(TokenApiError::EpochOutOfRange);
     }

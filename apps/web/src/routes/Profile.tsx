@@ -382,6 +382,8 @@ export default function Profile(): JSX.Element {
     switch (e.kind) {
       case "upload":
         return t("profile.save.error.upload");
+      case "full":
+        return t("profile.save.error.full");
       case "taken":
         return t("profile.username.taken", { username: `@${e.username}` });
       case "cancelled":

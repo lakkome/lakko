@@ -94,6 +94,17 @@ pub(crate) async fn put_backup(
 ) -> Result<Response, (StatusCode, String)> {
     let parent = backup_parent(&state.blob_root);
     let target = backup_path(&state.blob_root, &authed.0);
+    // The free-space guard (`crate::disk`), with the largest backup as the
+    // incoming size: the body length is not known before it is read.
+    if !crate::disk::check(
+        &state.blob_root,
+        MAX_BACKUP_BYTES as u64,
+        state.limits.min_free_bytes,
+    )
+    .await
+    {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "storage-full".to_string()));
+    }
 
     tokio::fs::create_dir_all(&parent).await.map_err(|e| {
         tracing::error!(error = %e, dir = %parent.display(), "create backup parent");
@@ -182,24 +193,33 @@ pub(crate) async fn delete_backup(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let path = backup_path(&state.blob_root, &authed.0);
-
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => {
-            tracing::info!("backup blob deleted",);
-            Ok(StatusCode::NO_CONTENT)
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Idempotent — no row, no work, success.
-            Ok(StatusCode::NO_CONTENT)
-        },
+    match remove_backup(&state.blob_root, &authed.0).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
-            tracing::error!(error = %e, path = %path.display(), "delete backup");
+            tracing::error!(error = %e, "delete backup");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal io error".to_string(),
             ))
         },
+    }
+}
+
+/// Remove the backup blob of `account_id`, if there is one. Idempotent: a
+/// missing blob is success. Shared by `DELETE /backup` and the internal
+/// purge route auth calls after deleting an account (`crate::internal`).
+///
+/// # Errors
+///
+/// An I/O error other than "not found".
+pub(crate) async fn remove_backup(root: &Path, account_id: &[u8; 16]) -> std::io::Result<()> {
+    match tokio::fs::remove_file(backup_path(root, account_id)).await {
+        Ok(()) => {
+            tracing::info!("backup blob deleted");
+            Ok(())
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 

@@ -428,6 +428,58 @@ public class AnonTokenPool(
         for (context in AnonTokenContext.entries) scheduledRefill(context, gen)
     }
 
+    /**
+     * Take [count] tokens of [context] out of the pool now, issuing with the
+     * live session what the pool does not hold (batches of at most
+     * [RESERVE_BATCH]). For spends that must happen after the session can no
+     * longer be issued to: Delete account removes its push subscriptions once
+     * auth has deleted the account, one `push-register` token each. The
+     * tokens leave the pool; the caller spends them. Returns as many as could
+     * be had (a quota, a refusal or no session stops it; nothing is thrown).
+     */
+    public suspend fun reserve(context: AnonTokenContext, count: Int): List<PooledAnonToken> {
+        val s = session() ?: return emptyList()
+        val out = ArrayList<PooledAnonToken>(count.coerceAtLeast(0))
+        val gen = synchronized(lock) {
+            if (s.accountKey in forgotten) return emptyList()
+            adoptLocked(s)
+            var next = if (out.size < count) popLiveLocked(context) else null
+            while (next != null) {
+                out += next
+                next = if (out.size < count) popLiveLocked(context) else null
+            }
+            generation
+        }
+        while (out.size < count) {
+            synchronized(lock) {
+                if (generation != gen) return out
+                val until = exhaustedUntil[context]
+                if (until != null && nowSecs() < until) return out
+            }
+            val result = try {
+                issueBatch(context, s, minOf(count - out.size, RESERVE_BATCH))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                RefillResult.Failed("reserve threw", e)
+            }
+            when (result) {
+                is RefillResult.Filled -> {
+                    if (result.tokens.isEmpty()) return out
+                    out += result.tokens
+                }
+                is RefillResult.Quota -> {
+                    synchronized(lock) {
+                        if (generation == gen) exhaustedUntil[context] = nowSecs() + result.retryAfterSecs
+                    }
+                    return out
+                }
+                else -> return out
+            }
+        }
+        return out
+    }
+
     override suspend fun takeDetached(session: AnonSession, context: AnonTokenContext): PooledAnonToken {
         synchronized(lock) {
             if (owner == session.accountKey) {
@@ -730,6 +782,10 @@ public class AnonTokenPool(
     public companion object {
         /** The most a context holds. */
         public const val MAX_HELD: Int = 32
+
+        /** Largest batch [reserve] asks the issuer for (the issuer's
+         *  `MAX_BATCH`). */
+        public const val RESERVE_BATCH: Int = 32
 
         /** How long an action waits for a refill before failing. */
         public const val DEFAULT_WAIT_MS: Long = 8_000L

@@ -725,6 +725,10 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // The store gate's cross-tab marker: digests of the accounts wiped in the
   // last minute, never an account id; it prunes itself.
   "lakko.account-store-gate.wiped.v1": "device",
+  // docs/ux/supporters.md: a supporter place is pre-account and names no
+  // account; the signed supporters list is the same for everyone.
+  "lakko.supporter-place.v1": "device",
+  "lakko.supporters.v1": "device",
   "lakko.push.token.v1": "device",
   "lakko.composer.recordMode": "device",
   // ADR-0089: the camera background chosen on this device, not synced.

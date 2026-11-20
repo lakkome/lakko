@@ -113,6 +113,29 @@ public final class AuthClient {
         try await postNoBody(endpoint: "/pow/challenge")
     }
 
+    /// `GET /signup/open` - whether sign-up is open now (the beta account
+    /// cap, `docs/ux/beta-account-cap.md`). Anonymous. Throws on any failure;
+    /// ``signupOpen()`` is what screens ask.
+    public func signupOpenStatus() async throws -> Bool {
+        let url = try buildURL(endpoint: "/signup/open")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let resp: SignupOpenResponse = try await execute(endpoint: "/signup/open", request: request)
+        return resp.open
+    }
+
+    /// ``signupOpenStatus()`` with every failure (no connection, an error,
+    /// an older server answering `404`, a body that does not parse) read as
+    /// open: the username bind decides later.
+    public func signupOpen() async -> Bool {
+        do {
+            return SignupCap.isOpen(.success(try await signupOpenStatus()))
+        } catch {
+            NSLog("[auth] sign-up open check failed, treated as open: %@", String(describing: type(of: error)))
+            return SignupCap.isOpen(.failure(error))
+        }
+    }
+
     /// `POST /signup/start`.
     public func signupStart(
         _ request: SignupStartRequest
@@ -1354,6 +1377,30 @@ public final class AuthClient {
             body: LoginHandleBindRequest(handle: base64UrlEncodeNoPad(handle)),
             bearer: sessionToken
         )
+    }
+
+    /// The first bind carrying a held supporter place (ADR-0097) in
+    /// `x-lakko-anon-token`. Auth reads the token only when the beta cap
+    /// refuses the bind; `403 supporter-code-used` when it was spent by
+    /// another account. `nil` is the plain ``bindLoginHandle(handle:sessionToken:)``.
+    public func bindLoginHandle(handle: Data, sessionToken: String, supporterToken: String?) async throws {
+        guard let supporterToken else {
+            try await bindLoginHandle(handle: handle, sessionToken: sessionToken)
+            return
+        }
+        try requireHandle(handle)
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let endpoint = "/auth/login-handle"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(supporterToken, forHTTPHeaderField: AnonTokenRoute.headerName)
+        request.httpBody = try encodeBody(
+            endpoint: endpoint, LoginHandleBindRequest(handle: base64UrlEncodeNoPad(handle)))
+        let _: LoginHandleBindResponse = try await execute(endpoint: endpoint, request: request)
     }
 
     /// `PUT /auth/login-handle` that CHANGES the account's handle (ADR-0076

@@ -2610,6 +2610,10 @@ unconditionally and forever stops being read. ADR-0046 has the full argument.
 
 **The gate, stated so it cannot be quietly routed around: no build reaches users while
 this is open** — no store submission, no GA tag. That is where "after Phase 2" bites.
+**Amended 2026-11-18 ([ADR-0046](../adr/0046-external-crypto-review.md) amendment):** a
+public beta capped at 1000 accounts, on beta channels only, marked as unaudited and not
+promoted to people at risk, may run while this is open. Lifting the cap, a production
+store listing and a GA tag still wait for this review.
 
 **Scoped for an engagement in
 [`external-review-scope.md`](./external-review-scope.md)** (added 2026-09-02) — the

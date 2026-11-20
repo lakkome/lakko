@@ -152,6 +152,9 @@ public final class ChatMediaController: ObservableObject {
     /// ADR-0065 / UX 4.2 — the last media send stopped at the sending limit:
     /// the composer says so. Cleared by the next send that starts.
     @Published public private(set) var sendLimited = false
+    /// UX storage-full — a media send stopped because the server has no room
+    /// for new files. Cleared at the next send, like ``sendLimited``.
+    @Published public private(set) var sendStorageFull = false
     /// ADR-0065 section 6 — blobs uploaded for a send that has not gone out
     /// yet, per job. Read by `deinit` (the chat closed with the send
     /// abandoned), so it is written on the main actor only.
@@ -686,6 +689,7 @@ public final class ChatMediaController: ObservableObject {
             $0.progress = 0
         }
         sendLimited = false
+        sendStorageFull = false
         do {
             if job.uploaded == nil {
                 if job.fileURL == nil, let gif = job.gif {
@@ -756,6 +760,7 @@ public final class ChatMediaController: ObservableObject {
         } catch {
             Self.log.warning("media message not sent")
             if case AttachmentBridgeError.uploadLimited = error { sendLimited = true }
+            if case AttachmentBridgeError.storageFull = error { sendStorageFull = true }
             updatePending(job.id) { $0.failed = true }
         }
     }

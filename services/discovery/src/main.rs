@@ -153,6 +153,9 @@
 //! - `POST   /discovery/group-invite`             — upload GroupInviteCapability blob (ADR-0028, G-3)
 //! - `GET    /discovery/group-invite/{blob_id}`   — fetch GroupInviteCapability blob (ADR-0028, G-3)
 //! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3, token)
+//!
+//! On the internal listener only (`LAKKO_DISCOVERY_INTERNAL_BIND`, `src/internal.rs`):
+//! - `POST   /internal/accounts/{account_id_hex}/purge` — auth purges a deleted account's rows
 
 #![forbid(unsafe_code)]
 
@@ -162,6 +165,7 @@ mod call_invite;
 mod group_invite;
 mod handles;
 mod identity_bundle;
+mod internal;
 mod invite;
 mod key_reset;
 mod keypackage;
@@ -402,6 +406,12 @@ async fn main() -> Result<()> {
 
     let name_policy = load_name_policy()?;
 
+    // The internal listener auth purges deleted accounts through. Both
+    // variables or neither; one alone refuses startup.
+    let internal_config = internal::load_config()
+        .map_err(anyhow::Error::msg)
+        .context("internal listener")?;
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
@@ -450,6 +460,8 @@ async fn main() -> Result<()> {
     // ONLY when the transparency integration is armed; best-effort +
     // idempotent, so it never blocks startup or any request path.
     let _transparency_reconciler = maybe_spawn_reconciler(state.transparency.clone(), pool.clone());
+
+    let _internal = internal::spawn(pool.clone(), internal_config).await?;
 
     let app = build_app(state);
 
@@ -1134,6 +1146,16 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
         let app = locate_app(100.0);
+        // Other tests in this binary run the same router at the same time
+        // with no subscriber, and a callsite one of them registers while this
+        // one starts can be cached as "never interested": the capture then
+        // sees nothing (it failed most full runs). A first request makes
+        // every callsite on this path registered, the rebuild recomputes
+        // their interest with this subscriber present, and only the second
+        // request is checked.
+        let _ = locate_as(&app, &[("x-real-ip", "198.51.100.9")]).await;
+        tracing::callsite::rebuild_interest_cache();
+        sink.0.lock().unwrap().clear();
         let (_, body, _) = locate_as(
             &app,
             &[

@@ -126,9 +126,12 @@ import {
   claimUsername,
   loginHandleFor,
   nameTargetFor,
+  RegistrationClosedError,
+  SupporterCodeUsedError,
   type LoginHandle,
   type NameTarget,
 } from "./login-handle";
+import { defaultPlaceStorage, dropHeldPlace, readHeldPlace } from "../supporters/supporter-code";
 import { createLoginHandleSync } from "./login-handle-sync";
 import { decideSilentRestore } from "./silent-restore";
 import { sessionTokens } from "./session-token-provider";
@@ -823,6 +826,10 @@ export interface AuthApi {
     password: string,
     options?: { readonly signal?: AbortSignal },
   ): Promise<SignupOutcome>;
+  /** `GET /signup/open` (`docs/ux/beta-account-cap.md`): whether a new
+   *  account with a username fits under the beta cap. Never rejects; a
+   *  failed question resolves `true`. */
+  signupOpen(): Promise<boolean>;
   /** ADR-0032 guest join — create a FULL account with NO username and no
    *  user-chosen password, so a visitor who opened a `/c/` link without an
    *  account goes straight into the call. Reuses the `signup` machinery:
@@ -838,6 +845,10 @@ export interface AuthApi {
   /** The session is a guest account (`guest-account.ts`): made to join a
    *  call from a link, not yet kept. */
   readonly isGuest: Accessor<boolean>;
+  /** The username an earlier `Create account` of this guest already bound
+   *  (the guest marker's `claimedUsername`), or `null`. Such a guest holds a
+   *  place under the beta cap (`docs/ux/beta-account-cap.md`). */
+  readonly guestReservedUsername: Accessor<string | null>;
   /** Delete a guest account at once: on the servers (in the order
    *  `guestDeletePlan` gives, which frees a username an unfinished
    *  `Create account` took), and every trace of it on this device. Lands
@@ -4409,6 +4420,37 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /**
+   * A sign-up refused at its first login-handle bind (the beta account cap,
+   * `docs/ux/beta-account-cap.md` section 2 item 4): delete the account the
+   * sign-up just made, then remove it from this device the way a declined
+   * guest is removed. Auth deletes an account with no login handle and no
+   * passkey on its session alone. A failed delete is logged and the device
+   * is wiped anyway: the server's unclaimed-account sweep removes the
+   * account within a day. Nothing of it was persisted as this device's
+   * account yet (the account marker is written after the claim), so another
+   * account cached on this browser is left alone, and the route state stays
+   * where it is.
+   */
+  async function discardRefusedSignup(accountIdB64: string, sessionToken: string): Promise<void> {
+    try {
+      const webauthn = new WebauthnClient();
+      webauthn.setSessionToken(sessionToken);
+      await webauthn.deleteAccount(null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "registration closed: the new account was not deleted; left to the server's sweep",
+        err instanceof WebauthnHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+      );
+    }
+    dropSession();
+    await wipeAccountLocalData(accountIdB64);
+    anonTokens.forgetAccount(accountIdB64);
+    // eslint-disable-next-line no-console
+    console.info("registration closed");
+  }
+
   /** Page-load restore; a key-store refusal (desktop) puts up the refusal
    *  screen, whose Try again runs the restore again. */
   async function restoreSessionOnLoad(): Promise<void> {
@@ -5737,17 +5779,45 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // again (so a retry is not refused by our own half claim). Either
       // "taken" surfaces as the form's taken copy.
       const handle = await loginHandleFor(trimmed);
-      const reg = await claimUsername({
-        username: trimmed,
-        bind: async () => {
-          await client.bindLoginHandle(result.session.sessionToken, handle.wire);
-          loginHandleSync.markBound(result.session.sessionToken, handle.wire);
-        },
-        register: () => discovery.registerUsername(result.accountId, trimmed),
-        release: async () => {
-          await client.releaseLoginHandle(result.session.sessionToken);
-        },
-      });
+      // ADR-0097: a supporter place held on this device rides the first
+      // bind; auth spends it only if the beta cap refuses the bind.
+      const placeStorage = defaultPlaceStorage();
+      const heldPlace = readHeldPlace(placeStorage, Date.now());
+      let reg: Awaited<ReturnType<typeof discovery.registerUsername>>;
+      try {
+        reg = await claimUsername({
+          username: trimmed,
+          bind: async () => {
+            await client.bindLoginHandle(
+              result.session.sessionToken,
+              handle.wire,
+              undefined,
+              heldPlace?.header,
+            );
+            loginHandleSync.markBound(result.session.sessionToken, handle.wire);
+          },
+          register: () => discovery.registerUsername(result.accountId, trimmed),
+          release: async () => {
+            await client.releaseLoginHandle(result.session.sessionToken);
+          },
+        });
+      } catch (err) {
+        // `docs/ux/beta-account-cap.md` section 2 item 4: the beta filled
+        // between the question and the bind. The account just made holds no
+        // name (auth refused the bind before discovery was asked), so it is
+        // deleted at once and leaves this device; the screen shows the full
+        // state.
+        if (err instanceof RegistrationClosedError) {
+          await discardRefusedSignup(accountIdB64, result.session.sessionToken);
+        }
+        // `docs/ux/supporters.md` 1.2: the held place was already spent by
+        // another account. Same discard; the place is dropped.
+        if (err instanceof SupporterCodeUsedError) {
+          dropHeldPlace(placeStorage);
+          await discardRefusedSignup(accountIdB64, result.session.sessionToken);
+        }
+        throw err;
+      }
       const normalisedUsername = reg.normalisedUsername;
 
       savePersisted({
@@ -5957,6 +6027,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
       return { recoveryPhrase: result.recoveryPhrase };
     },
+    signupOpen: () => client.signupOpen(),
     async signupGuest(options) {
       // ADR-0032 guest join. This is the `signup` flow up to (but NOT
       // including) the username claim: OPAQUE registration under a RANDOM
@@ -6102,6 +6173,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     isGuest: () => guestState() !== null,
+    guestReservedUsername: () => guestState()?.claimedUsername ?? null,
     async discardGuestAccount() {
       const current = state();
       const secrets = identitySecrets();

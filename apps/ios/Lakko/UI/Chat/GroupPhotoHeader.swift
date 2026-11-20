@@ -149,6 +149,8 @@ struct GroupPhotoHeader<Model: ConversationPhotoModel>: View {
             }
         case .limited:
             line(l10n.t("group_photo.error.limit"))
+        case .full:
+            line(l10n.t("group_photo.error.full"))
         case .owed:
             line(l10n.t("group_photo.owed"))
         case .notAllowed:

@@ -276,6 +276,7 @@ private fun groupPhotoFailure(cause: Throwable): UiText? {
         if (c is me.lakko.app.chat.GroupPhotoOwed) return null
         if (c is me.lakko.app.chat.GroupPhotoNotAllowed) return UiText("group_photo.error.not_allowed")
         if (c is me.lakko.app.storage.StorageHttpError && c.status == 429) return UiText("group_photo.error.limit")
+        me.lakko.app.media.groupPhotoRefusalKey(c)?.let { return UiText(it) }
         if (c is me.lakko.app.chat.AttachmentBridgeException) return UiText("group_photo.error.upload")
         c = c.cause
     }
