@@ -76,7 +76,7 @@ describe("the Protect your account step", () => {
     const q = skipProtectConfirmation(true);
     expect(q.title).toBe("Continue without protection?");
     expect(q.body).toBe(
-      "If you forget your password, or lose this phone, you will not be able to get back into this account.",
+      "If you forget your password or lose this device, you will not be able to get back into this account.",
     );
     expect(q.confirmLabel).toBe("Add an email");
     expect(q.cancelLabel).toBe("Continue without");

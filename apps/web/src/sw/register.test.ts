@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { shouldCheckForUpdate, UPDATE_CHECK_MIN_GAP_MS } from "./register";
+import { shouldCheckForUpdate, updateFoundAction, UPDATE_CHECK_MIN_GAP_MS } from "./register";
 
 describe("shouldCheckForUpdate", () => {
   it("checks at once when nothing has been checked yet", () => {
@@ -21,5 +21,21 @@ describe("shouldCheckForUpdate", () => {
 
   it("checks again once the gap has passed", () => {
     expect(shouldCheckForUpdate(1_000, 1_000 + UPDATE_CHECK_MIN_GAP_MS, true)).toBe(true);
+  });
+});
+
+describe("updateFoundAction", () => {
+  it("ignores the first install: nothing controls the page", () => {
+    expect(updateFoundAction(false, false)).toBe("ignore");
+    expect(updateFoundAction(false, true)).toBe("ignore");
+  });
+
+  it("takes a worker that came with this page's own load without a notice", () => {
+    // Walk 7: "A new version of Lakko is ready" on the first load of the site.
+    expect(updateFoundAction(true, false)).toBe("activate-silently");
+  });
+
+  it("offers the reload only for a newer version found later", () => {
+    expect(updateFoundAction(true, true)).toBe("offer-reload");
   });
 });

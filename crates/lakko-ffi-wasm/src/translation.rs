@@ -652,8 +652,9 @@ mod tests {
             "en",
             vec!["es".into(), "fr".into()],
         );
-        assert_eq!(r.line_tag().as_deref(), Some("es"));
-        assert!(r.line_can_translate());
+        // An unsure guess is not named up front; Translate starts from es.
+        assert_eq!(r.line_tag(), None);
+        assert!(!r.line_can_translate());
         assert_eq!(r.translate_source().as_deref(), Some("es"));
     }
 

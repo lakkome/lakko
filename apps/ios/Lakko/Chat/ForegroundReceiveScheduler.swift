@@ -134,6 +134,8 @@ final class ForegroundReceiveScheduler {
     private let backoff = GroupBackoff()
     private var nudged = false
     private var wakeWindowUntilMs: Int64 = 0
+    /// The groups the last sweep started with; `nil` before the first one.
+    private var lastSweepGroups: Set<String>?
 
     init(ports: Ports, config: Config = Config()) {
         self.ports = ports
@@ -185,6 +187,22 @@ final class ForegroundReceiveScheduler {
         nudged = true
     }
 
+    /// Whether a group appeared since the last sweep began: a chat this
+    /// device just joined (a Welcome, an approved request, a recreated
+    /// group). Its first messages and its name arrive in the next minute, and
+    /// may not bring a push wake (the device subscribes to its pushes only
+    /// once it holds the group's routing secret), so it is swept at once and
+    /// the short interval kept for ``Config/wakeWindowMs``. Walk 7
+    /// (2026-11-20): a group joined on an iPhone read "No messages yet" under
+    /// the creator's name for over 15 s though its first message had arrived.
+    func noteGroupsIfNew() -> Bool {
+        guard let last = lastSweepGroups else { return false }
+        let now = Set(ports.groups())
+        guard !now.isSubset(of: last) else { return false }
+        nudge()
+        return true
+    }
+
     /// The pause before the next sweep, for this moment.
     func currentIntervalMs() -> Int64 {
         guard let pushReachable = ports.pushReachable else { return config.intervalMs }
@@ -223,6 +241,7 @@ final class ForegroundReceiveScheduler {
             let slice = min(remaining, 1_000)
             await ports.sleepMs(slice)
             remaining -= slice
+            _ = noteGroupsIfNew()
         }
     }
 
@@ -249,7 +268,9 @@ final class ForegroundReceiveScheduler {
     /// most ``Config/concurrency`` polls in flight. Returns when the pass is
     /// done or the task is cancelled; never throws.
     func runSweep() async {
-        let queue = SweepQueue(groups: ports.groups())
+        let groups = ports.groups()
+        lastSweepGroups = Set(groups)
+        let queue = SweepQueue(groups: groups)
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<max(1, config.concurrency) {
                 group.addTask { @MainActor [weak self] in

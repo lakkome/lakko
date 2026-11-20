@@ -166,8 +166,6 @@ public fun SignupScreen(
                 }
             }
         }
-        Spacer(Modifier.height(12.dp))
-        Lead(t("auth.signup.lede"))
         Spacer(Modifier.height(16.dp))
     }
 }

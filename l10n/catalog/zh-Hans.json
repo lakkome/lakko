@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "服务器未启用通行密钥。",
+      "text": "通行密钥暂不可用。",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "已有账号？{link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "你的密码绝不会离开你的设备。",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "会显示给你的联系人。留空则显示你的用户名。",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "服务器返回了被篡改或过期的备份。你的账号是安全的；我们没有恢复旧数据，直接继续了。",
+      "text": "Lakko 收到了你已保存数据的过期副本，没有使用它。你的帐户是安全的。",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "Lakko 处于测试阶段，其安全性尚未经过独立审计。在你的安全依赖于它的场合，请不要依赖它。",
+      "text": "Lakko 处于测试阶段。独立的安全审计尚未完成，我们正在推进。我们相信 Lakko 可以安全使用，但目前还无法证明。继续即表示你接受这一风险。",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "服务器拒绝了该请求。请稍后再试。",
+      "text": "Lakko 暂时无法完成此操作。请稍后再试。",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "服务器上不存在此频道。",
+      "text": "此频道已不存在。",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "服务器目前没有空间存放新文件。请稍后再试。",
+      "text": "Lakko 目前没有空间存放新文件。请稍后再试。",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "正在加密“{name}”…",
+      "text": "正在准备“{name}”…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "正在加密“{name}”（{index}/{total}）…",
+      "text": "正在准备“{name}”（{index}/{total}）…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "正在加密并上传…",
+      "text": "正在发送…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "无法连接到服务器。请检查网络连接。",
+      "text": "无法连接到 Lakko。请检查网络连接。",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "服务器目前没有空间存放新文件。请稍后再试。",
+      "text": "Lakko 目前没有空间存放新文件。请稍后再试。",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "任何打开你链接的人都可以向你发送联系人请求，直到链接过期或次数用完。",
+      "text": "任何打开你的链接的人都会成为你的联系人，直到链接过期或用完为止。",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "扫描此二维码的任何人都可以向你发送联系人请求。",
+      "text": "扫描此二维码的人会成为你的联系人。",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "服务器目前没有空间存放新文件。请稍后再试。",
+      "text": "Lakko 目前没有空间存放新文件。请稍后再试。",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "如果你忘记密码或丢失这部手机，可以通过这种方式重新登录。",
+      "text": "如果你忘记密码或丢失这台设备，可以通过这种方式重新进入。",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "如果你忘记密码或丢失这部手机，将无法重新登录此账号。",
+      "text": "如果你忘记密码或丢失这台设备，将无法回到这个帐户。",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "无法恢复你的身份。请重试。",
+      "text": "无法恢复你的帐户。请重试。",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "消息、通话和联系人请求均为端到端加密：只有对话中的人能读取，Lakko 的服务器永远无法读取。你的密码从不离开你的设备，每位联系人都有一个安全码，你可以当面核对。",
+      "text": "消息、通话和联系人请求都经过端到端加密：只有对话中的人才能读取。每个联系人都有一个安全码，你们可以当面核对。",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "“退出登录”会将你的数据保留在此设备上。“忘记此设备”会移除这些数据；之后只能通过另一台已登录的设备、可恢复账号密钥的通行密钥或恢复短语回来。“删除账号”会清除服务器上的账号并清空此设备；此操作无法撤销。",
+      "text": "退出登录会把你的消息保留在此设备上。忘记此设备会从此设备上移除它们，你的帐户仍然保留。删除帐户会永久删除你的帐户。",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "这会清除你在服务器上的身份信息——用户名、密钥、恢复方式和备份——并在所有设备上退出登录。此设备上的本地消息也会被清除。此操作无法撤销。",
+      "text": "你的帐户、用户名、联系人和消息将被删除，所有设备都会退出登录。此操作无法撤销。",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "Lakko 关闭时，频道帖子可能会延迟送达。",
+      "text": "Lakko 关闭时，新频道帖子的通知可能会延迟。",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "服务器错误（{status}）。",
+      "text": "出了点问题（{status}）。请重试。",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "持有对应私钥的设备将无法再用它登录。此操作无法撤销。",
+      "text": "你将无法再使用此通行密钥登录。此操作无法撤销。",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "设置用于登录的新密码。此设备已有你的账号密钥，因此你只需输入新密码。",
+      "text": "选择一个新的登录密码。",
       "status": "machine"
     },
     "settings.password.title": {

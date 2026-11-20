@@ -25,9 +25,9 @@ blob-upload-budget-exhausted`) is shown, with its own words, and behaves the sam
 
 | Where | Key | Text |
 |---|---|---|
-| Composer note, a message with attachments, a voice or video message, a GIF | `chat.attachment.full.send` | The server has no room for new files right now. Try again later. |
-| Group photo | `group_photo.error.full` | The server has no room for new files right now. Try again later. |
-| Profile photo | `profile.save.error.full` | The server has no room for new files right now. Try again later. |
+| Composer note, a message with attachments, a voice or video message, a GIF | `chat.attachment.full.send` | Lakko has no room for new files right now. Try again later. |
+| Group photo | `group_photo.error.full` | Lakko has no room for new files right now. Try again later. |
+| Profile photo | `profile.save.error.full` | Lakko has no room for new files right now. Try again later. |
 
 Any other upload that already maps the file-sending limit to a sentence maps
 `storage-full` to the matching one of these. An upload with no such mapping keeps its

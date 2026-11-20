@@ -5,8 +5,8 @@
 //!
 //! Part of the cross-service account deletion: `services/auth` purges the auth
 //! tier (FK cascade over OPAQUE / passkeys / recovery factors), THIS purges the
-//! discovery tier (username binding, identity bundle, KeyPackage, name search
-//! terms), and `services/storage` purges the backup blob.
+//! discovery tier (identity bundle, KeyPackage, name search terms; the
+//! username binding is held anonymously, ADR-0098), and `services/storage` purges the backup blob.
 //!
 //! Invite ledger rows are not deleted here: since ADR-0078 section 10 they name
 //! no owner, so there is nothing to find them by. A deleting client revokes its
@@ -40,9 +40,9 @@ pub(crate) async fn delete_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Delete every account-keyed discovery row of `account_id`: its names (and
-/// their one-namespace claims), its identity bundle, and everything
-/// [`purge_owned_rows`] removes. Idempotent.
+/// Delete every account-keyed discovery row of `account_id`: its identity
+/// bundle and everything [`purge_owned_rows`] removes. Its names are not freed
+/// at once: they are held like a renamed name (ADR-0098 section 4). Idempotent.
 ///
 /// # Errors
 ///
@@ -52,22 +52,63 @@ pub(crate) async fn purge_account(
     pool: &sqlx::MySqlPool,
     account_id: &[u8; 16],
 ) -> Result<(), sqlx::Error> {
-    // The username binding and the published identity bundle are keyed on
-    // `account_id`; so is everything `purge_owned_rows` removes.
-    for sql in [
-        // The one-namespace claims of its names (ADR-0087), while the rows
-        // still say which names they are; then every row, current and
-        // retired (ADR-0076). The handles of groups and channels the account
-        // owns are not found here (a handle names no account): the client
-        // retires them before deleting the account.
-        "DELETE FROM name_claims WHERE lookup_key IN \
-           (SELECT oprf_hash FROM usernames WHERE account_id = ?)",
-        "DELETE FROM usernames WHERE account_id = ?",
+    // ADR-0098 section 4: the account's names are held, not freed. The
+    // current row is retired now and every row of the account (current and
+    // retired) has its account id replaced by random bytes, so a held row
+    // names no account and no rename can take it back; its one-namespace
+    // claim (ADR-0087) stays, and the hourly ADR-0076 pruner frees both after
+    // the hold. Freed at once, a stranger could register the name the same
+    // hour and be shown under it on the old contact by every peer that has
+    // not yet learned of the deletion. The handles of groups and channels the
+    // account owns are not found here (a handle names no account): the client
+    // retires them before deleting the account.
+    hold_usernames(pool, account_id).await?;
+    // The published identity bundle is keyed on `account_id`; so is everything
+    // `purge_owned_rows` removes. Its absence is what a peer reads as "this
+    // account was deleted" (`GET /discovery/identity/{id}` answers 404).
+    delete_keyed(
+        pool,
         "DELETE FROM identity_bundles WHERE account_id = ?",
-    ] {
-        delete_keyed(pool, sql, account_id).await?;
-    }
+        account_id,
+    )
+    .await?;
     purge_owned_rows(pool, account_id).await
+}
+
+/// Retire every username row of `account_id` and re-key it to a random id
+/// (ADR-0098 section 4). Idempotent: a second run finds no row under the old
+/// id. Retried on a lock conflict like [`delete_keyed`].
+async fn hold_usernames(pool: &sqlx::MySqlPool, account_id: &[u8; 16]) -> Result<(), sqlx::Error> {
+    use rand::RngCore as _;
+    let mut held = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut held);
+    let mut tries = 1;
+    loop {
+        let attempt = async {
+            let mut conn = pool.acquire().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "UPDATE usernames SET retired_at = COALESCE(retired_at, NOW(3)), \
+                 is_public = FALSE, account_id = ? WHERE account_id = ?",
+            )
+            .bind(held.as_slice())
+            .bind(account_id.as_slice())
+            .execute(&mut *conn)
+            .await
+        };
+        match attempt.await {
+            Err(e)
+                if tries < crate::handles::LOCK_ATTEMPTS
+                    && crate::identity_bundle::is_lock_conflict(&e) =>
+            {
+                tries += 1;
+            },
+            Err(e) => return Err(e),
+            Ok(_) => return Ok(()),
+        }
+    }
 }
 
 /// Everything an account owns here besides its username binding and its

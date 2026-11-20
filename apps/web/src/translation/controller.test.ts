@@ -271,11 +271,26 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     expect(await settled(c, ref(1), "hola amigos")).toEqual({ phase: "detected", source: "es", canTranslate: true });
   });
 
-  it("names an unsure guess too", async () => {
+  it("does not name an unsure guess (walk 7: English read as Polish)", async () => {
     f.detections.set("goedemorgen", { tag: "nl", permille: 400 });
     f.translationState.set("nl>en", "ready");
     const c = controller();
-    expect(await settled(c, ref(2), "goedemorgen")).toEqual({ phase: "detected", source: "nl", canTranslate: true });
+    expect(await settled(c, ref(2), "goedemorgen")).toEqual({ phase: "none" });
+    // Translate in the menu still starts from the guess.
+    c.translate("text", ref(2), "goedemorgen");
+    for (let i = 0; i < 5; i++) await flush();
+    expect(f.translateCalls.at(-1)?.source).toBe("nl");
+  });
+
+  it("names nothing for short text however probable the detector says it is", async () => {
+    // Walk 7 (2026-11-20): "W7 web to iphone" read "Polish · Translate". The
+    // shared rule makes short text unsure (fewer than 20 letters).
+    const short = wasm.languageCandidatesFromHypotheses("W7 web to iphone", ["pl"], new Uint16Array([900]));
+    expect(short?.confidencePermille).toBeLessThan(wasm.translationDetectionConfidentPermille());
+    f.detections.set("W7 web to iphone", { tag: "pl", permille: short?.confidencePermille ?? 0 });
+    f.translationState.set("pl>en", "ready");
+    const c = controller();
+    expect(await settled(c, ref(6), "W7 web to iphone")).toEqual({ phase: "none" });
   });
 
   it("is not shown on own messages or messages without text", async () => {
@@ -326,15 +341,15 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     });
   });
 
-  it("names and translates an unsure guess it cannot translate from by its first usable candidate", async () => {
-    // Seen on a Pixel: "hola, qué tal?" read as unsure Catalan, no line at
-    // all. The line names what Translate uses.
+  it("translates an unsure guess it cannot translate from by its first usable candidate, with no line", async () => {
+    // Seen on a Pixel: "hola, qué tal?" read as unsure Catalan. An unsure
+    // guess names nothing up front (walk 7); Translate uses Spanish.
     f.detections.set("hola, qué tal?", { tag: "ca", permille: 180, alternatives: ["es", "fr", "it"] });
     f.translationState.set("es>en", "ready");
     f.translationState.set("fr>en", "ready");
     f.translationState.set("it>en", "ready");
     const c = controller();
-    expect(await settled(c, ref(11), "hola, qué tal?")).toEqual({ phase: "detected", source: "es", canTranslate: true });
+    expect(await settled(c, ref(11), "hola, qué tal?")).toEqual({ phase: "none" });
     c.translate("text", ref(11), "hola, qué tal?");
     for (let i = 0; i < 5; i++) await flush();
     expect(f.translateCalls.at(-1)?.source).toBe("es");
@@ -364,15 +379,17 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     // A confident Italian message makes Italian the conversation's language...
     await settled(c, ref(20), "ciao a tutti, come va oggi?");
     expect(c.prefs(CONV).languages.detections).toEqual([{ messageId: 20, tag: "it" }]);
-    // ...which then names the unsure near tie.
-    expect(await settled(c, ref(21), "Ciao, come stai?")).toEqual({ phase: "detected", source: "it", canTranslate: true });
+    // ...which then decides the unsure near tie: Translate starts from
+    // Italian, and no line names an unsure guess (walk 7).
+    expect(await settled(c, ref(21), "Ciao, come stai?")).toEqual({ phase: "none" });
+    c.translate("text", ref(21), "Ciao, come stai?");
+    for (let i = 0; i < 5; i++) await flush();
+    expect(f.translateCalls.at(-1)?.source).toBe("it");
     // A guess Italian is not a candidate of keeps its own name.
     f.translationState.set("uk>en", "ready");
-    expect(await settled(c, ref(22), "Можешь мне позже перезвонить?")).toEqual({
-      phase: "detected",
-      source: "uk",
-      canTranslate: true,
-    });
+    c.translate("text", ref(22), "Можешь мне позже перезвонить?");
+    for (let i = 0; i < 5; i++) await flush();
+    expect(f.translateCalls.at(-1)?.source).toBe("uk");
   });
 
   it("names hola Spanish in G55 Two, whatever order the chat's messages were detected in", async () => {
@@ -401,7 +418,10 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
         if (entry === undefined) continue;
         await settled(c, ref(entry[0]), entry[1]);
       }
-      expect(await settled(c, ref(9), "hola, qué tal?")).toEqual({ phase: "detected", source: "es", canTranslate: true });
+      expect(await settled(c, ref(9), "hola, qué tal?")).toEqual({ phase: "none" });
+      c.translate("text", ref(9), "hola, qué tal?");
+      for (let i = 0; i < 5; i++) await flush();
+      expect(f.translateCalls.at(-1)?.source).toBe("es");
     }
   });
 
@@ -418,9 +438,13 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     picker?.choose("nl");
     await flush();
     expect(c.prefs(CONV).languages.picks.map((p) => p.tag)).toEqual(["nl"]);
-    // The next unsure message with Dutch among its candidates is Dutch.
+    // The next unsure message with Dutch among its candidates is translated
+    // from Dutch (and, unsure, is not named up front).
     f.detections.set("goedemiddag", { tag: "af", permille: 200, alternatives: ["nl"] });
-    expect(await settled(c, ref(31), "goedemiddag")).toEqual({ phase: "detected", source: "nl", canTranslate: true });
+    expect(await settled(c, ref(31), "goedemiddag")).toEqual({ phase: "none" });
+    c.translate("text", ref(31), "goedemiddag");
+    for (let i = 0; i < 5; i++) await flush();
+    expect(f.translateCalls.at(-1)?.source).toBe("nl");
   });
 
   it("gives way to the translation's own line once a translation is shown", async () => {

@@ -62,6 +62,10 @@
 //!   filter question for the ADR-0052 shared-pin envelope. Decode returns the
 //!   operation (to word a preview); nothing here composes, orders or persists
 //!   one (C-59).
+//! - [`account_deleted::is_account_deleted_envelope`] +
+//!   [`account_deleted::account_deleted_envelope_len`] — the same filter for
+//!   the ADR-0098 account-deleted envelope: yes or no, no field; marking a
+//!   person deleted is the app's decision (C-59).
 //! - [`key_rotation::is_key_rotation_envelope`] +
 //!   [`key_rotation::key_rotation_envelope_len`] — the same filter for the
 //!   ADR-0074 key-rotation envelope, with one difference: it answers yes or
@@ -107,6 +111,7 @@ use std::sync::{Arc, Mutex};
 
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming};
 
+pub mod account_deleted;
 pub mod attachment_kinds;
 pub mod attachments;
 pub mod call_signaling;

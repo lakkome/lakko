@@ -2361,7 +2361,7 @@ Username and password, then one step:
 
 ```
 Protect your account
-If you forget your password or lose this phone, this is how
+If you forget your password or lose this device, this is how
 you get back in.
 
   [mail]  Add an email                 Recommended     >
@@ -2387,7 +2387,7 @@ Not now
 - `Add an email` goes to 19.2. `Save a recovery phrase` goes to 19.5.
   Either lands in the app afterwards; the other stays available in Settings.
 - `Not now` opens the app's own confirmation: "Continue without protection?
-  If you forget your password, or lose this phone, you will not be able to
+  If you forget your password or lose this device, you will not be able to
   get back into this account." with `Add an email` (primary) and `Continue
   without` (plain).
 - An unprotected account shows one dismissible banner in Settings > Account,

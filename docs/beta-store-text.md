@@ -12,8 +12,9 @@ line below that is not true of the build being shipped.
 
 ---
 
-Lakko is in beta, and its security has not yet been checked by an independent audit. Do
-not rely on it where your safety depends on it.
+Lakko is in beta. An independent security audit is not finished yet; we are working on
+it. We believe Lakko is safe to use, but we cannot prove it yet. By continuing, you
+accept this risk.
 
 Lakko is an open-source messenger that encrypts one-to-one chats, groups, channels and
 calls end to end. You sign up with a username; no phone number or email address is

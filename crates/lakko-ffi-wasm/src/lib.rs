@@ -68,6 +68,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod account_deleted;
 pub mod account_statement;
 pub mod anon_cred;
 pub mod anon_token;

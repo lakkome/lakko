@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "لم يفعّل الخادم دعم مفاتيح المرور.",
+      "text": "مفاتيح المرور غير متاحة الآن.",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "لديك حساب بالفعل؟ {link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "لا تغادر كلمة مرورك جهازك أبدًا.",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "يظهر لجهات اتصالك. اتركه فارغًا لعرض اسم المستخدم.",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "أعاد الخادم نسخة احتياطية معدّلة أو قديمة. حسابك آمن؛ تابعنا دون استعادة البيانات الأقدم.",
+      "text": "تلقّى Lakko نسخة قديمة من بياناتك المحفوظة ولم يستخدمها. حسابك آمن.",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "Lakko في مرحلة تجريبية، ولم يتحقق أي تدقيق مستقل من أمانه بعد. لا تعتمد عليه حيث تتوقف سلامتك على ذلك.",
+      "text": "Lakko في مرحلة تجريبية. لم يكتمل بعد تدقيق أمني مستقل، ونحن نعمل عليه. نعتقد أن Lakko آمن للاستخدام، لكننا لا نستطيع إثبات ذلك بعد. بالمتابعة، أنت تقبل هذا الخطر.",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "رفض الخادم الطلب. حاول لاحقًا.",
+      "text": "تعذّر على Lakko تنفيذ ذلك الآن. حاول مرة أخرى لاحقًا.",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "هذه القناة غير موجودة على الخادم.",
+      "text": "هذه القناة لم تعد موجودة.",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
+      "text": "لا تتوفّر لدى Lakko مساحة لملفات جديدة الآن. حاول مرة أخرى لاحقًا.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "جارٍ تشفير «{name}»…",
+      "text": "جارٍ تجهيز \"{name}\"…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "جارٍ تشفير «{name}» ({index}/{total})…",
+      "text": "جارٍ تجهيز \"{name}\" ({index}/{total})…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "جارٍ التشفير والرفع…",
+      "text": "جارٍ الإرسال…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "تعذّر الوصول إلى الخادم. تحقّق من اتصالك.",
+      "text": "تعذّر الاتصال بـ Lakko. تحقّق من اتصالك.",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
+      "text": "لا تتوفّر لدى Lakko مساحة لملفات جديدة الآن. حاول مرة أخرى لاحقًا.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "يستطيع أي شخص يفتح أحد روابطك أن يرسل إليك طلب اتصال إلى أن تنتهي صلاحية الرابط أو يُستنفد.",
+      "text": "كل من يفتح أحد روابطك يصبح جهة اتصال لديك، حتى تنتهي صلاحية الرابط أو يُستنفد.",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "يمكن لأي شخص يمسح هذا الرمز أن يرسل إليك طلب تواصل.",
+      "text": "كل من يمسح هذا الرمز يصبح جهة اتصال لديك.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
+      "text": "لا تتوفّر لدى Lakko مساحة لملفات جديدة الآن. حاول مرة أخرى لاحقًا.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "إذا نسيت كلمة مرورك أو فقدت هذا الهاتف، فهكذا تعود إلى حسابك.",
+      "text": "إذا نسيت كلمة المرور أو فقدت هذا الجهاز، فهكذا تعود إلى حسابك.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "إذا نسيت كلمة مرورك أو فقدت هذا الهاتف، فلن تتمكن من العودة إلى هذا الحساب.",
+      "text": "إذا نسيت كلمة المرور أو فقدت هذا الجهاز، فلن تتمكن من العودة إلى هذا الحساب.",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "تعذّرت استعادة هويتك. حاول مجددًا.",
+      "text": "تعذّرت استعادة حسابك. حاول مرة أخرى.",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "الرسائل والمكالمات وطلبات الاتصال مشفّرة تشفيرًا تامًا بين الطرفين: لا يستطيع قراءتها إلا الأشخاص في المحادثة. لا تغادر كلمة مرورك جهازك أبدًا، ولكل جهة اتصال رقم أمان يمكنك مقارنته وجهًا لوجه.",
+      "text": "الرسائل والمكالمات وطلبات الاتصال مشفّرة من طرف إلى طرف: لا يقرؤها إلا المشاركون في المحادثة. لكل جهة اتصال رقم أمان يمكنكما مقارنته وجهًا لوجه.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "«تسجيل الخروج» يُبقي بياناتك على هذا الجهاز. «نسيان هذا الجهاز» يزيلها؛ ولا يمكنك العودة إلا بجهاز آخر مسجّل الدخول، أو بمفتاح مرور يستعيد مفاتيح الحساب، أو بعبارة الاسترداد. «حذف الحساب» يمحو الحساب على الخادم ويمسح هذا الجهاز؛ ولا يمكن التراجع عن ذلك.",
+      "text": "تسجيل الخروج يُبقي رسائلك على هذا الجهاز. «نسيان هذا الجهاز» يزيلها من هذا الجهاز ويبقى حسابك. «حذف الحساب» يحذف حسابك نهائيًا.",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "يؤدي هذا إلى محو هويتك على الخادم — اسم المستخدم والمفاتيح وعوامل الاسترداد والنسخة الاحتياطية — وتسجيل خروجك من كل مكان. تُمحى رسائلك المحلية من هذا الجهاز أيضًا. لا يمكن التراجع عن ذلك.",
+      "text": "سيُحذف حسابك واسم المستخدم وجهات الاتصال والرسائل، وسيُسجَّل الخروج من كل جهاز. لا يمكن التراجع عن ذلك.",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "قد تصل منشورات القنوات متأخرة عندما يكون Lakko مغلقًا.",
+      "text": "عندما يكون Lakko مغلقًا، قد تصل إشعارات منشورات القنوات الجديدة متأخرة.",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "خطأ في الخادم ({status}).",
+      "text": "حدث خطأ ما ({status}). حاول مرة أخرى.",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "لن يتمكن الجهاز الذي يحمل المفتاح الخاص المطابق من تسجيل الدخول به بعد الآن. لا يمكن التراجع عن ذلك.",
+      "text": "لن تتمكن بعد الآن من تسجيل الدخول بمفتاح المرور هذا. لا يمكن التراجع عن ذلك.",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "اختر كلمة مرور جديدة لتسجيل الدخول. هذا الجهاز يحمل مفاتيح حسابك بالفعل، لذا تكتب كلمة المرور الجديدة فقط.",
+      "text": "اختر كلمة مرور جديدة لتسجيل الدخول.",
       "status": "machine"
     },
     "settings.password.title": {

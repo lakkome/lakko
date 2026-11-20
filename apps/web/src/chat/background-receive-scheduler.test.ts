@@ -9,6 +9,7 @@ import {
   BACKGROUND_SWEEP_INTERVAL_MS,
   backgroundSweepIntervalMs,
   GroupBackoff,
+  groupsAppeared,
   runBackgroundReceiveLoop,
   runSweep,
   sweepPauseMs,
@@ -317,5 +318,20 @@ describe("backgroundSweepIntervalMs (an idle client polls no group every few sec
       BACKGROUND_IDLE_NO_PUSH_MS,
     );
     expect(BACKGROUND_IDLE_NO_PUSH_MS).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+describe("groupsAppeared (walk 7: a joined group waited for the idle sweep)", () => {
+  it("says nothing before the first list of a session", () => {
+    expect(groupsAppeared(null, ["a", "b"])).toBe(false);
+  });
+
+  it("sees a group that was not there", () => {
+    expect(groupsAppeared(new Set(["a"]), ["a", "joined"])).toBe(true);
+  });
+
+  it("does not count the same groups, or a group that left", () => {
+    expect(groupsAppeared(new Set(["a", "b"]), ["b", "a"])).toBe(false);
+    expect(groupsAppeared(new Set(["a", "b"]), ["a"])).toBe(false);
   });
 });

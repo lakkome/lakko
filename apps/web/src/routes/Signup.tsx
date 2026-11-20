@@ -363,7 +363,6 @@ export default function Signup(): JSX.Element {
         </p>
       </Show>
       <h1>{t("auth.signup.title")}</h1>
-      <p class="lk-auth-lede">{t("auth.signup.lede")}</p>
       <form onSubmit={onSubmit}>
         <label>
           {t("auth.username.label")}

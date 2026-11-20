@@ -118,7 +118,7 @@
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
-      "text": "השרת לא הפעיל תמיכה במפתחות גישה.",
+      "text": "מפתחות גישה לא זמינים כרגע.",
       "status": "machine"
     },
     "auth.passkey.error.unsupported": {
@@ -257,10 +257,6 @@
       "text": "כבר יש לכם חשבון? {link}",
       "status": "machine"
     },
-    "auth.signup.lede": {
-      "text": "הסיסמה שלכם לעולם לא יוצאת מהמכשיר.",
-      "status": "machine"
-    },
     "auth.signup.name.hint": {
       "text": "יוצג לאנשי הקשר שלכם. השאירו ריק כדי להציג את שם המשתמש.",
       "status": "machine"
@@ -350,7 +346,7 @@
       "status": "machine"
     },
     "backup.rollback_refused.body": {
-      "text": "השרת החזיר גיבוי ששונה או שאינו עדכני. החשבון שלכם בטוח; המשכנו בלי לשחזר את הנתונים הישנים.",
+      "text": "Lakko קיבלה עותק ישן של הנתונים השמורים שלך ולא השתמשה בו. החשבון שלך בטוח.",
       "status": "machine"
     },
     "backup.rollback_refused.title": {
@@ -390,7 +386,7 @@
       "status": "machine"
     },
     "beta.notice.body": {
-      "text": "Lakko נמצא בגרסת בטא, ואבטחתו עדיין לא נבדקה בביקורת עצמאית. אל תסתמכו עליו כשהביטחון שלכם תלוי בכך.",
+      "text": "Lakko נמצאת בגרסת בטא. ביקורת אבטחה בלתי תלויה עדיין לא הסתיימה; אנחנו עובדים על כך. אנחנו מאמינים ש-Lakko בטוחה לשימוש, אבל עדיין איננו יכולים להוכיח זאת. בהמשך, את/ה מקבל/ת את הסיכון הזה.",
       "status": "machine"
     },
     "beta.notice.title": {
@@ -1714,7 +1710,7 @@
       "status": "machine"
     },
     "channels.error.refused": {
-      "text": "השרת דחה את הבקשה. נסו שוב מאוחר יותר.",
+      "text": "Lakko לא הצליחה לעשות זאת כרגע. נסה/י שוב מאוחר יותר.",
       "status": "machine"
     },
     "channels.error.sign_in": {
@@ -1722,7 +1718,7 @@
       "status": "machine"
     },
     "channels.error.unknown_channel": {
-      "text": "הערוץ הזה לא קיים בשרת.",
+      "text": "הערוץ הזה כבר לא קיים.",
       "status": "machine"
     },
     "channels.error.unreachable": {
@@ -2442,7 +2438,7 @@
       "status": "machine"
     },
     "chat.attachment.full.send": {
-      "text": "אין כרגע מקום בשרת לקבצים חדשים. נסו שוב מאוחר יותר.",
+      "text": "אין כרגע מקום ב-Lakko לקבצים חדשים. נסה/י שוב מאוחר יותר.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3938,11 +3934,11 @@
       "status": "machine"
     },
     "chat.upload.encrypting": {
-      "text": "מצפינים את „{name}”…",
+      "text": "מכין את \"{name}\"…",
       "status": "machine"
     },
     "chat.upload.encrypting_of": {
-      "text": "מצפינים את „{name}” ({index}/{total})…",
+      "text": "מכין את \"{name}\" ({index}/{total})…",
       "status": "machine"
     },
     "chat.upload.preparing": {
@@ -3962,7 +3958,7 @@
       "status": "machine"
     },
     "chat.upload.working": {
-      "text": "מצפינים ומעלים…",
+      "text": "שולח…",
       "status": "machine"
     },
     "chat.video.load_failed": {
@@ -4338,7 +4334,7 @@
       "status": "machine"
     },
     "common.error.server_unreachable": {
-      "text": "לא ניתן היה להתחבר לשרת. בדקו את החיבור.",
+      "text": "לא ניתן להתחבר ל-Lakko. בדוק/י את החיבור.",
       "status": "machine"
     },
     "common.error.session_ended": {
@@ -6626,7 +6622,7 @@
       "status": "machine"
     },
     "group_photo.error.full": {
-      "text": "אין כרגע מקום בשרת לקבצים חדשים. נסו שוב מאוחר יותר.",
+      "text": "אין כרגע מקום ב-Lakko לקבצים חדשים. נסה/י שוב מאוחר יותר.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -7194,7 +7190,7 @@
       "status": "machine"
     },
     "invite.links.desc": {
-      "text": "כל מי שפותח אחד מהקישורים שלכם יכול לשלוח לכם בקשת קשר עד שתוקף הקישור יפוג או שהשימושים בו ינוצלו.",
+      "text": "כל מי שפותח אחד מהקישורים שלך הופך לאיש קשר שלך, עד שתוקף הקישור יפוג או שהשימושים בו ייגמרו.",
       "status": "machine"
     },
     "invite.links.edit": {
@@ -7326,7 +7322,7 @@
       "status": "machine"
     },
     "invite.links.qr_hint": {
-      "text": "כל מי שסורק את הקוד הזה יכול לשלוח לך בקשת קשר.",
+      "text": "מי שסורק את הקוד הזה הופך לאיש קשר שלך.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7626,7 +7622,7 @@
       "status": "machine"
     },
     "profile.save.error.full": {
-      "text": "אין כרגע מקום בשרת לקבצים חדשים. נסו שוב מאוחר יותר.",
+      "text": "אין כרגע מקום ב-Lakko לקבצים חדשים. נסה/י שוב מאוחר יותר.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7774,7 +7770,7 @@
       "status": "machine"
     },
     "protect.body": {
-      "text": "אם תשכחו את הסיסמה או תאבדו את הטלפון הזה, כך תחזרו לחשבון.",
+      "text": "אם תשכח/י את הסיסמה או תאבד/י את המכשיר הזה, כך תחזור/י לחשבון.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7842,7 +7838,7 @@
       "status": "machine"
     },
     "protect.skip.confirm.body": {
-      "text": "אם תשכחו את הסיסמה או תאבדו את הטלפון הזה, לא תוכלו לחזור לחשבון הזה.",
+      "text": "אם תשכח/י את הסיסמה או תאבד/י את המכשיר הזה, לא תוכל/י לחזור לחשבון הזה.",
       "status": "machine"
     },
     "protect.skip.confirm.continue": {
@@ -8426,7 +8422,7 @@
       "status": "machine"
     },
     "restore_identity.error.generic": {
-      "text": "לא ניתן היה לשחזר את הזהות שלכם. נסו שוב.",
+      "text": "לא ניתן לשחזר את החשבון. נסה/י שוב.",
       "status": "machine"
     },
     "restore_identity.error.invalid_phrase": {
@@ -8642,7 +8638,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "הודעות, שיחות ובקשות קשר מוצפנות מקצה לקצה: רק האנשים בשיחה יכולים לקרוא אותן. הסיסמה שלכם אף פעם לא יוצאת מהמכשיר, ולכל איש קשר יש מספר בטיחות שאפשר להשוות פנים אל פנים.",
+      "text": "הודעות, שיחות ובקשות קשר מוצפנות מקצה לקצה: רק המשתתפים בשיחה יכולים לקרוא אותן. לכל איש קשר יש מספר בטיחות שאפשר להשוות פנים אל פנים.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -8714,7 +8710,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "„התנתקות” משאירה את הנתונים במכשיר הזה. „שכחת המכשיר הזה” מסירה אותם; אפשר לחזור רק ממכשיר מחובר אחר, עם מפתח גישה שמשחזר את מפתחות החשבון, או עם ביטוי השחזור. „מחיקת החשבון” מוחקת את החשבון בשרת ומנקה את המכשיר הזה; אי אפשר לבטל את הפעולה.",
+      "text": "התנתקות שומרת את ההודעות שלך במכשיר הזה. \"שכח את המכשיר הזה\" מסיר אותן מהמכשיר הזה; החשבון נשאר. \"מחק חשבון\" מוחק את החשבון לצמיתות.",
       "status": "machine"
     },
     "settings.account.delete.blocked": {
@@ -8722,7 +8718,7 @@
       "status": "machine"
     },
     "settings.account.delete.body": {
-      "text": "הפעולה מוחקת את הזהות שלכם בשרת — שם משתמש, מפתחות, אמצעי שחזור וגיבוי — ומנתקת אתכם בכל מקום. גם ההודעות המקומיות נמחקות מהמכשיר הזה. אי אפשר לבטל את הפעולה.",
+      "text": "החשבון, שם המשתמש, אנשי הקשר וההודעות שלך יימחקו, וכל המכשירים ינותקו. אי אפשר לבטל זאת.",
       "status": "machine"
     },
     "settings.account.delete.confirm": {
@@ -9082,7 +9078,7 @@
       "status": "machine"
     },
     "settings.notifications.channel_posts_late": {
-      "text": "פוסטים בערוצים עלולים להגיע באיחור כש-Lakko סגור.",
+      "text": "כש-Lakko סגורה, התראות על פוסטים חדשים בערוצים עלולות להגיע באיחור.",
       "status": "machine"
     },
     "settings.notifications.off.body": {
@@ -9142,7 +9138,7 @@
       "status": "machine"
     },
     "settings.passkeys.error.server_status": {
-      "text": "שגיאת שרת ({status}).",
+      "text": "משהו השתבש ({status}). נסה/י שוב.",
       "status": "machine"
     },
     "settings.passkeys.error.unsupported": {
@@ -9190,7 +9186,7 @@
       "status": "machine"
     },
     "settings.passkeys.remove.body": {
-      "text": "המכשיר שמחזיק את המפתח הפרטי התואם לא יוכל עוד להתחבר איתו. אי אפשר לבטל את הפעולה.",
+      "text": "לא תוכל/י עוד להתחבר עם מפתח הגישה הזה. אי אפשר לבטל זאת.",
       "status": "machine"
     },
     "settings.passkeys.remove.confirm": {
@@ -9238,7 +9234,7 @@
       "status": "machine"
     },
     "settings.password.lede": {
-      "text": "בחרו סיסמה חדשה להתחברות. במכשיר הזה כבר נמצאים מפתחות החשבון שלכם, לכן מקלידים רק את הסיסמה החדשה.",
+      "text": "בחר/י סיסמה חדשה להתחברות.",
       "status": "machine"
     },
     "settings.password.title": {

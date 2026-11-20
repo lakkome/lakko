@@ -247,7 +247,7 @@ class LanguageDetectionTest {
     }
 
     @Test
-    fun `the hola case names Spanish and translates from Spanish`() {
+    fun `the hola case shows no line and translates from Spanish`() {
         // Seen on a Pixel: "hola, qué tal?" an unsure Catalan with es fr it
         // close, no Catalan on the device. The engine answers become the
         // rule's translatable list; the rule itself (resolveTranslationSource)
@@ -259,9 +259,11 @@ class LanguageDetectionTest {
             "it" to TranslationEngineState.READY,
         )
         assertEquals(listOf("es", "fr", "it"), SourceRules.translatable(listOf("ca", "es", "fr", "it")) { states[it] })
-        // The rule's answer for that input: Spanish for both.
-        val r = resolution("es", true, permille = 180)
-        assertEquals(TranslateLine.Detected("es", canTranslate = true), SourceRules.languageLine(TranslateOffer.TRANSLATE, r))
+        // The rule's answer for that input since walk 7 (2026-11-20): an
+        // unsure guess names nothing up front; Translate still starts from
+        // Spanish.
+        val r = resolution(null, false, source = "es", permille = 180)
+        assertNull(SourceRules.languageLine(TranslateOffer.TRANSLATE_ASK_LANGUAGE, r))
         assertEquals(TapAction.Translate("es"), SourceRules.tapSource(r))
     }
 

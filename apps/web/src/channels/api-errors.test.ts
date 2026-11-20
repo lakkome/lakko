@@ -43,11 +43,11 @@ describe("channels API error surface", () => {
   it("phrases the error for a person, never as 'unknown —'", () => {
     expect(channelErrorText({ status: 200, code: CHANNELS_UNREACHABLE, detail: "" })).toMatch(/not reachable/);
     expect(channelErrorText({ status: 404, code: "unknown-channel", detail: "no such channel" })).toBe(
-      "This channel does not exist on the server.",
+      "This channel no longer exists.",
     );
     // The server's detail prose never reaches the screen.
     expect(channelErrorText({ status: 500, code: "internal", detail: "db down" })).toBe(
-      "The server refused the request. Try again later.",
+      "Lakko could not do this right now. Try again later.",
     );
   });
 });

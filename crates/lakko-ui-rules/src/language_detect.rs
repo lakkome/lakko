@@ -61,7 +61,11 @@
 //! - Fewer than [`MIN_LETTERS`] letters in a script that several languages
 //!   share (Latin, Cyrillic, Arabic, Devanagari, Hebrew). A script that only
 //!   one language uses (Hangul, Greek, Thai, Georgian, ...) and Chinese and
-//!   Japanese characters are exempt: the script is the evidence.
+//!   Japanese characters are exempt: the script is the evidence. This rule
+//!   also holds a platform detector's answer
+//!   ([`candidates_from_hypotheses`]) since 2026-11-20, and with it most
+//!   one-sentence messages are unsure: the corpus figures below were taken
+//!   with a minimum of 8 letters.
 //! - Less than [`MIN_SCRIPT_SHARE_PERMILLE`] of the letters are in the script
 //!   of the detected language: "Lakko 仍在运行" is not Javanese. On the UI
 //!   corpus this rule removed 11 of the 20 wrong confident answers at 0.6.
@@ -118,10 +122,16 @@ use crate::translation::{
 /// detection stays bounded.
 pub const MAX_DETECT_CHARS: usize = 2048;
 
-/// Letters a shared-script text needs before an answer can be confident.
-/// Chosen, not measured: on the UI corpus a minimum of 0, 8 or 16 letters
-/// changed no wrong answer, so this is a guard for very short Latin text only.
-pub const MIN_LETTERS: usize = 8;
+/// Letters a shared-script text needs before an answer can be confident,
+/// from any detector (this module's and a platform's through
+/// [`candidates_from_hypotheses`]). Chosen, not measured. It was 8 until
+/// 2026-11-20 and only guarded this module's detector; on test.lakko.me that
+/// day the English messages "W7 web to iphone" (13 letters) and "W6 iphone
+/// while behind" (18) were named Polish and Afrikaans up front, by the iOS
+/// detector and by this one. A shorter message is still translated from a
+/// guess when the person asks, it is just never named before (UX section
+/// 3.1).
+pub const MIN_LETTERS: usize = 20;
 
 /// The share of letters, in thousandths, that must be in the detected
 /// language's script for a confident answer. Measured on the UI corpus (see
@@ -302,6 +312,15 @@ pub fn candidates_from_hypotheses(
     // Stable: equal probabilities keep the platform's order.
     merged.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     let (top_tag, top_permille) = merged.first()?.clone();
+    let letters_only = letters_of(text);
+    // A platform detector is held to the same length rule as this module's:
+    // too few letters in a shared script and the answer is a guess, however
+    // probable the platform says it is.
+    let top_permille = if long_enough(&letters_only) {
+        top_permille
+    } else {
+        top_permille.min(DETECTION_CONFIDENT_PERMILLE - 1)
+    };
     let mut candidates = LanguageCandidates {
         detected: DetectedLanguage {
             tag: top_tag,
@@ -312,7 +331,6 @@ pub fn candidates_from_hypotheses(
     if candidates.is_confident() {
         return Some(candidates);
     }
-    let letters_only = letters_of(text);
     let floor = u32::from(top_permille) * u32::from(CANDIDATE_PROBABILITY_RATIO_PERMILLE) / 1000;
     for (tag, permille) in merged.iter().skip(1) {
         if candidates.alternatives.len() == MAX_ALTERNATIVES || u32::from(*permille) < floor {
@@ -582,8 +600,8 @@ pub struct SourceResolution {
 
 /// The source language of a message, in the order `Translate` uses:
 ///
-/// 1. a confident detection (named alone when the device cannot translate
-///    from it);
+/// 1. a confident detection, the only one the line names (named alone when
+///    the device cannot translate from it);
 /// 2. the conversation's language among the candidates of an unsure
 ///    detection ([`conversation_detection`]);
 /// 3. that guess, when the device can translate from it into `target`;
@@ -597,8 +615,10 @@ pub struct SourceResolution {
 /// translate from into `target` (ready or with a pack to download); a client
 /// asks at least for every tag of `candidates` and the usual language.
 /// A language that is `target` itself is never a source to translate from.
-/// The line is `None` only for no detection, or an unsure one with no
-/// candidate the device can translate from.
+/// The line names only a confident detection (since 2026-11-20): an unsure
+/// one, or a text shorter than [`MIN_LETTERS`] in a shared script (which no
+/// detector answers confidently here), shows no line, and `Translate` in the
+/// menu still starts from steps 2 to 6.
 #[must_use]
 pub fn resolve_translation_source(
     candidates: Option<&LanguageCandidates>,
@@ -637,11 +657,14 @@ pub fn resolve_translation_source(
             }
         }
     }
+    // An unsure detection is never named up front (maintainer, 2026-11-20:
+    // English messages were labelled Polish and Italian). `Translate` in the
+    // menu still starts from the best usable candidate.
     if let Some(source) = order.into_iter().find(|tag| usable(tag)) {
         return SourceResolution {
-            line_tag: Some(source.clone()),
+            line_tag: None,
             line_confidence_permille: confidence,
-            line_can_translate: true,
+            line_can_translate: false,
             translate_source: Some(source),
             guess: None,
         };
@@ -744,6 +767,14 @@ fn counts_for(script: Script, lang: Lang, c: char) -> bool {
 }
 
 /// Whether the script alone says which language it is.
+/// Whether `letters_only` has enough letters for a confident answer: at
+/// least [`MIN_LETTERS`], or in a script only one language uses.
+fn long_enough(letters_only: &str) -> bool {
+    let letters = letters_only.chars().filter(|c| c.is_alphabetic()).count();
+    letters >= MIN_LETTERS
+        || whatlang::detect_script(letters_only).is_some_and(script_names_the_language)
+}
+
 fn script_names_the_language(script: Script) -> bool {
     matches!(
         script,
@@ -1102,23 +1133,24 @@ mod tests {
     }
 
     #[test]
-    fn the_line_names_the_language_translate_uses() {
+    fn translate_starts_from_a_usable_candidate_of_an_unsure_guess() {
         // Seen on a Pixel: "hola, qué tal?" is an unsure Catalan with
         // Spanish, French and Italian close; the device cannot translate
-        // from Catalan, so the line and Translate both say Spanish.
+        // from Catalan, so Translate starts from Spanish. An unsure guess is
+        // never named up front (2026-11-20), so there is no line.
         let hola = cands("hola, qué tal?");
         assert_eq!(hola.detected.tag, "ca");
         let engine = tags(&["es", "fr", "it", "de", "nl", "en"]);
         let r = resolve_translation_source(Some(&hola), &none(), "en", &engine);
-        assert_eq!(r.line_tag.as_deref(), Some("es"));
-        assert!(r.line_can_translate);
+        assert_eq!(r.line_tag, None);
+        assert!(!r.line_can_translate);
         assert_eq!(r.translate_source.as_deref(), Some("es"));
-        // "goedendag": Turkmen unsure, Danish first among those the device
+        // "goedendag": Turkmen unsure, Dutch first among those the device
         // can translate from.
         let goedendag = cands("goedendag");
         let r = resolve_translation_source(Some(&goedendag), &none(), "en", &engine);
         assert_eq!(r.translate_source.as_deref(), Some("nl"));
-        assert_eq!(r.line_tag, r.translate_source);
+        assert_eq!(r.line_tag, None);
         // The conversation's Dutch decides it before the order.
         let r = resolve_translation_source(
             Some(&guess("tk", 200, &["da", "nl"])),
@@ -1132,13 +1164,20 @@ mod tests {
     #[test]
     fn the_line_and_translate_never_disagree_on_a_language_shown() {
         let engine = tags(&["es"]);
-        // A usable guess is its own source.
+        // A usable guess is its own source, and is not named up front.
         let r =
             resolve_translation_source(Some(&guess("es", 300, &["ca"])), &none(), "en", &engine);
         assert_eq!(
             (r.line_tag.as_deref(), r.translate_source.as_deref()),
+            (None, Some("es"))
+        );
+        // A confident detection the device can translate from is named.
+        let r = resolve_translation_source(Some(&guess("es", 900, &[])), &none(), "en", &engine);
+        assert_eq!(
+            (r.line_tag.as_deref(), r.translate_source.as_deref()),
             (Some("es"), Some("es"))
         );
+        assert!(r.line_can_translate);
         // A confident language the device cannot translate from: the name
         // alone, and Translate goes to it (and says it cannot).
         let r =
@@ -1205,7 +1244,8 @@ mod tests {
             );
             let r =
                 resolve_translation_source(Some(&hola), &record, "en", &tags(&["es", "fr", "it"]));
-            assert_eq!(r.line_tag.as_deref(), Some("es"));
+            assert_eq!(r.translate_source.as_deref(), Some("es"));
+            assert_eq!(r.line_tag, None);
         }
         // A second Italian message makes Italian the chat's language.
         let more = detected(&[(1, "es"), (2, "it"), (6, "it")]);
@@ -1286,7 +1326,7 @@ mod tests {
 
     #[test]
     fn a_confident_detection_has_no_alternatives() {
-        let uk = cands("Привіт, як справи?");
+        let uk = cands("Привіт, як справи? Що ти робиш сьогодні ввечері?");
         assert_eq!(uk.detected.tag, "uk");
         assert!(confident(&uk.detected));
         assert!(uk.alternatives.is_empty());
@@ -1328,6 +1368,29 @@ mod tests {
     }
 
     #[test]
+    fn short_messages_are_never_named_up_front() {
+        // Seen on test.lakko.me, 2026-11-20: English test messages named
+        // Polish, Italian and Afrikaans by the line under the message.
+        let engine = tags(&["pl", "it", "af", "es", "de", "nl", "fr"]);
+        for text in [
+            "W7 web to iphone",
+            "W7 droid to iphone",
+            "W5 iphone hello",
+            "W6 iphone while behind",
+            "hola, qué tal?",
+            "ok",
+        ] {
+            let c = detect_text_language_candidates(text);
+            assert!(
+                c.as_ref().is_none_or(|c| !confident(&c.detected)),
+                "{text}: {c:?}"
+            );
+            let r = resolve_translation_source(c.as_ref(), &none(), "en", &engine);
+            assert_eq!(r.line_tag, None, "{text}");
+        }
+    }
+
+    #[test]
     fn hypotheses_go_through_the_same_rule() {
         let h = |list: &[(&str, u16)]| -> Vec<(String, u16)> {
             list.iter().map(|(t, p)| ((*t).to_string(), *p)).collect()
@@ -1356,8 +1419,21 @@ mod tests {
         let pt = candidates_from_hypotheses("hola que tal", &h(&[("es", 450), ("pt", 400)]));
         assert_eq!(pt.map(|c| c.alternatives), Some(vec![]));
         // A confident top has no alternatives.
-        let sure = candidates_from_hypotheses("x", &h(&[("de", 800), ("nl", 600)]));
+        let long = "Ich gehe morgen auf den Markt, um Gemüse zu kaufen.";
+        let sure = candidates_from_hypotheses(long, &h(&[("de", 800), ("nl", 600)]));
         assert_eq!(sure.map(|c| c.alternatives), Some(vec![]));
+        // Too short for any detector: a guess however probable (seen on
+        // iOS, 2026-11-20: "W7 web to iphone" named Polish).
+        let short = candidates_from_hypotheses("W7 web to iphone", &h(&[("pl", 900), ("en", 80)]));
+        let short = short.as_ref();
+        assert!(short.is_some_and(|c| !confident(&c.detected)));
+        assert_eq!(
+            resolve_translation_source(short, &none(), "en", &tags(&["pl"])).line_tag,
+            None
+        );
+        // A script only one language uses is evidence enough.
+        let el = candidates_from_hypotheses("Γεια σου", &h(&[("el", 950)]));
+        assert!(el.is_some_and(|c| confident(&c.detected)));
         assert_eq!(candidates_from_hypotheses("x", &h(&[("und", 900)])), None);
     }
 

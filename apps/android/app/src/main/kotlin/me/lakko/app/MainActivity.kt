@@ -1759,6 +1759,9 @@ private fun SessionRoot(
                     // app-wide failure state, for the account it ran for. A
                     // sweep that fails as a whole counts as not answered.
                     val sweepAccount = chatRepository.currentAccountIdB64()
+                    // The groups this sweep reads; one that appears during the
+                    // pause (a chat just joined) ends it (`ReceiveCadence`).
+                    val sweptGroups = chatRepository.state.value.threads.map { it.groupIdHex }.toSet()
                     try {
                         // 2026-11-06 — one read of every group per sweep, no
                         // long polls held open; the pause below decides how
@@ -1787,7 +1790,11 @@ private fun SessionRoot(
                     )
                     val wakeBefore = me.lakko.app.chat.ReceiveCadence.lastWakeAtMs.value
                     kotlinx.coroutines.withTimeoutOrNull((pause - elapsed).coerceAtLeast(APP_POLL_MIN_ITERATION_MS)) {
-                        me.lakko.app.chat.ReceiveCadence.lastWakeAtMs.first { it > wakeBefore }
+                        me.lakko.app.chat.ReceiveCadence.awaitWakeOrNewGroup(
+                            wakeBefore = wakeBefore,
+                            swept = sweptGroups,
+                            groups = chatRepository.state.map { s -> s.threads.map { it.groupIdHex } },
+                        )
                     }
                 }
             } finally {

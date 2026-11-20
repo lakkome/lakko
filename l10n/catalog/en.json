@@ -332,8 +332,8 @@
       "comment": "No passkey exists for the account."
     },
     "auth.passkey.error.server_disabled": {
-      "text": "Server hasn't enabled passkey support.",
-      "comment": "The server has passkeys switched off."
+      "text": "Passkeys are not available right now.",
+      "comment": "Passkey sign-in or setup is not available."
     },
     "auth.passkey.error.unsupported": {
       "text": "This browser doesn't support passkeys.",
@@ -471,11 +471,6 @@
       "text": "Already have an account? {link}",
       "comment": "Line under the sign-up form; {link} is the 'Log in' link."
     },
-    "auth.signup.lede": {
-      "text": "Your password never leaves your device.",
-      "comment": "Line under the sign-up title.",
-      "security_critical": true
-    },
     "auth.signup.name.hint": {
       "text": "Shown to your contacts. Leave it empty to show your username.",
       "comment": "Helper text under the optional name field on the sign-up form."
@@ -565,8 +560,8 @@
       "comment": "Title of the prompt shown after a passkey sign-in on a device that does not know the account's username yet."
     },
     "backup.rollback_refused.body": {
-      "text": "The server returned an altered or outdated backup. Your account is safe; we continued without restoring the older data.",
-      "comment": "Body of the alert shown when a restore refused a backup the server returned rolled back or altered (ADR-0037). Nothing older was loaded.",
+      "text": "Lakko received an outdated copy of your saved data and did not use it. Your account is safe.",
+      "comment": "Restore refused an outdated or altered copy of the saved data.",
       "security_critical": true
     },
     "backup.rollback_refused.title": {
@@ -615,8 +610,8 @@
       "security_critical": true
     },
     "beta.notice.body": {
-      "text": "Lakko is in beta, and its security has not yet been checked by an independent audit. Do not rely on it where your safety depends on it.",
-      "comment": "Body of the beta notice. A warning: keep both sentences and their meaning exact.",
+      "text": "Lakko is in beta. An independent security audit is not finished yet; we are working on it. We believe Lakko is safe to use, but we cannot prove it yet. By continuing, you accept this risk.",
+      "comment": "Body of the beta notice, maintainer wording of 2026-11-20. Keep all four sentences together and their meaning exact: the audit is not finished, we believe Lakko is safe but cannot prove it yet, continuing accepts the risk.",
       "security_critical": true
     },
     "beta.notice.title": {
@@ -2133,16 +2128,16 @@
       "comment": "The channels server refused a post, rotation or subscriber step because this device has not been confirmed as a publisher."
     },
     "channels.error.refused": {
-      "text": "The server refused the request. Try again later.",
-      "comment": "The channels server refused a request for a reason with no message of its own."
+      "text": "Lakko could not do this right now. Try again later.",
+      "comment": "Channel action refused for now."
     },
     "channels.error.sign_in": {
       "text": "Sign in again to use channels.",
       "comment": "Shown in place of a channel screen when this session holds no keys."
     },
     "channels.error.unknown_channel": {
-      "text": "This channel does not exist on the server.",
-      "comment": "The channels server does not know this channel."
+      "text": "This channel no longer exists.",
+      "comment": "The channel could not be found."
     },
     "channels.error.unreachable": {
       "text": "The channels service is not reachable right now. Try again in a moment.",
@@ -2869,7 +2864,7 @@
       "comment": "Encrypting or uploading an attached file failed; {name} is the file."
     },
     "chat.attachment.full.send": {
-      "text": "The server has no room for new files right now. Try again later.",
+      "text": "Lakko has no room for new files right now. Try again later.",
       "comment": "Composer note when an upload was refused because the server is out of disk space; the message text stays."
     },
     "chat.attachment.gone.body": {
@@ -4466,12 +4461,12 @@
       "comment": "Title of the sheet asking whether to remove the reader's own pin or the pin everyone sees."
     },
     "chat.upload.encrypting": {
-      "text": "Encrypting \"{name}\"…",
-      "comment": "Shown while an attached file is encrypted on this device; {name} is the file."
+      "text": "Preparing \"{name}\"…",
+      "comment": "Shown while one attachment is being prepared for sending; {name} is the file name."
     },
     "chat.upload.encrypting_of": {
-      "text": "Encrypting \"{name}\" ({index}/{total})…",
-      "comment": "Shown while one of several attached files is encrypted; {index} is which one, {total} how many."
+      "text": "Preparing \"{name}\" ({index}/{total})…",
+      "comment": "Shown while one of several attachments is being prepared; {name} is the file name, {index} of {total}."
     },
     "chat.upload.preparing": {
       "text": "Preparing \"{name}\"…",
@@ -4490,8 +4485,8 @@
       "comment": "Shown while one of several encrypted files is uploaded; {index} is which one, {total} how many."
     },
     "chat.upload.working": {
-      "text": "Encrypting + uploading…",
-      "comment": "Shown while attached files are being prepared."
+      "text": "Sending…",
+      "comment": "Shown while attachments are being sent."
     },
     "chat.video.load_failed": {
       "text": "Couldn't load video",
@@ -4962,8 +4957,8 @@
       "comment": "A QR code (a pairing code or an authenticator setup code) could not be drawn on screen."
     },
     "common.error.server_unreachable": {
-      "text": "Could not reach the server. Check your connection.",
-      "comment": "Error when the server could not be reached."
+      "text": "Could not connect to Lakko. Check your connection.",
+      "comment": "Generic error when the app cannot reach Lakko over the network."
     },
     "common.error.session_ended": {
       "text": "Your session has ended. Sign in again.",
@@ -7460,7 +7455,7 @@
       "comment": "Header line of a public group's info screen."
     },
     "group_photo.error.full": {
-      "text": "The server has no room for new files right now. Try again later.",
+      "text": "Lakko has no room for new files right now. Try again later.",
       "comment": "Under the group photo when the upload was refused because the server is out of disk space."
     },
     "group_photo.error.limit": {
@@ -8038,8 +8033,8 @@
       "comment": "Notice after an invite link was deleted."
     },
     "invite.links.desc": {
-      "text": "Anyone who opens one of your links can send you a contact request until it expires or is used up.",
-      "comment": "Description of the invite links card: a link lets whoever holds it reach you, so it should be shared with care.",
+      "text": "Anyone who opens one of your links becomes your contact, until the link expires or is used up.",
+      "comment": "Description of the invite links card: whoever opens a link becomes a contact at once (ADR-0079), so a link should be shared with care.",
       "security_critical": true
     },
     "invite.links.edit": {
@@ -8171,8 +8166,8 @@
       "comment": "Small badge on the invite link you just created, in your list of invite links."
     },
     "invite.links.qr_hint": {
-      "text": "Whoever scans this code can send you a contact request.",
-      "comment": "Under the QR code of an invite link."
+      "text": "Whoever scans this code becomes your contact.",
+      "comment": "Under the QR code of an invite link: scanning it makes the person a contact at once."
     },
     "invite.links.revoked": {
       "text": "Link revoked.",
@@ -8806,7 +8801,7 @@
       "comment": "Shown under Save in Settings > Profile after a successful save."
     },
     "profile.save.error.full": {
-      "text": "The server has no room for new files right now. Try again later.",
+      "text": "Lakko has no room for new files right now. Try again later.",
       "comment": "Under the profile photo when the upload was refused because the server is out of disk space."
     },
     "profile.save.error.generic": {
@@ -9027,8 +9022,8 @@
       "security_critical": true
     },
     "protect.body": {
-      "text": "If you forget your password or lose this phone, this is how you get back in.",
-      "comment": "Under the heading of the protect-your-account step."
+      "text": "If you forget your password or lose this device, this is how you get back in.",
+      "comment": "Under the heading of the protect-your-account step. Says 'device', not 'phone': it shows in browsers too."
     },
     "protect.continue": {
       "text": "Continue",
@@ -9101,8 +9096,8 @@
       "comment": "Plain button that skips the protect-your-account step."
     },
     "protect.skip.confirm.body": {
-      "text": "If you forget your password, or lose this phone, you will not be able to get back into this account.",
-      "comment": "Body of the confirmation after 'Not now'.",
+      "text": "If you forget your password or lose this device, you will not be able to get back into this account.",
+      "comment": "Body of the confirmation after 'Not now'. Says 'device', not 'phone': it shows in browsers too.",
       "security_critical": true
     },
     "protect.skip.confirm.continue": {
@@ -9745,8 +9740,8 @@
       "comment": "The account saved on this device cannot be read, so restoring from another device cannot start."
     },
     "restore_identity.error.generic": {
-      "text": "Could not restore your identity. Try again.",
-      "comment": "Restoring failed for a reason with no more specific message."
+      "text": "Could not restore your account. Try again.",
+      "comment": "Restoring the account on a new device failed."
     },
     "restore_identity.error.invalid_phrase": {
       "text": "That is not a valid recovery phrase. Check each word and try again.",
@@ -10035,7 +10030,7 @@
       "comment": "{licence} is the licence name, e.g. AGPL-3.0-or-later; keep it untranslated."
     },
     "settings.about.protection.body": {
-      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them. Your password never leaves your device, and each contact has a safety number you can compare in person.",
+      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them. Each contact has a safety number you can compare in person.",
       "comment": "Explains end-to-end encryption and safety numbers.",
       "security_critical": true
     },
@@ -10109,8 +10104,8 @@
       "comment": "Row title: the app version."
     },
     "settings.account.danger_zone.footer": {
-      "text": "Log out keeps your data on this device. Forget this device removes it; you can only come back with another signed-in device, a passkey that restores keys, or your recovery phrase. Delete account erases the account on the server and wipes this device; this cannot be undone.",
-      "comment": "Note under the Log out / Forget this device / Delete account rows in Settings. The three action names are the row labels, keep them recognisable.",
+      "text": "Log out keeps your messages on this device. Forget this device removes them from this device; your account stays. Delete account deletes your account for good.",
+      "comment": "Note under the Log out / Forget this device / Delete account rows in Settings. The three action names are the row labels, keep them recognisable. Plain outcomes only.",
       "security_critical": true
     },
     "settings.account.delete.blocked": {
@@ -10119,8 +10114,8 @@
       "security_critical": true
     },
     "settings.account.delete.body": {
-      "text": "This erases your server-side identity — username, keys, recovery factors and backup — and signs you out everywhere. Your local messages are wiped from this device too. This cannot be undone.",
-      "comment": "Confirmation dialog body; lists exactly what is erased.",
+      "text": "Your account, username, contacts and messages will be deleted, and every device will be signed out. This cannot be undone.",
+      "comment": "Confirmation dialog body for Delete account: what the person loses, in plain words, and that it cannot be undone.",
       "security_critical": true
     },
     "settings.account.delete.confirm": {
@@ -10517,8 +10512,8 @@
       "comment": "Line under the Media title in Settings."
     },
     "settings.notifications.channel_posts_late": {
-      "text": "Channel posts can arrive late while Lakko is closed.",
-      "comment": "Small line in Settings > Notifications, under the notification switches: channel posts are noticed only when the app reads the channel (there is no push for channels yet), so a notification can come late or only once Lakko is opened. Shown on no other screen."
+      "text": "While Lakko is closed, notifications about new channel posts can come late.",
+      "comment": "Small line in Settings > Notifications, under the notification switches: a notification about a channel post can come late while the app is closed."
     },
     "settings.notifications.off.body": {
       "text": "Notifications are off, so Lakko can only ring while it is open. Turn them on so calls and messages reach you when it is not.",
@@ -10592,8 +10587,8 @@
       "comment": "The passkey request could not reach the server."
     },
     "settings.passkeys.error.server_status": {
-      "text": "Server error ({status}).",
-      "comment": "Passkey request failed; {status} is an HTTP status code in Latin digits."
+      "text": "Something went wrong ({status}). Try again.",
+      "comment": "Passkey action failed; {status} is a number kept for support."
     },
     "settings.passkeys.error.unsupported": {
       "text": "This browser / device can't create passkeys right now.",
@@ -10678,8 +10673,8 @@
       "comment": "Web: placeholder of the field that names a new passkey. The example must not name a brand or an operating system, since the web runs on any of them; settings.passkeys.name.placeholder is the iOS wording."
     },
     "settings.passkeys.remove.body": {
-      "text": "The device that owns the matching private key will no longer be able to sign in with it. This cannot be undone.",
-      "comment": "Confirmation dialog body before removing a passkey.",
+      "text": "You will no longer be able to log in with this passkey. This cannot be undone.",
+      "comment": "Confirmation body when removing a passkey.",
       "security_critical": true
     },
     "settings.passkeys.remove.confirm": {
@@ -10733,8 +10728,8 @@
       "comment": "Button that opens the new-password form in Settings > Security."
     },
     "settings.password.lede": {
-      "text": "Choose a new password for logging in. This device already holds your account's keys, so you only type the new password.",
-      "comment": "Text under the Password heading in Settings > Security."
+      "text": "Choose a new password for logging in.",
+      "comment": "Line under the change-password title."
     },
     "settings.password.title": {
       "text": "Password",

@@ -42,6 +42,7 @@ use lakko_ui_rules::folder::{
 };
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
+    deleted_person_info_sections as rust_deleted_person_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
     ChannelInfoCapabilities as RustChannelInfoCapabilities, ChannelRole as RustChannelRole,
@@ -1006,6 +1007,19 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
     .into_iter()
     .map(|s| s.name().to_string())
     .collect()
+}
+
+/// What the info of a person whose account was deleted holds (ADR-0098,
+/// `docs/ux/deleted-account.md`), as kebab-case section names: `message` and
+/// `delete-chat` when a one-to-one exists, `remove-contact` when the person
+/// is on the contact list, nothing else.
+#[wasm_bindgen(js_name = deletedPersonInfoSections)]
+#[must_use]
+pub fn deleted_person_info_sections(has_one_to_one: bool, is_contact: bool) -> Vec<String> {
+    rust_deleted_person_info_sections(has_one_to_one, is_contact)
+        .into_iter()
+        .map(|s| s.name().to_string())
+        .collect()
 }
 
 /// What a group's or channel's info holds under ADR-0087 (UX

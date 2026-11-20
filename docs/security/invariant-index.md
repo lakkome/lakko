@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 93  | C-1..C-80, C-82..C-94  | [`calls.md`](./calls.md) |
+| **C-** | 94  | C-1..C-80, C-82..C-95  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 58  | G-1..G-58 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
-| Total invariants  | 117 | (I + C + T) | live properties |
+| Total invariants  | 118 | (I + C + T) | live properties |
 | Total open gaps   | 24  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
@@ -106,7 +106,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-94)
+## Call-side invariants (C-1..C-95)
 
 Source: [`calls.md`](./calls.md). The `C-` class is the
 catch-all for "everything the SFU / channels / storage /
@@ -386,6 +386,12 @@ store gate and persist-before-publish rules).
 | ID   | Title |
 |---|---|
 | C-94 | **No label of any metric a service records carries an identifier: a label value comes from a closed set fixed in the source (service, the route template, a method from a fixed list or `other`, the status class, named outcomes), never from request data; no account, device, login handle, username, group / journal / mailbox, room or call, channel, `push_gid`, blob, peer, token or nonce, IP or location, nor a prefix or hash of one; no per-object gauge, no exemplars** ([ADR-0096](../adr/0096-service-observability.md) section 1; P1 built 2026-11-08 in `crates/lakko-metrics` and every service with a router, host-tested, not deployed). Why: a metrics store is a dataset an operator, a backup or a seizure can be asked for, kept for weeks and indexed by time; a metric labelled by group or room is the social graph with timestamps (invariant #5), the same leak ADR-0078 section 11 closes for logs. Enforced three ways: the RED layer builds labels from the route template and closed sets only (`lakko_metrics::red_layer`); `lakko_log_hygiene::lint::lint_metric_labels` refuses a `counter!` / `gauge!` / `histogram!` label whose key or value names a denied identifier or is built at run time, run over every service by `tests/source_lint.rs`, which also requires every service to mount the layer and a listener; and `lakko_metrics::exposition::check` scans a rendered `/metrics` for foreign label names, non-template routes and identifier-shaped values, run by `crates/lakko-metrics/tests/red_layer.rs`, `services/sfu/tests/metrics_exposition.rs` and the DS and discovery capture tests. **Does NOT** hide when activity happened: aggregate counts at 15-second resolution reveal activity timing while users are few (the ADR's section 8 residual). Full entry: [`calls.md` C-94](./calls.md). |
+
+### C-95 — A deleted account is shown as deleted, and its username never names someone else (ADR-0098)
+
+| ID   | Title |
+|---|---|
+| C-95 | **A person is marked deleted for good only by an account-deleted statement that verifies under the MLS sender's account key resolved at receipt (C-68) over this conversation's group id; a directory `404` marks them deleted only until the directory answers again for the same person; a `@username` is shown beside a person only when they are not deleted and the directory confirmed their account within the last 21 days, which, with the deleted or renamed name held for 30 days, means a shown username never belongs to someone else** ([ADR-0098](../adr/0098-deleted-account.md); core, both FFI surfaces, the NSE recogniser and the discovery hold built 2026-11-20, host-tested only, no client uses it yet). `lakko-contacts::account_deleted` (`compose_account_deleted` / `verify_account_deleted`, `account_deletion_status`, `may_show_username`, `directory_check_due`); `services/discovery` `purge_account` retires and re-keys the account's username rows instead of deleting them. Pinned by the module's unit and property tests (`a_statement_verifies_only_for_its_group_and_key`, `any_flipped_byte_is_refused`, `a_shown_username_always_has_a_confirmation_inside_the_window`, `the_username_window_is_below_the_directory_hold`), the DB-gated `registry` test (a deleted account's names are refused to a stranger until the pruner frees them) and fuzz `account_deleted_decode`. **Does NOT** hold if the operator sets `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` at or below 21 days; does not stop a holder of the account key from marking the account deleted; does not cover a renamed name whose profile republish a device missed past the journal retention. Invariants **#4**, **#5**. Full entry: [`calls.md` C-95](./calls.md). |
 
 ### C-88 — A Welcome replaces an ended group and nothing else (ADR-0045 amendment)
 

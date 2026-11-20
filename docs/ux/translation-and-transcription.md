@@ -128,6 +128,17 @@ Spanish chat does not turn a Ukrainian message Spanish. Built on web, iOS and An
 (2026-11-15), unit-tested only.
 `Translate` on the line does exactly what the row does, in the order above.
 
+**Amended 2026-11-20 (maintainer, after walk 7):** the line up front names only a
+confident detection. English test messages ("W7 web to iphone", "W5 iphone hello")
+were labelled Polish, Italian and Afrikaans on iOS and Android. Now an unsure
+detection shows no line at all (the `Translate` row in the menu still starts from
+the order above, `Not X?` corrects it), and a text with fewer than 20 letters in a
+script several languages share is never confident, from Lakko's detector or the
+platform's (`lakko_ui_rules::language_detect::MIN_LETTERS`, chosen, not measured).
+A script only one language uses (Greek, Thai, Hangul, ...) is still evidence enough.
+The "hola, qué tal?" and "goedendag" examples above therefore show no line; what
+they say about `Translate` stands.
+
 ### 3.2 A translated bubble
 
 The translation takes the place of the text inside the same bubble. Under it,

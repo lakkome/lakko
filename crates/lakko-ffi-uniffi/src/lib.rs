@@ -37,6 +37,7 @@ use lakko_mls::{
     RoleTable as MlsRoleTable,
 };
 
+pub mod account_deleted;
 pub mod account_statement;
 pub mod anon_cred;
 pub mod anon_token;

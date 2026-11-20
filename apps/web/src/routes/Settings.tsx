@@ -569,15 +569,20 @@ function AboutSection(): JSX.Element {
         {/* docs/ux/beta-notice.md: first, so the protection claim below is
             read with the caveat. */}
         <BetaNoticeRow />
-        <div class="lk-card-row">
-          <span class="lk-card-row-icon">
-            <Icon name="info-circle" size={20} />
-          </span>
-          <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{t("settings.about.version")}</span>
-            <span class="lk-card-row-sub">{appVersion()}</span>
-          </div>
-        </div>
+        {/* No row when the build names no real version (walk 7: "0.0.0"). */}
+        <Show when={appVersion()}>
+          {(version) => (
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="info-circle" size={20} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-title">{t("settings.about.version")}</span>
+                <span class="lk-card-row-sub">{version()}</span>
+              </div>
+            </div>
+          )}
+        </Show>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="heart" size={20} />

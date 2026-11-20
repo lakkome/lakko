@@ -43,15 +43,30 @@ final class TranslationSourceTests: XCTestCase {
         for order in [seen, Array(seen.reversed()), [seen[1], seen[4], seen[0], seen[3], seen[2]],
                       [seen[0], seen[2], seen[3], seen[4], seen[1]]] {
             let r = resolve(guess("ca", 180, ["es", "fr", "it"]), detected: order, translatable: ["es", "fr", "it"])
-            XCTAssertEqual(r.lineTag, "es")
+            // An unsure guess is never named up front (walk 7, 2026-11-20).
+            XCTAssertNil(r.lineTag)
             XCTAssertEqual(r.translateSource, "es")
         }
     }
 
-    func testAUsableGuessBelowTheThresholdTranslatesAtOnce() {
+    func testAUsableGuessBelowTheThresholdTranslatesAtOnceButIsNotNamed() {
         let r = resolve(guess("es", confident - 1), translatable: ["es"])
         XCTAssertEqual(r.translateSource, "es")
-        XCTAssertEqual(r.lineTag, "es")
+        XCTAssertNil(r.lineTag)
+        // At the threshold the line names it.
+        XCTAssertEqual(resolve(guess("es", confident), translatable: ["es"]).lineTag, "es")
+    }
+
+    /// Walk 7 (2026-11-20): English test messages on an iPhone read
+    /// "Polish · Translate". Short text is never confident, whatever the
+    /// platform detector's probability, so no line names it.
+    func testShortTextFromThePlatformDetectorIsNeverNamed() {
+        let short = languageCandidatesFromHypotheses(
+            text: "W7 web to iphone",
+            hypotheses: [LanguageHypothesis(tag: "pl", probabilityPermille: 900)])
+        XCTAssertNotNil(short)
+        XCTAssertLessThan(short?.detected.confidencePermille ?? 1000, confident)
+        XCTAssertNil(resolve(short, translatable: ["pl"]).lineTag)
     }
 
     func testNoGuessAtAllOpensThePicker() {
@@ -79,8 +94,8 @@ final class TranslationSourceTests: XCTestCase {
         // Seen on a Pixel: unsure Catalan, candidates es fr it, no Catalan
         // on the device.
         let r = resolve(guess("ca", 180, ["es", "fr", "it"]), translatable: ["es", "fr", "it"])
-        XCTAssertEqual(r.lineTag, "es")
-        XCTAssertTrue(r.lineCanTranslate)
+        XCTAssertNil(r.lineTag)
+        XCTAssertFalse(r.lineCanTranslate)
         XCTAssertEqual(r.translateSource, "es")
     }
 

@@ -62,8 +62,8 @@ reads the channel:
     nothing.
   - **Desktop:** the window may be hidden; the host keeps the page running.
 - Honest cost, said in one place only (Settings > Notifications, under the
-  channel line, small text): "Channel posts can arrive late while Lakko is
-  closed." No other screen mentions it.
+  channel line, small text): "While Lakko is closed, notifications about new
+  channel posts can come late." No other screen mentions it.
 
 ## 4. Settings
 

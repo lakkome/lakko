@@ -403,6 +403,27 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     sections
 }
 
+/// What the info of a person whose account was deleted holds (ADR-0098,
+/// `docs/ux/deleted-account.md` section 3).
+///
+/// Only what still makes sense with nobody at the other end: returning to the
+/// readable one-to-one and deleting it when there is one, and removing the
+/// contact when the person is on the contact list. No call, no safety number
+/// (there is nothing left to compare), no rename, no add, no share, and
+/// nothing group-shaped.
+#[must_use]
+pub fn deleted_person_info_sections(has_one_to_one: bool, is_contact: bool) -> Vec<InfoSection> {
+    let mut sections = Vec::new();
+    if has_one_to_one {
+        sections.push(InfoSection::Message);
+        sections.push(InfoSection::DeleteChat);
+    }
+    if is_contact {
+        sections.push(InfoSection::RemoveContact);
+    }
+    sections
+}
+
 /// What a group's info holds - section 2.2.
 ///
 /// An ended membership leaves the name and the roster readable and takes
@@ -1443,5 +1464,37 @@ mod tests {
     fn the_members_switch_is_conversation_only_and_named() {
         assert!(InfoSection::MembersCanFindMe.group_only());
         assert_eq!(InfoSection::MembersCanFindMe.name(), "members-can-find-me");
+    }
+
+    #[test]
+    fn a_deleted_person_offers_only_the_chat_and_the_contact_row() {
+        assert!(deleted_person_info_sections(false, false).is_empty());
+        assert_eq!(
+            deleted_person_info_sections(true, true),
+            vec![
+                InfoSection::Message,
+                InfoSection::DeleteChat,
+                InfoSection::RemoveContact
+            ]
+        );
+        assert_eq!(
+            deleted_person_info_sections(false, true),
+            vec![InfoSection::RemoveContact]
+        );
+        for one in [false, true] {
+            for contact in [false, true] {
+                let s = deleted_person_info_sections(one, contact);
+                for never in [
+                    InfoSection::Call,
+                    InfoSection::SafetyNumber,
+                    InfoSection::RenameContact,
+                    InfoSection::AddContact,
+                    InfoSection::TheirContactsCanFindMe,
+                ] {
+                    assert!(!s.contains(&never), "{never:?}");
+                }
+                assert!(s.iter().all(|x| !x.group_only()));
+            }
+        }
     }
 }
