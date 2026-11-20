@@ -189,7 +189,29 @@ public final class ReportSheetModel: ObservableObject {
         return .count(included)
     }
 
-    public var canSend: Bool { reason != nil && phase != .sending && phase != .sent }
+    /// `Send report` needs a reason, takes no second tap while sending, and
+    /// stays off once the server said reporting is not available here (UX
+    /// 2.3: said when the sheet opens, with `Send report` disabled).
+    public var canSend: Bool { reason != nil && phase != .sending && phase != .sent && phase != .unavailable }
+
+    /// UX 2.3, "Reporting not available on this server": asked when the
+    /// sheet opens. When the server has no reporting (no pinned key, the
+    /// service off, a list refused) the sheet says so and `Send report` is
+    /// disabled, so the follow-up is never offered against a report that
+    /// cannot go. No answer (no network) leaves the sheet as it is; a send
+    /// then says what happened. Seals and sends nothing.
+    public func checkAvailability() async {
+        guard phase == .editing else { return }
+        let unavailable: Bool
+        if ports.rootKey == nil {
+            unavailable = true
+        } else if case .unavailable = await ports.moderatorList() {
+            unavailable = true
+        } else {
+            unavailable = false
+        }
+        if unavailable, phase == .editing { phase = .unavailable }
+    }
 
     public func isPicked(_ id: Int64) -> Bool { picked.contains(id) }
 
@@ -210,7 +232,7 @@ public final class ReportSheetModel: ObservableObject {
 
     /// Send (UX 2.3). A second tap while sending does nothing.
     public func send() async {
-        guard let reason, phase != .sending, phase != .sent else { return }
+        guard let reason, phase != .sending, phase != .sent, phase != .unavailable else { return }
         phase = .sending
         guard let rootKey = ports.rootKey else { return finish(.unavailable) }
         let list: Data

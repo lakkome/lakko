@@ -26,6 +26,9 @@ public struct AccountDeletionCleanup {
 ///   1. auth `DELETE /account`. If it throws (a refused proof, the ADR-0074
 ///      recall window, the network), the error propagates and NOTHING else
 ///      runs: no cleanup, no wipe.
+///      Once it succeeded, ``afterAuth`` tells the session provider: no
+///      refresh runs and no refusal signs the device out from here on
+///      (ADR-0098: a sign-out would stop the account-deleted statements).
 ///   2. Every cleanup, concurrently, each retried a few times with a short
 ///      pause, the whole step bounded by ``overallTimeout``. A cleanup that
 ///      fails is logged by its fixed name and the error's type only, and
@@ -40,6 +43,16 @@ public struct AccountDeletionCleanup {
 public struct AccountDeletionRun {
     public var prepare: @MainActor () async -> Void = {}
     public var deleteAtAuth: @MainActor () async throws -> Void
+    /// Runs once the auth delete succeeded, before any cleanup (ADR-0098):
+    /// tells the session provider the account is gone, so a cleanup's `401`
+    /// cannot sign the device out while the conversations are still being
+    /// told the account was deleted.
+    public var afterAuth: @MainActor () -> Void = {}
+    /// ADR-0098 (walk 10): the account-deleted statement. Runs to the end
+    /// before any of `cleanups` starts: removing the directory entry at the
+    /// same time could rebuild this device's conversation identity and stop
+    /// the statement (seen on Android).
+    public var first: [AccountDeletionCleanup] = []
     public var cleanups: [AccountDeletionCleanup]
     public var wipe: @MainActor () -> Void
     /// Attempts per cleanup (chosen, not measured).
@@ -54,11 +67,15 @@ public struct AccountDeletionRun {
     public init(
         prepare: @escaping @MainActor () async -> Void = {},
         deleteAtAuth: @escaping @MainActor () async throws -> Void,
+        afterAuth: @escaping @MainActor () -> Void = {},
+        first: [AccountDeletionCleanup] = [],
         cleanups: [AccountDeletionCleanup],
         wipe: @escaping @MainActor () -> Void
     ) {
         self.prepare = prepare
         self.deleteAtAuth = deleteAtAuth
+        self.afterAuth = afterAuth
+        self.first = first
         self.cleanups = cleanups
         self.wipe = wipe
     }
@@ -68,11 +85,14 @@ public struct AccountDeletionRun {
     public func run() async throws {
         await prepare()
         try await deleteAtAuth()
-        await runCleanups()
+        afterAuth()
+        await runCleanups(first)
+        await runCleanups(cleanups)
         wipe()
     }
 
-    private func runCleanups() async {
+    private func runCleanups(_ cleanups: [AccountDeletionCleanup]) async {
+        if cleanups.isEmpty { return }
         let attempts = max(1, attemptsPerCleanup)
         let delay = retryDelay
         let timeout = overallTimeout

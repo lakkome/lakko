@@ -37,9 +37,10 @@ import {
   withReason,
 } from "./report-model";
 import { pickCandidates, reportPorts } from "./report-runtime";
-import { availablePicks, sendReport } from "./report-send";
+import { availablePicks, checkReportAvailability, sendReport } from "./report-send";
 import {
   closeReport,
+  markReportUnavailable,
   reportSent,
   reportSentVersion,
   reportSession,
@@ -83,6 +84,23 @@ export function ReportSheetHost(): JSX.Element {
         void reportPorts(accountId()).then(async (ports) => {
           const kept = await availablePicks(draft, ports);
           if (reportSession()?.draft.picked === picked) setAvailable(kept);
+        });
+      },
+    ),
+  );
+
+  // UX 2.3 - "Reporting isn't available on this server" is said when the
+  // sheet opens, and `Send report` stays disabled, so the checkbox's block or
+  // leave is never offered against a report that cannot go. Asked once per
+  // opened sheet (keyed on the target, which every edit keeps).
+  createEffect(
+    on(
+      () => reportSession()?.draft.target,
+      (target) => {
+        const opened = reportSession()?.draft;
+        if (target === undefined || opened === undefined) return;
+        void reportPorts(accountId()).then(async (ports) => {
+          if ((await checkReportAvailability(ports)) === "unavailable") markReportUnavailable(opened);
         });
       },
     ),

@@ -33,6 +33,7 @@ import {
 } from "./webauthn-client";
 import { DiscoveryClient } from "../discovery/client";
 import { runAccountDeletion } from "./account-deletion";
+import { sessionTokens } from "./session-token-provider";
 import { buildDeletionCleanups, prepareDeletionTokens } from "./account-deletion-cleanups";
 import {
   bindingSigner,
@@ -399,18 +400,20 @@ export function DeleteAccountDialog(props: {
             }
           }
         },
-        cleanups: async () => {
-          // ADR-0098: the statements first, so a short budget reaches them.
-          let statements: Awaited<ReturnType<typeof statementCleanups>> = [];
+        afterAuth: () => sessionTokens.markAccountDeleted(),
+        // ADR-0098: the statements run to the end before any other cleanup
+        // starts (walk 10: removing the directory entry at the same time
+        // stopped them).
+        firstCleanups: async () => {
           try {
-            statements = await statementCleanups(base64Encode(secrets.accountId));
+            return await statementCleanups(base64Encode(secrets.accountId));
           } catch {
             // eslint-disable-next-line no-console
             console.warn("[account] delete: statements not built");
+            return [];
           }
-          const rest = await buildDeletionCleanups(base64Encode(secrets.accountId), secrets.bearer);
-          return [...statements, ...rest];
         },
+        cleanups: async () => buildDeletionCleanups(base64Encode(secrets.accountId), secrets.bearer),
         wipe: async () => {
           gate.clear();
           // Wipes this device and lands on the sign-in screen (ADR-0099: a

@@ -69,6 +69,8 @@ public class SessionTokenProvider(
         @Volatile var refused: Boolean = false,
         /** ADR-0099 - the account is suspended; the pair is the `s1` one. */
         @Volatile var suspended: Boolean = false,
+        /** ADR-0098 - auth deleted this account at this device's request. */
+        @Volatile var deleted: Boolean = false,
     )
 
     private val refreshMutex = Mutex()
@@ -129,7 +131,7 @@ public class SessionTokenProvider(
      */
     public suspend fun suspendedFromBearerRoute() {
         val inst = installed ?: return
-        if (inst.suspended || inst.refused) return
+        if (inst.suspended || inst.refused || inst.deleted) return
         refreshIfStillCurrent(inst.pair.accessToken)
     }
 
@@ -159,6 +161,21 @@ public class SessionTokenProvider(
         } catch (cause: Throwable) {
             log("session pair persist after bind failed: ${cause.javaClass.simpleName}")
         }
+    }
+
+    /**
+     * ADR-0098 - auth deleted the installed account at this device's
+     * request. The pair stays (storage and discovery verify it statelessly
+     * for their own deletions), but from now on nothing is refreshed and no
+     * refusal is reported: the deletion goes on to tell every conversation
+     * and to its own wipe, and a sign-out raised by a cleanup's `401` would
+     * stop it half-way (the account store sealed under the statement's
+     * persist). Silent: marked refused without calling `onRefusal`.
+     */
+    public fun markAccountDeleted() {
+        val inst = installed ?: return
+        inst.deleted = true
+        inst.refused = true
     }
 
     /** Forget the session (logout, wipe). */
@@ -216,7 +233,7 @@ public class SessionTokenProvider(
         val pair = inst.pair
         // Suspended: nothing to refresh to; the restricted session is served
         // as it is (the controller keeps it live).
-        if (inst.suspended) return pair.accessToken
+        if (inst.suspended || inst.deleted) return pair.accessToken
         if (tokenActionAt(pair.accessExpiresAtMs, clock()) == TokenAction.Use) return pair.accessToken
         return refreshIfStillCurrent(pair.accessToken)?.accessToken ?: installed?.pair?.accessToken
     }
@@ -230,7 +247,7 @@ public class SessionTokenProvider(
      */
     public suspend fun afterUnauthorized(usedToken: String): String? {
         val inst = installed ?: return null
-        if (inst.suspended) return null
+        if (inst.suspended || inst.deleted) return null
         return refreshIfStillCurrent(usedToken)?.accessToken
     }
 
@@ -238,6 +255,7 @@ public class SessionTokenProvider(
      *  or `null` when the refresh did not yield one. */
     public suspend fun refreshNow(): SessionPair? {
         val inst = installed ?: return null
+        if (inst.deleted) return null
         return refreshIfStillCurrent(inst.pair.accessToken)
     }
 

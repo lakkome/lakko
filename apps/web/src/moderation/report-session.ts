@@ -16,7 +16,7 @@
 
 import { createSignal, type Accessor } from "solid-js";
 
-import { newDraft, togglePick, type ReportDraft, type SheetPhase } from "./report-model";
+import { newDraft, phaseAfterEdit, togglePick, type ReportDraft, type SheetPhase } from "./report-model";
 
 /** One open report. */
 export interface ReportSession {
@@ -52,7 +52,7 @@ export function closeReport(): void {
 export function updateDraft(change: (draft: ReportDraft) => ReportDraft): void {
   const s = session();
   if (s === null) return;
-  setSession({ ...s, draft: change(s.draft), phase: s.phase === "sending" ? "sending" : "editing" });
+  setSession({ ...s, draft: change(s.draft), phase: phaseAfterEdit(s.phase) });
 }
 
 /** Move the sheet to a phase. */
@@ -60,6 +60,15 @@ export function setReportPhase(phase: SheetPhase): void {
   const s = session();
   if (s === null) return;
   setSession({ ...s, phase });
+}
+
+/** The availability check of an opened sheet said "not available": the
+ *  sheet says so and `Send report` is disabled (UX 2.3). Only the draft
+ *  the check was started for, and only before a send. */
+export function markReportUnavailable(draft: ReportDraft): void {
+  const s = session();
+  if (s === null || s.draft.target !== draft.target || s.phase === "sending") return;
+  setSession({ ...s, phase: "unavailable" });
 }
 
 /** `Add messages`: the sheet shows its "Choose messages" list. */

@@ -455,19 +455,26 @@ public class PasskeysViewModel(
                             }
                         }
                     },
-                    cleanups = accountDeletionCleanups(subscriptionIds, pushTokens, secrets.bearer) +
-                        listOfNotNull(
-                            // ADR-0098: a suspended device without its chats
-                            // holds no seed and has nothing to tell.
-                            announceDeletion?.let { announce ->
-                                secrets.accountIdentitySeed?.let { seed ->
-                                    me.lakko.app.account.accountDeletedAnnouncement(
-                                        seeds = deletionAnnouncementSeeds(context, accountIdB64, seed),
-                                        announce = announce,
-                                    )
-                                }
-                            },
-                        ),
+                    // ADR-0098 - the session refuses from here on; no
+                    // cleanup's 401 may sign this device out before the
+                    // conversations are told.
+                    afterAuth = { me.lakko.app.auth.SessionTokens.provider?.markAccountDeleted() },
+                    // ADR-0098: the statement first, to the end, before the
+                    // directory entry is removed (walk 10: running both at
+                    // once rebuilt the conversation identity and stopped it).
+                    // A suspended device without its chats holds no seed and
+                    // has nothing to tell.
+                    first = listOfNotNull(
+                        announceDeletion?.let { announce ->
+                            secrets.accountIdentitySeed?.let { seed ->
+                                me.lakko.app.account.accountDeletedAnnouncement(
+                                    seeds = deletionAnnouncementSeeds(context, accountIdB64, seed),
+                                    announce = announce,
+                                )
+                            }
+                        },
+                    ),
+                    cleanups = accountDeletionCleanups(subscriptionIds, pushTokens, secrets.bearer),
                     // Local wipe + full sign-out on this device: the same path
                     // Forget device takes (every per-account store, push first).
                     wipe = onAccountDeleted,

@@ -170,8 +170,13 @@ public data class ReportSheetState(
     val also: Boolean = false,
     val phase: ReportPhase = ReportPhase.EDITING,
 ) {
-    /** Send report needs a reason and accepts no second tap while sending. */
-    public val canSend: Boolean get() = reason != null && phase != ReportPhase.SENDING
+    /**
+     * Send report needs a reason, accepts no second tap while sending, and
+     * stays off once the server said reporting is not available here (UX
+     * section 2.3: said when the sheet opens, with `Send report` disabled).
+     */
+    public val canSend: Boolean
+        get() = reason != null && phase != ReportPhase.SENDING && phase != ReportPhase.UNAVAILABLE
 
     public fun withReason(code: UByte): ReportSheetState = copy(reason = code, phase = editingAfterRefusal())
 
@@ -195,8 +200,9 @@ public data class ReportSheetState(
     public fun withPickedPosts(posts: List<ReportablePost>): ReportSheetState =
         copy(pickedPosts = posts.distinctBy { it.cursor }.take(REPORT_MESSAGE_LIMIT))
 
+    /** A refusal line goes with an edit, except "not available", which no edit changes. */
     private fun editingAfterRefusal(): ReportPhase =
-        if (phase == ReportPhase.SENDING) phase else ReportPhase.EDITING
+        if (phase == ReportPhase.SENDING || phase == ReportPhase.UNAVAILABLE) phase else ReportPhase.EDITING
 
     public companion object {
         public fun initial(subject: ReportSubject): ReportSheetState = ReportSheetState(
@@ -300,6 +306,61 @@ private fun retryableTokenRefusal(post: ReportPost): Boolean =
     post is ReportPost.Refused && post.status == 401 &&
         post.error in setOf("anon-token-spent", "anon-token-expired", "anon-token-wrong-context", "anon-token-malformed")
 
+/** The pinned root key and a moderator list it accepts, or why not. */
+private sealed interface ListStep {
+    class Ok(val root: ByteArray, val list: ByteArray) : ListStep
+    data object Unavailable : ListStep
+    data object Network : ListStep
+}
+
+private suspend fun verifiedModeratorList(ports: ReportPorts): ListStep {
+    val root = ports.rootKey() ?: return ListStep.Unavailable
+    val list = when (val fetched = ports.fetchModeratorList()) {
+        is ModeratorListFetch.Ok -> fetched.bytes
+        ModeratorListFetch.Unavailable -> return ListStep.Unavailable
+        ModeratorListFetch.Network -> return ListStep.Network
+    }
+    val version = try {
+        ports.moderatorListVersion(list, root)
+    } catch (cause: CancellationException) {
+        throw cause
+    } catch (_: Throwable) {
+        return ListStep.Unavailable
+    }
+    if (!moderatorListAccepted(version, ports.highestListVersion())) return ListStep.Unavailable
+    ports.recordListVersion(version)
+    return ListStep.Ok(root, list)
+}
+
+/** Whether reporting can work on this server, asked when the sheet opens. */
+public enum class ReportAvailability {
+    AVAILABLE,
+
+    /** No pinned root key, the service answers 503, or the list is refused. */
+    UNAVAILABLE,
+
+    /** No answer (no network): the sheet stays as it is and a send says what happened. */
+    UNKNOWN,
+}
+
+/**
+ * UX section 2.3, "Reporting not available on this server": said when the
+ * sheet opens, and `Send report` is disabled, so the sheet's block or leave
+ * is never offered against a report that cannot go. Seals and posts nothing.
+ * Never throws but for cancellation.
+ */
+public suspend fun checkReportAvailability(ports: ReportPorts): ReportAvailability = try {
+    when (verifiedModeratorList(ports)) {
+        is ListStep.Ok -> ReportAvailability.AVAILABLE
+        ListStep.Unavailable -> ReportAvailability.UNAVAILABLE
+        ListStep.Network -> ReportAvailability.UNKNOWN
+    }
+} catch (cause: CancellationException) {
+    throw cause
+} catch (_: Throwable) {
+    ReportAvailability.UNKNOWN
+}
+
 /**
  * Send one report (UX section 2.3). Never throws but for cancellation.
  * The moderator list is fetched, verified under the pinned root and checked
@@ -307,21 +368,11 @@ private fun retryableTokenRefusal(post: ReportPost): Boolean =
  */
 public suspend fun sendReport(ports: ReportPorts): ReportOutcome {
     try {
-        val root = ports.rootKey() ?: return ReportOutcome.Unavailable
-        val list = when (val fetched = ports.fetchModeratorList()) {
-            is ModeratorListFetch.Ok -> fetched.bytes
-            ModeratorListFetch.Unavailable -> return ReportOutcome.Unavailable
-            ModeratorListFetch.Network -> return ReportOutcome.Failed
+        val (root, list) = when (val step = verifiedModeratorList(ports)) {
+            is ListStep.Ok -> step.root to step.list
+            ListStep.Unavailable -> return ReportOutcome.Unavailable
+            ListStep.Network -> return ReportOutcome.Failed
         }
-        val version = try {
-            ports.moderatorListVersion(list, root)
-        } catch (cause: CancellationException) {
-            throw cause
-        } catch (_: Throwable) {
-            return ReportOutcome.Unavailable
-        }
-        if (!moderatorListAccepted(version, ports.highestListVersion())) return ReportOutcome.Unavailable
-        ports.recordListVersion(version)
         val sealed = ports.seal(list, root)
         var post = ports.post(sealed, ports.takeToken())
         if (retryableTokenRefusal(post)) post = ports.post(sealed, ports.takeToken())

@@ -572,6 +572,7 @@ import {
   asHistoryRow,
   rowMessageId,
   dedupByMessageId,
+  seedTimelineFromLog,
   type TimelineRow,
 } from "../chat/timeline-row";
 import { TimelineBubble } from "../chat/TimelineBubble";
@@ -7793,12 +7794,11 @@ function ChatView(props: {
             .map((a) => mediaKey(b64UrlDecode(a.blobIdB64))),
         ),
       );
-      // Only seed when the in-memory list is empty — a refresh
-      // running concurrently with hydration shouldn't get
-      // stomped by the disk load.
-      if (rows().length === 0) {
-        setRows(seeded);
-      }
+      // A row that reached the view first (a poll answer, a flushed send, a
+      // gap row) is kept as it is; every stored row it does not hold goes in
+      // by DS id. Seeding only an empty list hid the stored history behind
+      // that first row, and the view's next write then took it out of the log.
+      setRows(seedTimelineFromLog(rows(), seeded));
       // ADR-0023 — restore the edit / delete / reaction overlay. Guarded on
       // the overlay rather than on `rows`, because it is keyed on DS ids and
       // lands correctly on whichever rows are present; and not seeded over a

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { base64Encode } from "../auth/account-id";
 import { newDraft, withReason, type ReportDraft } from "./report-model";
-import { sendReport, type ReportSendPorts, type SealSpec } from "./report-send";
+import { checkReportAvailability, sendReport, type ReportSendPorts, type SealSpec } from "./report-send";
 
 const KEY = new Uint8Array(32).fill(7);
 const GROUP_ID = new Uint8Array(32).fill(3);
@@ -149,5 +149,45 @@ describe("sending a report", () => {
   it("passes the post's outcome through", async () => {
     const { ports: p } = ports({ post: async () => ({ kind: "limited" }) });
     expect(await sendReport(personDraft(), p)).toEqual({ kind: "limited" });
+  });
+});
+
+describe("asking whether reporting is available, when the sheet opens", () => {
+  it("is available with a pinned key and a list it accepts, and seals and posts nothing", async () => {
+    let posted = false;
+    const { ports: p, sealed, floors } = ports({
+      post: async () => {
+        posted = true;
+        return { kind: "sent", receiptId: "r".repeat(22) };
+      },
+    });
+    expect(await checkReportAvailability(p)).toBe("available");
+    expect(sealed).toEqual([]);
+    expect(posted).toBe(false);
+    expect(floors).toEqual([2n]);
+  });
+
+  it("is unavailable with no pinned key, a 503, a list that does not verify or an older list", async () => {
+    expect(await checkReportAvailability(ports({ rootKey: () => null }).ports)).toBe("unavailable");
+    expect(await checkReportAvailability(ports({ fetchList: async () => null }).ports)).toBe("unavailable");
+    expect(
+      await checkReportAvailability(
+        ports({
+          listVersion: () => {
+            throw new Error("bad signature");
+          },
+        }).ports,
+      ),
+    ).toBe("unavailable");
+    expect(await checkReportAvailability(ports({ readFloor: () => 5n }).ports)).toBe("unavailable");
+  });
+
+  it("is unknown when the list cannot be fetched, so the sheet stays as it is", async () => {
+    const { ports: p } = ports({
+      fetchList: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect(await checkReportAvailability(p)).toBe("unknown");
   });
 });

@@ -127,10 +127,13 @@ public enum DeletedAccountRules {
         return .otherKey
     }
 
-    /// The groups where a statement was verified and removal is not proposed.
-    public static func removalsOwed(_ r: PersonDeletionRecord) -> [String] {
-        guard r.statementVerified else { return [] }
-        return r.statementGroups.filter { !r.removalProposed.contains($0) }
+    /// Whether this device still owes the person's removal in `groupIdHex`.
+    /// A verified statement proves the ACCOUNT is gone, so it is owed in
+    /// every group this device holds, not only the one the statement arrived
+    /// in (seen live 2026-11-20: the owner's device kept a deleted person in a
+    /// group the statement never reached). Never on a directory answer.
+    public static func owesRemoval(_ r: PersonDeletionRecord, groupIdHex: String) -> Bool {
+        r.statementVerified && !r.removalProposed.contains(groupIdHex)
     }
 }
 
@@ -251,12 +254,12 @@ public final class DeletedAccounts: ObservableObject {
         DeletedAccountRules.mayShowUsername(keysB64.compactMap { records[$0] }, nowMs: nowMs())
     }
 
-    /// The people with a verified statement in `groupIdHex` whose removal is
-    /// not proposed yet.
+    /// The people with a verified statement (from any conversation) whose
+    /// removal from `groupIdHex` is not proposed or settled yet.
     public func removalsOwed(groupIdHex: String) -> [String] {
         records.compactMap { key, r in
-            DeletedAccountRules.removalsOwed(r).contains(groupIdHex) ? key : nil
-        }
+            DeletedAccountRules.owesRemoval(r, groupIdHex: groupIdHex) ? key : nil
+        }.sorted()
     }
 
     // MARK: - Writing
@@ -383,25 +386,61 @@ public final class DeletedAccounts: ObservableObject {
     }
 }
 
+/// What a drawn person's on-screen check is keyed on: the person, and the
+/// account id this device holds for them right now. A group member who is not
+/// a contact is known by the id their own profile v2 claims (ADR-0048); when
+/// that profile arrives after the row was drawn, the key changes and the check
+/// runs again (the rule and the one-in-flight limit still decide whether
+/// anything is asked).
+struct OnScreenCheckKey: Hashable {
+    let personKey: Data
+    let accountId: Data?
+
+    /// `nil` for no person (this device's own row). `accountId` is a caller's
+    /// explicit id (a contact row); otherwise `profileAccountId` is asked.
+    @MainActor
+    static func of(
+        personKey: Data?, accountId: Data?, profileAccountId: @MainActor (Data) -> Data?
+    ) -> OnScreenCheckKey? {
+        guard let personKey else { return nil }
+        return OnScreenCheckKey(personKey: personKey, accountId: accountId ?? profileAccountId(personKey))
+    }
+
+    /// The id a group member's own profile claims, or `nil`.
+    @MainActor
+    static func profileAccountId(_ personKey: Data) -> Data? {
+        ProfileDirectory.shared.accountId(signatureKeyB64: base64Encode(personKey))
+    }
+}
+
 /// `docs/ux/deleted-account.md` section 2 — ask whether the person drawn here
 /// still has an account, when a check is due. For the surfaces the ADR names
 /// (a contacts row, an open one-to-one, a person card, a member row).
 struct ChecksAccountExists: ViewModifier {
-    let personKey: Data?
+    /// Computed by the caller's render (``View/checksAccountExists(personKey:accountId:)``),
+    /// so a profile arriving, which re-renders the row, changes it.
+    let key: OnScreenCheckKey?
     let accountId: Data?
 
     func body(content: Content) -> some View {
-        content.task(id: personKey) {
-            guard let personKey else { return }
+        content.task(id: key) {
+            guard let key else { return }
             DeletedAccounts.shared.checkIfDue(
-                personKey: personKey, accountId: accountId ?? DeletedAccounts.accountId(personKey: personKey))
+                personKey: key.personKey,
+                accountId: accountId ?? DeletedAccounts.accountId(personKey: key.personKey))
         }
     }
 }
 
 extension View {
-    /// See ``ChecksAccountExists``.
+    /// See ``ChecksAccountExists``. The key is taken here, in the caller's
+    /// render: a member whose account id was not known when the row was drawn
+    /// is asked about once their profile v2 brings it.
+    @MainActor
     func checksAccountExists(personKey: Data?, accountId: Data? = nil) -> some View {
-        modifier(ChecksAccountExists(personKey: personKey, accountId: accountId))
+        modifier(ChecksAccountExists(
+            key: OnScreenCheckKey.of(
+                personKey: personKey, accountId: accountId, profileAccountId: OnScreenCheckKey.profileAccountId),
+            accountId: accountId))
     }
 }

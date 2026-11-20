@@ -191,6 +191,11 @@ public class PersonDeletionBook(
     public fun markStatementVerified(keyB64: String): Boolean =
         update(keyB64) { if (it.statementVerified) it else it.copy(statementVerified = true) }?.first == true
 
+    /** The people a verified account-deleted statement was recorded for, in
+     *  any conversation. Never a directory answer. */
+    public fun statementVerifiedKeys(): List<String> =
+        synchronized(lock) { loaded()?.second?.filterValues { it.statementVerified }?.keys?.sorted() } ?: emptyList()
+
     /** A complete directory answer for [keyB64]. Ignored after a statement:
      *  nothing reverses it. */
     public fun recordAnswer(keyB64: String, answer: DirectoryAnswer) {
@@ -335,6 +340,28 @@ public class AccountDeletionChecks(
             }
         }
     }
+}
+
+/**
+ * ADR-0098 section 2 — what a drawn person's on-screen check is keyed on: the
+ * person, and the account id their own profile claims right now. A group
+ * member who is not a contact is known only by that claim (ADR-0048 v2);
+ * when their profile arrives after the row was drawn the key changes and the
+ * row's check runs again. Whether anything is then asked is still
+ * [AccountDeletionChecks.onScreen]'s decision (the due rule, one request in
+ * flight per person). `null` for no person (this device's own row).
+ */
+public data class OnScreenCheckKey(val personKeyB64: String, val profileAccountIdHex: String?)
+
+/** The [OnScreenCheckKey] of [personKeyB64], or `null`. */
+public fun onScreenCheckKey(personKeyB64: String?, profileAccountIdHex: (String) -> String?): OnScreenCheckKey? {
+    if (personKeyB64.isNullOrEmpty()) return null
+    val id = try {
+        profileAccountIdHex(personKeyB64)
+    } catch (_: Throwable) {
+        null
+    }
+    return OnScreenCheckKey(personKeyB64, id)
 }
 
 /**
@@ -505,7 +532,7 @@ internal fun attachAccountDeletions(context: Context, directory: ProfileDirector
 
 /**
  * Whether this device proposes the removal of a member whose account-deleted
- * statement it just verified in a group: only in a group (a one-to-one
+ * statement it verified (in any conversation): only in a group (a one-to-one
  * cannot remove a person, ADR-0062), only when this device's account is the
  * owner or an admin there, never for the owner (C-63: unremovable), and once
  * per (account, group).
@@ -517,10 +544,45 @@ public fun deletedMemberRemovalDue(
     alreadyProposed: Boolean,
 ): Boolean = isGroup && ownRoleIsOwnerOrAdmin && !deletedIsOwner && !alreadyProposed
 
+/** What this device does about one deleted person in one group. */
+public sealed interface DeletedRemovalPlan {
+    /** Propose the removal naming [leafIndex] (the remove flow removes every
+     *  leaf of the account, ADR-0050). */
+    public data class Propose(val leafIndex: UInt) : DeletedRemovalPlan
+
+    /** Nothing now: not ours to remove here, or a removal of every one of
+     *  their leaves is already pending. Asked again at a later poll. */
+    public data object Wait : DeletedRemovalPlan
+
+    /** Nothing is ever owed here: the person has no leaf in the roster, is
+     *  the owner (C-63), or this is a one-to-one. */
+    public data object Settled : DeletedRemovalPlan
+}
+
+/** The plan for one deleted person in one group. Pure. */
+public fun deletedRemovalPlan(
+    isGroup: Boolean,
+    ownRoleIsOwnerOrAdmin: Boolean,
+    deletedIsOwner: Boolean,
+    personLeaves: List<UInt>,
+    pendingRemoveLeaves: Set<UInt>,
+): DeletedRemovalPlan {
+    val first = personLeaves.firstOrNull() ?: return DeletedRemovalPlan.Settled
+    if (!isGroup || deletedIsOwner) return DeletedRemovalPlan.Settled
+    if (!deletedMemberRemovalDue(isGroup, ownRoleIsOwnerOrAdmin, deletedIsOwner, alreadyProposed = false)) {
+        return DeletedRemovalPlan.Wait
+    }
+    if (personLeaves.all { it in pendingRemoveLeaves }) return DeletedRemovalPlan.Wait
+    return DeletedRemovalPlan.Propose(first)
+}
+
 /**
- * The (group, account key) pairs whose removal this device owes or has
- * proposed after a verified statement, per signed-in account. Only a signed
- * statement ever enters here, never a directory answer.
+ * The (group, account key) pairs whose removal this device has proposed (or
+ * found nothing to remove) after a verified statement, per signed-in account.
+ * A verified statement proves the ACCOUNT is gone, so a removal is owed in
+ * every group this device holds, not only the one the statement arrived in
+ * (seen live 2026-11-20, walk 12). Only a signed statement ever makes a
+ * removal owed, never a directory answer.
  */
 public class DeletedMemberRemovals(private val storage: Storage) {
     /** Where the ledger lives. */
@@ -538,27 +600,19 @@ public class DeletedMemberRemovals(private val storage: Storage) {
     public fun proposed(groupIdHex: String, keyB64: String): Boolean =
         synchronized(lock) { storage.load()[rowKey(groupIdHex, keyB64)] == true }
 
-    /** Record that the removal is owed (before the proposal is sent).
-     *  `false` when it was already recorded, owed or proposed. */
-    public fun markOwed(groupIdHex: String, keyB64: String): Boolean = synchronized(lock) {
-        val rows = storage.load()
-        val key = rowKey(groupIdHex, keyB64)
-        if (key in rows) return@synchronized false
-        storage.save(rows + (key to false))
-        true
-    }
-
-    /** The proposal reached the group. */
+    /** The proposal reached the group, or nothing is ever owed there. */
     public fun markProposed(groupIdHex: String, keyB64: String) {
         synchronized(lock) {
             storage.save(storage.load() + (rowKey(groupIdHex, keyB64) to true))
         }
     }
 
-    /** The account keys whose removal from [groupIdHex] is still owed. */
-    public fun owed(groupIdHex: String): List<String> = synchronized(lock) {
-        val prefix = groupIdHex.lowercase() + "|"
-        storage.load().filter { (k, done) -> !done && k.startsWith(prefix) }.keys.map { it.removePrefix(prefix) }
+    /** The account keys of [statementVerified] (people a verified statement
+     *  was recorded for, from any conversation) whose removal from
+     *  [groupIdHex] is still owed. */
+    public fun owed(groupIdHex: String, statementVerified: Collection<String>): List<String> = synchronized(lock) {
+        val rows = storage.load()
+        statementVerified.filter { rows[rowKey(groupIdHex, it)] != true }
     }
 
     public companion object {

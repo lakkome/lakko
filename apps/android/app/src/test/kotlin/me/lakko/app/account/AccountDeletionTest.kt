@@ -26,6 +26,7 @@ class AccountDeletionTest {
     private fun deletion(
         prepare: suspend () -> Unit = {},
         deleteAtAuth: suspend () -> Unit = { events += "auth" },
+        first: List<AccountDeletion.Cleanup> = emptyList(),
         cleanups: List<AccountDeletion.Cleanup>,
         attempts: Int = 3,
         perCleanupBoundMs: Long = 8_000,
@@ -34,6 +35,7 @@ class AccountDeletionTest {
     ) = AccountDeletion(
         prepare = prepare,
         deleteAtAuth = deleteAtAuth,
+        first = first,
         cleanups = cleanups,
         wipe = { events += "wipe" },
         attempts = attempts,
@@ -45,6 +47,23 @@ class AccountDeletionTest {
     )
 
     private fun recording(name: String) = AccountDeletion.Cleanup(name) { events += name }
+
+    /** ADR-0098, walk 10 - the statement runs to the end before the
+     *  directory entry is removed: both at once rebuilt the conversation
+     *  identity and stopped the statement in every conversation. */
+    @Test
+    fun the_first_cleanup_ends_before_any_other_cleanup_starts() = runTest {
+        val statement = AccountDeletion.Cleanup("conversations") {
+            events += "statement start"
+            kotlinx.coroutines.delay(1_000)
+            events += "statement end"
+        }
+        deletion(first = listOf(statement), cleanups = listOf(recording("directory"), recording("push"))).run()
+
+        assertEquals(listOf("auth", "statement start", "statement end"), events.subList(0, 3))
+        assertEquals(setOf("directory", "push"), events.subList(3, 5).toSet())
+        assertEquals("wipe", events.last())
+    }
 
     @Test
     fun auth_first_then_every_cleanup_then_the_wipe() = runTest {
@@ -263,5 +282,74 @@ class AccountDeletionTest {
         deletion(cleanups = listOf(failing), attempts = 2).run()
         assertEquals(listOf("auth", "wipe"), events)
         assertEquals(listOf("account deletion: conversations failed: IllegalStateException"), logs)
+    }
+    /**
+     * Walk 8 (ADR-0098): after DELETE /account a cleanup's bearer request
+     * met 401, the refresh answered refresh-invalid, the device signed out
+     * (the account store sealed), and the statement could not be posted.
+     * With the provider told after the auth delete, nothing signs out and
+     * every conversation gets its statement.
+     */
+    @Test
+    fun a_refused_session_after_the_auth_delete_signs_nothing_out_and_every_conversation_is_told() = runTest {
+        val refresher = object : me.lakko.app.auth.SessionTokenProvider.SessionRefresher {
+            var calls = 0
+            override suspend fun refresh(refreshToken: String): me.lakko.app.auth.SessionPair {
+                calls += 1
+                throw me.lakko.app.auth.AuthHttpError(
+                    401, "/auth/session/refresh", """{"error":"refresh-invalid"}""", code = "refresh-invalid",
+                )
+            }
+        }
+        val acct = "AAAAAAAAAAAAAAAAAAAAAA"
+        val dev = "D".repeat(43)
+        val now = 1_000_000L
+        val provider = me.lakko.app.auth.SessionTokenProvider(refresher, clock = { now })
+        val token = "v3.$acct.1.$dev.1.${now + 60_000L}.access1"
+        val refusals = mutableListOf<me.lakko.app.auth.SessionRefusal>()
+        provider.install(
+            me.lakko.app.auth.SessionPair(
+                accessToken = token,
+                accessExpiresAtMs = now + 60_000L,
+                refreshToken = "r2.$acct.1.$dev.1.9.refresh1",
+                refreshExpiresAtMs = now + 1_000_000L,
+                keyGeneration = 1L,
+            ),
+            persist = {},
+            onRefusal = { refusals += it },
+        )
+        val conversations = listOf("one-to-one", "group-a", "group-b")
+        val posted = mutableSetOf<String>()
+        val announce = accountDeletedAnnouncement(emptyList()) { _, sent ->
+            var failures = 0
+            for (c in conversations) {
+                if (c in sent) continue
+                // logout() seals the account store: the persist under the
+                // statement's send then throws.
+                if (refusals.isNotEmpty()) failures++ else { posted += c; sent += c }
+            }
+            if (failures > 0) throw IllegalStateException("$failures conversations not reached")
+        }
+        AccountDeletion(
+            deleteAtAuth = { events += "auth" },
+            afterAuth = { provider.markAccountDeleted() },
+            cleanups = listOf(
+                // A bearer request after the delete: near expiry, then a 401.
+                AccountDeletion.Cleanup("push subscriptions") {
+                    provider.current()
+                    provider.afterUnauthorized(token)
+                },
+                announce,
+            ),
+            wipe = { events += "wipe" },
+            retryDelayMs = 10,
+            log = { logs += it },
+        ).run()
+
+        assertTrue(refusals.isEmpty())
+        assertEquals(0, refresher.calls)
+        assertEquals(conversations.toSet(), posted)
+        assertEquals(listOf("auth", "wipe"), events)
+        assertTrue(logs.isEmpty())
     }
 }

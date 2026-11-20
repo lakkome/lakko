@@ -305,9 +305,10 @@ final class DeletedAccountTests: XCTestCase {
         XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g1").isEmpty, "a directory answer never removes")
         deletions.noteStatement(personKeyB64: statement, groupIdHex: "g1")
         XCTAssertEqual(deletions.removalsOwed(groupIdHex: "g1"), [statement])
-        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g2").isEmpty, "only where it was verified")
+        XCTAssertEqual(deletions.removalsOwed(groupIdHex: "g2"), [statement], "the account is gone everywhere")
         deletions.noteRemovalProposed(personKeyB64: statement, groupIdHex: "g1")
         XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g1").isEmpty, "proposed once")
+        XCTAssertEqual(deletions.removalsOwed(groupIdHex: "g2"), [statement], "once per group")
 
         let person = key(7)
         let owner = key(1)
@@ -325,6 +326,76 @@ final class DeletedAccountTests: XCTestCase {
             ownRole: .owner, roles: roles, personKey: person, inRoster: true, oneToOne: true))
         XCTAssertFalse(ChatRepository.shouldProposeRemoval(
             ownRole: .owner, roles: roles, personKey: person, inRoster: false, oneToOne: false))
+    }
+
+    /// Seen live 2026-11-20 (walk 12): a statement verified in a one-to-one
+    /// leads to a removal proposal in a separate group where this device is
+    /// owner and the person is a member; a group where this device is a plain
+    /// member gets none; a group already proposed gets none.
+    func testAStatementInAOneToOneLeadsToARemovalInAnotherGroup() {
+        let deletions = makeDeletions()
+        let personKey = key(7)
+        let person = base64Encode(personKey)
+        deletions.noteStatement(personKeyB64: person, groupIdHex: "one-to-one")
+
+        // A group this device owns, the person on leaves 3 and 5.
+        let ownedRoles = RoleTable(owner: key(1), admins: [])
+        XCTAssertEqual(deletions.removalsOwed(groupIdHex: "owned"), [person])
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .owner, roles: ownedRoles, personKey: personKey, personLeaves: [3, 5],
+                pendingRemoveLeaves: [], oneToOne: false),
+            .propose(leafIndex: 3))
+
+        // A group where this device is a plain member: nothing, asked again later.
+        let otherRoles = RoleTable(owner: key(2), admins: [])
+        XCTAssertEqual(deletions.removalsOwed(groupIdHex: "member-only"), [person])
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .member, roles: otherRoles, personKey: personKey, personLeaves: [4],
+                pendingRemoveLeaves: [], oneToOne: false),
+            .wait)
+
+        // Already proposed in the owned group: no longer owed there.
+        deletions.noteRemovalProposed(personKeyB64: person, groupIdHex: "owned")
+        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "owned").isEmpty)
+        XCTAssertEqual(deletions.removalsOwed(groupIdHex: "member-only"), [person])
+
+        // A removal of every leaf already pending: no second proposal.
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .admin, roles: ownedRoles, personKey: personKey, personLeaves: [3, 5],
+                pendingRemoveLeaves: [3, 5], oneToOne: false),
+            .wait)
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .admin, roles: ownedRoles, personKey: personKey, personLeaves: [3, 5],
+                pendingRemoveLeaves: [3], oneToOne: false),
+            .propose(leafIndex: 3))
+
+        // Never the owner (C-63), never a one-to-one, nothing once gone.
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .admin, roles: RoleTable(owner: personKey, admins: [key(1)]), personKey: personKey,
+                personLeaves: [0], pendingRemoveLeaves: [], oneToOne: false),
+            .settled)
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .owner, roles: ownedRoles, personKey: personKey, personLeaves: [1],
+                pendingRemoveLeaves: [], oneToOne: true),
+            .settled)
+        XCTAssertEqual(
+            ChatRepository.deletedRemovalPlan(
+                ownRole: .owner, roles: ownedRoles, personKey: personKey, personLeaves: [],
+                pendingRemoveLeaves: [], oneToOne: false),
+            .settled)
+    }
+
+    func testADirectoryAnswerAloneOwesNoRemovalAnywhere() {
+        let deletions = makeDeletions()
+        let pulled = base64Encode(key(9))
+        deletions.noteAnswer(personKeyB64: pulled, accountIdB64: nil, .absent)
+        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "owned").isEmpty)
     }
 
     // MARK: - Requests and the records
@@ -402,4 +473,47 @@ private struct NoSession: SessionPersistence {
     func sessionToken(accountIdB64: String) -> PersistedSessionToken? { nil }
     func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws {}
     func deleteSessionToken(accountIdB64: String) {}
+}
+
+// ADR-0098 section 2 — a group member who is not a contact is asked about with
+// the account id their own profile v2 claims, and a member row drawn before
+// that profile arrived is asked about once it has.
+extension DeletedAccountTests {
+
+    func testAMemberRowIsRekeyedWhenTheProfileAccountIdArrives() {
+        let person = key(9)
+        var claimed: Data?
+        let before = OnScreenCheckKey.of(personKey: person, accountId: nil, profileAccountId: { _ in claimed })
+        XCTAssertNil(before?.accountId)
+        claimed = Data(repeating: 0xCD, count: 16)
+        let after = OnScreenCheckKey.of(personKey: person, accountId: nil, profileAccountId: { _ in claimed })
+        XCTAssertEqual(after?.accountId, claimed)
+        XCTAssertNotEqual(before, after, "a new key re-runs the row's check")
+        XCTAssertNil(OnScreenCheckKey.of(personKey: nil, accountId: nil, profileAccountId: { _ in claimed }))
+        let explicit = Data(repeating: 0x01, count: 16)
+        XCTAssertEqual(
+            OnScreenCheckKey.of(personKey: person, accountId: explicit, profileAccountId: { _ in claimed })?.accountId,
+            explicit, "a contact row's own id is kept")
+    }
+
+    func testAMemberWithNoAccountIdYetIsAskedAboutOnceTheIdIsKnown() async {
+        let deletions = makeDeletions()
+        let asked = Recorder()
+        let person = key(9)
+        deletions.fetchIdentity = { _ in
+            asked.add("ask")
+            return IdentityFetchResponse(signaturePubkey: base64Encode(person), x25519Pubkey: "")
+        }
+        // Drawn before the profile arrived: nothing to ask with, nothing recorded.
+        deletions.checkIfDue(personKey: person, accountId: nil)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(asked.items.isEmpty)
+        XCTAssertNil(deletions.record(personKeyB64: base64Encode(person))?.lastAttemptAtMs)
+        // The profile's account id is known now: the row's check runs.
+        deletions.checkIfDue(personKey: person, accountId: Data(repeating: 0xCD, count: 16))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(asked.items.count, 1)
+        XCTAssertEqual(deletions.record(personKeyB64: base64Encode(person))?.lastAnswer, "samePerson")
+        XCTAssertTrue(deletions.mayShowUsername(keysB64: [base64Encode(person)]))
+    }
 }

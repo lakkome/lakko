@@ -44,6 +44,9 @@ struct ReportSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(model.phase == .sending)
+        // UX 2.3 - "Reporting isn't available on this server" is said when
+        // the sheet opens, with `Send report` disabled.
+        .task { await model.checkAvailability() }
         .onChange(of: model.phase) { _, phase in
             if phase == .sent { onClose(true) }
         }

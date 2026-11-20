@@ -4691,6 +4691,10 @@ private fun MembersSheet(
     modifier: Modifier = Modifier,
 ) {
     val members by viewModel.members.collectAsStateWithLifecycle()
+    // ADR-0048 / ADR-0098 — a profile arriving, a username verifying or a
+    // directory answer (which decides whether a `@username` may show) bumps
+    // the names; the rows below read it so they show the change in place.
+    val membersNameVersion by viewModel.nameVersion.collectAsStateWithLifecycle()
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
     val contactKeysB64 = remember(contactsState.accepted) {
         contactsState.accepted.map { me.lakko.app.chat.outboxB64(it.request.fromPubkey) }.toSet()
@@ -5444,12 +5448,18 @@ private fun MembersSheet(
                                 )
                                 // ADR-0084 — a person's photo beside their name;
                                 // the own row shows the owner's own photo.
-                                val memberName = viewModel.memberLabel(member)
+                                val memberName = membersNameVersion.let { viewModel.memberLabel(member) }
                                 val isOwnRow = ownLeaf == member.leafIndex
                                 // ADR-0098 section 2 — a visible member row: the
                                 // directory is asked about them when a check is due.
-                                LaunchedEffect(memberKeyB64, isOwnRow) {
-                                    if (!isOwnRow) viewModel.notePersonOnScreen(memberKeyB64)
+                                // Keyed on the account id their profile claims, so a
+                                // member who is not a contact and whose profile
+                                // arrives after the row was drawn is asked about then.
+                                val checkKey = membersNameVersion.let {
+                                    if (isOwnRow) null else viewModel.memberCheckKey(memberKeyB64)
+                                }
+                                LaunchedEffect(checkKey) {
+                                    if (checkKey != null) viewModel.notePersonOnScreen(checkKey.personKeyB64)
                                 }
                                 LakkoAvatar(
                                     // Initials from the name alone, never

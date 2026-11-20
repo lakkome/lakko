@@ -22,6 +22,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  *   1. the auth delete (`DELETE /account`). It may be refused (the recall
  *      window, a missing fresh-auth proof); a refusal throws out of [run] and
  *      nothing below runs, so nothing is removed for an account that stays;
+ *      Once it succeeded, [afterAuth] tells the session provider, so no
+ *      refresh runs and no refusal signs the device out from here on
+ *      (ADR-0098: a sign-out would stop the account-deleted statements);
  *   2. the cleanups only this device can do, because the servers cannot find
  *      the rows by the account (push subscriptions name no account), or as a
  *      fast path (the backup blob, the directory). They run side by side,
@@ -33,6 +36,16 @@ import kotlinx.coroutines.withTimeoutOrNull
 public class AccountDeletion(
     private val prepare: suspend () -> Unit = {},
     private val deleteAtAuth: suspend () -> Unit,
+    /** Runs once the auth delete succeeded, before any cleanup (ADR-0098):
+     *  tells the session provider the account is gone, so a cleanup's `401`
+     *  cannot sign the device out (and seal the account store) while the
+     *  conversations are still being told. A failure is logged only. */
+    private val afterAuth: () -> Unit = {},
+    /** ADR-0098 (walk 10): the account-deleted statement. Runs to the end
+     *  before any of [cleanups] starts: removing the directory entry at the
+     *  same time rebuilt this device's conversation identity and stopped the
+     *  statement in every conversation. Shares the overall bound. */
+    private val first: List<Cleanup> = emptyList(),
     private val cleanups: List<Cleanup>,
     private val wipe: () -> Unit,
     private val attempts: Int = DEFAULT_ATTEMPTS,
@@ -61,7 +74,13 @@ public class AccountDeletion(
         }
         deleteAtAuth()
         try {
+            afterAuth()
+        } catch (cause: Throwable) {
+            log("account deletion: after-auth step failed: ${cause.javaClass.simpleName}")
+        }
+        try {
             val finished = withTimeoutOrNull(overallBoundMs) {
+                for (cleanup in first) runOne(cleanup)
                 coroutineScope {
                     cleanups.map { cleanup -> async { runOne(cleanup) } }.awaitAll()
                 }

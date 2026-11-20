@@ -12,6 +12,7 @@ import {
   includedLine,
   newDraft,
   pickable,
+  phaseAfterEdit,
   pickCandidatesFor,
   postOutcome,
   reasonKey,
@@ -51,6 +52,15 @@ describe("a new draft", () => {
     expect(canSend(chosen, "editing")).toBe(true);
     expect(canSend(chosen, "sending")).toBe(false);
     expect(canSend(chosen, "failed")).toBe(true);
+  });
+
+  it("keeps Send off once the server said reporting is not available, whatever is edited", () => {
+    const chosen = withReason(newDraft({ target: person, conversationKind: 1 }), 3);
+    expect(canSend(chosen, "unavailable")).toBe(false);
+    expect(phaseAfterEdit("unavailable")).toBe("unavailable");
+    expect(phaseAfterEdit("sending")).toBe("sending");
+    expect(phaseAfterEdit("failed")).toBe("editing");
+    expect(phaseAfterEdit("limited")).toBe("editing");
   });
 
   it("ignores a reason code outside 1..8", () => {

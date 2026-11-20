@@ -459,6 +459,11 @@ public final class PasskeysViewModel: ObservableObject {
             // gone, within its lifetime), then the local wipe + sign-out
             // Forget device also runs: every store of the account on this
             // device, chats included.
+            let allCleanups = Self.deletionCleanups(
+                sessionToken: token,
+                subscriptionIds: subscriptionIds,
+                pushTokens: pushTokens,
+                announceDeletion: announceDeletion)
             try await AccountDeletionRun(
                 prepare: {
                     await pushTokens.fill(
@@ -483,11 +488,14 @@ public final class PasskeysViewModel: ObservableObject {
                         }
                     }
                 },
-                cleanups: Self.deletionCleanups(
-                    sessionToken: token,
-                    subscriptionIds: subscriptionIds,
-                    pushTokens: pushTokens,
-                    announceDeletion: announceDeletion),
+                // ADR-0098 — the session refuses from here on; no cleanup's
+                // 401 may sign this device out before the conversations are
+                // told.
+                afterAuth: { SessionTokenProvider.shared.markAccountDeleted() },
+                // ADR-0098 (walk 10): the statement runs to the end before the
+                // directory entry is removed.
+                first: allCleanups.filter { $0.name == "conversations" },
+                cleanups: allCleanups.filter { $0.name != "conversations" },
                 wipe: { wipeAfterDeletion(accountIdB64) }
             ).run()
             return true

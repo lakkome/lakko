@@ -1365,9 +1365,13 @@ public class DeviceGroupSyncRepository(
 
     /**
      * Block or unblock [accountKey]: fold it here at once and tell the other
-     * devices. A send that fails is owed: the pending flag makes the next
-     * flush re-send every block envelope ([publishSnapshot]). Returns whether
-     * the register changed.
+     * devices in the background (UX `reporting-and-moderation.md` 1.4: the
+     * block takes effect on this device at once; a failed sync shows
+     * nothing). The send is bounded and retried ([me.lakko.app.moderation.sendOwed]);
+     * one that does not go is owed: the pending flag makes the next flush
+     * re-send every block envelope ([publishSnapshot]). Returns whether the
+     * register changed, without waiting for the send: a send that waited on
+     * the journal once held the contact removal behind it.
      */
     private suspend fun setBlocked(accountKey: ByteArray, blocked: Boolean): Boolean {
         val envelope = synchronized(stateLock) {
@@ -1375,13 +1379,17 @@ public class DeviceGroupSyncRepository(
             state.setBlocked(Hlc.mint(), accountKey, blocked, System.currentTimeMillis().toULong())
         } ?: return false
         republish()
-        try {
-            sendServiceEnvelope(envelope)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (cause: Throwable) {
-            Log.w(LOG_TAG, "block not published (${cause.javaClass.simpleName})")
-            pendingFlag?.recordFailure()
+        scope.launchBound(sessionBinding) {
+            me.lakko.app.moderation.sendOwed(
+                attempt = {
+                    sendServiceEnvelope(envelope)
+                    true
+                },
+                onFailure = {
+                    Log.w(LOG_TAG, "block not published; retried in the background")
+                    pendingFlag?.recordFailure()
+                },
+            )
         }
         return true
     }

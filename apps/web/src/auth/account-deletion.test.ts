@@ -43,6 +43,40 @@ function recorder(): {
 }
 
 describe("runAccountDeletion", () => {
+  it("runs the first cleanups to the end before any other cleanup starts (ADR-0098, walk 10)", async () => {
+    const r = recorder();
+    let releaseStatement: () => void = () => {};
+    const statementGate = new Promise<void>((resolve) => {
+      releaseStatement = resolve;
+    });
+    const run = runAccountDeletion({
+      ...r.deps,
+      deleteAtAuth: async () => void r.events.push("auth"),
+      firstCleanups: async () => [
+        {
+          label: "conversations",
+          run: async () => {
+            r.events.push("statement start");
+            await statementGate;
+            r.events.push("statement end");
+          },
+        },
+      ],
+      cleanups: async () => [
+        { label: "discovery", run: async () => void r.events.push("discovery") },
+        { label: "push", run: async () => void r.events.push("push") },
+      ],
+      wipe: async () => void r.events.push("wipe"),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(r.events).toEqual(["auth", "statement start"]);
+    releaseStatement();
+    await run;
+    expect(r.events.slice(0, 3)).toEqual(["auth", "statement start", "statement end"]);
+    expect(new Set(r.events.slice(3, 5))).toEqual(new Set(["discovery", "push"]));
+    expect(r.events.at(-1)).toBe("wipe");
+  });
+
   it("deletes at auth, then runs the cleanups, then wipes", async () => {
     const r = recorder();
     await runAccountDeletion({
@@ -246,5 +280,98 @@ describe("retryableHttpFailure", () => {
     expect(retryableHttpFailure(new HttpError(408))).toBe(true);
     expect(retryableHttpFailure(new HttpError(401))).toBe(false);
     expect(retryableHttpFailure(new HttpError(404))).toBe(false);
+  });
+});
+
+describe("ADR-0098: the statements still go out once the session is refused", () => {
+  // Walk 8: after DELETE /account a cleanup's bearer request met 401, the
+  // refresh answered refresh-invalid, the device signed out, and the
+  // account-deleted statements found no session left to post from.
+  it("a refused session after the auth delete signs nothing out, and every conversation gets its statement", async () => {
+    const { SessionTokenProvider } = await import("./session-token-provider");
+    const NOW = 1_800_000_000_000;
+    const provider = new SessionTokenProvider();
+    const refreshes: string[] = [];
+    provider.configure({
+      refresh: async (rt) => {
+        refreshes.push(rt);
+        return { kind: "refused", status: 401, errorCode: "refresh-invalid" };
+      },
+      persist: async () => {},
+      now: () => NOW,
+      fetchImpl: async () => new Response("", { status: 401 }),
+    });
+    provider.install("QUJDRA==", {
+      sessionToken: "v2.acct.1.1.tag",
+      sessionExpiresAtMs: NOW + 900_000,
+      refreshToken: "r1.acct.1.1.tag",
+      refreshExpiresAtMs: NOW + 1_000_000_000,
+      keyGeneration: 1n,
+    });
+    let signedOut = false;
+    provider.subscribe((e) => {
+      if (e.kind === "refresh-invalid" || e.kind === "superseded" || e.kind === "device-revoked") signedOut = true;
+    });
+    const posted: string[] = [];
+    const conversations = ["one-to-one", "group-a", "group-b"];
+    const r = recorder();
+    await runAccountDeletion({
+      ...r.deps,
+      deleteAtAuth: async () => {
+        r.events.push("auth");
+      },
+      afterAuth: () => provider.markAccountDeleted(),
+      cleanups: async () => [
+        {
+          label: "push",
+          // A bearer request to auth after the delete: 401, then a refresh.
+          run: async () => {
+            await provider.fetch("https://example.test/api/auth/auth/tokens", {
+              method: "POST",
+              headers: { authorization: "Bearer v2.acct.1.1.tag" },
+            });
+            await provider.refreshOnce();
+          },
+        },
+        ...conversations.map(
+          (c): DeletionCleanup => ({
+            label: "account-deleted-statement",
+            run: async () => {
+              if (signedOut) throw new Error("no session left to post from");
+              posted.push(c);
+            },
+          }),
+        ),
+      ],
+      wipe: async () => {
+        r.events.push("wipe");
+      },
+    });
+    expect(signedOut).toBe(false);
+    expect(refreshes).toEqual([]);
+    expect(posted.sort()).toEqual([...conversations].sort());
+    expect(r.events).toEqual(["auth", "wipe"]);
+  });
+
+  it("without the mark, the same refusal signs the device out (the defect)", async () => {
+    const { SessionTokenProvider } = await import("./session-token-provider");
+    const NOW = 1_800_000_000_000;
+    const provider = new SessionTokenProvider();
+    provider.configure({
+      refresh: async () => ({ kind: "refused", status: 401, errorCode: "refresh-invalid" }),
+      persist: async () => {},
+      now: () => NOW,
+    });
+    provider.install("QUJDRA==", {
+      sessionToken: "v2.acct.1.1.tag",
+      sessionExpiresAtMs: NOW + 900_000,
+      refreshToken: "r1.acct.1.1.tag",
+      refreshExpiresAtMs: NOW + 1_000_000_000,
+      keyGeneration: 1n,
+    });
+    const events: string[] = [];
+    provider.subscribe((e) => events.push(e.kind));
+    await provider.refreshOnce();
+    expect(events).toEqual(["refresh-invalid"]);
   });
 });

@@ -437,6 +437,13 @@ android {
                 sfuDefault = "wss://test.lakko.me/sfu",
                 webOriginDefault = "https://test.lakko.me",
             )
+            // ADR-0099 — the TEST stack's moderation root (public). Release
+            // keeps the empty default above until a production root exists.
+            buildConfigField(
+                "String",
+                "LAKKO_MODERATION_ROOT_KEY",
+                "\"${project.findProperty("lakko.moderation.root.key") as String? ?: "h1rAntknQimM7_vYMzVfXlOnSaewXXRW8nHyeIdlcNk"}\"",
+            )
         }
         release {
             endpointFields(apiDefault = "", sfuDefault = "", webOriginDefault = "https://lakko.me")

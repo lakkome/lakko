@@ -13,6 +13,10 @@
  * 1. The account is deleted at auth. Auth can refuse (the ADR-0074 recall
  *    window, a missing proof): then nothing else runs and the error reaches
  *    the caller, so nothing is removed for an account that still exists.
+ *    Right after a deletion succeeded the session provider is told
+ *    ({@link AccountDeletionDeps.afterAuth}): from then on no refresh runs
+ *    and no refusal signs the device out, since a sign-out in the middle of
+ *    the cleanups would stop the account-deleted statements (ADR-0098).
  * 2. The cleanups run: what only this device can remove from the servers
  *    (its push-gw subscriptions, ADR-0078 phase 3, which push-gw cannot tie
  *    to an account), plus the backup blob and the directory entry, which the
@@ -50,6 +54,16 @@ export interface AccountDeletionDeps {
   readonly beforeAuth?: () => Promise<void>;
   /** The auth deletion. A throw stops everything and is rethrown. */
   readonly deleteAtAuth: () => Promise<void>;
+  /** Runs once the auth deletion succeeded, before any cleanup (ADR-0098):
+   *  tells the session provider the account is gone, so a cleanup's `401`
+   *  cannot sign the device out while the conversations are still being
+   *  told. Never throws into the deletion. */
+  readonly afterAuth?: () => void;
+  /** ADR-0098 (walk 10): the account-deleted statements. Run to the end
+   *  before any other cleanup starts: removing the directory entry at the
+   *  same time can rebuild this device's conversation identity and stop the
+   *  statements. Built after the auth deletion succeeded. */
+  readonly firstCleanups?: () => Promise<readonly DeletionCleanup[]>;
   /** Built only after the auth deletion succeeded, before the wipe. */
   readonly cleanups: () => Promise<readonly DeletionCleanup[]>;
   /** Wipes this device. Its error is rethrown. */
@@ -156,8 +170,22 @@ export async function runAccountDeletion(deps: AccountDeletionDeps): Promise<voi
     }
   }
   await deps.deleteAtAuth();
+  try {
+    deps.afterAuth?.();
+  } catch (err) {
+    (deps.log ?? defaultLog)("[account] delete after-auth step failed", "session", errorName(err));
+  }
   const now = deps.now ?? Date.now;
   const deadline = now() + (deps.budgetMs ?? DELETION_CLEANUP_BUDGET_MS);
+  if (deps.firstCleanups !== undefined) {
+    let first: readonly DeletionCleanup[] = [];
+    try {
+      first = await deps.firstCleanups();
+    } catch (err) {
+      (deps.log ?? defaultLog)("[account] delete cleanup list failed", "first", errorName(err));
+    }
+    await runCleanups(first, deadline, deps);
+  }
   let cleanups: readonly DeletionCleanup[] = [];
   try {
     cleanups = await deps.cleanups();

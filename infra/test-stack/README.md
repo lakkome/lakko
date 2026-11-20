@@ -26,6 +26,36 @@ Needs Docker, Node and SSH access as root. The first build fills the Docker volu
 `lakko-amd64-registry`, `lakko-amd64-git` and `lakko-amd64-target`; later builds are
 incremental.
 
+## Reporting (ADR-0099)
+
+Reporting answers `503 {"error":"reporting-unavailable"}` until the moderation
+service has a signed moderator list and the root public key it is verified
+under. The test stack was given a TEST root and one test moderator on
+2026-11-20, made with `tools/moderation-root` (`lakko-moderation-root keygen`,
+`dev-moderator`, `sign-list --version 1 --rp-id test.lakko.me --origin
+https://test.lakko.me`). Its private files (the root seed, the moderator's
+report secret and software signing seed) are kept off the server by whoever
+made them; a test root is never used anywhere else. What is on the server:
+
+| What | Where |
+|---|---|
+| Signed moderator list | `/etc/lakko-test/moderators.bin` (root:lakkotest 640) |
+| `LAKKO_MODERATION_LIST_PATH` | `/etc/lakko-test/moderators.bin` |
+| `LAKKO_MODERATION_ROOT_KEY` and `LAKKO_{AUTH,DISCOVERY,CHANNELS,STORAGE}_MODERATION_ROOT_KEY` | the root's public key (base64url), in `/etc/lakko-test/lakko.env` |
+
+To replace the list (a new moderator, a removal), sign a higher `--version`
+with the same root seed, copy it over `moderators.bin` and restart
+`lakko-test-moderation` (it pushes the list to auth, discovery, channels and
+storage). A new root means the four `*_MODERATION_ROOT_KEY` lines change too
+and every service restarts. Check: `curl -s -o /dev/null -w '%{http_code}'
+https://test.lakko.me/api/moderation/moderation/moderators` answers `200`.
+
+The clients pin the same public key at build time: `deploy.sh` reads it from
+the server env for the web build (`VITE_LAKKO_MODERATION_ROOT_KEY`); iOS
+(`LakkoModerationRootKey` in Info.plist / `project.yml`) and Android
+(`-Plakko.moderation.root.key=...`) take it by hand. A build without it says
+reporting is not available.
+
 ## Layout on the server
 
 | What | Where |

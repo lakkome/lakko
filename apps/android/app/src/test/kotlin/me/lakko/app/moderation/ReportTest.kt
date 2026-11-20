@@ -207,6 +207,39 @@ class ReportTest {
     }
 
     @Test
+    fun `the sheet asks on opening whether reporting is available and seals nothing`() = runTest {
+        val ok = FakePorts()
+        assertEquals(ReportAvailability.AVAILABLE, checkReportAvailability(ok))
+        assertEquals(0, ok.sealed)
+        assertTrue(ok.tokens.isEmpty())
+        assertEquals(5uL, ok.recorded)
+        for (ports in listOf(
+            FakePorts(root = null),
+            FakePorts(list = ModeratorListFetch.Unavailable),
+            FakePorts(version = 2u, highest = 3u),
+        )) {
+            assertEquals(ReportAvailability.UNAVAILABLE, checkReportAvailability(ports))
+        }
+        val unverified = object : ReportPorts by FakePorts() {
+            override fun moderatorListVersion(list: ByteArray, rootKey: ByteArray): ULong = error("bad signature")
+        }
+        assertEquals(ReportAvailability.UNAVAILABLE, checkReportAvailability(unverified))
+        assertEquals(ReportAvailability.UNKNOWN, checkReportAvailability(FakePorts(list = ModeratorListFetch.Network)))
+    }
+
+    @Test
+    fun `send stays off once reporting is not available, whatever is edited`() {
+        val s = ReportSheetState.initial(subject()).withReason(1u).copy(phase = ReportPhase.UNAVAILABLE)
+        assertFalse(s.canSend)
+        assertEquals(ReportPhase.UNAVAILABLE, s.withReason(2u).phase)
+        assertEquals(ReportPhase.UNAVAILABLE, s.withComment("more").phase)
+        assertFalse(s.withReason(2u).canSend)
+        // Other refusals still clear on an edit.
+        assertEquals(ReportPhase.EDITING, s.copy(phase = ReportPhase.LIMITED).withReason(2u).phase)
+        assertTrue(s.copy(phase = ReportPhase.FAILED).withReason(2u).canSend)
+    }
+
+    @Test
     fun `the block still applies at the limit, leaving only after a send`() {
         val block = ReportAlso.Block(author)
         val leave = ReportAlso.Leave("ab")

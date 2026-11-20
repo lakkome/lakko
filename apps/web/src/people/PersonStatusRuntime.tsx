@@ -47,6 +47,7 @@ import { loadWasm } from "../wasm";
 import { classifyIdentityAnswer } from "./account-status";
 import { IdbPersonStatusBackend } from "./account-status-idb";
 import { deletedRemovalPlan } from "./deleted-removal";
+import { personAccountIdHex } from "./person-account-id";
 import {
   bindPersonStatus,
   directoryCheckDueFor,
@@ -54,6 +55,7 @@ import {
   isDeletedAccount,
   personStatusEntries,
   personStatusOf,
+  recheckVisiblePeople,
   recordDeletionStatement,
   recordDirectoryAnswer,
   recordDirectoryAttempt,
@@ -108,21 +110,16 @@ export function PersonStatusRuntime(): JSX.Element {
   });
 
   /** The account id (hex) this device holds for a person key: a trusted
-   *  local record first, else the person's profile claim, else the record. */
+   *  local record first, else the person's profile claim (a group member
+   *  who is not a contact), else a pending contact's, else the record. */
   function accountIdHexOfKey(keyB64: string): string | null {
-    const trusted = accountIdB64OfKey(keyB64);
-    if (trusted !== null) {
-      try {
-        return hexOf(base64Decode(trusted));
-      } catch {
-        // fall through
-      }
-    }
-    const claimed = profiles.accountIdHexOf(keyB64);
-    if (claimed !== null) return claimed;
-    const pending = pendingContacts().find((p) => p.signaturePubkeyB64 === keyB64);
-    if (pending !== undefined) return pending.accountIdHex;
-    return personStatusOf(keyB64)?.accountIdHex ?? null;
+    return personAccountIdHex(keyB64, {
+      contactIdB64: accountIdB64OfKey,
+      profileIdHex: (k) => profiles.accountIdHexOf(k),
+      pendingIdHex: (k) => pendingContacts().find((p) => p.signaturePubkeyB64 === k)?.accountIdHex ?? null,
+      recordIdHex: (k) => personStatusOf(k)?.accountIdHex ?? null,
+      decodeB64: base64Decode,
+    });
   }
 
   /** Every key this device holds for the person with `accountIdHex`. */
@@ -200,23 +197,50 @@ export function PersonStatusRuntime(): JSX.Element {
     })();
   });
 
+  // A member row drawn before this device held the member's account id (their
+  // profile v2 arrived later) is asked about once the id is known, while the
+  // row is still in view: the rows do not report being in view again.
+  createEffect(() => {
+    profiles.accountIdBindings();
+    untrack(() => {
+      if (accountId() !== null) recheckVisiblePeople();
+    });
+  });
+
   // ---- the statement sink ---------------------------------------------------
   installAccountDeletedSink(async (arrived) => {
     if (accountId() === null) return;
     const wasm = await loadWasm();
-    if (!acceptAccountDeleted(wasm, arrived.plaintext, arrived.groupId, arrived.senderAccountKey)) return;
+    if (!acceptAccountDeleted(wasm, arrived.plaintext, arrived.groupId, arrived.senderAccountKey)) {
+      // eslint-disable-next-line no-console
+      console.info("[person-status] statement refused");
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.info("[person-status] statement verified");
     const senderKeyB64 = base64Encode(arrived.senderAccountKey as Uint8Array);
     if (senderKeyB64 === ownPersonKeyB64(chats.identity())) return;
     const idHex = accountIdHexOfKey(senderKeyB64);
     const keys = new Set<string>([senderKeyB64]);
     if (idHex !== null) for (const k of heldKeysOf(idHex)) keys.add(k);
     for (const k of keys) await recordDeletionStatement(k, idHex ?? undefined);
-    const entry = chats.get(arrived.groupIdB64);
-    if (entry !== undefined && conversationKindOf(entry.group) === "group") {
-      await recordRemoval(senderKeyB64, arrived.groupIdB64, "owed");
-      await tryRemoval(entry, senderKeyB64);
-    }
+    // Walk 12: a verified statement proves the ACCOUNT is gone, so every
+    // group this device holds is checked, not only the one it arrived in (a
+    // statement missed in one group otherwise left the person there).
+    // Walk 14: never awaited here. The statement is delivered from inside
+    // the group's receive, which holds that group's MLS lock; the removal
+    // takes the same lock, so awaiting it hung both for good. It starts once
+    // the receive has let go.
+    setTimeout(() => void removeFromEveryGroup(senderKeyB64), 0);
   });
+
+  async function removeFromEveryGroup(deletedKeyB64: string): Promise<void> {
+    for (const entry of chats.groups()) {
+      if (conversationKindOf(entry.group) !== "group") continue;
+      if (personStatusOf(deletedKeyB64)?.removals?.[entry.groupIdB64] === "proposed") continue;
+      await tryRemoval(entry, deletedKeyB64);
+    }
+  }
 
   // ---- section 5: the removal ----------------------------------------------
   function ownRoleOf(entry: ActiveGroup): "owner" | "admin" | "member" | null {
@@ -238,8 +262,16 @@ export function PersonStatusRuntime(): JSX.Element {
   const removing = new Set<string>();
   async function tryRemoval(entry: ActiveGroup, deletedKeyB64: string): Promise<void> {
     const secrets = auth.identitySecrets();
-    if (secrets === null) return;
-    if (readIsActive(entry.group) === false) return;
+    if (secrets === null) {
+      // eslint-disable-next-line no-console
+      console.info("[person-status] removal skipped", "no-session");
+      return;
+    }
+    if (readIsActive(entry.group) === false) {
+      // eslint-disable-next-line no-console
+      console.info("[person-status] removal skipped", "inactive");
+      return;
+    }
     const tag = `${entry.groupIdB64}:${deletedKeyB64}`;
     if (removing.has(tag)) return;
     let roster: { leafIndex: number; personKeyB64: string }[];
@@ -267,6 +299,8 @@ export function PersonStatusRuntime(): JSX.Element {
       pendingRemoveLeaves,
       alreadyProposed: personStatusOf(deletedKeyB64)?.removals?.[entry.groupIdB64] === "proposed",
     });
+    // eslint-disable-next-line no-console
+    console.info("[person-status] removal plan", plan.kind);
     if (plan.kind === "gone") {
       await recordRemoval(deletedKeyB64, entry.groupIdB64, "proposed");
       return;
@@ -280,6 +314,8 @@ export function PersonStatusRuntime(): JSX.Element {
         outcome.kind === "proposed" ? outcome.proposalMessageId : outcome.commitMessageId,
       );
       await recordRemoval(deletedKeyB64, entry.groupIdB64, "proposed");
+      // eslint-disable-next-line no-console
+      console.info("[person-status] removal proposed", outcome.kind);
     } catch (err) {
       // Owed: tried again later.
       // eslint-disable-next-line no-console
@@ -292,11 +328,7 @@ export function PersonStatusRuntime(): JSX.Element {
   async function retryOwedRemovals(): Promise<void> {
     for (const [key, rec] of personStatusEntries()) {
       if (!rec.statementVerified) continue;
-      for (const [groupIdB64, state] of Object.entries(rec.removals ?? {})) {
-        if (state !== "owed") continue;
-        const entry = chats.get(groupIdB64);
-        if (entry !== undefined) await tryRemoval(entry, key);
-      }
+      await removeFromEveryGroup(key);
     }
   }
 

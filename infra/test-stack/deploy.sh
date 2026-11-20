@@ -66,6 +66,11 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
   # absent key builds a client that simply does not offer Web Push.
   vapid_public="$(remote 'cat /etc/lakko-test/vapid_public.b64url 2>/dev/null || true' | tr -d '[:space:]')"
   [[ -n $vapid_public ]] || log "no VAPID public key on the server; Web Push stays off"
+  # ADR-0099: the moderator root PUBLIC key the server verifies its list under
+  # (installed by hand, README "Reporting"); the web build pins the same one.
+  # Absent, the built client says reporting is not available.
+  moderation_root="$(remote "grep -m1 '^LAKKO_MODERATION_ROOT_KEY=' /etc/lakko-test/lakko.env 2>/dev/null | cut -d= -f2- || true" | tr -d '[:space:]')"
+  [[ -n $moderation_root ]] || log "no moderation root key on the server; reporting stays off in the web build"
   # The test stack turns off the device-link answer limit (5 a day on the
   # signed-in device), so sign-in tests do not run out of answers, and refills
   # an empty token bucket on demand, so a walk never stops on the pool. Limits
@@ -80,6 +85,7 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
     VITE_LAKKO_PUBLIC_ORIGIN="https://$DOMAIN" \
     VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off \
     VITE_LAKKO_ANON_TOKEN_REFILL=on-demand \
+    VITE_LAKKO_MODERATION_ROOT_KEY="$moderation_root" \
     VITE_LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL="$vapid_public" npm run build)
 fi
 

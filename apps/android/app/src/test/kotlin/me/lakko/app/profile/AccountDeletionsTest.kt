@@ -310,26 +310,101 @@ class AccountDeletionsTest {
     }
 
     @Test
-    fun `the removal ledger records an owed removal once and retires it when proposed`() {
+    fun `the removal ledger owes a verified person in every group until proposed there`() {
         val ledger = DeletedMemberRemovals(MemoryLedger())
         val group = "ab".repeat(32)
-        assertTrue(ledger.markOwed(group, alice))
-        assertFalse(ledger.markOwed(group, alice))
-        assertEquals(listOf(alice), ledger.owed(group))
-        assertTrue(ledger.owed("cd".repeat(32)).isEmpty())
+        val other = "cd".repeat(32)
+        assertEquals(listOf(alice), ledger.owed(group, listOf(alice)))
+        assertEquals(listOf(alice), ledger.owed(other, listOf(alice)))
+        assertTrue(ledger.owed(group, emptyList()).isEmpty())
         assertFalse(ledger.proposed(group, alice))
         ledger.markProposed(group, alice)
         assertTrue(ledger.proposed(group, alice))
-        assertTrue(ledger.owed(group).isEmpty())
-        // Once proposed it is never owed again.
-        assertFalse(ledger.markOwed(group, alice))
+        assertTrue(ledger.owed(group, listOf(alice)).isEmpty())
+        // Once per group: still owed in the other one.
+        assertEquals(listOf(alice), ledger.owed(other, listOf(alice)))
+    }
+
+    /** Seen live 2026-11-20 (walk 12): a statement verified in a one-to-one
+     *  leads to a removal proposal in a separate group where this device is
+     *  owner and the person is a member; a group where this device is a plain
+     *  member gets none; a group already proposed gets none. */
+    @Test
+    fun `a statement in a one-to-one leads to a removal proposal in another group`() {
+        assertTrue(book.markStatementVerified(alice))
+        val verified = book.statementVerifiedKeys()
+        assertEquals(listOf(alice), verified)
+        val ledger = DeletedMemberRemovals(MemoryLedger())
+        val owned = "ab".repeat(32)
+        val memberOnly = "cd".repeat(32)
+
+        // Owned group: alice on leaves 3 and 5.
+        assertEquals(listOf(alice), ledger.owed(owned, verified))
+        assertEquals(
+            DeletedRemovalPlan.Propose(3u),
+            deletedRemovalPlan(
+                isGroup = true, ownRoleIsOwnerOrAdmin = true, deletedIsOwner = false,
+                personLeaves = listOf(3u, 5u), pendingRemoveLeaves = emptySet(),
+            ),
+        )
+        // A group where this device is a plain member: nothing, asked again later.
+        assertEquals(listOf(alice), ledger.owed(memberOnly, verified))
+        assertEquals(
+            DeletedRemovalPlan.Wait,
+            deletedRemovalPlan(
+                isGroup = true, ownRoleIsOwnerOrAdmin = false, deletedIsOwner = false,
+                personLeaves = listOf(4u), pendingRemoveLeaves = emptySet(),
+            ),
+        )
+        // Already proposed in the owned group: no longer owed there.
+        ledger.markProposed(owned, alice)
+        assertTrue(ledger.owed(owned, verified).isEmpty())
+        assertEquals(listOf(alice), ledger.owed(memberOnly, verified))
+        // Every leaf already has a remove pending: no second proposal.
+        assertEquals(
+            DeletedRemovalPlan.Wait,
+            deletedRemovalPlan(
+                isGroup = true, ownRoleIsOwnerOrAdmin = true, deletedIsOwner = false,
+                personLeaves = listOf(3u, 5u), pendingRemoveLeaves = setOf(3u, 5u),
+            ),
+        )
+        assertEquals(
+            DeletedRemovalPlan.Propose(3u),
+            deletedRemovalPlan(
+                isGroup = true, ownRoleIsOwnerOrAdmin = true, deletedIsOwner = false,
+                personLeaves = listOf(3u, 5u), pendingRemoveLeaves = setOf(3u),
+            ),
+        )
+        // Never the owner (C-63), never a one-to-one, nothing once gone.
+        assertEquals(
+            DeletedRemovalPlan.Settled,
+            deletedRemovalPlan(
+                isGroup = true, ownRoleIsOwnerOrAdmin = true, deletedIsOwner = true,
+                personLeaves = listOf(0u), pendingRemoveLeaves = emptySet(),
+            ),
+        )
+        assertEquals(
+            DeletedRemovalPlan.Settled,
+            deletedRemovalPlan(
+                isGroup = false, ownRoleIsOwnerOrAdmin = true, deletedIsOwner = false,
+                personLeaves = listOf(1u), pendingRemoveLeaves = emptySet(),
+            ),
+        )
+        assertEquals(
+            DeletedRemovalPlan.Settled,
+            deletedRemovalPlan(
+                isGroup = true, ownRoleIsOwnerOrAdmin = true, deletedIsOwner = false,
+                personLeaves = emptyList(), pendingRemoveLeaves = emptySet(),
+            ),
+        )
     }
 
     @Test
     fun `a directory Absent marks deleted but is not a verified statement`() {
         // Section 5: only a verified statement makes a device owe a removal
-        // (`ChatRepository.receiveAccountDeleted` is the one writer of the
-        // ledger). A pull answer leaves `statementVerified` false.
+        // (the owed people are `statementVerifiedKeys`, written only by
+        // `ChatRepository.receiveAccountDeleted`). A pull answer leaves
+        // `statementVerified` false.
         val checks = AccountDeletionChecks(
             book = book,
             accountIdOf = { null },
@@ -341,5 +416,58 @@ class AccountDeletionsTest {
         checks.onDirectoryAnswer(ByteArray(16) { 5 }, null, null)
         assertTrue(book.isDeleted(alice))
         assertFalse(book.record(alice).statementVerified)
+        assertTrue(book.statementVerifiedKeys().isEmpty())
+    }
+
+    // ---- a group member who is not a contact (ADR-0098 section 2) ----------
+
+    @Test
+    fun `a member row is rekeyed when the profile account id arrives`() {
+        var claimed: String? = null
+        val before = onScreenCheckKey(bob) { claimed }
+        claimed = "05".repeat(16)
+        val after = onScreenCheckKey(bob) { claimed }
+        assertNull(before?.profileAccountIdHex)
+        assertEquals("05".repeat(16), after?.profileAccountIdHex)
+        assertTrue("a new key re-runs the row's check", before != after)
+        assertNull(onScreenCheckKey(null) { claimed })
+        assertNull(onScreenCheckKey("") { claimed })
+    }
+
+    @Test
+    fun `a member with no account id yet is asked about once the id is known`() {
+        var id: ByteArray? = null
+        var fetches = 0
+        val checks = AccountDeletionChecks(
+            book = book,
+            accountIdOf = { id },
+            heldKeysOf = { setOf(bob) },
+            fetch = { fetches++; bob to null },
+            verifyLink = { _, _ -> null },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+        )
+        checks.onScreen(bob)
+        assertEquals(0, fetches)
+        assertNull("nothing recorded without an account id", book.record(bob).lastAttemptAtMs)
+        id = ByteArray(16) { 5 }
+        checks.onScreen(bob)
+        assertEquals(1, fetches)
+        // The answer reaches the book through the feed every fetch reports to.
+        checks.onDirectoryAnswer(ByteArray(16) { 5 }, bob, null)
+        assertEquals(DirectoryAnswer.SAME_PERSON, book.record(bob).lastAnswer)
+        assertTrue(book.mayShowUsername(bob))
+    }
+
+    @Test
+    fun `the directory reads a member's account id from their profile`() {
+        val dir = ProfileDirectory(
+            persistence = InMemoryProfilePersistence(),
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            isNewer = { a, b -> a > b },
+            passesRule = { true },
+        )
+        assertNull(dir.accountIdHexOf(bob))
+        dir.profiles.offer(bob, PeerProfile(displayName = "Bob", username = "bob", updatedAtMs = 1uL, accountIdHex = "05".repeat(16)))
+        assertEquals("05".repeat(16), dir.accountIdHexOf(bob))
     }
 }

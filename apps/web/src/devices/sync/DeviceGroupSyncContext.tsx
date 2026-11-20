@@ -230,6 +230,7 @@ import {
   publishBlocked,
   type BlockedEntry,
 } from "../../moderation/block-registry";
+import { sendOwedInBackground } from "../../moderation/owed-send";
 import { clearSuspensionMarks } from "../../moderation/suspension-marks";
 import { clearChannelRemovals } from "../../moderation/channel-removal";
 import { clearHiddenFromSearch } from "../../moderation/hidden-from-search";
@@ -328,9 +329,10 @@ export interface DeviceGroupSyncApi {
   readonly blockedAccounts: Accessor<readonly BlockedEntry[]>;
   /** Block or unblock the account whose 32-byte account signature key is
    *  `accountKey`: fold it here at once and send it to the account's other
-   *  devices. A send that does not go out is owed and re-sent at the next
-   *  start. `false` when nothing changed. Throws while the synced state is
-   *  not loaded. */
+   *  devices in the background (resolves without waiting for that send). A
+   *  send that does not go out is retried and otherwise owed and re-sent at
+   *  the next start. `false` when nothing changed. Throws while the synced
+   *  state is not loaded. */
   setBlocked(accountKey: Uint8Array, blocked: boolean): Promise<boolean>;
 
   /** Convenience helper — return the draft for `groupId` or
@@ -1991,33 +1993,51 @@ export function DeviceGroupSyncProvider(props: {
    *  keeps the winning stamp. */
   const blocksUnsentKey = (account: string): string => `lakko.blocked.unsent.v1.${account}`;
 
-  async function sendBlockedEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+  /** Send `envelopes` to the account's other devices. `true` when they went
+   *  (the unsent marker is cleared); `false` when the send failed (the marker
+   *  is set again, so a concurrent success cannot clear a change still
+   *  owed). Never throws. */
+  async function sendBlockedEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<boolean> {
     try {
       await sendLineageEnvelopes(envelopes);
       localStorage.removeItem(blocksUnsentKey(account));
+      return true;
     } catch (err) {
+      try {
+        if (activeAccountIdB64 === account) localStorage.setItem(blocksUnsentKey(account), "1");
+      } catch {
+        /* storage unavailable: the in-session retries are what is left */
+      }
       // eslint-disable-next-line no-console
-      console.warn("block send failed; retried at the next start", err instanceof Error ? err.name : "unknown");
+      console.warn("block send failed; retried in the background", err instanceof Error ? err.name : "unknown");
+      return false;
     }
   }
 
-  async function flushUnsentBlocks(): Promise<void> {
+  /** Send every held block envelope when an earlier send was not confirmed.
+   *  `true` when nothing is owed any more. */
+  async function flushUnsentBlocks(): Promise<boolean> {
     const account = activeAccountIdB64;
-    if (account === null || synced === null) return;
+    if (account === null || synced === null) return false;
     try {
-      if (localStorage.getItem(blocksUnsentKey(account)) === null) return;
+      if (localStorage.getItem(blocksUnsentKey(account)) === null) return true;
     } catch {
-      return;
+      return false;
     }
     let envelopes: Uint8Array[];
     try {
       envelopes = synced.blockedEnvelopes();
     } catch {
-      return;
+      return false;
     }
-    await sendBlockedEnvelopes(account, envelopes);
+    return sendBlockedEnvelopes(account, envelopes);
   }
 
+  /** UX `reporting-and-moderation.md` 1.4: the block takes effect here at
+   *  once; the send to the other devices runs in the background, bounded,
+   *  and never holds the caller (a hung publish once held the Block button
+   *  at "Saving..." for minutes). A send that does not go is retried a few
+   *  times and otherwise stays owed for the next start. */
   async function setBlockedImpl(accountKey: Uint8Array, blocked: boolean): Promise<boolean> {
     if (synced === null) throw new Error("the synced state is not loaded");
     if (accountKey.length !== 32) throw new Error("an account key is 32 bytes");
@@ -2029,9 +2049,12 @@ export function DeviceGroupSyncProvider(props: {
     try {
       localStorage.setItem(blocksUnsentKey(account), "1");
     } catch {
-      /* storage unavailable: the send below is the only attempt */
+      /* storage unavailable: the background send is the only attempt */
     }
-    await sendBlockedEnvelopes(account, [envelope]);
+    void sendOwedInBackground(
+      (index) => (index === 0 ? sendBlockedEnvelopes(account, [envelope]) : flushUnsentBlocks()),
+      { isCurrent: () => activeAccountIdB64 === account },
+    );
     return true;
   }
 

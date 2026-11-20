@@ -387,6 +387,11 @@ public class ProfileDirectory internal constructor(
      */
     public fun accountIdsByKey(): Map<String, String> = profiles.accountIdsByKey()
 
+    /** The account id (hex) the stored profile of [signatureKeyB64] claims
+     *  (ADR-0048 v2), or `null`: how a group member who is not a contact is
+     *  asked about (ADR-0098 section 2). */
+    public fun accountIdHexOf(signatureKeyB64: String): String? = profiles.get(signatureKeyB64)?.accountIdHex
+
     /**
      * ADR-0092 section 7 — whether the newest profile held from
      * [signatureKeyB64] lets others share the person's contact card. A person

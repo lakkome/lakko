@@ -83,7 +83,8 @@ extension ChatRepository {
 
     /// Wire the deletion facts to the chat layer: a statement just recorded
     /// refreshes the background name mirror and proposes the group removals
-    /// it owes.
+    /// it owes in EVERY group this device holds, whichever conversation the
+    /// statement arrived in (the account is gone, not only its leaf there).
     func observeDeletedAccounts() {
         DeletedAccounts.shared.onStatementRecorded = { [weak self] _ in
             guard let self else { return }
@@ -113,9 +114,37 @@ extension ChatRepository {
         }
     }
 
-    /// Propose the removal of every person a statement was verified for in
-    /// `groupIdHex`, once each, when this device may. A removal that could not
-    /// be sent is tried again on a later poll; one that went is recorded.
+    /// What this device does about one deleted person in one group.
+    enum DeletedRemovalPlan: Equatable {
+        /// Propose the removal naming this leaf (the remove flow removes every
+        /// leaf of the account, ADR-0050).
+        case propose(leafIndex: UInt32)
+        /// Nothing now: not ours to remove here, or a removal of every one of
+        /// their leaves is already pending. Asked again on a later poll.
+        case wait
+        /// Nothing is ever owed here: the person is not in the roster, is the
+        /// owner (C-63), or this is a one-to-one.
+        case settled
+    }
+
+    /// The plan for one deleted person in one group. Pure.
+    nonisolated static func deletedRemovalPlan(
+        ownRole: Role?, roles: RoleTable?, personKey: Data, personLeaves: [UInt32],
+        pendingRemoveLeaves: Set<UInt32>, oneToOne: Bool
+    ) -> DeletedRemovalPlan {
+        guard let first = personLeaves.first else { return .settled }
+        if oneToOne || roles?.owner == personKey { return .settled }
+        guard shouldProposeRemoval(
+            ownRole: ownRole, roles: roles, personKey: personKey, inRoster: true, oneToOne: oneToOne)
+        else { return .wait }
+        if personLeaves.allSatisfy(pendingRemoveLeaves.contains) { return .wait }
+        return .propose(leafIndex: first)
+    }
+
+    /// Propose, in `groupIdHex`, the removal of every person a statement was
+    /// verified for in any conversation, once each, when this device may. A
+    /// removal that could not be sent is tried again on a later poll; one that
+    /// went, or one that is never owed here, is recorded.
     func proposeDeletedMemberRemovalsSoon(groupIdHex: String) {
         let owed = DeletedAccounts.shared.removalsOwed(groupIdHex: groupIdHex)
         guard !owed.isEmpty, let record = groups[groupIdHex],
@@ -124,19 +153,26 @@ extension ChatRepository {
         let roles = groupRoles(groupIdHex: groupIdHex)
         let own = ownRole(groupIdHex: groupIdHex)
         let oneToOne = isOneToOne(groupIdHex: groupIdHex)
+        let pendingRemoveLeaves: Set<UInt32> = Set(((try? record.group.pendingProposals()) ?? []).compactMap {
+            guard $0.stored, case .remove(let leaf) = $0.kind else { return nil }
+            return leaf
+        })
         for personKeyB64 in owed {
             guard let personKey = base64Decode(personKeyB64) else { continue }
-            let member = roster.first { PersonKey.of($0) == personKey }
-            guard Self.shouldProposeRemoval(
-                ownRole: own, roles: roles, personKey: personKey, inRoster: member != nil,
-                oneToOne: oneToOne) else {
-                // Gone already, or never ours to remove: nothing is owed.
-                if member == nil || roles?.owner == personKey || oneToOne {
-                    DeletedAccounts.shared.noteRemovalProposed(personKeyB64: personKeyB64, groupIdHex: groupIdHex)
-                }
+            let plan = Self.deletedRemovalPlan(
+                ownRole: own, roles: roles, personKey: personKey,
+                personLeaves: roster.filter { PersonKey.of($0) == personKey }.map(\.leafIndex),
+                pendingRemoveLeaves: pendingRemoveLeaves, oneToOne: oneToOne)
+            let leaf: UInt32
+            switch plan {
+            case .settled:
+                DeletedAccounts.shared.noteRemovalProposed(personKeyB64: personKeyB64, groupIdHex: groupIdHex)
                 continue
+            case .wait:
+                continue
+            case .propose(let leafIndex):
+                leaf = leafIndex
             }
-            guard let leaf = member?.leafIndex else { continue }
             let attemptKey = "\(groupIdHex)|\(personKeyB64)"
             let now = Self.nowMs()
             guard !deletedRemovalsInFlight.contains(attemptKey),

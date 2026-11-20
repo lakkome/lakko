@@ -104,7 +104,7 @@ offers `Add to contacts` (`conversation-info.md` section 2.1).
 
 | State | What shows |
 |---|---|
-| Blocking in progress | The Block button shows progress. The block takes effect on this device at once, and on the account's other devices when they sync. |
+| Blocking in progress | The Block button shows progress only while the block is saved on this device, which is at once. The block takes effect on the account's other devices when they sync; that sync runs in the background and never holds the button. |
 | Block saved, sync failed | Nothing visible. The block holds on this device and syncs later. |
 | Blocked, card opened | `Unblock`, plus a muted line under the name: "Blocked". |
 
@@ -188,7 +188,7 @@ Then:
 | Sent | The sheet closes. A short notice reads "Report sent. Moderators will review it." The block or leave, if checked, is applied at the same time. |
 | No network | "Couldn't send the report. Try again." The sheet stays filled in. |
 | Daily limit reached | "You've sent many reports today. Try again tomorrow." The sheet stays filled in. The block still applies if checked. |
-| Reporting not available on this server | "Reporting isn't available on this server." The block still applies if checked. |
+| Reporting not available on this server | Asked when the sheet opens: "Reporting isn't available on this server." shows at once and `Send report` is disabled, so nothing is sent and nothing is blocked from the sheet. If the server answers this only when the report is sent, the line shows then and the block still applies if checked. When the opening check gets no answer (no network), the sheet stays as it is. |
 | Evidence can't be prepared (a message is no longer on this device) | That message is left out and the line reads "Included: 2 of 3 messages". |
 
 **Your reports.** Settings > Privacy > **Your reports** lists the reports

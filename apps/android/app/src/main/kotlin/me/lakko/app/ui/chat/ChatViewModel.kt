@@ -2118,6 +2118,12 @@ public class ChatViewModel(
         if (identity != null) profileNames.noteOnScreen(identity)
     }
 
+    /** ADR-0098 section 2 — what a member row's check is keyed on: the member
+     *  and the account id their profile claims now, so the row asks again
+     *  once a member who is not a contact sends their profile. */
+    public fun memberCheckKey(identity: me.lakko.app.chat.MemberIdentity?): me.lakko.app.profile.OnScreenCheckKey? =
+        me.lakko.app.profile.onScreenCheckKey(identity, profileNames::accountIdHexOf)
+
     /**
      * docs/ux/conversation-info.md section 1 — the other person's signature
      * key in a two-member chat, base64url, in the encoding the contact screen

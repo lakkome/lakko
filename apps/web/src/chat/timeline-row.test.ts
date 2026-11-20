@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { dedupByMessageId, type TimelineRow } from "./timeline-row";
+import { dedupByMessageId, seedTimelineFromLog, type TimelineRow } from "./timeline-row";
 
 function out(messageId: number | undefined, tempId: number): TimelineRow {
   return {
@@ -49,5 +49,45 @@ describe("dedupByMessageId", () => {
   it("returns the rows untouched when there is nothing to collapse", () => {
     const rows = [inc(1), out(2, 1), inc(3)];
     expect(dedupByMessageId(rows)).toEqual(rows);
+  });
+});
+
+function commit(messageId: number): TimelineRow {
+  return { kind: "incoming", event: { kind: "system", messageId, systemKind: "commit", createdAt: "t" } } as TimelineRow;
+}
+
+function ids(rows: readonly TimelineRow[]): string[] {
+  return rows.map((r) =>
+    r.kind === "outgoing" ? `out:${r.messageId ?? "pending"}` : `in:${r.event.messageId}`,
+  );
+}
+
+describe("seedTimelineFromLog", () => {
+  it("is the stored rows when the view holds nothing yet", () => {
+    const stored = [out(1, -1), inc(2)];
+    expect(seedTimelineFromLog([], stored)).toEqual(stored);
+  });
+
+  it("keeps the stored history when a row reached the view first", () => {
+    // 2026-11-20: a one-to-one whose other person had deleted their account
+    // showed only this person's own messages. A view that already holds a row
+    // when the log is read must still show the stored "hello" (2).
+    const stored = [out(1, -1), inc(2), commit(3)];
+    const current = [out(4, 7)];
+    expect(ids(seedTimelineFromLog(current, stored))).toEqual(["out:1", "in:2", "in:3", "out:4"]);
+  });
+
+  it("keeps the view's own copy of a row it already holds", () => {
+    const live = inc(2);
+    const stored = [inc(1), inc(2)];
+    const seeded = seedTimelineFromLog([live], stored);
+    expect(ids(seeded)).toEqual(["in:1", "in:2"]);
+    expect(seeded[1]).toBe(live);
+  });
+
+  it("leaves a bubble with no DS id yet last", () => {
+    const stored = [inc(1), inc(2)];
+    const current = [out(undefined, 9)];
+    expect(ids(seedTimelineFromLog(current, stored))).toEqual(["in:1", "in:2", "out:pending"]);
   });
 });

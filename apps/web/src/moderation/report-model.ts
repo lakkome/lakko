@@ -216,9 +216,17 @@ export function showsEmptyHint(kept: number): boolean {
   return kept === 0;
 }
 
-/** Whether `Send report` can be pressed. */
+/** Whether `Send report` can be pressed: a reason is chosen, no send is
+ *  out, and the server has not said reporting is not available here
+ *  (UX 2.3: said when the sheet opens, with `Send report` disabled). */
 export function canSend(draft: ReportDraft, phase: SheetPhase): boolean {
-  return draft.reason !== null && phase !== "sending";
+  return draft.reason !== null && phase !== "sending" && phase !== "unavailable";
+}
+
+/** The phase after an edit to the draft: a refusal line goes, except
+ *  "not available", which no edit changes. */
+export function phaseAfterEdit(phase: SheetPhase): SheetPhase {
+  return phase === "sending" || phase === "unavailable" ? phase : "editing";
 }
 
 /** UX 2.2 - the line above the button names the person only for a person. */

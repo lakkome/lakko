@@ -156,6 +156,11 @@ export class SessionTokenProvider {
    *  account key; a device that cannot is signed out as before. */
   private supersededHeld: { readonly accountIdB64: string; readonly pair: SessionPair } | null = null;
   private readonly listeners = new Set<Listener>();
+  /** ADR-0098: the account auth just deleted on this device's own request.
+   *  From then on nothing refreshes and no refusal is raised: the deletion
+   *  goes on to its cleanups (the conversations are told) and its own wipe,
+   *  and a sign-out raised by a cleanup's `401` would stop it half-way. */
+  private deletedAccount: string | null = null;
 
   /** Install (or replace) the ports. Called once by `AuthContext`. */
   configure(ports: SessionTokenProviderPorts): void {
@@ -167,6 +172,7 @@ export class SessionTokenProvider {
    *  of the same account keep resolving to the live one. */
   install(accountIdB64: string, pair: SessionPair): void {
     this.supersededHeld = null;
+    this.deletedAccount = null;
     if (this.account !== accountIdB64) this.replaced.clear();
     if (this.held !== null && this.held.sessionToken !== pair.sessionToken) {
       this.replaced.add(this.held.sessionToken);
@@ -209,6 +215,7 @@ export class SessionTokenProvider {
 
   /** Sign-out, wipe, or a session that ended: hold nothing. */
   clear(): void {
+    this.deletedAccount = null;
     this.account = null;
     this.held = null;
     this.restrictedHeld = null;
@@ -302,7 +309,25 @@ export class SessionTokenProvider {
    * it is in flight. Drops the pair and raises the matching event on a
    * refusal; keeps it on a network failure.
    */
+  /**
+   * ADR-0098: auth deleted the held account at this device's request. The
+   * held pair stays (storage and discovery verify it statelessly for their
+   * own deletions), but from now on no refresh is made and no refusal is
+   * raised, so a cleanup that meets a `401` cannot sign the device out
+   * before the account-deleted statement is posted and the wipe runs.
+   * Cleared by the next `install` or `clear`.
+   */
+  markAccountDeleted(): void {
+    this.deletedAccount = this.account;
+  }
+
+  /** Whether `markAccountDeleted` holds for the account held now. */
+  private accountWasDeleted(): boolean {
+    return this.deletedAccount !== null && this.deletedAccount === this.account;
+  }
+
   refreshOnce(): Promise<RefreshOutcome> {
+    if (this.accountWasDeleted()) return Promise.resolve("invalid");
     if (this.inflight !== null) return this.inflight;
     const run = this.runRefresh().finally(() => {
       this.inflight = null;
@@ -371,7 +396,7 @@ export class SessionTokenProvider {
    */
   reportSuperseded(): void {
     const account = this.account;
-    if (account === null) return;
+    if (account === null || this.accountWasDeleted()) return;
     const held = this.held;
     this.clear();
     if (held !== null) this.supersededHeld = { accountIdB64: account, pair: held };
@@ -385,7 +410,7 @@ export class SessionTokenProvider {
    */
   reportDeviceRevoked(): void {
     const account = this.account;
-    if (account === null) return;
+    if (account === null || this.accountWasDeleted()) return;
     this.clear();
     this.emit({ kind: "device-revoked", accountIdB64: account });
   }

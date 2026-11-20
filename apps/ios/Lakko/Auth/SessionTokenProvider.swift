@@ -189,6 +189,10 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// ``SuspendedRequestRule`` allows leave the device. Cleared by a
     /// refresh that answers a normal pair.
     private var suspended = false
+    /// ADR-0098: `true` once auth deleted this account at this device's
+    /// request (``markAccountDeleted()``). Nothing is refreshed and no
+    /// refusal callback fires until ``clear()`` or the next ``install``.
+    private var accountDeleted = false
     private var inFlight: Task<SessionRefreshOutcome, Never>?
 
     /// Set by the repository. Absent means a refresh cannot run.
@@ -249,6 +253,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         pair = newPair
         superseded = false
         revoked = false
+        accountDeleted = false
         suspended = isSuspended
         if !newPair.sessionToken.isEmpty {
             knownAccessTokens.insert(newPair.sessionToken)
@@ -264,9 +269,22 @@ public final class SessionTokenProvider: @unchecked Sendable {
         knownAccessTokens = []
         superseded = false
         revoked = false
+        accountDeleted = false
         suspended = false
         inFlight?.cancel()
         inFlight = nil
+        lock.unlock()
+    }
+
+    /// ADR-0098: auth deleted the installed account at this device's request.
+    /// The pair stays (storage and discovery verify it statelessly for their
+    /// own deletions), but from now on nothing is refreshed and no refusal
+    /// callback fires: the deletion goes on to tell every conversation and to
+    /// its own wipe, and a sign-out raised by a cleanup's `401` would stop it
+    /// half-way.
+    public func markAccountDeleted() {
+        lock.lock()
+        if accountIdB64 != nil { accountDeleted = true }
         lock.unlock()
     }
 
@@ -363,6 +381,10 @@ public final class SessionTokenProvider: @unchecked Sendable {
     @discardableResult
     public func refresh() async -> SessionRefreshOutcome {
         lock.lock()
+        if accountDeleted {
+            lock.unlock()
+            return .noCredential
+        }
         if revoked {
             lock.unlock()
             return .revoked
@@ -424,7 +446,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         inFlight = nil
         // The session may have been cleared or replaced while the refresh
         // was out; only the account it was made for takes the result.
-        if accountIdB64 == account {
+        if accountIdB64 == account, !accountDeleted {
             switch outcome {
             case .refreshed(let fresh):
                 pair = fresh
@@ -487,7 +509,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
     public func noteSuperseded(refused: String?) {
         var fire: (() -> Void)?
         lock.lock()
-        if !superseded, let account = accountIdB64, refused == nil || refused == pair?.sessionToken {
+        if !superseded, !accountDeleted, let account = accountIdB64, refused == nil || refused == pair?.sessionToken {
             superseded = true
             let callback = onSuperseded
             fire = { callback?(account) }
@@ -503,7 +525,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
     public func noteDeviceRevoked() {
         var fire: (() -> Void)?
         lock.lock()
-        if !revoked, let account = accountIdB64 {
+        if !revoked, !accountDeleted, let account = accountIdB64 {
             revoked = true
             let callback = onDeviceRevoked
             fire = { callback?(account) }

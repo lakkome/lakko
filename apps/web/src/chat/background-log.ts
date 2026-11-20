@@ -88,11 +88,18 @@ export function appendToGroupSlot(
 }
 
 /**
- * The chat view's write: its own rows, plus any stored row NEWER than the
- * newest row the view holds (the background receive wrote it after the view
- * last looked). The cursor is the maximum of both; `lastViewedMessageId` —
- * everything the open view holds counts as seen — only ever moves forward. The
- * history floor is not the view's to change.
+ * The chat view's write: its own rows, plus every stored row it does not hold
+ * (the background receive wrote it after the view last looked, a history
+ * bundle or the gap filed it below, or the view never read it). A row the
+ * view holds replaces the stored row of the same DS id: the view's copy
+ * carries the latest edit, deletion and reactions. The view never removes a
+ * row (a deletion is an op on the row), so a stored row it lacks is one it
+ * did not load, never one it dropped; until 2026-11-20 every such row at or
+ * below the view's newest was erased here, which a view that missed the
+ * stored history turned into lost messages. The cursor is the maximum of
+ * both; `lastViewedMessageId` — everything the open view holds counts as
+ * seen — only ever moves forward. The history floor is not the view's to
+ * change.
  */
 export function mergeForegroundSlot(
   slot: PersistedGroup | undefined,
@@ -103,7 +110,9 @@ export function mergeForegroundSlot(
     const id = idOf(m);
     if (id !== null && (newest === null || id > newest)) newest = id;
   }
-  const newerStored = (slot?.messages ?? []).filter((m) => {
+  const held = new Set(foreground.messages.map((m) => m.messageId));
+  const storedOnly = (slot?.messages ?? []).filter((m) => !held.has(m.messageId));
+  const allNewer = storedOnly.every((m) => {
     const id = idOf(m);
     return id !== null && (newest === null || id > newest);
   });
@@ -120,7 +129,9 @@ export function mergeForegroundSlot(
   });
   return {
     cursor: maxCursor(slot?.cursor, foreground.cursor),
-    messages: [...foreground.messages, ...newerStored.sort(compareById)],
+    messages: allNewer
+      ? [...foreground.messages, ...storedOnly.sort(compareById)]
+      : [...foreground.messages, ...storedOnly].sort(compareById),
     ...(lastViewed === undefined ? {} : { lastViewedMessageId: lastViewed }),
     ...(feedSeen.length === 0 ? {} : { feedSeen }),
     ...(slot?.syncedThroughMessageId === undefined

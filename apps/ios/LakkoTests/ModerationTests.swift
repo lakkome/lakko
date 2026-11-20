@@ -288,6 +288,44 @@ final class ModerationTests: XCTestCase {
         XCTAssertEqual(spy2.followUps, [.block])
     }
 
+    func testTheSheetSaysReportingIsNotAvailableWhenItOpensAndSendStaysOff() async {
+        let spy = Spy()
+        let off = model(list: .unavailable, spy: spy)
+        off.reason = 1
+        await off.checkAvailability()
+        XCTAssertEqual(off.phase, .unavailable)
+        XCTAssertFalse(off.canSend)
+        off.reason = 2
+        off.comment = "more"
+        XCTAssertFalse(off.canSend, "no edit turns Send back on")
+        await off.send()
+        XCTAssertEqual(off.phase, .unavailable)
+        XCTAssertTrue(spy.followUps.isEmpty, "nothing is blocked from a sheet that could not send")
+        XCTAssertTrue(spy.recorded.isEmpty)
+
+        let spy2 = Spy()
+        let unpinned = model(rootKey: nil, spy: spy2)
+        await unpinned.checkAvailability()
+        XCTAssertEqual(unpinned.phase, .unavailable)
+        XCTAssertTrue(spy2.followUps.isEmpty)
+    }
+
+    func testTheOpeningCheckLeavesTheSheetAsItIsWhenAvailableOrOffline() async {
+        let spy = Spy()
+        let on = model(spy: spy)
+        on.reason = 1
+        await on.checkAvailability()
+        XCTAssertEqual(on.phase, .editing)
+        XCTAssertTrue(on.canSend)
+        XCTAssertTrue(spy.recorded.isEmpty, "the check sends nothing")
+
+        let offline = model(list: .failed, spy: Spy())
+        offline.reason = 1
+        await offline.checkAvailability()
+        XCTAssertEqual(offline.phase, .editing)
+        XCTAssertTrue(offline.canSend)
+    }
+
     func testAnUncheckedFollowUpIsNotApplied() async {
         let spy = Spy()
         let m = model(target: .group(handle: "cats"), followUp: .leave, spy: spy)

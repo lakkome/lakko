@@ -174,21 +174,71 @@ export function personOnScreen(keyB64: string | null | undefined): void {
   }
 }
 
+// The people a list row shows right now, counted per row: a row in view adds
+// one, a row leaving view or unmounting takes it back. Read by
+// `recheckVisiblePeople` only.
+const visibleCounts = new Map<string, number>();
+
+function enterView(keyB64: string): void {
+  visibleCounts.set(keyB64, (visibleCounts.get(keyB64) ?? 0) + 1);
+}
+
+function leaveView(keyB64: string): void {
+  const n = visibleCounts.get(keyB64) ?? 0;
+  if (n <= 1) visibleCounts.delete(keyB64);
+  else visibleCounts.set(keyB64, n - 1);
+}
+
+/** The people whose rows are in view now (tests and the runtime). */
+export function visiblePeople(): string[] {
+  return [...visibleCounts.keys()];
+}
+
+/**
+ * Ask again about every person whose row is in view. The runtime calls it
+ * when this device learns an account id (a group member's profile v2
+ * arriving after their row was drawn): a row in view does not intersect
+ * again, so without this the member would be asked about only after the list
+ * was reopened. Each call goes through the same checker, so the rule, the
+ * one-in-flight limit and the account-id requirement still hold.
+ */
+export function recheckVisiblePeople(): void {
+  for (const key of [...visibleCounts.keys()]) personOnScreen(key);
+}
+
 /**
  * Ask about the person behind `el` once it is in view: the visible rows of a
- * list, not all of them. Without an `IntersectionObserver` (tests) it asks at
- * once. Returns the cleanup.
+ * list, not all of them. Without an `IntersectionObserver` (tests) the row
+ * counts as in view at once. Returns the cleanup.
  */
 export function checkWhenVisible(el: Element, keyB64: () => string | null | undefined): () => void {
+  let shown: string | null = null;
+  const show = (): void => {
+    if (shown !== null) return;
+    const key = keyB64();
+    if (key === null || key === undefined || key.length === 0) return;
+    shown = key;
+    enterView(key);
+    personOnScreen(key);
+  };
+  const hide = (): void => {
+    if (shown === null) return;
+    leaveView(shown);
+    shown = null;
+  };
   if (typeof IntersectionObserver === "undefined") {
-    personOnScreen(keyB64());
-    return () => undefined;
+    show();
+    return hide;
   }
   const observer = new IntersectionObserver((entries) => {
-    for (const e of entries) if (e.isIntersecting) personOnScreen(keyB64());
+    for (const e of entries) {
+      if (e.isIntersecting) show();
+      else hide();
+    }
   });
   observer.observe(el);
   return () => {
     observer.disconnect();
+    hide();
   };
 }

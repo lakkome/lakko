@@ -66,10 +66,23 @@ describe("mergeForegroundSlot (the chat view's write)", () => {
     expect(next.cursor).toBe("12");
   });
 
-  it("stays authoritative for what it holds (a row it dropped is not resurrected)", () => {
+  it("keeps a stored row the view does not hold, below its newest row too", () => {
+    // 2026-11-20: a one-to-one lost the other person's "hello" after they
+    // deleted their account. A view that has not loaded a stored row and then
+    // writes a newer one of its own must not erase it: the view never removes
+    // a row, so a stored row it lacks is one it did not load.
     const stored: PersistedGroup = { cursor: "3", messages: [msg(1), msg(2), msg(3)] };
-    const next = mergeForegroundSlot(stored, { messages: [msg(1), msg(3)], cursor: 3 });
-    expect(next.messages.map((m) => m.messageId)).toEqual(["1", "3"]);
+    const next = mergeForegroundSlot(stored, { messages: [msg(1), msg(3), msg(4, "outgoing")], cursor: 4 });
+    expect(next.messages.map((m) => m.messageId)).toEqual(["1", "2", "3", "4"]);
+  });
+
+  it("writes the view's copy of a row it holds over the stored one", () => {
+    const stored: PersistedGroup = { cursor: "2", messages: [msg(1, "incoming", "old"), msg(2)] };
+    const next = mergeForegroundSlot(stored, { messages: [msg(1, "incoming", "edited")], cursor: 2 });
+    expect(next.messages.map((m) => [m.messageId, m.text])).toEqual([
+      ["1", "edited"],
+      ["2", "m2"],
+    ]);
   });
 
   it("records the newest row the view held as viewed, never lowering it", () => {
@@ -283,13 +296,13 @@ describe("mergeClosedViewSlot (a closed view's late write)", () => {
 
   it("keeps a row the background receive filed below the late send", () => {
     // The view closed at 3; the background receive filed 5; the send that was
-    // in flight came back as 6. The view never held 5 and must not erase it,
-    // which is what its ordinary merge would do.
+    // in flight came back as 6. The view never held 5 and must not erase it
+    // (since 2026-11-20 its ordinary merge keeps it too).
     const slot: PersistedGroup = { cursor: "5", messages: [msg(3), msg(5)] };
     const next = mergeClosedViewSlot(slot, [msg(6, "outgoing")], 3);
     expect(next.messages.map((m) => m.messageId)).toEqual(["3", "5", "6"]);
     expect(mergeForegroundSlot(slot, { messages: [msg(3), msg(6, "outgoing")], cursor: 3 })
-      .messages.map((m) => m.messageId)).toEqual(["3", "6"]);
+      .messages.map((m) => m.messageId)).toEqual(["3", "5", "6"]);
   });
 
   it("replaces the stored row an edit changed, and only that row", () => {

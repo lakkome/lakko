@@ -247,6 +247,18 @@ known (no profile v2, not a contact) never shows a username again. Android check
 run from ordinary chat-list rows (the ADR does not list them). An owed removal counts as done
 once its proposal is published; if no committer ever sweeps it, it is not proposed again.
 
+Walk 8 on the test stack (2026-11-20), fixed the same day on web, iOS and Android, host-tested
+only: (1) on Android the statement went to no conversation. Posting needs no session, but after
+`DELETE /account` any bearer request of a concurrent cleanup (a token refill, a refresh near
+expiry) was refused, the refresh answered `refresh-invalid`, and the client signed out, which
+sealed the account store under the statement's persist-before-publish. The session provider is now
+told right after the auth delete (`markAccountDeleted`): no refresh and no refusal handling from
+then until the wipe. Android also skips a conversation it is no longer in instead of counting it
+as a failure. (2) A group member who is not a contact now gets the on-screen check as soon as their
+profile's account id arrives while the row is on screen (before, the check ran only when the row
+first appeared, and Android's member list did not redraw on a directory answer); a member whose
+profile has not reached this device still shows no username.
+
 ## Alternatives
 
 1. **Push only.** Smallest change, but a deleting device that is offline, killed, or out of

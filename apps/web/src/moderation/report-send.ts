@@ -132,12 +132,17 @@ function hexBytes(hex: string): Uint8Array | null {
   return out;
 }
 
-/** Send one report. Never throws: every failure is an outcome. */
-export async function sendReport(draft: ReportDraft, ports: ReportSendPorts): Promise<SendOutcome> {
-  if (draft.reason === null) return { kind: "failed" };
+/** Steps 1 and 2: the pinned root key and a moderator list it accepts. */
+type ListStep =
+  | { readonly kind: "ok"; readonly rootKey: Uint8Array; readonly list: Uint8Array }
+  | { readonly kind: "unavailable" }
+  | { readonly kind: "failed" };
+
+async function verifiedList(
+  ports: Pick<ReportSendPorts, "rootKey" | "fetchList" | "listVersion" | "readFloor" | "writeFloor">,
+): Promise<ListStep> {
   const rootKey = ports.rootKey();
   if (rootKey === null) return { kind: "unavailable" };
-
   let list: Uint8Array | null;
   try {
     list = await ports.fetchList();
@@ -154,6 +159,36 @@ export async function sendReport(draft: ReportDraft, ports: ReportSendPorts): Pr
   const floor = acceptListVersion(ports.readFloor(), version);
   if (!floor.accept) return { kind: "unavailable" };
   ports.writeFloor(floor.floor);
+  return { kind: "ok", rootKey, list };
+}
+
+/** Whether reporting can work on this server, asked when the sheet opens
+ *  (UX 2.3, "Reporting not available on this server": said when the sheet
+ *  opens, and `Send report` is disabled). `unknown` when the answer did not
+ *  come (no network): the sheet stays as it is and a send says what
+ *  happened. Never throws. */
+export type ReportAvailability = "available" | "unavailable" | "unknown";
+
+export async function checkReportAvailability(
+  ports: Pick<ReportSendPorts, "rootKey" | "fetchList" | "listVersion" | "readFloor" | "writeFloor">,
+): Promise<ReportAvailability> {
+  const step = await verifiedList(ports);
+  switch (step.kind) {
+    case "ok":
+      return "available";
+    case "unavailable":
+      return "unavailable";
+    case "failed":
+      return "unknown";
+  }
+}
+
+/** Send one report. Never throws: every failure is an outcome. */
+export async function sendReport(draft: ReportDraft, ports: ReportSendPorts): Promise<SendOutcome> {
+  if (draft.reason === null) return { kind: "failed" };
+  const step = await verifiedList(ports);
+  if (step.kind !== "ok") return { kind: step.kind };
+  const { rootKey, list } = step;
 
   let targetKind: number;
   let target: Uint8Array;

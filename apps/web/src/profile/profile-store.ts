@@ -352,8 +352,16 @@ export class ProfileStore {
       this.persist(accountId);
       return true;
     }
-    this.forgetVerificationIfCertificateChanged(senderKeyB64, held, incoming);
-    this.profiles.set(senderKeyB64, incoming);
+    // A newer profile that carries no account id keeps the one the key's held
+    // row already had: the same person's key, and the id is how a group member
+    // who is not a contact is asked about (ADR-0098 section 2). iOS and
+    // Android keep it the same way.
+    const next =
+      incoming.accountIdHex === null && held !== undefined && held.accountIdHex !== null
+        ? { ...incoming, accountIdHex: held.accountIdHex }
+        : incoming;
+    this.forgetVerificationIfCertificateChanged(senderKeyB64, held, next);
+    this.profiles.set(senderKeyB64, next);
     this.notify();
     this.persist(accountId);
     return true;

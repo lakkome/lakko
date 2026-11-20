@@ -85,12 +85,12 @@
 	<string>$(LAKKO_DONATIONS_KEY)</string>
 	<key>LakkoGifProxyUrl</key>
 	<string></string>
-	<key>LakkoReleaseCheckDevOverride</key>
-	<string>false</string>
 	<key>LakkoModerationLogKey</key>
 	<string></string>
 	<key>LakkoModerationRootKey</key>
-	<string></string>
+	<string>$(LAKKO_MODERATION_ROOT_KEY)</string>
+	<key>LakkoReleaseCheckDevOverride</key>
+	<string>false</string>
 	<key>LakkoReleaseKey</key>
 	<string></string>
 	<key>LakkoReleaseManifestUrl</key>

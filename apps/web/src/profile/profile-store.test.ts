@@ -153,6 +153,14 @@ describe("ProfileStore", () => {
     expect(store.get(KEY_A)?.accountIdHex).toBe("05".repeat(16));
   });
 
+  it("a newer profile with no account id keeps the id the key already had", async () => {
+    const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
+    await store.ingest(ACCOUNT, KEY_A, { ...profile("Alice", "alice", 100n), accountId: new Uint8Array(16).fill(5) });
+    expect(await store.ingest(ACCOUNT, KEY_A, profile("Alice Petrova", "alice", 200n))).toBe(true);
+    expect(store.get(KEY_A)?.displayName).toBe("Alice Petrova");
+    expect(store.get(KEY_A)?.accountIdHex).toBe("05".repeat(16));
+  });
+
   it("a claim from another key never touches the first key's entry", async () => {
     const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
     await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n));

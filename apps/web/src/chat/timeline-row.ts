@@ -8,6 +8,7 @@
  * (`TimelineBubble.tsx`) and the layout computation (`timeline-layout.ts`)
  * can share it without importing the route.
  */
+import { insertByMessageId } from "./gap-line";
 import { historyRowId } from "./lineage";
 import type { MemberIdentity } from "./author-identity";
 import type { AttachmentRefBytes, ForwardRef, ReplyRef } from "./attachments";
@@ -139,6 +140,33 @@ export function rowCreatedAt(row: TimelineRow): string | undefined {
 export function rowSenderKey(row: TimelineRow): string | undefined {
   if (row.kind !== "incoming") return undefined;
   return (row.event as { senderKey?: string }).senderKey;
+}
+
+/** The DS id a row stands for, for every incoming kind (a commit row
+ *  included), and for an outgoing row once the DS acknowledged it. */
+function dsIdOf(row: TimelineRow): number | undefined {
+  if (row.kind === "outgoing") return row.ack === "sent" ? row.messageId : undefined;
+  return row.event.messageId;
+}
+
+/**
+ * The timeline once the stored log of the conversation has been read
+ * (`routes/Chat.tsx` `hydrateFromLog`). Every stored row the view does not
+ * already hold goes in by DS id; a row the view holds (a newer copy of the
+ * same message) is kept as it is. A row with no DS id yet stays where it is.
+ *
+ * The view used to seed from the log only when it held nothing yet, so a row
+ * that reached it first (a poll answer, a flushed send, a gap row) hid the
+ * whole stored history, and the view's next write then removed that history
+ * from the log (found while tracing a one-to-one that lost the other
+ * person's message after they deleted their account, 2026-11-20).
+ */
+export function seedTimelineFromLog(
+  current: readonly TimelineRow[],
+  stored: readonly TimelineRow[],
+): TimelineRow[] {
+  if (current.length === 0) return [...stored];
+  return insertByMessageId(current, stored, dsIdOf);
 }
 
 /**

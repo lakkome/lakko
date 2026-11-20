@@ -178,6 +178,99 @@ final class AccountDeletionRunTests: XCTestCase {
     static func token() -> AnonToken {
         AnonToken(context: AnonTokenContext.pushRegister.rawValue, epoch: 1, headerValue: "t")
     }
+
+    // Walk 8 (ADR-0098): after DELETE /account a cleanup's bearer request met
+    // 401, the refresh answered refresh-invalid and the device signed out, so
+    // the account-deleted statements were never posted. With the provider
+    // told after the auth delete, nothing signs out and every conversation is
+    // told.
+    func testARefusedSessionAfterTheAuthDeleteSignsNothingOutAndEveryConversationIsTold() async throws {
+        let events = Recorder()
+        let provider = SessionTokenProvider()
+        provider.nowMs = { 1_000_000 }
+        let fired = Counter()
+        provider.onRefreshInvalid = { _ in fired.bump("invalid") }
+        provider.onSuperseded = { _ in fired.bump("superseded") }
+        provider.onDeviceRevoked = { _ in fired.bump("revoked") }
+        let refreshes = Counter()
+        provider.refresher = { _ in
+            refreshes.bump("refresh")
+            throw AuthClientError.http(
+                status: 401, endpoint: "/auth/session/refresh", body: #"{"error":"refresh-invalid"}"#)
+        }
+        provider.install(.fixture(), accountIdB64: "acct")
+        let conversations = ["one-to-one", "group-a", "group-b"]
+        let posted = Recorder()
+        var run = AccountDeletionRun(
+            deleteAtAuth: { events.add("auth") },
+            afterAuth: { provider.markAccountDeleted() },
+            cleanups: [
+                AccountDeletionCleanup(name: "push") {
+                    // A bearer request after the delete: a 401, then a refresh.
+                    _ = await provider.refresh()
+                    provider.noteSuperseded(refused: nil)
+                    provider.noteDeviceRevoked()
+                },
+                AccountDeletionCleanup(name: "conversations") {
+                    for c in conversations where !posted.items.contains(c) {
+                        // A sign-out tears the session down under the send.
+                        if !fired.names.isEmpty { throw Failed() }
+                        posted.add(c)
+                    }
+                },
+            ],
+            wipe: { events.add("wipe") })
+        run.retryDelay = .milliseconds(1)
+        run.overallTimeout = .seconds(5)
+        run.log = { _ in }
+        try await run.run()
+        XCTAssertEqual(fired.names, [], "nothing signs the device out")
+        XCTAssertEqual(refreshes.names, [], "no refresh is sent for a deleted account")
+        XCTAssertEqual(Set(posted.items), Set(conversations))
+        XCTAssertEqual(events.items, ["auth", "wipe"])
+    }
+
+    /// ADR-0098, walk 10 — the statement runs to the end before the
+    /// directory entry is removed: both at once rebuilt the conversation
+    /// identity and stopped the statement (seen on Android).
+    func testTheFirstCleanupEndsBeforeAnyOtherCleanupStarts() async throws {
+        let events = Recorder()
+        var run = AccountDeletionRun(
+            deleteAtAuth: { events.add("auth") },
+            first: [
+                AccountDeletionCleanup(name: "conversations") {
+                    events.add("statement start")
+                    try await Task.sleep(for: .milliseconds(50))
+                    events.add("statement end")
+                },
+            ],
+            cleanups: [
+                AccountDeletionCleanup(name: "discovery") { events.add("discovery") },
+                AccountDeletionCleanup(name: "push") { events.add("push") },
+            ],
+            wipe: { events.add("wipe") })
+        run.retryDelay = .milliseconds(1)
+        run.overallTimeout = .seconds(5)
+        run.log = { _ in }
+        try await run.run()
+        XCTAssertEqual(Array(events.items.prefix(3)), ["auth", "statement start", "statement end"])
+        XCTAssertEqual(Set(events.items[3..<5]), ["discovery", "push"])
+        XCTAssertEqual(events.items.last, "wipe")
+    }
+
+    func testWithoutTheMarkTheSameRefusalSignsOut() async {
+        let provider = SessionTokenProvider()
+        provider.nowMs = { 1_000_000 }
+        let fired = Counter()
+        provider.onRefreshInvalid = { _ in fired.bump("invalid") }
+        provider.refresher = { _ in
+            throw AuthClientError.http(
+                status: 401, endpoint: "/auth/session/refresh", body: #"{"error":"refresh-invalid"}"#)
+        }
+        provider.install(.fixture(), accountIdB64: "acct")
+        _ = await provider.refresh()
+        XCTAssertEqual(fired.names, ["invalid"])
+    }
 }
 
 private final class DeletionTokenIssuer: AnonTokenIssuing, @unchecked Sendable {

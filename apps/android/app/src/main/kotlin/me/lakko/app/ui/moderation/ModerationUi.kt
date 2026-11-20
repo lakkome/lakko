@@ -259,6 +259,21 @@ private fun ReportSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var state by remember(subject) { mutableStateOf(ReportSheetState.initial(subject)) }
     var picking by remember(subject) { mutableStateOf(false) }
+    // UX section 2.3 — "Reporting isn't available on this server" is said
+    // when the sheet opens and `Send report` stays disabled, so `Also block`
+    // never runs against a report that cannot go from this sheet.
+    LaunchedEffect(subject) {
+        val availability = me.lakko.app.moderation.ModerationClient().use { client ->
+            me.lakko.app.moderation.checkReportAvailability(
+                me.lakko.app.moderation.ProductionReportPorts(context, subject, state, client),
+            )
+        }
+        if (availability == me.lakko.app.moderation.ReportAvailability.UNAVAILABLE &&
+            state.phase != ReportPhase.SENDING
+        ) {
+            state = state.copy(phase = ReportPhase.UNAVAILABLE)
+        }
+    }
     val reasons = remember {
         runCatching { uniffi.lakko_ffi_uniffi.reportReasonCodes().map { it.toUByte() } }.getOrDefault(emptyList())
     }
