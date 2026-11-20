@@ -4770,8 +4770,18 @@ mod signup_login_limits_e2e_tests {
         let (st, body) = passkey_register_start(state, token, Some(grant)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let ccr: webauthn_rs::prelude::CreationChallengeResponse =
+        let mut ccr: webauthn_rs::prelude::CreationChallengeResponse =
             serde_json::from_value(v["options"].clone()).expect("parse options");
+        // The route asks for a discoverable credential (`require_discoverable`),
+        // which the software authenticator cannot create (`NotSupported`). The
+        // server's registration check ignores that request, so the test
+        // withdraws it before handing the options to the soft authenticator;
+        // what the route sends is pinned by `passkey_registration_asks_for_a_
+        // discoverable_credential` in `webauthn.rs`.
+        if let Some(selection) = ccr.public_key.authenticator_selection.as_mut() {
+            selection.require_resident_key = false;
+            selection.resident_key = Some(webauthn_rs_proto::ResidentKeyRequirement::Discouraged);
+        }
         let rpkc = wa
             .do_registration(passkey_origin(), ccr)
             .expect("soft register");
