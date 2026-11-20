@@ -24,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 # ADR-0078 section 11: the request span that records the route template.
 lakko-log-hygiene.workspace = true
+lakko-metrics.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -45,12 +46,10 @@ futures = "0.3"
 # infra/systemd/lakko-sfu.service.
 dotenvy = "0.15"
 
-# Prometheus metrics. The `metrics` crate is the facade; the
-# Prometheus exporter renders the recorder's snapshot at the
-# `/metrics` endpoint that infra/prometheus/prometheus.yml
-# scrapes via mTLS.
+# Prometheus metrics. The `metrics` crate is the facade the SFU's
+# modules record through; the recorder and the `/metrics` listener
+# are lakko-metrics' (ADR-0096), scraped through nginx with mTLS.
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false }
 
 # Call-admission JWT — minted by services/auth, verified here.
 # This is the SAME crate auth links, so the wire format cannot

@@ -81,6 +81,7 @@ impl WitnessStore {
             anyhow::anyhow!("witness_state.tree_root is not 32 bytes — corruption?")
         })?;
 
+        crate::metrics::log_size(log_size);
         Ok(Self {
             witness_key,
             state: Mutex::new(HighWater {
@@ -157,6 +158,7 @@ impl WitnessStore {
                 .map_err(|e| CosignError::Db(e.to_string()))?;
             hw.tree_root = new_root.tree_root;
             hw.log_size = new_root.log_size;
+            crate::metrics::log_size(hw.log_size);
         }
 
         Ok(cosig)

@@ -370,6 +370,31 @@ pub(crate) enum TokenApiError {
 
 impl IntoResponse for TokenApiError {
     fn into_response(self) -> Response {
+        let code = self.code();
+        let mut response = self.render();
+        response
+            .extensions_mut()
+            .insert(lakko_metrics::ErrorCode(code));
+        response
+    }
+}
+
+impl TokenApiError {
+    /// The stable body code, for the metrics `code` label (ADR-0096).
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::Disabled => "anon-tokens-disabled",
+            Self::UnknownContext => "unknown-context",
+            Self::BadBatchSize => "bad-batch-size",
+            Self::BadBlindedElement => "bad-blinded-element",
+            Self::EpochNotIssuable { .. } => "epoch-not-issuable",
+            Self::EpochOutOfRange => "epoch-out-of-range",
+            Self::QuotaExhausted { .. } => "anon-token-quota-exhausted",
+            Self::Internal => "internal",
+        }
+    }
+
+    fn render(self) -> Response {
         let (status, body) = match self {
             Self::Disabled => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -525,6 +550,7 @@ pub(crate) async fn issue_tokens(
     let remaining = match reserve_issuance(&state.db, &auth.0, context, epoch, count, quota).await {
         Ok(IssuanceDecision::Granted { remaining }) => remaining,
         Ok(IssuanceDecision::Exhausted { remaining }) => {
+            crate::metrics::anon_token_quota_exhausted(context);
             let now = lakko_anon_token_server::now_unix_secs();
             return Err(TokenApiError::QuotaExhausted {
                 remaining,
@@ -549,6 +575,7 @@ pub(crate) async fn issue_tokens(
         tracing::error!(error = %e, "anon-token evaluation failed after reservation");
         TokenApiError::Internal
     })?;
+    crate::metrics::anon_tokens_issued(context, count);
 
     Ok(Json(IssueRes {
         context: context.name(),

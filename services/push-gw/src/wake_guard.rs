@@ -53,8 +53,11 @@ pub(crate) const DEFAULT_PER_MINUTE: u32 = 60;
 pub(crate) enum GuardRefusal {
     /// Timestamp outside the window.
     Stale,
-    /// The nonce was seen within the window, or the set is full.
+    /// The nonce was seen within the window.
     Replay,
+    /// The nonce set is full of unexpired nonces (fail closed: the wake is
+    /// refused rather than an unexpired nonce forgotten).
+    NonceSetFull,
     /// The group's wake budget is spent.
     Capped,
 }
@@ -131,7 +134,7 @@ impl WakeGuard {
             let ttl = self.nonce_ttl;
             seen.retain(|_, at| now.saturating_duration_since(*at) < ttl);
             if seen.len() >= self.max_nonces {
-                return Err(GuardRefusal::Replay);
+                return Err(GuardRefusal::NonceSetFull);
             }
         }
         seen.insert(*nonce, now);
@@ -239,7 +242,7 @@ mod tests {
         g.admit(NOW_MS, &[2; 16], &[9; 32], NOW_MS, t).unwrap();
         assert_eq!(
             g.admit(NOW_MS, &[3; 16], &[9; 32], NOW_MS, t),
-            Err(GuardRefusal::Replay)
+            Err(GuardRefusal::NonceSetFull)
         );
         // Once the first two expire, room is made.
         let later = t + Duration::from_millis(2 * MAX_SKEW_MS + 1);

@@ -396,6 +396,47 @@ fn denied_in_body(macro_name: &str, body: &[char]) -> Vec<String> {
     out
 }
 
+/// Builders that make a label value at run time.
+const LABEL_BUILDERS: &[&str] = &[
+    "format!",
+    ".to_string()",
+    ".to_owned()",
+    "String::from",
+    "encode",
+    "hex::",
+];
+
+/// The denied names and run-time builders one metric macro body names.
+fn denied_in_metric_body(_macro_name: &str, body: &[char]) -> Vec<String> {
+    let args = split_args(body);
+    let mut out: Vec<String> = Vec::new();
+    for (index, raw) in args.iter().enumerate() {
+        let arg = raw.trim();
+        let (key, value) = match arg.split_once("=>") {
+            Some((k, v)) => (Some(k.trim()), v.trim()),
+            None if index == 0 => (None, arg),
+            // A label slice or iterator built elsewhere; its values are
+            // checked where they are written.
+            None => continue,
+        };
+        if let Some(key) = key {
+            let bare = key.trim_matches('"');
+            if is_denied_name(bare) {
+                out.push(bare.to_string());
+            }
+        }
+        for builder in LABEL_BUILDERS {
+            if value.contains(builder) {
+                out.push((*builder).to_string());
+            }
+        }
+        out.extend(idents(value).into_iter().filter(|n| is_denied_name(n)));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    out.retain(|n| seen.insert(n.clone()));
+    out
+}
+
 /// `name = value` at the top level of a field argument (not `==`).
 fn split_field(arg: &str) -> Option<(&str, &str)> {
     let bytes = arg.as_bytes();
@@ -430,6 +471,35 @@ fn split_field(arg: &str) -> Option<(&str, &str)> {
 /// Lint one Rust source file. Returns every violation, in source order.
 #[must_use]
 pub fn lint_source(text: &str) -> Vec<Violation> {
+    scan_macros(text, CHECKED_MACROS, denied_in_body)
+}
+
+/// The `metrics` macros whose labels [`lint_metric_labels`] checks.
+const METRIC_MACROS: &[&str] = &["counter", "gauge", "histogram"];
+
+/// Lint the labels of every `metrics` macro in one Rust source file
+/// ([ADR-0096] section 1.5).
+///
+/// A label is `"key" => value` after the metric name. Reported: a key that
+/// is a denied name, a value whose expression mentions a denied name, and a
+/// value built at run time with `format!`, `to_string`, `to_owned`,
+/// `String::from` or an encoder (a label value comes from a closed set fixed
+/// in the source, never from request data). The `describe_*` macros carry
+/// no labels and are not checked.
+///
+/// [ADR-0096]: ../../../docs/adr/0096-service-observability.md
+#[must_use]
+pub fn lint_metric_labels(text: &str) -> Vec<Violation> {
+    scan_macros(text, METRIC_MACROS, denied_in_metric_body)
+}
+
+/// Run `check` over the body of every macro in `macros`, skipping comments
+/// and string literals.
+fn scan_macros(
+    text: &str,
+    macros: &[&str],
+    check: fn(&str, &[char]) -> Vec<String>,
+) -> Vec<Violation> {
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut line = 1usize;
@@ -501,7 +571,7 @@ pub fn lint_source(text: &str) -> Vec<Violation> {
             }
             let word: String = chars[start..i].iter().collect();
             let preceded_ok = start == 0 || !is_ident_char(chars[start - 1]);
-            if preceded_ok && CHECKED_MACROS.contains(&word.as_str()) {
+            if preceded_ok && macros.contains(&word.as_str()) {
                 let mut j = i;
                 while j < chars.len() && chars[j].is_whitespace() {
                     j += 1;
@@ -513,7 +583,7 @@ pub fn lint_source(text: &str) -> Vec<Violation> {
                     }
                     if matches!(chars.get(j), Some('(' | '[' | '{')) {
                         if let Some(close) = matching_close(&chars, j) {
-                            for name in denied_in_body(&word, &chars[j + 1..close]) {
+                            for name in check(&word, &chars[j + 1..close]) {
                                 out.push(Violation {
                                     line,
                                     macro_name: word.clone(),
@@ -584,6 +654,45 @@ mod tests {
 
     fn names(src: &str) -> Vec<String> {
         lint_source(src).into_iter().map(|v| v.name).collect()
+    }
+
+    fn metric_names(src: &str) -> Vec<String> {
+        lint_metric_labels(src)
+            .into_iter()
+            .map(|v| v.name)
+            .collect()
+    }
+
+    #[test]
+    fn metric_labels_from_closed_sets_pass() {
+        assert!(metric_names("metrics::counter!(names::CALLS_TOTAL).increment(1);").is_empty());
+        assert!(metric_names(
+            r#"metrics::counter!(X, "direction" => "inbound", "kind" => frame.kind_str()).increment(1);"#
+        )
+        .is_empty());
+        assert!(metric_names(r#"counter!(X, "why" => change.why.as_str())"#).is_empty());
+        assert!(metric_names(r#"metrics::describe_counter!(X, "room count")"#).is_empty());
+    }
+
+    #[test]
+    fn metric_labels_that_name_or_build_an_identifier_are_reported() {
+        assert_eq!(metric_names(r#"counter!(X, "room" => "a")"#), ["room"]);
+        assert_eq!(
+            metric_names(r#"gauge!(X, "kind" => peer_id.as_str())"#),
+            ["peer_id"]
+        );
+        assert_eq!(
+            metric_names(r#"histogram!(X, "route" => format!("/g/{}", g))"#),
+            ["format!"]
+        );
+        assert_eq!(
+            metric_names(r#"metrics::counter!(X, "k" => hex::encode(group_id))"#),
+            ["encode", "hex::", "group_id"]
+        );
+        assert_eq!(
+            metric_names(r#"counter!(format!("lakko_{x}"))"#),
+            ["format!"]
+        );
     }
 
     #[test]

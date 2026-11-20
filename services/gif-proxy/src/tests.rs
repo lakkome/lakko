@@ -629,3 +629,50 @@ async fn the_per_account_rate_limit_answers_429_with_retry_after() {
         StatusCode::OK
     );
 }
+
+/// ADR-0096: the routes move the upstream and cache counters, an error
+/// answer carries its code as the `code` label, and nothing in the
+/// exposition names the GIF, the query, the account or the upstream.
+#[tokio::test]
+async fn routes_move_their_metrics() {
+    let metrics = lakko_metrics::install("gif-proxy", "0.0.0").expect("install");
+    let (app, up) = proxy().await;
+    assert_eq!(
+        get_as(&app, "/gifs/search?q=catsandmetrics", 9).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_as(&app, "/gifs/media/okgif/preview", 9).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_as(&app, "/gifs/media/okgif/preview", 10).await.0,
+        StatusCode::OK
+    );
+    let (status, _, body) = get_as(&app, "/gifs/media/err500/preview", 10).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(error_code(&body), "gif-upstream-failed");
+
+    let text = metrics.render();
+    lakko_metrics::exposition::assert_clean(&text, &["kind"], &[]);
+    for needle in [
+        "catsandmetrics",
+        "okgif",
+        "err500",
+        API_KEY,
+        up.base.as_str(),
+    ] {
+        assert!(!text.contains(needle), "{needle} in\n{text}");
+    }
+    for line in [
+        "lakko_gif_proxy_upstream_calls_total{kind=\"search\",outcome=\"ok\"}",
+        "lakko_gif_proxy_upstream_calls_total{kind=\"lookup\",outcome=\"ok\"}",
+        "lakko_gif_proxy_upstream_calls_total{kind=\"lookup\",outcome=\"status\"}",
+        "lakko_gif_proxy_upstream_calls_total{kind=\"media\",outcome=\"ok\"}",
+        "lakko_gif_proxy_rendition_cache_lookups_total{outcome=\"hit\"}",
+        "lakko_gif_proxy_rendition_cache_lookups_total{outcome=\"miss\"}",
+        "code=\"gif-upstream-failed\"",
+    ] {
+        assert!(text.contains(line), "{line} missing in\n{text}");
+    }
+}

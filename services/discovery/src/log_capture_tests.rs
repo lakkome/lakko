@@ -79,6 +79,9 @@ async fn no_identifier_reaches_the_log_on_account_and_link_routes() {
         return;
     };
     let (capture, _guard) = Capture::install();
+    // ADR-0096 section 1.5: the same routes must leave no identifier in
+    // /metrics either.
+    let metrics = lakko_metrics::install("discovery", env!("CARGO_PKG_VERSION")).unwrap();
     let st = state(db, true);
     let app = build_app(st.clone());
     let master = MasterSecret::from_hex(MASTER_HEX).unwrap();
@@ -226,4 +229,20 @@ async fn no_identifier_reaches_the_log_on_account_and_link_routes() {
         capture.output()
     );
     capture.assert_no_identifiers(ALLOW);
+    let text = metrics.render();
+    lakko_metrics::exposition::assert_clean(&text, &["kind", "context"], ALLOW);
+    assert!(
+        text.contains(r#"lakko_http_requests_total{service="discovery",route="/"#),
+        "the routes driven above are counted:\n{text}"
+    );
+    // The three identity uploads above, by how the change rule decided, and
+    // the refusal's code on the RED counter (ADR-0096 P2).
+    for outcome in ["changed", "invalid", "identity_change_needs_attestation"] {
+        let line = format!(r#"lakko_discovery_identity_uploads_total{{outcome="{outcome}"}}"#);
+        assert!(text.contains(&line), "missing {line}:\n{text}");
+    }
+    assert!(
+        text.contains(r#"code="identity-change-needs-attestation""#),
+        "the refusal carries its code:\n{text}"
+    );
 }

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Dashboards as code (ADR-0096 section 7). The JSON files in
+# infra/grafana/dashboards/ are copied to /var/lib/grafana/dashboards/lakko
+# by infra/monitoring/setup-monitoring.sh; edits made in the Grafana UI are
+# not kept, the repository is the source.
+
+apiVersion: 1
+
+providers:
+  - name: lakko
+    folder: Lakko
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards/lakko

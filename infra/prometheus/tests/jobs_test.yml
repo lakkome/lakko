@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# promtool unit tests for the job and backup heartbeat rules (ADR-0096 P3).
+#   promtool test rules infra/prometheus/tests/jobs_test.yml
+# (run from infra/prometheus; `just prometheus-check` does it in a container).
+#
+# The series carry what Prometheus stores after a scrape with
+# honor_labels: the scrape job in `job`, the job's name in `task`.
+# A heartbeat is a Unix timestamp, so each series below is its last
+# success expressed as seconds since the test's time zero. Input series are
+# sampled every minute: a sample interval above the 5-minute lookback makes
+# the series vanish between samples and resets every `for:`.
+
+rule_files:
+  - ../rules/services.yml
+
+evaluation_interval: 1m
+
+tests:
+  # An hourly pruner that stopped at t=0 is stale once three hours pass; one
+  # still succeeding is not.
+  - interval: 1m
+    input_series:
+      - series: 'lakko_job_last_success_timestamp_seconds{job="lakko_services",stack="prod",service="ds",task="ds_pruner"}'
+        values: '0x300'
+      - series: 'lakko_job_last_success_timestamp_seconds{job="lakko_services",stack="prod",service="auth",task="limits_prune"}'
+        values: '0+60x300'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: LakkoJobStale
+        exp_alerts: []
+      - eval_time: 3h15m
+        alertname: LakkoJobStale
+        exp_alerts:
+          - exp_labels: {severity: warning, job: lakko_services, stack: prod, service: ds, task: ds_pruner}
+            exp_annotations:
+              summary: "ds (prod): job ds_pruner last succeeded 3h 15m 0s ago"
+
+  # The daily blob sweep is not stale after three hours, only after three
+  # days.
+  - interval: 1m
+    input_series:
+      - series: 'lakko_job_last_success_timestamp_seconds{job="lakko_services",stack="prod",service="storage",task="blob_sweep"}'
+        values: '0x2000'
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: LakkoJobStale
+        exp_alerts: []
+
+  # A daily dump that stopped is a critical alert after 26 hours; it is not
+  # also reported as a stale ordinary job.
+  - interval: 1m
+    input_series:
+      - series: 'lakko_job_last_success_timestamp_seconds{job="host",stack="prod",host="main",exporter="node",task="backup_db"}'
+        values: '0x2000'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: LakkoBackupStale
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: LakkoBackupStale
+        exp_alerts:
+          - exp_labels: {severity: critical, job: host, stack: prod, host: main, exporter: node, task: backup_db}
+            exp_annotations:
+              summary: "backup_db on main last succeeded 1d 3h 0m 0s ago"
+              description: |
+                Check `journalctl -u lakko-backup-db` / `lakko-backup-blobs` and
+                `systemctl list-timers 'lakko-backup-*'`.
+      - eval_time: 27h
+        alertname: LakkoJobStale
+        exp_alerts: []

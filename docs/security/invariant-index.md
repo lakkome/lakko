@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 88  | C-1..C-80, C-82..C-89  | [`calls.md`](./calls.md) |
+| **C-** | 89  | C-1..C-80, C-82..C-94  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 53  | G-1..G-53 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
-| Total invariants  | 109 | (I + C + T) | live properties |
+| Total invariants  | 110 | (I + C + T) | live properties |
 | Total open gaps   | 23  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
@@ -106,7 +106,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-89)
+## Call-side invariants (C-1..C-94)
 
 Source: [`calls.md`](./calls.md). The `C-` class is the
 catch-all for "everything the SFU / channels / storage /
@@ -360,6 +360,12 @@ store gate and persist-before-publish rules).
 | ID   | Title |
 |---|---|
 | C-85 | **Under the ADR-0015 attested-removal policy a DeviceGroup removal merges only when an attestation covers it or when the removed leaf's own key signed a proof naming the epoch the commit leaves and a KeyPackage the same commit adds** ([ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) "Amendment (2026-10-19)", amending [ADR-0015](../adr/0015-device-removal-authorization.md); built 2026-10-19 in `lakko-mls`, the pairing proto, both FFI surfaces and web / iOS / Android; host-tested, not walked live, not deployed). The proof (`lakko-mls` `self_removal.rs`, 137 bytes) signs `"lakko/devicegroup/self-removal/v1\0" ‖ group_id_len ‖ group_id ‖ epoch ‖ removed_pubkey ‖ key_package_ref`; `process_incoming_verifying_removals` tries every entry of the envelope's removal-authorisation slot as an attestation and as a proof (different lengths and domains), and a proof covers only its own leaf, its own group, its own epoch (so a used or stale proof covers nothing: the replacement keeps the leaf key, and without the epoch a member could later remove the rejoined device by re-adding the stale KeyPackage) and a KeyPackage the commit adds; the device reads the epoch with a knock probe. The rejoin knock carries it (`PairingQr` field 16), the sibling verifies it before building (`deviceGroupSelfRemovalCovers`) and commits one remove-and-add (`DeviceGroup::replace_device_at`) through the DeviceGroup outbox. Pinned by the self-removal tests in `crates/lakko-mls/src/device_group.rs` (only with the named add; never a plain removal; another KeyPackage, epoch, leaf, group or signer refused; a used proof replayed with the same KeyPackage refused; an attestation still works; policy off unchanged; a tampered proof covers nothing) and fuzz `self_removal_proof_decode`. C-81 is free but unused in every document and the history; this takes C-85 to avoid a number another branch may hold. **Does NOT** let anyone remove another device, nor readmit a device that no longer holds its old leaf key (it is only added; the old leaf waits for the passkey flow). Invariants **#3** / **#4**. Full entry: [`calls.md` C-85](./calls.md). |
+
+### C-94 — A metric label never carries an identifier (ADR-0096)
+
+| ID   | Title |
+|---|---|
+| C-94 | **No label of any metric a service records carries an identifier: a label value comes from a closed set fixed in the source (service, the route template, a method from a fixed list or `other`, the status class, named outcomes), never from request data; no account, device, login handle, username, group / journal / mailbox, room or call, channel, `push_gid`, blob, peer, token or nonce, IP or location, nor a prefix or hash of one; no per-object gauge, no exemplars** ([ADR-0096](../adr/0096-service-observability.md) section 1; P1 built 2026-11-08 in `crates/lakko-metrics` and every service with a router, host-tested, not deployed). Why: a metrics store is a dataset an operator, a backup or a seizure can be asked for, kept for weeks and indexed by time; a metric labelled by group or room is the social graph with timestamps (invariant #5), the same leak ADR-0078 section 11 closes for logs. Enforced three ways: the RED layer builds labels from the route template and closed sets only (`lakko_metrics::red_layer`); `lakko_log_hygiene::lint::lint_metric_labels` refuses a `counter!` / `gauge!` / `histogram!` label whose key or value names a denied identifier or is built at run time, run over every service by `tests/source_lint.rs`, which also requires every service to mount the layer and a listener; and `lakko_metrics::exposition::check` scans a rendered `/metrics` for foreign label names, non-template routes and identifier-shaped values, run by `crates/lakko-metrics/tests/red_layer.rs`, `services/sfu/tests/metrics_exposition.rs` and the DS and discovery capture tests. **Does NOT** hide when activity happened: aggregate counts at 15-second resolution reveal activity timing while users are few (the ADR's section 8 residual). Full entry: [`calls.md` C-94](./calls.md). |
 
 ### C-89 — A key joins a person only with the consent of the key pinned for them (ADR-0074 section 3.7)
 

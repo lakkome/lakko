@@ -77,6 +77,7 @@ use crate::config::Config;
 use crate::directory::{
     band, normalize_search_query, rank, DirectoryEntry, BUCKET_PAGE_LEN, SEARCH_PAGE_LEN,
 };
+use crate::metrics::{self, Outcome, ProofKind, RefusalReason, RotationStep};
 use crate::owner_auth::{require_owner, require_publisher};
 use crate::storage::SealedTicket;
 use crate::storage::{
@@ -536,6 +537,22 @@ pub(crate) fn err(code: &'static str, detail: impl Into<String>) -> ErrorRespons
     }
 }
 
+/// An [`ErrorResponse`] as a JSON body that also carries its code as the
+/// `code` label of the request counters (`lakko_metrics::ErrorCode`,
+/// ADR-0096). Every error body of the service goes through it.
+pub(crate) struct ErrJson(pub(crate) ErrorResponse);
+
+impl IntoResponse for ErrJson {
+    fn into_response(self) -> Response {
+        let code = self.0.code;
+        let mut response = Json(self.0).into_response();
+        response
+            .extensions_mut()
+            .insert(lakko_metrics::ErrorCode(code));
+        response
+    }
+}
+
 // ---------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------
@@ -548,7 +565,7 @@ async fn create_channel(
     let Ok(channel) = ChannelId::from_hex(&req.channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -561,7 +578,7 @@ async fn create_channel(
     let Some(owner) = owner else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-owner-pubkey",
                 "owner_pubkey_hex must be 64 hex chars of an Ed25519 public key",
             )),
@@ -582,7 +599,7 @@ async fn create_channel(
             .into_response(),
         Err(StorageError::OwnerMismatch) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "channel-exists",
                 "a channel with this id exists under another owner key",
             )),
@@ -591,7 +608,7 @@ async fn create_channel(
         Err(StorageError::ChannelDeleted) => channel_deleted(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("storage", e.to_string())),
+            ErrJson(err("storage", e.to_string())),
         )
             .into_response(),
     }
@@ -655,7 +672,7 @@ async fn publish_post(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -667,21 +684,22 @@ async fn publish_post(
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .unwrap_or(0);
-    match state
+    let result = state
         .store
         .put(channel, body.to_vec(), state.cfg.max_post_bytes, now)
-        .await
-    {
+        .await;
+    metrics::post(Outcome::of(&result));
+    match result {
         Ok(stored) => (StatusCode::CREATED, Json(PostView::from_stored(stored))).into_response(),
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::EmptyPost) => (
             StatusCode::BAD_REQUEST,
-            Json(err("empty-post", "post body cannot be empty")),
+            ErrJson(err("empty-post", "post body cannot be empty")),
         )
             .into_response(),
         Err(StorageError::PostTooLarge { max, got }) => (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(err(
+            ErrJson(err(
                 "post-too-large",
                 format!("post body {got} bytes exceeds limit {max}"),
             )),
@@ -689,12 +707,12 @@ async fn publish_post(
             .into_response(),
         Err(StorageError::BadChannelId) => (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -709,7 +727,7 @@ async fn fetch_posts(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -729,12 +747,12 @@ async fn fetch_posts(
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::BadChannelId) => (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -761,7 +779,7 @@ async fn subscribe(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -775,7 +793,7 @@ async fn subscribe(
     else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-subscriber-id",
                 "subscriber_pubkey_hex must be 64 hex chars of a valid Ed25519 key",
             )),
@@ -799,7 +817,7 @@ async fn subscribe(
         if ticket.is_none() {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(err(
+                ErrJson(err(
                     "sealed-ticket-required",
                     "subscribing to a private channel needs a sealed admission ticket",
                 )),
@@ -877,7 +895,7 @@ fn parse_ticket(b64: Option<&str>) -> Result<Option<SealedTicket>, Box<Response>
             Box::new(
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(err(
+                    ErrJson(err(
                         "bad-sealed-ticket",
                         format!(
                             "sealed_ticket_b64 must be {SEALED_TICKET_LEN} bytes in base64url \
@@ -894,7 +912,7 @@ fn parse_ticket(b64: Option<&str>) -> Result<Option<SealedTicket>, Box<Response>
 fn invite_proof_required() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(err(
+        ErrJson(err(
             "invite-proof-required",
             "subscribing to this channel needs a valid invitation",
         )),
@@ -920,16 +938,21 @@ async fn check_invite_proof(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| lakko_channels::InviteProof::parse(v).ok())
     else {
+        metrics::proof_refused(ProofKind::Invite, RefusalReason::Malformed);
         return Err(invite_proof_required());
     };
     let now = unix_ms();
     if lakko_channels::verify_invite_proof(&proof, channel.as_bytes(), sub.as_bytes(), now).is_err()
     {
+        metrics::proof_refused(ProofKind::Invite, RefusalReason::Invalid);
         return Err(invite_proof_required());
     }
     let key = match state.store.invite_key(channel, proof.invite_key).await {
         Ok(Some(key)) => key,
-        Ok(None) => return Err(invite_proof_required()),
+        Ok(None) => {
+            metrics::proof_refused(ProofKind::Invite, RefusalReason::UnknownKey);
+            return Err(invite_proof_required());
+        },
         Err(e) => {
             tracing::error!(error = %e, "invite key lookup failed");
             return Err(internal_error());
@@ -942,6 +965,7 @@ async fn check_invite_proof(
         key.is_live(now)
     };
     if !usable {
+        metrics::proof_refused(ProofKind::Invite, RefusalReason::Exhausted);
         return Err(invite_proof_required());
     }
     match state
@@ -950,7 +974,10 @@ async fn check_invite_proof(
         .await
     {
         Ok(true) => {},
-        Ok(false) => return Err(invite_proof_required()),
+        Ok(false) => {
+            metrics::proof_refused(ProofKind::Invite, RefusalReason::Replayed);
+            return Err(invite_proof_required());
+        },
         Err(e) => {
             tracing::error!(error = %e, "invite nonce store failed; refusing");
             return Err(internal_error());
@@ -965,7 +992,10 @@ async fn check_invite_proof(
         .await
     {
         Ok(true) => Ok(Some(proof.invite_key)),
-        Ok(false) => Err(invite_proof_required()),
+        Ok(false) => {
+            metrics::proof_refused(ProofKind::Invite, RefusalReason::Exhausted);
+            Err(invite_proof_required())
+        },
         Err(e) => {
             tracing::error!(error = %e, "invite use claim failed");
             Err(internal_error())
@@ -1003,7 +1033,7 @@ async fn list_subscribers(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -1031,7 +1061,7 @@ async fn list_subscribers(
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1070,7 +1100,7 @@ async fn no_subscriber_row(state: &AppState, channel: ChannelId, sub: Subscriber
     match state.store.is_removed(channel, sub).await {
         Ok(true) => (
             StatusCode::GONE,
-            Json(err(
+            ErrJson(err(
                 "subscriber-removed",
                 "a publisher removed this subscriber from the channel",
             )),
@@ -1078,7 +1108,7 @@ async fn no_subscriber_row(state: &AppState, channel: ChannelId, sub: Subscriber
             .into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(err(
+            ErrJson(err(
                 "unknown-subscriber",
                 "subscriber has not registered against this channel",
             )),
@@ -1107,14 +1137,14 @@ async fn deliver_envelope(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
     let Ok(sub) = SubscriberId::from_hex(&pubkey_hex) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-subscriber-id",
                 "subscriber pubkey must be 64 hex chars",
             )),
@@ -1124,16 +1154,17 @@ async fn deliver_envelope(
     if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
         return refused;
     }
-    match state
+    let result = state
         .store
         .deliver_envelope(channel, sub, q.epoch, body.to_vec(), EXPECTED_ENVELOPE_LEN)
-        .await
-    {
+        .await;
+    metrics::envelope_delivery(Outcome::of(&result));
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::UnknownSubscriber) => (
             StatusCode::NOT_FOUND,
-            Json(err(
+            ErrJson(err(
                 "unknown-subscriber",
                 "subscriber has not registered against this channel",
             )),
@@ -1141,7 +1172,7 @@ async fn deliver_envelope(
             .into_response(),
         Err(StorageError::BadEnvelopeLen { expected, got }) => (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-envelope-len",
                 format!("envelope must be {expected} bytes (got {got})"),
             )),
@@ -1149,7 +1180,7 @@ async fn deliver_envelope(
             .into_response(),
         Err(StorageError::EnvelopeEpochInFuture { current, got }) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "envelope-epoch-in-future",
                 format!("epoch {got} exceeds the channel's current epoch {current}"),
             )),
@@ -1157,7 +1188,7 @@ async fn deliver_envelope(
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1173,14 +1204,14 @@ async fn fetch_envelope(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
     let Ok(sub) = SubscriberId::from_hex(&pubkey_hex) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-subscriber-id",
                 "subscriber pubkey must be 64 hex chars",
             )),
@@ -1226,7 +1257,7 @@ async fn fetch_envelope(
                 .await;
             (
                 StatusCode::NOT_FOUND,
-                Json(err(
+                ErrJson(err(
                     "envelope-not-ready",
                     "no envelope delivered to this subscriber yet",
                 )),
@@ -1237,7 +1268,7 @@ async fn fetch_envelope(
         Err(StorageError::UnknownSubscriber) => no_subscriber_row(&state, channel, sub).await,
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1253,14 +1284,14 @@ async fn fetch_envelopes(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
     let Ok(sub) = SubscriberId::from_hex(&pubkey_hex) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-subscriber-id",
                 "subscriber pubkey must be 64 hex chars",
             )),
@@ -1290,7 +1321,7 @@ async fn fetch_envelopes(
         Err(StorageError::UnknownSubscriber) => no_subscriber_row(&state, channel, sub).await,
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1304,7 +1335,7 @@ async fn fetch_epoch(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -1313,7 +1344,7 @@ async fn fetch_epoch(
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1332,7 +1363,7 @@ async fn rotate_channel(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -1352,7 +1383,7 @@ async fn rotate_channel(
         let Ok(sub) = SubscriberId::from_hex(&entry.subscriber_id) else {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(err(
+                ErrJson(err(
                     "bad-subscriber-id",
                     format!(
                         "subscriber_id {:?} is not 64 hex chars",
@@ -1365,7 +1396,7 @@ async fn rotate_channel(
         let Ok(env_bytes) = URL_SAFE_NO_PAD.decode(&entry.envelope_b64) else {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(err(
+                ErrJson(err(
                     "bad-envelope-b64",
                     "envelope_b64 must be valid base64url (no padding)",
                 )),
@@ -1375,16 +1406,17 @@ async fn rotate_channel(
         batch.push((sub, env_bytes));
     }
 
-    match state
+    let result = state
         .store
         .rotate(channel, batch, EXPECTED_ENVELOPE_LEN)
-        .await
-    {
+        .await;
+    metrics::rotation(RotationStep::Rotate, Outcome::of(&result));
+    match result {
         Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::UnknownSubscriber) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "unknown-subscriber",
                 "one or more entries reference a subscriber that is not registered against this channel",
             )),
@@ -1392,7 +1424,7 @@ async fn rotate_channel(
             .into_response(),
         Err(StorageError::BadEnvelopeLen { expected, got }) => (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-envelope-len",
                 format!("each envelope must decode to exactly {expected} bytes (got {got})"),
             )),
@@ -1400,7 +1432,7 @@ async fn rotate_channel(
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1452,7 +1484,7 @@ async fn rotate_stage(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -1470,7 +1502,7 @@ async fn rotate_stage(
     if req.envelopes.len() > MAX_STAGE_CHUNK_ENTRIES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(err(
+            ErrJson(err(
                 "chunk-too-large",
                 format!(
                     "a stage chunk may carry at most {MAX_STAGE_CHUNK_ENTRIES} entries (got {})",
@@ -1485,14 +1517,15 @@ async fn rotate_stage(
     let staged = req.envelopes.len();
     let batch = match decode_rotate_batch(req.envelopes) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(e)).into_response(),
+        Err(e) => return (StatusCode::BAD_REQUEST, ErrJson(e)).into_response(),
     };
 
-    match state
+    let result = state
         .store
         .stage_envelopes(channel, target_epoch, batch, EXPECTED_ENVELOPE_LEN)
-        .await
-    {
+        .await;
+    metrics::rotation(RotationStep::Stage, Outcome::of(&result));
+    match result {
         Ok(()) => (
             StatusCode::OK,
             Json(StageResponse {
@@ -1504,7 +1537,7 @@ async fn rotate_stage(
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::StaleTargetEpoch { expected, got }) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "stale-target-epoch",
                 format!("target_epoch must be current + 1 (expected {expected}, got {got})"),
             )),
@@ -1512,7 +1545,7 @@ async fn rotate_stage(
             .into_response(),
         Err(StorageError::UnknownSubscriber) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "unknown-subscriber",
                 "one or more entries reference a subscriber that is not registered against this channel",
             )),
@@ -1520,7 +1553,7 @@ async fn rotate_stage(
             .into_response(),
         Err(StorageError::BadEnvelopeLen { expected, got }) => (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-envelope-len",
                 format!("each envelope must decode to exactly {expected} bytes (got {got})"),
             )),
@@ -1528,7 +1561,7 @@ async fn rotate_stage(
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1549,7 +1582,7 @@ async fn rotate_commit(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -1560,12 +1593,14 @@ async fn rotate_commit(
         Ok(r) => r,
         Err(rejected) => return rejected,
     };
-    match state.store.commit_rotation(channel, req.target_epoch).await {
+    let result = state.store.commit_rotation(channel, req.target_epoch).await;
+    metrics::rotation(RotationStep::Commit, Outcome::of(&result));
+    match result {
         Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::StaleTargetEpoch { expected, got }) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "stale-target-epoch",
                 format!("target_epoch must be current + 1 (expected {expected}, got {got})"),
             )),
@@ -1573,7 +1608,7 @@ async fn rotate_commit(
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1641,7 +1676,7 @@ fn bad_ids(channel_id: &str, pubkey_hex: &str) -> Result<(ChannelId, SubscriberI
         return Err(Box::new(
             (
                 StatusCode::BAD_REQUEST,
-                Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+                ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
             )
                 .into_response(),
         ));
@@ -1650,7 +1685,7 @@ fn bad_ids(channel_id: &str, pubkey_hex: &str) -> Result<(ChannelId, SubscriberI
         return Err(Box::new(
             (
                 StatusCode::BAD_REQUEST,
-                Json(err(
+                ErrJson(err(
                     "bad-subscriber-id",
                     "subscriber pubkey must be 64 hex chars",
                 )),
@@ -1664,7 +1699,7 @@ fn bad_ids(channel_id: &str, pubkey_hex: &str) -> Result<(ChannelId, SubscriberI
 fn bad_member_signature() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(err(
+        ErrJson(err(
             "bad-member-signature",
             "the request must be signed by the subscriber key it names",
         )),
@@ -1677,7 +1712,7 @@ fn member_store_error(channel: ChannelId, e: StorageError) -> Response {
         StorageError::UnknownChannel => unknown_channel(channel),
         StorageError::UnknownSubscriber => (
             StatusCode::NOT_FOUND,
-            Json(err(
+            ErrJson(err(
                 "unknown-subscriber",
                 "subscriber has not registered against this channel",
             )),
@@ -1685,7 +1720,7 @@ fn member_store_error(channel: ChannelId, e: StorageError) -> Response {
             .into_response(),
         StorageError::MemberCardEpochInFuture { current, got } => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "member-card-epoch-in-future",
                 format!("epoch {got} exceeds the channel's current epoch {current}"),
             )),
@@ -1693,7 +1728,7 @@ fn member_store_error(channel: ChannelId, e: StorageError) -> Response {
             .into_response(),
         StorageError::MemberCardStale { stored, got } => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "member-card-stale",
                 format!("epoch {got} is older than the stored card's {stored}"),
             )),
@@ -1701,7 +1736,7 @@ fn member_store_error(channel: ChannelId, e: StorageError) -> Response {
             .into_response(),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
+            ErrJson(err("internal", "unexpected error")),
         )
             .into_response(),
     }
@@ -1726,7 +1761,7 @@ async fn put_member_card(
     let Ok(epoch) = lakko_channels::member_card_epoch(&body) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-member-card",
                 format!(
                     "a member card is {}..={} bytes of a known version",
@@ -1855,7 +1890,7 @@ async fn remove_subscriber(
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(StorageError::ChannelPublic) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "channel-public",
                 "a public channel's subscribers cannot be removed",
             )),
@@ -1872,7 +1907,7 @@ async fn remove_subscriber(
 fn bad_unsubscribe_signature(code: &'static str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(err(
+        ErrJson(err(
             code,
             "an unsubscribe must be signed by the subscriber key it names, \
              stamped within the freshness window",
@@ -1924,7 +1959,7 @@ async fn list_member_cards(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -1940,7 +1975,7 @@ async fn list_member_cards(
                 None => {
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(err(
+                        ErrJson(err(
                             "bad-after",
                             "after must be a 32-byte key in base64url without padding",
                         )),
@@ -2004,7 +2039,7 @@ async fn parse_json_body<T: serde::de::DeserializeOwned>(
 fn bad_channel_id() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
     )
         .into_response()
 }
@@ -2012,7 +2047,7 @@ fn bad_channel_id() -> Response {
 fn internal_error() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(err("internal", "unexpected error")),
+        ErrJson(err("internal", "unexpected error")),
     )
         .into_response()
 }
@@ -2046,7 +2081,7 @@ async fn put_listing(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(err(
+                ErrJson(err(
                     "bad-listing",
                     format!("listing refused by the codec: {}", e.code()),
                 )),
@@ -2057,7 +2092,7 @@ async fn put_listing(
     if listing.channel_id != *channel.as_bytes() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "listing-channel-mismatch",
                 "the listing names another channel than the path",
             )),
@@ -2081,7 +2116,7 @@ async fn put_listing(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(StorageError::StaleListing) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "stale-listing",
                 "updated_at_ms must be newer than the stored listing's",
             )),
@@ -2089,7 +2124,7 @@ async fn put_listing(
             .into_response(),
         Err(StorageError::ListingBlocked) => (
             StatusCode::FORBIDDEN,
-            Json(err(
+            ErrJson(err(
                 "listing-blocked",
                 "this channel cannot be listed in the directory",
             )),
@@ -2194,7 +2229,7 @@ async fn replace_owner(
         // channel appeared between the two reads.
         return (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "owner-changed",
                 "the channel's owner changed; ask again",
             )),
@@ -2204,7 +2239,7 @@ async fn replace_owner(
     let Ok(new_owner) = lakko_channels::parse_owner_handover_body(&body) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-owner-pubkey",
                 "the body must be the 32 bytes of the new owner's Ed25519 public key",
             )),
@@ -2222,7 +2257,7 @@ async fn replace_owner(
         },
         Ok(false) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "owner-changed",
                 "the channel's owner key changed while this request was in flight",
             )),
@@ -2257,7 +2292,7 @@ async fn appoint_copublisher(
     let Some(key) = parse_pubkey_hex(&pubkey_hex) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-copublisher-key",
                 "the co-publisher key must be 64 hex chars of an Ed25519 public key",
             )),
@@ -2272,7 +2307,7 @@ async fn appoint_copublisher(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(StorageError::TooManyCoPublishers) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "too-many-copublishers",
                 "revoke a co-publisher key before appointing another",
             )),
@@ -2305,7 +2340,7 @@ async fn revoke_copublisher(
     let Some(key) = parse_pubkey_hex(&pubkey_hex) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-copublisher-key",
                 "the co-publisher key must be 64 hex chars of an Ed25519 public key",
             )),
@@ -2324,7 +2359,7 @@ async fn revoke_copublisher(
 fn channel_private() -> Response {
     (
         StatusCode::CONFLICT,
-        Json(err(
+        ErrJson(err(
             "channel-private",
             "this is a private channel: it is never listed and holds no public seed",
         )),
@@ -2341,7 +2376,7 @@ pub(crate) struct MissingChannel(pub(crate) ChannelId);
 fn unknown_channel(channel: ChannelId) -> Response {
     let mut resp = (
         StatusCode::NOT_FOUND,
-        Json(err("unknown-channel", "no such channel")),
+        ErrJson(err("unknown-channel", "no such channel")),
     )
         .into_response();
     resp.extensions_mut().insert(MissingChannel(channel));
@@ -2354,7 +2389,7 @@ fn unknown_channel(channel: ChannelId) -> Response {
 pub(crate) fn channel_deleted() -> Response {
     (
         StatusCode::GONE,
-        Json(err("channel-deleted", "the owner deleted this channel")),
+        ErrJson(err("channel-deleted", "the owner deleted this channel")),
     )
         .into_response()
 }
@@ -2432,7 +2467,7 @@ fn parse_epoch(epoch: &str) -> Option<u32> {
 fn bad_epoch() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(err("bad-epoch", "epoch must be a decimal u32")),
+        ErrJson(err("bad-epoch", "epoch must be a decimal u32")),
     )
         .into_response()
 }
@@ -2465,7 +2500,7 @@ async fn put_public_seed(
     let Ok(envelope) = <[u8; PUBLIC_SEED_LEN]>::try_from(body.as_ref()) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-public-seed",
                 format!("a public seed envelope is {PUBLIC_SEED_LEN} bytes"),
             )),
@@ -2477,7 +2512,7 @@ async fn put_public_seed(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "public-seed-epoch-mismatch",
                 "the envelope names another epoch than the path",
             )),
@@ -2496,7 +2531,7 @@ async fn put_public_seed(
         Err(StorageError::ChannelPrivate) => channel_private(),
         Err(StorageError::PublicSeedEpochInFuture { current, got }) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "public-seed-epoch-in-future",
                 format!("epoch {got} is beyond the next epoch (current epoch is {current})"),
             )),
@@ -2504,7 +2539,7 @@ async fn put_public_seed(
             .into_response(),
         Err(StorageError::PublicSeedConflict) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "public-seed-exists",
                 "another public seed is stored for this epoch",
             )),
@@ -2544,7 +2579,7 @@ async fn get_public_seed(
         Ok(None) => with_cache_control(
             (
                 StatusCode::NOT_FOUND,
-                Json(err(
+                ErrJson(err(
                     "public-seed-not-found",
                     "no public seed is stored for this channel and epoch",
                 )),
@@ -2569,7 +2604,7 @@ fn parse_invite_key(hex_str: &str) -> Option<[u8; INVITE_KEY_LEN]> {
 fn bad_invite_key() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(err(
+        ErrJson(err(
             "bad-invite-key",
             "the invite key must be 64 hex chars of an Ed25519 public key",
         )),
@@ -2650,7 +2685,7 @@ async fn put_invite_key(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(StorageError::TooManyInviteKeys) => (
             StatusCode::CONFLICT,
-            Json(err(
+            ErrJson(err(
                 "too-many-invite-keys",
                 "revoke an invite key before registering another",
             )),
@@ -2704,7 +2739,7 @@ async fn directory_bucket(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(err("bad-topic", "topic must be a known topic id")),
+                ErrJson(err("bad-topic", "topic must be a known topic id")),
             )
                 .into_response()
         },
@@ -2712,7 +2747,7 @@ async fn directory_bucket(
     if lakko_channels::listing::check_language(&language).is_err() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-language",
                 "language must be 2-3 lowercase ASCII letters",
             )),
@@ -2766,7 +2801,7 @@ async fn directory_listing(
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(err("not-listed", "this channel is not in the directory")),
+            ErrJson(err("not-listed", "this channel is not in the directory")),
         )
             .into_response(),
         Err(e) => {
@@ -2787,7 +2822,7 @@ async fn directory_search(
     let Ok(needle) = normalize_search_query(&q.q) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err(
+            ErrJson(err(
                 "bad-query",
                 "q must be 2-64 characters without control characters",
             )),
@@ -2916,6 +2951,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             Arc::clone(&state),
             deleted_channel_layer,
         ))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("channels"))
         .with_state(state)
 }
 

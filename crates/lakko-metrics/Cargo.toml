@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "ADR-0096 - aggregate service metrics with no identifier in any label: the Prometheus recorder, the RED layer over route templates, job heartbeats, the localhost /metrics listener, and the exposition check service tests assert with"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Every crate below is already in the services' dependency graph (the SFU
+# carries the two metrics crates; axum and tower come with every service).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["matched-path", "tokio", "http1"] }
+tower = "0.5"
+tokio = { workspace = true }
+tracing.workspace = true
+thiserror.workspace = true
+lakko-log-hygiene.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

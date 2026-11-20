@@ -65,11 +65,12 @@ use lakko_channels::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::api::{err, unix_ms, AppState};
+use crate::api::{err, unix_ms, AppState, ErrJson};
 use crate::feedback::{
     Label, WriterKey, COMMENT_PAGE_LEN, COMMENT_SEALED_MAX_LEN, COMMENT_SEALED_MIN_LEN,
     MAX_COUNT_COMMENTS, MAX_COUNT_POSTS,
 };
+use crate::metrics::{proof_refused, ProofKind, RefusalReason};
 use crate::owner_auth::require_publisher;
 use crate::storage::{ChannelId, StorageError};
 
@@ -205,13 +206,13 @@ pub struct CommentsResponse {
 }
 
 fn bad(code: &'static str, detail: &'static str) -> Response {
-    (StatusCode::BAD_REQUEST, Json(err(code, detail))).into_response()
+    (StatusCode::BAD_REQUEST, ErrJson(err(code, detail))).into_response()
 }
 
 fn proof_required() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(err(
+        ErrJson(err(
             "write-proof-required",
             "this write needs a valid write proof",
         )),
@@ -223,7 +224,7 @@ fn internal(e: &StorageError) -> Response {
     tracing::error!(error = %e, "comments and reactions store failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(err("internal", "unexpected error")),
+        ErrJson(err("internal", "unexpected error")),
     )
         .into_response()
 }
@@ -231,7 +232,7 @@ fn internal(e: &StorageError) -> Response {
 fn unknown_post() -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(err(
+        ErrJson(err(
             "unknown-post",
             "the channel holds no post at this cursor",
         )),
@@ -283,15 +284,20 @@ async fn check_write_proof(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| OwnerProof::parse(v).ok())
     else {
+        proof_refused(ProofKind::Write, RefusalReason::Malformed);
         return Err(proof_required());
     };
     let now = unix_ms();
     if verify_write_proof(&proof, statement, now).is_err() {
+        proof_refused(ProofKind::Write, RefusalReason::Invalid);
         return Err(proof_required());
     }
     match state.store.consume_write_nonce(proof.nonce, now).await {
         Ok(true) => Ok(()),
-        Ok(false) => Err(proof_required()),
+        Ok(false) => {
+            proof_refused(ProofKind::Write, RefusalReason::Replayed);
+            Err(proof_required())
+        },
         Err(e) => Err(internal(&e)),
     }
 }
@@ -777,7 +783,7 @@ async fn delete_comment(
 fn unknown_comment() -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(err("unknown-comment", "no such comment under this post")),
+        ErrJson(err("unknown-comment", "no such comment under this post")),
     )
         .into_response()
 }

@@ -39,7 +39,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use subtle::ConstantTimeEq as _;
 
-use crate::api::{err, unix_ms, AppState};
+use crate::api::{err, unix_ms, AppState, ErrJson};
 use crate::directory::is_reason_code;
 use crate::storage::{ChannelId, ModerationAction};
 
@@ -123,6 +123,8 @@ pub fn internal_router(app: Arc<AppState>, secret: Arc<Vec<u8>>) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             MAX_INTERNAL_BODY_BYTES,
         ))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("channels"))
         .with_state(state)
 }
 
@@ -161,7 +163,7 @@ async fn moderate(
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            ErrJson(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
     };
@@ -172,7 +174,7 @@ async fn moderate(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(err("bad-action", "action must be remove, block or unblock")),
+                ErrJson(err("bad-action", "action must be remove, block or unblock")),
             )
                 .into_response()
         },
@@ -180,7 +182,7 @@ async fn moderate(
     if !is_reason_code(&req.reason) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(err("bad-reason", "reason must be 1-64 of [a-z0-9-]")),
+            ErrJson(err("bad-reason", "reason must be 1-64 of [a-z0-9-]")),
         )
             .into_response();
     }
@@ -198,7 +200,7 @@ async fn moderate(
             tracing::error!(error = %e, "moderation failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(err("internal", "unexpected error")),
+                ErrJson(err("internal", "unexpected error")),
             )
                 .into_response()
         },

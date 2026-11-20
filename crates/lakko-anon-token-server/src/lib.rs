@@ -269,14 +269,23 @@ pub async fn prune_issuance(pool: &MySqlPool, current_epoch: u64) -> Result<u64,
 
 /// Spawn the hourly issuance-row pruner. Aborts with the returned handle.
 pub fn spawn_issuance_pruner(pool: MySqlPool, window_secs: u64) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = "anon_token_issuance_prune";
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PRUNE_INTERVAL);
         loop {
             tick.tick().await;
             match prune_issuance(&pool, current_epoch(window_secs)).await {
-                Ok(n) if n > 0 => tracing::debug!(rows = n, "pruned anon_token_issuance"),
-                Ok(_) => {},
-                Err(e) => tracing::warn!(error = %e, "prune anon_token_issuance"),
+                Ok(n) => {
+                    lakko_metrics::job_succeeded(JOB);
+                    if n > 0 {
+                        tracing::debug!(rows = n, "pruned anon_token_issuance");
+                    }
+                },
+                Err(e) => {
+                    lakko_metrics::job_failed(JOB);
+                    tracing::warn!(error = %e, "prune anon_token_issuance");
+                },
             }
         }
     })
@@ -343,14 +352,23 @@ pub async fn prune_spent(pool: &MySqlPool, current_epoch: u64) -> Result<u64, sq
 
 /// Spawn the hourly spent-set pruner. Aborts with the returned handle.
 pub fn spawn_spent_pruner(pool: MySqlPool, window_secs: u64) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = "anon_token_spent_prune";
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PRUNE_INTERVAL);
         loop {
             tick.tick().await;
             match prune_spent(&pool, current_epoch(window_secs)).await {
-                Ok(n) if n > 0 => tracing::debug!(rows = n, "pruned anon_token_spent"),
-                Ok(_) => {},
-                Err(e) => tracing::warn!(error = %e, "prune anon_token_spent"),
+                Ok(n) => {
+                    lakko_metrics::job_succeeded(JOB);
+                    if n > 0 {
+                        tracing::debug!(rows = n, "pruned anon_token_spent");
+                    }
+                },
+                Err(e) => {
+                    lakko_metrics::job_failed(JOB);
+                    tracing::warn!(error = %e, "prune anon_token_spent");
+                },
             }
         }
     })

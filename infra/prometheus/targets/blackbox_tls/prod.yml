@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# coturn's TURN-over-TLS on the prod name (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/blackbox_tls/prod.yml by infra/monitoring/setup-monitoring.sh
+# only when "prod" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['turn.lakko.me:443']
+  labels: {stack: prod}

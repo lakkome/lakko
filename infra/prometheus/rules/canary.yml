@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Alert rules for the synthetic canary (ADR-0096 section 5, P5).
+#
+# The canary (tools/canary, one instance per stack on the monitoring host)
+# signs two dedicated accounts in, sends a message from one to the other and
+# decrypts it, moves an encrypted attachment between them and, every few
+# runs, places a call whose SFrame-sealed audio must reach the other side.
+# Each step exports its last outcome; a step that failed twice in a row is
+# the "people cannot use Lakko" signal no server can produce on its own.
+#
+# Steps: sign_in, message, attachment, call. Thresholds are first guesses.
+
+groups:
+  - name: lakko_canary
+    interval: 30s
+    rules:
+      # Two failures in a row: one failure can be a network blip between
+      # the monitoring host and the stack, two are not.
+      - alert: LakkoCanaryStepFailing
+        expr: lakko_canary_step_consecutive_failures >= 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "Canary step {{ $labels.step }} on {{ $labels.stack }} failed {{ $value }} times in a row"
+          description: |
+            `journalctl -u lakko-canary@<stack>` on the monitoring host names
+            the error class of each failure.
+
+      # The canary runs every 10 minutes by default; three missed runs.
+      - alert: LakkoCanaryStale
+        expr: time() - lakko_canary_last_run_timestamp_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The {{ $labels.stack }} canary last finished a run {{ $value | humanizeDuration }} ago"
+
+      - alert: LakkoCanaryDown
+        expr: up{job="lakko_canary"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The {{ $labels.stack }} canary is not running"
+          description: |
+            `systemctl status lakko-canary@<stack>` on the monitoring host. A
+            stack whose canary was never initialised has no state file and
+            no running unit (`just canary-init <stack>`).
+
+      # Delivery still works but has become slow: the time from the sender's
+      # publish to the recipient's decrypt.
+      - alert: LakkoCanaryDeliverySlow
+        expr: |
+          lakko_canary_step_seconds{step="message"} > 20
+            and
+          lakko_canary_step_success{step="message"} == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A message on {{ $labels.stack }} takes {{ $value | humanize }} s from send to decrypt"

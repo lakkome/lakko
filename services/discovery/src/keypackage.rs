@@ -149,17 +149,20 @@ async fn require_publishable_device(
 /// [`TOMBSTONE_RETENTION_MS`], hourly. Hygiene only: the upload gate compares
 /// the age itself.
 pub(crate) fn spawn_tombstone_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::{job_run, jobs};
+    lakko_metrics::job_registered(jobs::KEYPACKAGE_TOMBSTONE_PRUNE);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(TOMBSTONE_PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
             let cutoff = now_ms().saturating_sub(TOMBSTONE_RETENTION_MS);
-            match sqlx::query("DELETE FROM keypackage_tombstones WHERE deleted_at_ms <= ?")
+            let result = sqlx::query("DELETE FROM keypackage_tombstones WHERE deleted_at_ms <= ?")
                 .bind(cutoff)
                 .execute(&pool)
-                .await
-            {
+                .await;
+            job_run(jobs::KEYPACKAGE_TOMBSTONE_PRUNE, &result);
+            match result {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned keypackage tombstones");
                 },

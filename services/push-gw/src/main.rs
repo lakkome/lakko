@@ -86,6 +86,7 @@
 #![forbid(unsafe_code)]
 
 mod internal;
+mod metrics;
 mod notify;
 mod provider;
 mod providers;
@@ -155,6 +156,7 @@ pub(crate) struct AppState {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
     {
@@ -164,6 +166,13 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "push-gw",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_PUSH_GW_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -192,6 +201,10 @@ async fn main() -> Result<()> {
         .context("connect to MariaDB")?;
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let pool_for_gauge = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (pool_for_gauge.size(), pool_for_gauge.num_idle()));
 
     // ADR-0054 S3 - a malformed secret or window refuses startup; an unset
     // secret leaves the registration routes answering 503.
@@ -422,6 +435,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/push/wake-key", get(wake_key::wake_key_handler))
         .merge(registration)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("push-gw"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

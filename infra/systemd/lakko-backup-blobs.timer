@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Schedule of lakko-backup-blobs.service (ADR-0096 P2).
+#
+# Enable:  sudo systemctl enable --now lakko-backup-blobs.timer
+# Next run: systemctl list-timers lakko-backup-blobs.timer
+
+[Unit]
+Description=Lakko backup (blob mirror) schedule
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00 UTC
+RandomizedDelaySec=15m
+# A run missed while the host was down starts at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

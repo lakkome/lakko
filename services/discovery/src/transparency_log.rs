@@ -246,6 +246,8 @@ pub(crate) fn spawn_transparency_reconciler(
     client: TransparencyClient,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::{job_run, jobs};
+    lakko_metrics::job_registered(jobs::KT_RECONCILE);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // The first tick fires immediately — skip it so we don't sweep the
@@ -253,9 +255,23 @@ pub(crate) fn spawn_transparency_reconciler(
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            reconcile_once(&pool, &client).await;
+            job_run(jobs::KT_RECONCILE, &reconcile_once(&pool, &client).await);
         }
     })
+}
+
+/// The reconciler's queue: how many accounts' current keys the log has not
+/// confirmed, and how many seconds ago the oldest of those rows was last
+/// written (`None` when there is none). The same predicate as the sweep's
+/// scan, aggregated; like that scan it is not index-backed.
+async fn pending_appends(pool: &sqlx::MySqlPool) -> Result<(i64, Option<i64>), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT COUNT(*), TIMESTAMPDIFF(SECOND, MIN(updated_at), CURRENT_TIMESTAMP) \
+         FROM identity_bundles \
+         WHERE logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// One reconciliation sweep. Factored out of the spawn loop so the body is
@@ -264,7 +280,27 @@ pub(crate) fn spawn_transparency_reconciler(
 /// failed append leaves the marker stale; a failed marker UPDATE is logged
 /// and the account is simply reconciled again next tick (the idempotent
 /// append makes that harmless).
-async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
+///
+/// Before the scan the queue is measured into the ADR-0096 gauges
+/// (`lakko_discovery_kt_append_pending` and its oldest age); an empty queue
+/// skips the scan. `Err` (for the job heartbeat) only when a query the sweep
+/// depends on failed; failed appends are counted, not errors of the run.
+async fn reconcile_once(
+    pool: &sqlx::MySqlPool,
+    client: &TransparencyClient,
+) -> Result<(), sqlx::Error> {
+    let (pending, oldest_age_secs) = match pending_appends(pool).await {
+        Ok(queue) => queue,
+        Err(e) => {
+            tracing::warn!(error = %e, "KT-log S2.5 reconciler queue count failed — retrying next sweep");
+            return Err(e);
+        },
+    };
+    crate::metrics::kt_pending(pending, oldest_age_secs);
+    if pending == 0 {
+        return Ok(());
+    }
+
     // The un-logged / stale accounts: never-confirmed (NULL) or whose
     // current key differs from the last confirmed one. `leaf_auth` (G-30 #2,
     // ADR-0019) and `genesis_attest` (ADR-0036) are carried verbatim so a
@@ -282,12 +318,12 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "KT-log S2.5 reconciler scan failed — retrying next sweep");
-            return;
+            return Err(e);
         },
     };
 
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
 
     let mut reconciled: u64 = 0;
@@ -306,6 +342,7 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
                 genesis_attest.as_deref(),
             )
             .await;
+        crate::metrics::kt_append(crate::metrics::KtAppendKind::Reconcile, confirmed);
         if !confirmed {
             append_failures += 1;
             // Leave the marker stale; the next sweep retries.
@@ -346,6 +383,7 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
         scanned = rows.len(),
         "KT-log S2.5 reconciliation sweep complete",
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -477,6 +515,47 @@ mod tests {
                 .await
                 .expect("cleanup row");
         }
+        pool.close().await;
+    }
+
+    /// ADR-0096: the reconciler-queue query behind the KT gauges counts an
+    /// unconfirmed row and reports an age. DB-gated like the test above;
+    /// other tests may leave rows of their own, so it asserts a lower bound.
+    #[tokio::test]
+    async fn pending_appends_counts_unconfirmed_rows() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
+            eprintln!("skipping pending_appends_counts_unconfirmed_rows: DB unset");
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
+        let acct = [0xA3u8; 16];
+        let clear =
+            || sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?").bind(&acct[..]);
+        clear().execute(&pool).await.expect("clear");
+        sqlx::query(
+            "INSERT INTO identity_bundles \
+                (account_id, signature_pubkey, x25519_pubkey, logged_pubkey) \
+             VALUES (?, ?, ?, NULL)",
+        )
+        .bind(&acct[..])
+        .bind(&[0x44u8; 32][..])
+        .bind(&[0x55u8; 32][..])
+        .execute(&pool)
+        .await
+        .expect("insert unconfirmed row");
+
+        let (pending, oldest_age) = super::pending_appends(&pool).await.expect("queue");
+        assert!(pending >= 1, "pending {pending}");
+        assert!(oldest_age.is_some_and(|a| a >= 0), "age {oldest_age:?}");
+
+        clear().execute(&pool).await.expect("cleanup");
         pool.close().await;
     }
 }

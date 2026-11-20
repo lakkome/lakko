@@ -5872,3 +5872,40 @@ sees one more opaque track. In a group call the share media is sealed with
 SFrame under stream indices 2 (picture) and 5 (sound); in a one-to-one call it
 travels as the camera does there. Invariants **#4** (a group share that cannot
 be sealed is not sent); **#2**, **#3** and **#5** untouched.
+
+## A metric label never carries an identifier (C-94)
+
+### C-94: metric labels come from closed sets fixed in the source
+
+No label of any metric a Lakko service records carries an identifier
+([ADR-0096](../adr/0096-service-observability.md) section 1). A label value
+comes from a closed set fixed in the source: the service name, the route
+template (axum's `MatchedPath`, or `unmatched`), the method from a fixed list
+or `other`, the status class, and named outcomes, reasons and kinds. Never an
+account, device, login handle, username, group, journal, mailbox, room, call,
+channel, `push_gid`, blob, peer, token or nonce, IP address or location, nor a
+prefix or hash of one. No gauge has one series per object and no exemplar
+ties a sample to a request. A metrics store is a dataset an operator, a backup
+or a seizure can be asked for, kept for weeks and indexed by time; a metric
+labelled by group or room would be the social graph with timestamps
+(invariant #5).
+
+**Where it is enforced.** `crates/lakko-metrics`: `red_layer` (requests,
+duration and in-flight count by route template, method and status class),
+`exposition::check` (foreign label names, non-template routes, label length,
+and `lakko_log_hygiene::scan::find_identifiers` over the whole text).
+`crates/lakko-log-hygiene/src/lint.rs` `lint_metric_labels` (a label key or
+value that names a denied identifier, or a value built with `format!`,
+`to_string`, `to_owned`, `String::from` or an encoder), run over every service
+by `crates/lakko-log-hygiene/tests/source_lint.rs`, which also requires every
+service with a router to mount the layer and a metrics listener. Pinned by
+`crates/lakko-metrics/tests/red_layer.rs` (hex, base64 and UUID ids in paths
+and as method tokens never reach the exposition),
+`services/sfu/tests/metrics_exposition.rs`, and the metrics scan added to the
+DS and discovery capture tests (database-gated). Host-tested 2026-11-08; not
+deployed.
+
+**What this does NOT do.** It does not hide when activity happened: aggregate
+counts at 15-second resolution reveal activity timing while users are few
+(ADR-0096 section 8). Invariants **#5** (strengthened for metrics); **#1**,
+**#2**, **#3**, **#4** untouched.

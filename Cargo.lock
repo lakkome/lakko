@@ -2571,6 +2571,7 @@ dependencies = [
  "axum",
  "lakko-anon-token",
  "lakko-crypto",
+ "lakko-metrics",
  "serde_json",
  "sqlx",
  "thiserror 1.0.69",
@@ -2676,6 +2677,40 @@ dependencies = [
  "prost",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "lakko-canary-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "hex",
+ "lakko-anon-token",
+ "lakko-attachments",
+ "lakko-auth-client",
+ "lakko-calls",
+ "lakko-contacts",
+ "lakko-ds-proof",
+ "lakko-metrics",
+ "lakko-mls",
+ "lakko-mnemonic",
+ "lakko-pow",
+ "lakko-sfu-proto",
+ "lakko-vault",
+ "rand 0.8.6",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "str0m",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2913,6 +2948,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-metrics"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "lakko-log-hygiene",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
@@ -2975,6 +3024,7 @@ dependencies = [
  "base64 0.22.1",
  "equix",
  "http",
+ "lakko-metrics",
  "rand 0.8.6",
  "serde",
  "sha2 0.10.9",
@@ -3070,6 +3120,7 @@ dependencies = [
  "lakko-crypto",
  "lakko-device-link",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-mnemonic",
  "lakko-pow-server",
  "lakko-sfu-proto",
@@ -3109,6 +3160,7 @@ dependencies = [
  "lakko-anon-token-server",
  "lakko-channels",
  "lakko-crypto",
+ "lakko-metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -3141,6 +3193,7 @@ dependencies = [
  "lakko-crypto",
  "lakko-discovery-client",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-mls",
  "lakko-transparency",
  "maxminddb",
@@ -3174,6 +3227,7 @@ dependencies = [
  "lakko-contacts",
  "lakko-ds-proof",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -3205,6 +3259,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "lakko-auth-token",
+ "lakko-metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -3226,6 +3281,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hex",
+ "lakko-metrics",
  "lakko-transport",
  "rustls",
  "sha2 0.10.9",
@@ -3256,6 +3312,7 @@ dependencies = [
  "lakko-contacts",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "p256",
  "parking_lot",
  "rand 0.8.6",
@@ -3287,9 +3344,9 @@ dependencies = [
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-sfu-proto",
  "metrics",
- "metrics-exporter-prometheus",
  "reqwest",
  "serde",
  "serde_json",
@@ -3322,6 +3379,7 @@ dependencies = [
  "lakko-auth-token",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-vault",
  "serde",
  "serde_json",
@@ -3350,6 +3408,7 @@ dependencies = [
  "lakko-attest",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-transparency",
  "rand 0.8.6",
  "reqwest",
@@ -3386,6 +3445,7 @@ dependencies = [
  "http-body-util",
  "lakko-crypto",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-transparency",
  "rand 0.8.6",
  "serde",

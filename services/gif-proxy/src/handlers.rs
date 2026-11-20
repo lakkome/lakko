@@ -23,6 +23,7 @@ use serde_json::json;
 
 use crate::auth::AuthenticatedAccount;
 use crate::giphy::{is_valid_gif_id, GifItem, GiphyClient, UpstreamError, Variant, MAX_OFFSET};
+use crate::metrics::{self, UpstreamCall};
 use crate::rate_limit::{AccountRateLimiter, Decision};
 use crate::rendition_cache::RenditionCache;
 use crate::AppState;
@@ -79,6 +80,10 @@ impl IntoResponse for ApiError {
             Json(json!({ "error": code })),
         )
             .into_response();
+        // The code as the `code` label of the request counters (ADR-0096).
+        response
+            .extensions_mut()
+            .insert(lakko_metrics::ErrorCode(code));
         if let Self::RateLimited { retry_after_secs } = self {
             response
                 .headers_mut()
@@ -209,10 +214,12 @@ async fn list(
     })?;
     let offset = validate_offset(params.offset.as_deref())?;
     let page = match kind {
-        ListKind::Trending => svc.client.trending(offset).await,
+        ListKind::Trending => {
+            metrics::upstream(UpstreamCall::Trending, svc.client.trending(offset)).await
+        },
         ListKind::Search => {
             let query = validate_query(params.q.as_deref())?;
-            svc.client.search(&query, offset).await
+            metrics::upstream(UpstreamCall::Search, svc.client.search(&query, offset)).await
         },
     }
     .map_err(|e| match from_upstream(e) {
@@ -256,20 +263,26 @@ pub(crate) async fn media(
     }
     let variant = Variant::parse(&variant).ok_or(ApiError::InvalidVariant)?;
 
-    let renditions = if let Some(hit) = svc.cache.get_at(account.0, &id, Instant::now()) {
+    let cached = svc.cache.get_at(account.0, &id, Instant::now());
+    metrics::rendition_cache(cached.is_some());
+    let renditions = if let Some(hit) = cached {
         hit
     } else {
-        let looked_up = svc.client.lookup(&id).await.map_err(from_upstream)?;
+        let looked_up = metrics::upstream(UpstreamCall::Lookup, svc.client.lookup(&id))
+            .await
+            .map_err(from_upstream)?;
         svc.cache
             .insert_at(account.0, id, looked_up.clone(), Instant::now());
         looked_up
     };
 
-    let media = svc
-        .client
-        .fetch_media(renditions.for_variant(variant), variant.max_bytes())
-        .await
-        .map_err(from_upstream)?;
+    let media = metrics::upstream(
+        UpstreamCall::Media,
+        svc.client
+            .fetch_media(renditions.for_variant(variant), variant.max_bytes()),
+    )
+    .await
+    .map_err(from_upstream)?;
 
     let mut response = Response::new(media.body);
     let headers = response.headers_mut();

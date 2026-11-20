@@ -66,6 +66,7 @@ mod auth;
 mod backup;
 mod blob;
 mod index;
+mod metrics;
 mod pass;
 mod stream;
 mod sweep;
@@ -201,6 +202,10 @@ async fn open_index(
             .run(&pool)
             .await
             .context("run storage migrations")?;
+        // Connections in use and idle (ADR-0096); only with a database.
+        let sampled = pool.clone();
+        let _pool_gauge =
+            lakko_metrics::spawn_pool_gauge(move || (sampled.size(), sampled.num_idle()));
         tracing::info!("blob index: MariaDB");
         return Ok((
             Arc::new(index::sql::SqlIndex::new(pool.clone())),
@@ -230,6 +235,13 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "storage",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_STORAGE_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -371,6 +383,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_BLOB_BYTES))
         .merge(backup_routes)
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("storage"))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(lakko_log_hygiene::request_span),

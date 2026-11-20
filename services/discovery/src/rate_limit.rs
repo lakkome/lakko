@@ -498,6 +498,8 @@ impl DiscoveryLimits {
 /// caller holds an `Arc<DiscoveryLimits>` clone in
 /// `AppState`; the spawned task holds its own clone.
 pub fn spawn_pruner(limits: Arc<DiscoveryLimits>) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::jobs;
+    lakko_metrics::job_registered(jobs::RATE_LIMIT_BUCKET_PRUNE);
     tokio::spawn(async move {
         let interval = DEFAULT_PRUNE_INTERVAL;
         let mut ticker = tokio::time::interval(interval);
@@ -510,6 +512,8 @@ pub fn spawn_pruner(limits: Arc<DiscoveryLimits>) -> tokio::task::JoinHandle<()>
                 .checked_sub(DEFAULT_PRUNE_AFTER)
                 .unwrap_or_else(Instant::now);
             let dropped = limits.prune_idle(cutoff);
+            // In memory, cannot fail: every run is a success.
+            lakko_metrics::job_succeeded(jobs::RATE_LIMIT_BUCKET_PRUNE);
             if dropped > 0 {
                 tracing::debug!(
                     dropped,
@@ -620,11 +624,14 @@ pub async fn write_middleware(
 }
 
 fn rate_limited_response(code: &'static str, detail: &str) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(json!({"code": code, "detail": detail})),
+    crate::metrics::with_code(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"code": code, "detail": detail})),
+        )
+            .into_response(),
+        code,
     )
-        .into_response()
 }
 
 // =========================================================

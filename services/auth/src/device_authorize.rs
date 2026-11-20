@@ -179,6 +179,18 @@ pub(crate) async fn start(
     }))
 }
 
+/// `POST /device/authorize/redeem`, counted as a device-grant login
+/// (ADR-0096); the flow is [`redeem_answer`].
+pub(crate) async fn redeem(
+    state: State<AppState>,
+    req: Json<DeviceAuthorizeRedeemReq>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::DeviceGrant,
+        redeem_answer(state, req).await,
+    )
+}
+
 /// `POST /device/authorize/redeem` — consume a device grant for a session
 /// token.
 ///
@@ -190,7 +202,7 @@ pub(crate) async fn start(
 /// enumeration-safe `401` — the same generic shape an OPAQUE bad-credential
 /// login returns.
 #[axum::debug_handler]
-pub(crate) async fn redeem(
+async fn redeem_answer(
     State(state): State<AppState>,
     Json(req): Json<DeviceAuthorizeRedeemReq>,
 ) -> Result<Json<DeviceAuthorizeRedeemRes>, ApiError> {

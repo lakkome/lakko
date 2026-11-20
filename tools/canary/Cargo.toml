@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-canary-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Synthetic canary (ADR-0096 P5): two dedicated accounts sign in, exchange an MLS message, an attachment and SFrame-sealed call audio through the public endpoints, and export the outcome as metrics."
+
+[[bin]]
+name = "lakko-canary"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-mnemonic.workspace = true
+lakko-mls.workspace = true
+lakko-auth-client.workspace = true
+lakko-pow.workspace = true
+lakko-contacts.workspace = true
+lakko-ds-proof.workspace = true
+lakko-anon-token.workspace = true
+lakko-attachments.workspace = true
+lakko-vault.workspace = true
+lakko-calls.workspace = true
+lakko-sfu-proto.workspace = true
+lakko-metrics.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+
+# HTTP to auth / ds / storage. rustls with bundled web roots, no openssl;
+# the same features the services use.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# The SFU signaling WebSocket. `handshake` only: the TLS layer for `wss` is
+# tokio-rustls below (ring provider, web roots), so no second TLS stack or
+# root bundle is pulled. Same versions already in the tree.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1"
+
+# The call step's media client: the workspace-patched str0m fork, exactly as
+# services/sfu pins it (pure-Rust crypto provider).
+str0m = { version = "=0.19.0", default-features = false, features = ["rust-crypto"] }

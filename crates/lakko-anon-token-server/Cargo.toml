@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+lakko-metrics.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

@@ -35,6 +35,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::key_reset::RouteError;
+use crate::metrics::{IdentityOutcome, IdentityRefusal};
 use crate::AppState;
 
 /// `account_id` length in bytes (UUIDv7 raw, matches the rest of
@@ -297,12 +298,40 @@ pub(crate) struct UploadResponse {
 /// generation must not be below the row's (`401
 /// {"error":"key-generation-superseded"}`). An attested change deletes every
 /// KeyPackage row of the account in the same transaction (section 5).
+///
+/// Every answer is counted by outcome (ADR-0096,
+/// `lakko_discovery_identity_uploads_total`).
 pub(crate) async fn upload(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     axum::Extension(generation): axum::Extension<crate::auth::SessionKeyGeneration>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, RouteError> {
+    let result = upload_decided(&state, &authed, generation, payload).await;
+    crate::metrics::identity_upload(upload_outcome(&result));
+    result.map(|_| Json(UploadResponse { ok: true }))
+}
+
+/// The metrics outcome of an identity upload's answer.
+fn upload_outcome(result: &Result<LogAppendDecision, RouteError>) -> IdentityOutcome {
+    match result {
+        Ok(LogAppendDecision::Skip) => IdentityOutcome::Unchanged,
+        Ok(LogAppendDecision::Append { is_reset: false }) => IdentityOutcome::Changed,
+        Ok(LogAppendDecision::Append { is_reset: true }) => IdentityOutcome::Reset,
+        Err(RouteError::Code(_, code)) => IdentityOutcome::Refused(IdentityRefusal::of_code(code)),
+        Err(RouteError::Text(status, _)) if status.is_server_error() => IdentityOutcome::Error,
+        Err(RouteError::Text(..)) => IdentityOutcome::Invalid,
+    }
+}
+
+/// The body of [`upload`]: decide, store and (on a key change) append to the
+/// transparency log; returns how the change rule decided.
+async fn upload_decided(
+    state: &AppState,
+    authed: &crate::auth::AuthenticatedAccount,
+    generation: crate::auth::SessionKeyGeneration,
+    payload: UploadRequest,
+) -> Result<LogAppendDecision, RouteError> {
     let account_id = decode_fixed::<ACCOUNT_ID_LEN>(&payload.account_id, "account_id")?;
     let signature_pubkey =
         decode_fixed::<SIGNATURE_PUBKEY_LEN>(&payload.signature_pubkey, "signature_pubkey")?;
@@ -424,12 +453,13 @@ pub(crate) async fn upload(
                 genesis_attest.as_deref(),
             )
             .await;
+        crate::metrics::kt_append(crate::metrics::KtAppendKind::Upload, confirmed);
         if confirmed {
             mark_logged_pubkey(&state.db, &account_id, &signature_pubkey).await;
         }
     }
 
-    Ok(Json(UploadResponse { ok: true }))
+    Ok(decision)
 }
 
 /// KT-log S2.5 — best-effort advance of the `logged_pubkey` marker after a

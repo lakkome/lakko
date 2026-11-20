@@ -125,7 +125,11 @@ pub(crate) const CODE_NOT_READY: &str = "device-request-not-ready";
 pub(crate) const CODE_ALREADY_USED: &str = "device-request-already-used";
 
 fn refusal(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(serde_json::json!({ "error": code }))).into_response()
+    let mut response = (status, Json(serde_json::json!({ "error": code }))).into_response();
+    response
+        .extensions_mut()
+        .insert(lakko_metrics::ErrorCode(code));
+    response
 }
 
 /// `POST /device/request` body.

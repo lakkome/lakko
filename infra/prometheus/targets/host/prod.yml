@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Host exporters on the main VPS (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/host/prod.yml by infra/monitoring/setup-monitoring.sh
+# only when "prod" is in LAKKO_MONITORING_STACKS.
+
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, host: main, exporter: node, __metrics_path__: /node/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, host: main, exporter: mysqld, __metrics_path__: /mysqld/metrics}
+- targets: ['metrics.lakko.me:9643']
+  labels: {stack: prod, host: main, exporter: nginx, __metrics_path__: /nginx/metrics}

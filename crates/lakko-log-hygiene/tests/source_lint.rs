@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lakko_log_hygiene::lint::{bare_trace_layers, lint_source};
+use lakko_log_hygiene::lint::{bare_trace_layers, lint_metric_labels, lint_source};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -45,7 +45,11 @@ fn scanned_files() -> Vec<PathBuf> {
             rust_files(&src, &mut files);
         }
     }
-    for krate in ["lakko-anon-token-server", "lakko-pow-server"] {
+    for krate in [
+        "lakko-anon-token-server",
+        "lakko-pow-server",
+        "lakko-metrics",
+    ] {
         rust_files(&root.join("crates").join(krate).join("src"), &mut files);
     }
     files.sort();
@@ -103,6 +107,70 @@ fn every_trace_layer_records_the_route_template_not_the_uri() {
         report.is_empty(),
         "ADR-0078 section 11: mount TraceLayer with \
          .make_span_with(lakko_log_hygiene::request_span):\n{}",
+        report.join("\n")
+    );
+}
+
+#[test]
+fn no_metric_label_names_or_builds_an_identifier() {
+    let root = repo_root();
+    let mut report = Vec::new();
+    for path in scanned_files() {
+        let text = fs::read_to_string(&path).expect("readable source");
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for v in lint_metric_labels(&text) {
+            report.push(format!(
+                "{rel}:{} {}! label names `{}`",
+                v.line, v.macro_name, v.name
+            ));
+        }
+    }
+    assert!(
+        report.is_empty(),
+        "ADR-0096 section 1: {} metric label(s) name or build an identifier:\n{}",
+        report.len(),
+        report.join("\n")
+    );
+}
+
+/// Services that serve nothing yet (Phase-0 stubs) and so mount no router.
+const STUB_SERVICES: &[&str] = &["edge", "transport-rendezvous"];
+
+#[test]
+fn every_service_mounts_the_red_layer_and_a_metrics_listener() {
+    let root = repo_root();
+    let mut report = Vec::new();
+    for entry in fs::read_dir(root.join("services"))
+        .expect("services/ exists")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let src = entry.path().join("src");
+        if !src.is_dir() || STUB_SERVICES.contains(&name.as_str()) {
+            continue;
+        }
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        let text: String = files
+            .iter()
+            .map(|f| fs::read_to_string(f).expect("readable source"))
+            .collect();
+        if !text.contains("lakko_metrics::red_layer(") {
+            report.push(format!("services/{name}: no lakko_metrics::red_layer"));
+        }
+        if !text.contains("lakko_metrics::start_from_env(")
+            && !text.contains("lakko_metrics::serve(")
+        {
+            report.push(format!("services/{name}: no metrics listener"));
+        }
+    }
+    assert!(
+        report.is_empty(),
+        "ADR-0096 section 2: every service records RED metrics and serves /metrics:\n{}",
         report.join("\n")
     );
 }

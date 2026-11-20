@@ -105,7 +105,10 @@ impl IntoResponse for RouteError {
     fn into_response(self) -> Response {
         match self {
             Self::Text(status, message) => (status, message).into_response(),
-            Self::Code(status, code) => (status, Json(json!({ "error": code }))).into_response(),
+            Self::Code(status, code) => crate::metrics::with_code(
+                (status, Json(json!({ "error": code }))).into_response(),
+                code,
+            ),
         }
     }
 }

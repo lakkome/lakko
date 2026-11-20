@@ -24,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 # ADR-0078 section 11: the request span that records the route template.
 lakko-log-hygiene.workspace = true
+lakko-metrics.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true

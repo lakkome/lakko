@@ -12,6 +12,7 @@ use lakko_crypto::signing::Signature;
 use lakko_transparency::{SignedRoot, TreeHash};
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::CosignOutcome;
 use crate::store::CosignError;
 use crate::AppState;
 
@@ -45,20 +46,34 @@ pub(crate) struct CosignRes {
 /// gated). The witness co-signs only when the root is operator-signed AND
 /// append-only-extends its last-co-signed root; a fork is refused (409).
 pub(crate) async fn cosign(
+    state: State<AppState>,
+    req: Json<CosignReq>,
+) -> Result<Json<CosignRes>, (StatusCode, &'static str)> {
+    let result = cosign_checked(state, req).await;
+    crate::metrics::cosign(match &result {
+        Ok(_) => CosignOutcome::Ok,
+        Err((outcome, _)) => *outcome,
+    });
+    result.map_err(|(_, refusal)| refusal)
+}
+
+/// The body of [`cosign`]; a refusal carries its ADR-0096 outcome.
+async fn cosign_checked(
     State(state): State<AppState>,
     Json(req): Json<CosignReq>,
-) -> Result<Json<CosignRes>, (StatusCode, &'static str)> {
+) -> Result<Json<CosignRes>, (CosignOutcome, (StatusCode, &'static str))> {
+    let invalid = |r: (StatusCode, &'static str)| (CosignOutcome::Invalid, r);
     let tree_root: TreeHash = B64
         .decode(req.new_root.tree_root_b64.as_bytes())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "tree_root_b64 not valid base64"))?
+        .map_err(|_| invalid((StatusCode::BAD_REQUEST, "tree_root_b64 not valid base64")))?
         .as_slice()
         .try_into()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "tree_root must be 32 bytes"))?;
+        .map_err(|_| invalid((StatusCode::BAD_REQUEST, "tree_root must be 32 bytes")))?;
     let sig_bytes = B64
         .decode(req.new_root.signature_b64.as_bytes())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "signature_b64 not valid base64"))?;
+        .map_err(|_| invalid((StatusCode::BAD_REQUEST, "signature_b64 not valid base64")))?;
     let signature = Signature::from_bytes(&sig_bytes)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "signature must be 64 bytes"))?;
+        .map_err(|_| invalid((StatusCode::BAD_REQUEST, "signature must be 64 bytes")))?;
     let new_root = SignedRoot {
         tree_root,
         log_size: req.new_root.log_size,
@@ -71,18 +86,18 @@ pub(crate) async fn cosign(
         let node: TreeHash = B64
             .decode(h.as_bytes())
             .map_err(|_| {
-                (
+                invalid((
                     StatusCode::BAD_REQUEST,
                     "consistency proof hash not valid base64",
-                )
+                ))
             })?
             .as_slice()
             .try_into()
             .map_err(|_| {
-                (
+                invalid((
                     StatusCode::BAD_REQUEST,
                     "consistency proof hash must be 32 bytes",
-                )
+                ))
             })?;
         proof.push(node);
     }
@@ -91,19 +106,23 @@ pub(crate) async fn cosign(
         .store
         .cosign(&state.db, &state.operator_pubkey, &new_root, &proof)
         .await
-        .map_err(|e| match e {
-            CosignError::BadOperatorSignature => {
-                (StatusCode::BAD_REQUEST, "operator signature is invalid")
-            },
-            CosignError::NotConsistent => (
-                StatusCode::CONFLICT,
-                "root does not extend the witnessed log (fork refused)",
-            ),
-            CosignError::Rollback { .. } => (StatusCode::CONFLICT, "log_size rollback refused"),
-            CosignError::Db(detail) => {
-                tracing::error!(detail, "witness cosign storage error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "cosign failed")
-            },
+        .map_err(|e| {
+            let outcome = CosignOutcome::of(&e);
+            let refusal = match e {
+                CosignError::BadOperatorSignature => {
+                    (StatusCode::BAD_REQUEST, "operator signature is invalid")
+                },
+                CosignError::NotConsistent => (
+                    StatusCode::CONFLICT,
+                    "root does not extend the witnessed log (fork refused)",
+                ),
+                CosignError::Rollback { .. } => (StatusCode::CONFLICT, "log_size rollback refused"),
+                CosignError::Db(detail) => {
+                    tracing::error!(detail, "witness cosign storage error");
+                    (StatusCode::INTERNAL_SERVER_ERROR, "cosign failed")
+                },
+            };
+            (outcome, refusal)
         })?;
 
     Ok(Json(CosignRes {

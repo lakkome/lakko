@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Public probes of the test stack (ADR-0096). Prometheus file_sd target file, installed to
+# /etc/prometheus/targets/blackbox_http/test.yml by infra/monitoring/setup-monitoring.sh
+# only when "test" is in LAKKO_MONITORING_STACKS.
+
+- targets:
+    - https://test.lakko.me/
+    - https://test.lakko.me/api/auth/ready
+    - https://test.lakko.me/api/ds/ready
+    - https://test.lakko.me/api/discovery/ready
+    - https://test.lakko.me/api/storage/ready
+    - https://test.lakko.me/api/push/ready
+    - https://test.lakko.me/api/channels/health
+    - https://test.lakko.me/api/gifs/ready
+    - https://test.lakko.me/sfu/ready
+  labels: {stack: test}
