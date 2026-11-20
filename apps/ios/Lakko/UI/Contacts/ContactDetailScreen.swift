@@ -80,6 +80,9 @@ struct ContactDetailScreen: View {
                     contact: contact, isContact: viewModel.isContact(messageId: messageId),
                     resolved: resolved)
             }
+            // ADR-0098 section 2 — a person card asks whether the account
+            // still exists, when a check is due.
+            .checksAccountExists(personKey: contact.request.fromPubkey, accountId: contact.request.fromAccountId)
         } else {
             // Removed here, or removed with no one-to-one left on this device
             // or another: the page goes.
@@ -128,12 +131,18 @@ struct ContactDetailScreen: View {
         // person the viewer removed is not a contact: their card offers `Add
         // to contacts` in place of Rename and Remove (amended 2026-10-24).
         let isBlocked = blocks.isBlocked(contact.request.fromPubkey)
-        let sections = SuspendedInfo.withoutSending(personInfoSections(
-            caps: PersonInfoCapabilities(
-                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
-                isContact: isContact,
-                contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts,
-                isBlocked: isBlocked)), suspended: accountSuspended)
+        // ADR-0098 — a deleted account's card: Open chat and Delete chat
+        // while a one-to-one exists, Remove contact while on the list, and
+        // nothing else (no call, no safety number, no rename, no add, no
+        // block, no report).
+        let sections = resolved.isDeletedAccount
+            ? deletedPersonInfoSections(hasOneToOne: chat != nil, isContact: isContact)
+            : SuspendedInfo.withoutSending(personInfoSections(
+                caps: PersonInfoCapabilities(
+                    membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
+                    isContact: isContact,
+                    contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts,
+                    isBlocked: isBlocked)), suspended: accountSuspended)
         List {
             Section {
                 VStack(spacing: 8) {
@@ -180,12 +189,18 @@ struct ContactDetailScreen: View {
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    if chat == nil, let key = Self.noChatLineKey(contact) {
+                    if resolved.isDeletedAccount {
+                        // ADR-0098 — the one line; nothing about why.
+                        Text(ResolvedDisplayName.deletedBody)
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .multilineTextAlignment(.center)
+                    } else if chat == nil, let key = Self.noChatLineKey(contact) {
                         Text(l10n.t(key))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    if let line = Self.messageLineKey(
+                    if !resolved.isDeletedAccount, let line = Self.messageLineKey(
                         hasChat: chat != nil,
                         waitingRequest: viewModel.hasWaitingRequest(for: contact),
                         notice: viewModel.messageNotice[contact.request.messageId]) {

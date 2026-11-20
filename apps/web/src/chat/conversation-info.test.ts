@@ -40,6 +40,7 @@ import {
   GROUP_ONLY_SECTIONS,
   channelInfoSections,
   conversationInfoSectionsFor,
+  deletedPersonInfoSections,
   findPersonRecord,
   infoHeading,
   infoOpenLabel,
@@ -474,5 +475,26 @@ describe("infoOpening", () => {
     // resolve to a moment later - for a contact, the second card again.
     expect(infoOpening(null, record)).toBe("nothing");
     expect(infoOpening(null, null)).toBe("nothing");
+  });
+});
+
+describe("ADR-0098 — the person info of a deleted account", () => {
+  it("Message and Delete chat only with a one-to-one, Remove contact only for a contact", () => {
+    expect([...deletedPersonInfoSections(rules, true, true)].sort()).toEqual(
+      ["delete-chat", "message", "remove-contact"].sort(),
+    );
+    expect(deletedPersonInfoSections(rules, false, true)).toEqual(["remove-contact"]);
+    expect(deletedPersonInfoSections(rules, false, false)).toEqual([]);
+  });
+
+  it("never a call, safety number, rename, add or share", () => {
+    for (const oneToOne of [true, false]) {
+      for (const contact of [true, false]) {
+        const s = deletedPersonInfoSections(rules, oneToOne, contact);
+        for (const never of ["call", "safety-number", "rename-contact", "add-contact"] as const) {
+          expect(s).not.toContain(never);
+        }
+      }
+    }
   });
 });

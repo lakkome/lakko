@@ -6317,7 +6317,9 @@ dispatcher arm in `incoming_envelope.rs`, `lakko-ui-rules::info::deleted_person_
 unit and property tests, the FFI tests (the statement dispatches as
 `AccountDeleted` and parses as a never-rendered service envelope), the
 DB-gated registry test and fuzz `account_deleted_decode`. Host-tested
-2026-11-20; no client sends or reads it yet.
+2026-11-20. The clients (web, iOS, Android) send it on deletion, verify it
+at receipt, record directory answers and apply both rules through these
+FFI calls; host-tested the same day, not walked (ADR-0098 "Clients").
 
 **Residuals.** The directory is trusted for liveness: it can make a live
 person look deleted until its next answer, and can confirm a dead account as

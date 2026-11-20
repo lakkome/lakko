@@ -128,8 +128,47 @@ public final class ChatViewModel: ObservableObject {
     /// §6.2.5 — what occupies the composer's slot. The draft is read live so a
     /// commit landing mid-sentence preserves what was actually typed.
     public var composerSlot: ComposerState {
+        // ADR-0098 — a one-to-one with a deleted account: one line in the
+        // composer's place, no draft, no button.
+        Self.composerSlot(peerDeleted: peerDeleted, membership: membership, draft: draft)
+    }
+
+    /// The rule of ``composerSlot``, apart from the screen.
+    nonisolated static func composerSlot(
+        peerDeleted: Bool, membership: MembershipState, draft: String
+    ) -> ComposerState {
+        if peerDeleted {
+            return .withdrawn(notice: ResolvedDisplayName.deletedBody, draft: nil, draftLabel: nil)
+        }
         return composerState(membership, draft: draft)
     }
+
+    /// ADR-0098 — the rule of ``hasSomeoneToCall``, apart from the screen.
+    nonisolated static func hasSomeoneToCall(peerDeleted: Bool, isGroup: Bool, people: Int?) -> Bool {
+        if peerDeleted { return false }
+        return GroupCallHostRules.hasSomeoneToCall(isGroup: isGroup, people: people)
+    }
+
+    /// ADR-0098 — the other person of this one-to-one deleted their account.
+    /// The history stays readable; nothing can be sent or called.
+    public var peerDeleted: Bool {
+        guard !presentsAsGroup, let peer = oneToOnePeerSignatureKey else { return false }
+        return ProfileDirectory.shared.isDeletedAccount(signatureKey: peer)
+    }
+
+    /// ADR-0098 — whether the message `message` quotes was written by a
+    /// deleted account (the quote then names them `Deleted account`).
+    func quotedAuthorDeleted(_ message: ChatMessage) -> Bool {
+        guard let target = message.reply?.target,
+              let author = messages.first(where: { $0.messageId == target })?.authorKeyB64,
+              let key = base64Decode(author) else { return false }
+        return ProfileDirectory.shared.isDeletedAccount(signatureKey: key)
+    }
+
+    /// ADR-0098 — whether Reply, React, Edit and Delete are offered: they all
+    /// send, and a deleted person can receive nothing. Copy, Save, Forward
+    /// and Pin for me stay.
+    public var sendActionsAvailable: Bool { !peerDeleted }
 
 
     /// ADR-0045 UX §6.2.5 — whether a message still carries Edit / Delete /
@@ -833,8 +872,9 @@ public final class ChatViewModel: ObservableObject {
     /// Whether anyone else is here to call (`docs/ux/group-and-channel-privacy.md`
     /// section 10). Without it the toolbar has no call buttons.
     var hasSomeoneToCall: Bool {
-        GroupCallHostRules.hasSomeoneToCall(
-            isGroup: isGroupChat, people: repository.memberCount(groupIdHex: groupIdHex))
+        // ADR-0098 — a deleted account cannot be called.
+        Self.hasSomeoneToCall(
+            peerDeleted: peerDeleted, isGroup: isGroupChat, people: repository.memberCount(groupIdHex: groupIdHex))
     }
 
     /// What the toolbar call buttons do right now.
@@ -2872,7 +2912,7 @@ public final class ChatViewModel: ObservableObject {
     /// strip. A message without a server id has nothing to point at, so it is
     /// refused here as it is in the menu.
     func beginReply(_ message: ChatMessage) {
-        guard message.messageId > 0 else { return }
+        guard message.messageId > 0, sendActionsAvailable else { return }
         if editingMessage != nil { cancelEdit() }
         replyingTo = ReplyArmed(
             messageId: message.messageId,
@@ -3504,7 +3544,7 @@ public final class ChatViewModel: ObservableObject {
     /// Section 6 — a double tap on the bubble: the quick reaction, or nothing,
     /// silently, when it does not apply.
     func quickReact(to message: ChatMessage) {
-        guard messageActionsAvailable, message.messageId > 0, !message.deleted,
+        guard messageActionsAvailable, sendActionsAvailable, message.messageId > 0, !message.deleted,
               message.direction != .system else { return }
         react(to: message, emoji: QuickReactionSetting.shared.current)
     }
@@ -3726,6 +3766,8 @@ public final class ChatViewModel: ObservableObject {
     }
 
     private func publishTyping(_ isTyping: Bool) {
+        // ADR-0098 — typing stops toward a deleted account.
+        guard !peerDeleted else { return }
         Task { @MainActor in
             do {
                 try await repository.sendTyping(
@@ -3755,6 +3797,8 @@ public final class ChatViewModel: ObservableObject {
         // watermark it would broadcast can never reach a member who could use
         // it.
         guard !membershipHasEnded else { return }
+        // ADR-0098 — and read markers stop toward a deleted account.
+        guard !peerDeleted else { return }
         var highest: Int64 = -1
         for m in messages where m.messageId > 0 {
             if m.messageId > highest { highest = m.messageId }

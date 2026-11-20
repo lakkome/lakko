@@ -162,6 +162,8 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|channel-ban-lists`, ciphertext: ct } },
     { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|channel-reactions-waiting`, ciphertext: ct } },
     byId("lakko-group-closed", "rows"),
+    // ADR-0098: the per-person account status.
+    byId("lakko-person-status", "rows"),
     byId("lakko-membership-end", "rows"),
     byId("lakko-registrar-seeds", "rows"),
     byId("lakko-pending-root-seeds", "rows"),
@@ -652,6 +654,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-avatars": "account",
   "lakko-group-names": "account",
   "lakko-group-closed": "account",
+  "lakko-person-status": "account",
   "lakko-membership-end": "account",
   "lakko-registrar-seeds": "account",
   "lakko-pending-root-seeds": "account",

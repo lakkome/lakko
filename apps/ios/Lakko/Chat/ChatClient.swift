@@ -931,6 +931,18 @@ public final class ChatClient {
             // read. It is still the same synchronous region, hence still the
             // same epoch.
             let senderKey = senderLeaf.flatMap(resolveSender)
+            // ADR-0098 — a person's device says their account was deleted.
+            // Never a timeline row and never a notification: the receive side
+            // verifies it against the sender's account key resolved here
+            // (C-68) and this conversation's group id, and records it.
+            if isAccountDeletedEnvelope(plaintext: data) {
+                return .accountDeleted(
+                    messageId: messageId,
+                    envelope: data,
+                    senderKey: senderKey,
+                    createdAt: createdAt
+                )
+            }
             // `docs/ux/who-can-find-me.md` 6.4 — a contact request carried
             // inside the group, sealed to one member whom it does not name.
             // Never a timeline row and never a notification: the receive side
@@ -1731,6 +1743,18 @@ public enum IncomingChatEvent: Equatable {
     /// account's own echo, and answers no request it cannot attribute.
     case profileRequest(
         messageId: Int64,
+        senderKey: MemberIdentity?,
+        createdAt: String
+    )
+    /// ADR-0098 — an account-deleted statement: the sender's device says
+    /// their account was deleted. Never a timeline row and never a
+    /// notification. `senderKey` is the sender's account key resolved from
+    /// the MLS-authenticated leaf at receipt (C-68); the receive side checks
+    /// the signature against it and this conversation's group id, and drops
+    /// it otherwise.
+    case accountDeleted(
+        messageId: Int64,
+        envelope: Data,
         senderKey: MemberIdentity?,
         createdAt: String
     )

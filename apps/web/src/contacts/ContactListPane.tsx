@@ -17,7 +17,8 @@
  * Markup only: the route owns the state and every mutation.
  */
 import { accountSuspended } from "../auth/suspension-state";
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { checkWhenVisible, isDeletedAccount } from "../people/person-status";
 
 import { base64Encode } from "../auth/account-id";
 import { memberNameOf } from "../profile/member-label";
@@ -133,8 +134,12 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   type ListRow =
     | { readonly kind: "contact"; readonly c: AcceptedContact; readonly name: string; readonly username: string | null }
     | { readonly kind: "invited"; readonly p: PendingContact; readonly name: string; readonly username: string | null };
+  // ADR-0098: a pending contact whose account was deleted reads "Deleted
+  // account", with no username.
   const invitedName = (p: PendingContact): string =>
-    pendingNameOf(p) ?? t("invite.contact.page.unnamed");
+    isDeletedAccount(p.signaturePubkeyB64)
+      ? t("person.deleted.name")
+      : (pendingNameOf(p) ?? t("invite.contact.page.unnamed"));
   const rows = (): ListRow[] => [
     ...props.contacts().map(
       (c): ListRow => ({ kind: "contact", c, name: nameOf(c), username: usernameOf(c) }),
@@ -144,7 +149,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         kind: "invited",
         p,
         name: invitedName(p),
-        username: subLineUsername(invitedName(p), p.username.length > 0 ? `@${p.username}` : null),
+        username:
+          isDeletedAccount(p.signaturePubkeyB64)
+            ? null
+            : subLineUsername(invitedName(p), p.username.length > 0 ? `@${p.username}` : null),
       }),
     ),
   ];
@@ -417,6 +425,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       };
                       return (
                         <div
+                          ref={(el) => {
+                            // ADR-0098 section 2: a visible row is on screen.
+                            onCleanup(checkWhenVisible(el, () => key));
+                          }}
                           class="lk-row"
                           role="button"
                           tabIndex={0}

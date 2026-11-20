@@ -7621,6 +7621,14 @@
       "text": "Abrir en la app",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "Esta cuenta se eliminó.",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "Cuenta eliminada",
+      "status": "machine"
+    },
     "profile.save.error.full": {
       "text": "Lakko no tiene espacio para archivos nuevos ahora. Inténtalo más tarde.",
       "status": "machine"

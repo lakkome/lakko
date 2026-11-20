@@ -166,6 +166,11 @@ public final class ChatRepository: ObservableObject {
     var onGroupContactRequest: (@MainActor (_ groupIdHex: String, _ envelope: Data, _ senderKeyB64: String) -> Void)?
     /// Groups whose end is being carried out now.
     var endsRunning: Set<String> = []
+    /// ADR-0098 — removals of a deleted account in flight, `group|person`.
+    var deletedRemovalsInFlight: Set<String> = []
+    /// ADR-0098 — when a removal of a deleted account was last tried,
+    /// `group|person`, so a refused one is not re-sent on every poll.
+    var deletedRemovalLastTryMs: [String: Int64] = [:]
     /// One pass over the held Welcomes at a time.
     var heldWelcomesRunning = false
     /// A pass was asked for while one ran.
@@ -968,6 +973,8 @@ public final class ChatRepository: ObservableObject {
             }
         }
         observeStateBundleNames()
+        // ADR-0098 — a verified account-deleted statement.
+        observeDeletedAccounts()
         historyBundleObserver = NotificationCenter.default.addObserver(
             forName: .lakkoHistoryBundleFiled, object: nil, queue: .main
         ) { [weak self] note in
@@ -5983,6 +5990,11 @@ public final class ChatRepository: ObservableObject {
             groupContactRequestSink: { [weak self] envelope, senderKey in
                 self?.onGroupContactRequest?(groupIdHex, envelope, senderKey)
             },
+            // ADR-0098 — synchronous: verify against this conversation's id
+            // and the sender resolved at receipt, then record.
+            accountDeletedSink: { [weak self] envelope, senderKey in
+                self?.receiveAccountDeleted(groupIdHex: groupIdHex, envelope: envelope, senderKey: senderKey)
+            },
             // ADR-0052 decision 3 — standing check against the live group, the
             // per-message order, store. Fire-and-forget (it only spawns a
             // `Task`), so the pin chain it takes is never awaited while the
@@ -6063,6 +6075,9 @@ public final class ChatRepository: ObservableObject {
         // idle long poll still writes no file.
         if !result.events.isEmpty { persistMessageLogBestEffort() }
         state = state.with(threads: buildThreadList())
+        // ADR-0098 section 5 — removals owed for a deleted account (only
+        // schedules; tried again here after one that could not be sent).
+        proposeDeletedMemberRemovalsSoon(groupIdHex: groupIdHex)
         // ADR-0057 S2 finding 1 — the ownership moved away from this account in
         // this batch: hand the journal root over (only schedules).
         noteOwnerTransition(
@@ -7730,6 +7745,10 @@ public final class ChatRepository: ObservableObject {
                         },
                         groupContactRequestSink: { [weak self] envelope, senderKey in
                             self?.onGroupContactRequest?(groupIdHex, envelope, senderKey)
+                        },
+                        accountDeletedSink: { [weak self] envelope, senderKey in
+                            self?.receiveAccountDeleted(
+                                groupIdHex: groupIdHex, envelope: envelope, senderKey: senderKey)
                         },
                         pinSink: { [weak self] op, senderLeaf in
                             self?.receivePin(
@@ -11493,6 +11512,7 @@ final class GroupRecord {
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
         profileRequestSink: ((MemberIdentity) -> Void)? = nil,
         groupContactRequestSink: ((Data, MemberIdentity) -> Void)? = nil,
+        accountDeletedSink: ((Data, MemberIdentity) -> Void)? = nil,
         pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
         registrarSeedSink: ((Data, UInt32?) -> Void)? = nil,
         scopedDiscoverySink: ((ScopedDiscoveryEnvelope, MemberIdentity?) -> Void)? = nil,
@@ -11695,6 +11715,12 @@ final class GroupRecord {
                 // never answered — the fail-closed side, as for the beacon.
                 guard let senderKey, senderKey != ownAuthorKey else { continue }
                 profileRequestSink?(senderKey)
+            case .accountDeleted(_, let envelope, let senderKey, _):
+                // ADR-0098 — never a timeline row. Our own (another of our
+                // devices deleting this account) changes nothing here; one
+                // with no resolvable sender is dropped.
+                guard let senderKey, senderKey != ownAuthorKey else { continue }
+                accountDeletedSink?(envelope, senderKey)
             case .groupContactRequest(_, let envelope, let senderKey, _):
                 // `docs/ux/who-can-find-me.md` 6.4 — never a timeline row.
                 // Our own (sent from another of our devices) is not for us;

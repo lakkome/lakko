@@ -127,6 +127,20 @@ public enum PendingContacts {
         if !trimmed.isEmpty { return trimmed }
         return contact.username.isEmpty ? nil : "@\(contact.username)"
     }
+
+    /// ADR-0098 — the name drawn for a pending contact: ``name(_:)``, or
+    /// `Deleted account` once this device learned their account is gone.
+    @MainActor
+    public static func shownName(_ contact: PendingContact) -> String? {
+        if isDeleted(contact) { return ResolvedDisplayName.deletedName }
+        return name(contact)
+    }
+
+    /// ADR-0098 — this device learned the pending contact's account is gone.
+    @MainActor
+    public static func isDeleted(_ contact: PendingContact) -> Bool {
+        ProfileDirectory.shared.isDeletedAccount(signatureKey: contact.signaturePubkey)
+    }
 }
 
 /// The pending-contact records, per account, in `UserDefaults` (no message

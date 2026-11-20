@@ -292,6 +292,45 @@ public final class ContactsRepository: ObservableObject {
                 MainActor.assumeIsolated { self?.bind(accountIdB64: accountIdB64) }
             }
             .store(in: &cancellables)
+        // ADR-0098 — a person learned deleted: their unanswered request goes
+        // silently, and what was held for a pending contact is dropped.
+        DeletedAccounts.shared.$revision
+            .dropFirst()
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyDeletedAccounts() }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// ADR-0098 — drop the incoming requests of deleted accounts, and the
+    /// messages held for a pending contact whose account is gone (they would
+    /// never arrive). The pending contact itself stays, drawn as `Deleted
+    /// account`, until the person deletes the chat.
+    func applyDeletedAccounts(isDeleted given: ((Data) -> Bool)? = nil) {
+        let isDeleted = given ?? { ProfileDirectory.shared.isDeletedAccount(signatureKey: $0) }
+        let kept = state.pending.filter { !isDeleted($0.fromPubkey) }
+        if kept.count != state.pending.count { state = state.with(pending: kept) }
+        for contact in invited where isDeleted(contact.signaturePubkey) {
+            chatRepository?.clearPendingInvitedMessages(queueKey: contact.queueKey)
+        }
+    }
+
+    /// ADR-0098 — ask the directory about the account behind a request about
+    /// to be accepted. `true` only on a `404`, which is recorded; anything
+    /// else (an answer, a network failure) is `false`.
+    static func accountAnswersAbsent(
+        accountId: Data, personKey: Data, fetch: (Data) async throws -> IdentityFetchResponse?
+    ) async -> Bool {
+        let answer: IdentityFetchResponse?
+        do {
+            answer = try await fetch(accountId)
+        } catch {
+            return false
+        }
+        let classified = DeletedAccountRules.classify(bundle: answer, heldKey: personKey)
+        DeletedAccounts.shared.noteAnswer(
+            personKeyB64: base64Encode(personKey), accountIdB64: base64Encode(accountId), classified)
+        return classified == .absent
     }
 
     private var stateBundleObserver: NSObjectProtocol?
@@ -1656,6 +1695,17 @@ public final class ContactsRepository: ObservableObject {
     /// ``ContactAccept`` is the order and the failure rule.
     public func acceptIncomingRequest(_ request: IncomingContactRequest) async -> ContactAccept.Outcome {
         let bound = binding.capture()
+        // ADR-0098 — a request from an account that is gone is not accepted:
+        // the card goes and the screen says so. Only a `404` counts; a
+        // network failure goes on to the ordinary accept.
+        if let accountId = request.fromAccountId,
+           await Self.accountAnswersAbsent(
+                accountId: accountId, personKey: request.fromPubkey,
+                fetch: { [discoveryClientFactory] in try await discoveryClientFactory().identityFetch(accountId: $0) }) {
+            guard bound.isCurrent else { return .failed }
+            declineContactRequest(messageId: request.messageId)
+            return .deletedAccount
+        }
         return await ContactAccept.run(request: request, ports: ContactAccept.Ports(
             found: { [weak self] request, accountId in
                 guard let chat = self?.chatRepository else { throw ContactAccept.Unavailable() }
@@ -3561,6 +3611,9 @@ public enum ContactAccept {
         case welcomeOwed(groupIdHex: String)
         /// Nothing was delivered and nothing stands: the request stays.
         case failed
+        /// ADR-0098 — the directory answered that the person's account is
+        /// gone: the request was removed and nothing was founded.
+        case deletedAccount
     }
 
     /// No chat bridge is wired.

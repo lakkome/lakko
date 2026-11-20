@@ -46,6 +46,13 @@ public class PasskeysViewModel(
      *  orchestration (MainActivity), so Delete account leaves exactly what
      *  Forget device leaves: nothing of the account on this device. */
     private val onAccountDeleted: () -> Unit,
+    /**
+     * ADR-0098 section 1 — post the account-deleted statement in every
+     * conversation this device holds ([me.lakko.app.chat.ChatRepository.announceAccountDeleted]):
+     * the candidate 64-byte account seeds, and the conversations already
+     * reached across retries. `null` sends nothing.
+     */
+    private val announceDeletion: (suspend (seeds: List<ByteArray>, sent: MutableSet<String>) -> Unit)? = null,
     private val client: WebauthnClient = WebauthnClient(),
     private val registration: WebauthnRegistration = WebauthnRegistration(),
     /** For the passkeys this device learned cannot carry keys
@@ -448,7 +455,19 @@ public class PasskeysViewModel(
                             }
                         }
                     },
-                    cleanups = accountDeletionCleanups(subscriptionIds, pushTokens, secrets.bearer),
+                    cleanups = accountDeletionCleanups(subscriptionIds, pushTokens, secrets.bearer) +
+                        listOfNotNull(
+                            // ADR-0098: a suspended device without its chats
+                            // holds no seed and has nothing to tell.
+                            announceDeletion?.let { announce ->
+                                secrets.accountIdentitySeed?.let { seed ->
+                                    me.lakko.app.account.accountDeletedAnnouncement(
+                                        seeds = deletionAnnouncementSeeds(context, accountIdB64, seed),
+                                        announce = announce,
+                                    )
+                                }
+                            },
+                        ),
                     // Local wipe + full sign-out on this device: the same path
                     // Forget device takes (every per-account store, push first).
                     wipe = onAccountDeleted,
@@ -592,6 +611,25 @@ public class PasskeysViewModel(
                 }
             },
         )
+    }
+
+    /**
+     * ADR-0098 — the account seeds the statement may be signed with: this
+     * account's current seed and every own predecessor's (after an ADR-0074
+     * rotation the conversation leaves stay bound under the earliest). The
+     * chat repository picks the one its binding names. Fresh copies.
+     */
+    private fun deletionAnnouncementSeeds(context: Context, accountIdB64: String, current: ByteArray): List<ByteArray> {
+        val predecessors = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(context).load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        return try {
+            predecessors.map { it.phraseSeed.copyOf() } + current.copyOf()
+        } finally {
+            predecessors.forEach { it.zero() }
+        }
     }
 
     private companion object {

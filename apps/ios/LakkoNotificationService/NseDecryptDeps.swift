@@ -418,6 +418,11 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                     || isOpenItemsEnvelope(plaintext: bytes)
                     || isPollBallotsEnvelope(plaintext: bytes)
                     || isPollChoiceEnvelope(plaintext: bytes)
+                    // ADR-0098 — a person's device says their account was
+                    // deleted: never a notification, never a bubble. The app
+                    // verifies and records it; this process only stays silent.
+                    || (bytes.count == Int(accountDeletedEnvelopeLen())
+                        && isAccountDeletedEnvelope(plaintext: bytes))
             },
             // `docs/ux/who-can-find-me.md` 6.4 — a contact request inside the
             // group: a yes / no from the slim FFI, never opened here.

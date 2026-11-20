@@ -460,6 +460,20 @@ export async function removePendingContact(accountIdB64: string, accountIdHex: s
 }
 
 /**
+ * ADR-0098: the pending contact's account was deleted. The messages kept for
+ * it in the held-send queue are discarded, never sent; the record stays, read
+ * as "Deleted account", until `Delete chat` removes it. Never throws.
+ */
+export async function dropHeldForDeletedPending(accountIdB64: string, accountIdHex: string): Promise<void> {
+  try {
+    if (heldSends.take(pendingQueueKey({ accountIdHex })).length > 0) await persistHeldSends(accountIdB64);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("pending-contacts: held messages not dropped");
+  }
+}
+
+/**
  * Hand the messages of the pending contact a joined conversation belongs to
  * over to `deliver` (it moves them from {@link pendingQueueKey} to the
  * held-send slot of the new one-to-one), then drop the record, inside the

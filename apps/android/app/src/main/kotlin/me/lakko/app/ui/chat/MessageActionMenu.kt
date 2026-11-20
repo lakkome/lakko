@@ -417,7 +417,10 @@ internal fun MessageActionMenuOverlay(
                     // The card is a menu: system text size, not the chat's.
                     if (actions.any) me.lakko.app.ui.theme.SystemTextScale {
                         MessageActionCard(
-                            actions = actions,
+                            // ADR-0098 — no Reply in a one-to-one whose other
+                            // person is deleted (React is withdrawn through
+                            // the conversation's reactions).
+                            actions = if (LocalReplyWithdrawn.current) actions.copy(canReply = false) else actions,
                             onReply = onReply,
                             onForward = onForward,
                             onPin = onPin,
@@ -948,3 +951,7 @@ private object WindowOriginProvider : PopupPositionProvider {
         popupContentSize: IntSize,
     ): IntOffset = IntOffset.Zero
 }
+
+/** ADR-0098 / UX section 3 — `true` inside a one-to-one whose other person
+ *  deleted their account: the message menu offers no Reply. */
+internal val LocalReplyWithdrawn = androidx.compose.runtime.staticCompositionLocalOf { false }

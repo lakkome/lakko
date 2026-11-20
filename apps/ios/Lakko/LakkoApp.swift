@@ -1932,7 +1932,10 @@ private struct SessionRoot: View, Equatable {
                         onOpen: { settingsPath.append($0) },
                         onLogout: authRepository.logout,
                         onForgetDevice: forgetDevice,
-                        onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) }
+                        onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) },
+                        announceDeletion: { [chat = services.chatRepository] in
+                            try await chat.announceAccountDeleted()
+                        }
                     )
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
                 }

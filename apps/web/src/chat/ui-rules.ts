@@ -36,6 +36,8 @@ export type UiRules = Pick<
   | "ChannelInfoCapabilities"
   | "infoTarget"
   | "personInfoSections"
+  // ADR-0098: the person info of a deleted account.
+  | "deletedPersonInfoSections"
   | "conversationInfoSections"
   | "channelInfoSections"
   // Whether an arriving call offer rings, and for how long

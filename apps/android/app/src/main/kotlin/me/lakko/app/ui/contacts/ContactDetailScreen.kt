@@ -59,6 +59,7 @@ import uniffi.lakko_ffi_uniffi.InfoSection
 import me.lakko.app.contacts.CONTACT_ACCOUNT_ID_LEN
 import me.lakko.app.ui.settings.toModel
 import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
+import uniffi.lakko_ffi_uniffi.deletedPersonInfoSections
 import uniffi.lakko_ffi_uniffi.personInfoSections
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
@@ -209,16 +210,26 @@ public fun ContactDetailScreen(
     val isSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(contactKeyB64)
     // ADR-0099 section 4 - no calls and no adding people while suspended.
     val suspendedReadOnlyInfo by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
-    val sections = remember(membershipEnded, isContact, contactsOfContactsOn, isBlocked, suspendedReadOnlyInfo) {
-        me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
-        personInfoSections(
-            PersonInfoCapabilities(
-                membershipEnded = membershipEnded,
-                isContact = isContact,
-                contactsOfContactsOn = contactsOfContactsOn,
-                isBlocked = isBlocked,
-            ),
-        ))
+    // ADR-0098 — a person whose account was deleted: the shared rule's own
+    // section list (open / delete the chat, remove the contact; no block, no
+    // report, nothing else).
+    val personKeyB64 = contactKeyB64
+    val deleted = personKeyB64 != null && nameVersion.let { directory.isDeleted(personKeyB64) }
+    LaunchedEffect(personKeyB64) { personKeyB64?.let(directory::noteOnScreen) }
+    val sections = remember(membershipEnded, isContact, contactsOfContactsOn, isBlocked, suspendedReadOnlyInfo, deleted, groupIdHex) {
+        if (deleted) {
+            deletedPersonInfoSections(hasOneToOne = groupIdHex != null, isContact = isContact)
+        } else {
+            me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
+            personInfoSections(
+                PersonInfoCapabilities(
+                    membershipEnded = membershipEnded,
+                    isContact = isContact,
+                    contactsOfContactsOn = contactsOfContactsOn,
+                    isBlocked = isBlocked,
+                ),
+            ))
+        }
     }
     // Read through `nameVersion` so a profile or a username arriving later
     // renames in place.
@@ -426,6 +437,15 @@ private fun ContactDetailBody(
             )
             Spacer(Modifier.height(12.dp))
             Text(name.primary, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+            if (name.deleted) {
+                // ADR-0098 / UX section 3 — one line, no button.
+                Text(
+                    t("person.deleted.body"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
             name.verifiedUsername?.takeIf { name.primary != "@$it" }?.let { user ->
                 Text(
                     "@$user",

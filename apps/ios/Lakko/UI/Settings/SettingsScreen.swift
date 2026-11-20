@@ -40,7 +40,8 @@ struct SettingsScreen: View {
         onOpen: @escaping (TabRoute) -> Void,
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void,
-        onAccountDeleted: @escaping (String) -> Void
+        onAccountDeleted: @escaping (String) -> Void,
+        announceDeletion: (@MainActor () async throws -> Void)? = nil
     ) {
         self.account = account
         self.accountProtection = accountProtection
@@ -49,7 +50,8 @@ struct SettingsScreen: View {
         self.onForgetDevice = onForgetDevice
         self._accountDeletion = StateObject(
             wrappedValue: PasskeysViewModel(
-                authRepository: authRepository, wipeAfterDeletion: onAccountDeleted))
+                authRepository: authRepository, wipeAfterDeletion: onAccountDeleted,
+                announceDeletion: announceDeletion))
     }
     /// ADR-0047 / UX spec section 3 — "Autoplay video notes", default OFF:
     /// autoplay downloads media, so it is the user's choice, per device.

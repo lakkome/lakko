@@ -8577,6 +8577,14 @@
       "text": "Open in the app",
       "comment": "Button on the invite, call-link, group-invite and shared-feed web pages: opens the Lakko app installed on this computer, phone or tablet, on the same screen."
     },
+    "person.deleted.body": {
+      "text": "This account was deleted.",
+      "comment": "One line shown in place of the message field in a one-to-one chat with a person whose account was deleted, on their info screen, and when accepting a contact request from them fails because the account is gone. No button follows it."
+    },
+    "person.deleted.name": {
+      "text": "Deleted account",
+      "comment": "Shown in place of every name, title and author label of a person whose Lakko account was deleted: chat list, contacts, chat header, group messages, members, person info. A label for a person who is no longer on Lakko, not an instruction. No full stop."
+    },
     "poll.close": {
       "text": "Close poll",
       "comment": "Message-menu item and dialog button that closes a poll for good."

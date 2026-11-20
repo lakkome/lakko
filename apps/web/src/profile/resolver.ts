@@ -68,10 +68,20 @@ export interface DisplayInputs {
     | undefined;
   /** Verification state of `profile.username` for this key. */
   readonly verification?: VerificationState | undefined;
+  /** ADR-0098: the person's account is deleted. Every name, a rename
+   *  included, gives way to `deletedName`; no username is shown. */
+  readonly deleted?: boolean | undefined;
+  /** The catalog's `person.deleted.name`, supplied by the caller (this module
+   *  holds no copy). */
+  readonly deletedName?: string | undefined;
+  /** ADR-0098 section 4: whether a username may be drawn beside this person
+   *  now (`mayShowUsername`), in addition to the certificate check. Absent
+   *  means no such limit (the own row). */
+  readonly usernameShowable?: boolean | undefined;
 }
 
 /** Which rule produced the primary name. */
-export type NameSource = "rename" | "profile" | "username" | "fingerprint";
+export type NameSource = "rename" | "profile" | "username" | "fingerprint" | "deleted";
 
 /** The resolved presentation of one person. */
 export interface ResolvedName {
@@ -114,10 +124,29 @@ export function fingerprintLabel(signatureKey: Uint8Array): string {
 /** Resolve one person's presentation. See the module docs for the rules. */
 export function resolveDisplay(inputs: DisplayInputs): ResolvedName {
   const fingerprint = fingerprintLabel(inputs.signatureKey);
+  if (inputs.deleted === true) {
+    // ADR-0098: "Deleted account" replaces every name, the viewer's own
+    // rename included; never a username, never the old name.
+    const name =
+      inputs.deletedName !== undefined && inputs.deletedName.length > 0 ? inputs.deletedName : fingerprint;
+    return {
+      name,
+      source: "deleted",
+      username: null,
+      listLabel: name,
+      theirName: null,
+      fingerprint,
+      usernameNotVerified: false,
+    };
+  }
   const rename = (inputs.rename ?? "").trim();
   const profileName = inputs.profile?.displayName ?? null;
   const claimed = inputs.profile?.username ?? null;
-  const verified = claimed !== null && claimed.length > 0 && inputs.verification === "verified";
+  const verified =
+    claimed !== null &&
+    claimed.length > 0 &&
+    inputs.verification === "verified" &&
+    inputs.usernameShowable !== false;
   const username = verified ? `@${claimed}` : null;
   // Only a refusal earns the line. A check that could not reach the
   // directory (a 429, the network) says nothing about the person: it reads
@@ -180,6 +209,10 @@ export interface PersonInputs {
   readonly linkStatement?: LinkStatement | undefined;
   /** The verification state of `username` claimed for this key. */
   readonly verificationOf: (username: string) => VerificationState | undefined;
+  /** ADR-0098 — see {@link DisplayInputs.deleted}. */
+  readonly deleted?: boolean | undefined;
+  readonly deletedName?: string | undefined;
+  readonly usernameShowable?: boolean | undefined;
 }
 
 /**
@@ -217,5 +250,8 @@ export function resolvePerson(inputs: PersonInputs): ResolvedName {
     rename: inputs.rename,
     profile,
     verification: claimed !== null && claimed.length > 0 ? inputs.verificationOf(claimed) : undefined,
+    deleted: inputs.deleted,
+    deletedName: inputs.deletedName,
+    usernameShowable: inputs.usernameShowable,
   });
 }

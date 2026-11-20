@@ -15,6 +15,8 @@ import { createSignal, Match, onCleanup, onMount, Switch, type JSX } from "solid
 
 import { avatarMediaFor, conversationAvatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
 import { wasmSync } from "../wasm";
+import { isDeletedAccount } from "../people/person-status";
+import { Icon } from "./icons";
 import { paintVideoBehind } from "../media/video-overlay";
 import { avatarVideoPlays, deviceCanHover, pointerHovers, type AvatarVideoMode } from "./avatar-video";
 
@@ -34,6 +36,22 @@ export function initialsOf(label: string, placeholder = "?"): string {
     return initials.length > 0 ? initials : placeholder;
   } catch {
     return placeholder;
+  }
+}
+
+/** The person glyph's box for an avatar size (about half the circle). */
+function glyphSize(size: "sm" | "md" | "lg" | "xl" | "profile" | undefined): number {
+  switch (size) {
+    case "sm":
+      return 16;
+    case "lg":
+      return 28;
+    case "xl":
+      return 48;
+    case "profile":
+      return 56;
+    default:
+      return 22;
   }
 }
 
@@ -88,7 +106,12 @@ export function Avatar(props: {
   // Asking for the video is what downloads it, so it is asked for only
   // while it is to play.
   const plays = (): boolean => avatarVideoPlays(props.playVideo, hovering(), canHover);
+  // ADR-0098: a deleted account is the neutral person glyph: no photo, no
+  // initials, the neutral surface colour.
+  const deleted = (): boolean =>
+    props.personKey !== undefined && props.personKey !== "self" && isDeletedAccount(props.personKey);
   const media = (): AvatarMedia | null => {
+    if (deleted()) return null;
     if (props.media !== undefined) return props.media;
     if (props.conversationKey !== undefined) {
       return conversationAvatarMediaFor(props.conversationKey, plays());
@@ -111,9 +134,13 @@ export function Avatar(props: {
       class={`lk-avatar ${props.size ?? ""} ${props.class ?? ""}`}
       data-tone={toneOf(props.personKey ?? props.id ?? props.label)}
       data-photo={video() !== null || still() !== null ? "true" : undefined}
+      data-deleted={deleted() ? "true" : undefined}
       aria-hidden="true"
     >
       <Switch fallback={initialsOf(props.label)}>
+        <Match when={deleted()}>
+          <Icon name="person-fill" size={glyphSize(props.size)} />
+        </Match>
         <Match when={video()}>
           {(url) => (
             <video

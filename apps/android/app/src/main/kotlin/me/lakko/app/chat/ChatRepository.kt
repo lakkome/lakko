@@ -9585,6 +9585,177 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0098 section 1 — the receive rule for an account-deleted statement.
+     * Called from the poll's (or the sweep verdict's) locked apply region, so
+     * the sender is the account key resolved from the MLS sender at receipt
+     * (C-68). Verified by the core over THIS conversation's group id; a wrong
+     * sender or a bad signature changes nothing. An accepted statement marks
+     * the person deleted for good and, in a group this device's account owns
+     * or administers, owes the removal of their devices (section 5), proposed
+     * outside this lock.
+     */
+    private fun receiveAccountDeleted(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        envelope: ByteArray,
+    ) {
+        val account = currentAccountIdB64.get() ?: return
+        val groupId = groups[groupIdHex]?.groupId ?: hexToBytes(groupIdHex) ?: return
+        // A statement in our own name (another device of this account) is not
+        // about someone else; this device is wiped by its own deletion.
+        if (senderKey != null && senderKey == ownPersonKeyB64()) return
+        val deleted = acceptAccountDeletedStatement(envelope, groupId, senderKey, ::verifyAccountDeletedWithCore)
+        if (deleted == null) {
+            android.util.Log.w("ChatRepository", "ADR-0098: account-deleted statement refused")
+            return
+        }
+        profileDirectory.deletions?.book?.markStatementVerified(deleted)
+        // Section 5 — only the signed statement removes; never a directory answer.
+        val table = roleTableOrNull(group)
+        val own = ownPersonKeyB64()
+        val ownPrivileged = table != null && own != null &&
+            (outboxB64(table.owner) == own || table.admins.any { outboxB64(it) == own })
+        val removals = deletedMemberRemovals(account)
+        val due = me.lakko.app.profile.deletedMemberRemovalDue(
+            isGroup = runCatching { group.groupKind() }.getOrNull() == GroupKind.GROUP,
+            ownRoleIsOwnerOrAdmin = ownPrivileged,
+            deletedIsOwner = table != null && outboxB64(table.owner) == deleted,
+            alreadyProposed = removals.proposed(groupIdHex, deleted),
+        )
+        if (!due) return
+        removals.markOwed(groupIdHex, deleted)
+        pushScope.launch { proposeOwedDeletedRemovals(groupIdHex) }
+    }
+
+    private fun deletedMemberRemovals(account: String): me.lakko.app.profile.DeletedMemberRemovals =
+        me.lakko.app.profile.DeletedMemberRemovals.onDevice(applicationContext, account)
+
+    /**
+     * ADR-0098 section 5 — propose the removal of every leaf of each deleted
+     * member whose removal [groupIdHex] still owes. Re-run at the tail of the
+     * group's poll, so a proposal that could not be sent is tried again. A
+     * member whose leaves are already gone is settled. Never throws.
+     */
+    internal suspend fun proposeOwedDeletedRemovals(groupIdHex: String) {
+        val account = currentAccountIdB64.get() ?: return
+        val removals = deletedMemberRemovals(account)
+        val owed = try {
+            removals.owed(groupIdHex)
+        } catch (_: Throwable) {
+            return
+        }
+        if (owed.isEmpty()) return
+        // One pass per group at a time: a receive and a poll tail must not
+        // both propose the same removal.
+        if (!deletedRemovalsInFlight.add(groupIdHex)) return
+        try {
+            proposeDeletedRemovals(groupIdHex, removals, owed)
+        } finally {
+            deletedRemovalsInFlight.remove(groupIdHex)
+        }
+    }
+
+    private val deletedRemovalsInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private suspend fun proposeDeletedRemovals(
+        groupIdHex: String,
+        removals: me.lakko.app.profile.DeletedMemberRemovals,
+        owed: List<String>,
+    ) {
+        for (deleted in owed) {
+            val leaf = try {
+                groups[groupIdHex]?.let { record ->
+                    providerLock.sessionLock {
+                        rosterOf(record.group).firstOrNull { outboxB64(personKeyOf(it)) == deleted }?.leafIndex
+                    }
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Throwable) {
+                continue
+            }
+            if (leaf == null) {
+                // No leaf of theirs is left: nothing to propose.
+                removals.markProposed(groupIdHex, deleted)
+                continue
+            }
+            try {
+                removeMemberFromGroup(groupIdHex, leaf)
+                removals.markProposed(groupIdHex, deleted)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                // Owed: tried again at the group's next poll.
+                android.util.Log.w("ChatRepository", "ADR-0098: removal proposal not sent: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * ADR-0098 section 1 — post the account-deleted statement, signed with
+     * the account key this device's conversation leaves are bound under, in
+     * every one-to-one and group this device holds (not channels, not the
+     * DeviceGroup: neither is in [groups]). Best effort: one conversation that
+     * fails is logged by a fixed label and the others go on; the caller bounds
+     * the time. [sent] carries the conversations already done across retries.
+     *
+     * [candidateSeeds] are 64-byte account identity seeds; the one whose
+     * signature key is the binding key of this device's conversation identity
+     * signs. Run only after the account is gone at auth (the DS needs no
+     * session: a post is proved by the group's epoch key, ADR-0053).
+     */
+    public suspend fun announceAccountDeleted(
+        candidateSeeds: List<ByteArray>,
+        sent: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet(),
+    ) {
+        val identity = canonicalIdentity.get() ?: return
+        val bindingKey = try {
+            identity.accountPublicKey() ?: identity.signaturePublicKey()
+        } catch (_: Throwable) {
+            return
+        }
+        val signingSeed = candidateSeeds.firstNotNullOfOrNull { seed ->
+            try {
+                Identity.fromSeed(seed).use { candidate ->
+                    if (candidate.signaturePublicKey().contentEquals(bindingKey)) candidate.ed25519Seed() else null
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        } ?: run {
+            android.util.Log.w("ChatRepository", "ADR-0098: no seed for the binding key; nothing announced")
+            return
+        }
+        try {
+            var failures = 0
+            for ((groupIdHex, record) in groups.entries.toList()) {
+                if (groupIdHex in sent) continue
+                val envelope = try {
+                    uniffi.lakko_ffi_uniffi.composeAccountDeletedEnvelope(signingSeed, record.groupId)
+                } catch (_: Throwable) {
+                    failures++
+                    continue
+                }
+                try {
+                    if (broadcastControlToGroup(identity, groupIdHex, record.group, envelope) != null) {
+                        sent += groupIdHex
+                    } else {
+                        failures++
+                    }
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Throwable) {
+                    failures++
+                }
+            }
+            if (failures > 0) throw IllegalStateException("$failures conversations not reached")
+        } finally {
+            signingSeed.fill(0)
+        }
+    }
+
+    /**
      * R.6 - the receive rule for a `group_closed` envelope, which since the
      * visible flow was removed has one producer: a successor claim. Called
      * from the poll's locked apply region, so the roster and role-table read,
@@ -11160,6 +11331,11 @@ public class ChatRepository(
                     // read-decide-write (C-62 sub-invariant 5).
                     receiveSuccessorClaim(record.group, groupIdHex, messageId, senderKey, closed)
                 },
+                accountDeletedSink = { senderKey, envelope ->
+                    // ADR-0098 — verified here, inside the locked apply region,
+                    // against the group as it stands at receipt.
+                    receiveAccountDeleted(record.group, groupIdHex, senderKey, envelope)
+                },
                 // UX second-device.md section 4 — a batch of commits that
                 // changed the PEOPLE of a group names them on its last commit
                 // row; a device change or a one-to-one records nothing.
@@ -11418,6 +11594,10 @@ public class ChatRepository(
         // retried from the poll tail, no sooner than its retry interval.
         scheduleRootHandover(groupIdHex)
         scheduleTakeover(groupIdHex)
+        // ADR-0098 section 5 — a removal of a deleted member this device owes
+        // (its proposal could not be sent) is tried again from the poll tail,
+        // outside the per-group lock the propose takes itself.
+        pushScope.launch { proposeOwedDeletedRemovals(groupIdHex) }
         // ADR-0045 — the committer sweep runs at the TAIL of every poll, AFTER
         // [runSplitPoll] has released the per-group lock: the sweep takes that
         // same lock itself and holds it across its own two DS round-trips, and
@@ -17157,6 +17337,9 @@ public class ChatRepository(
                             groupClosedSink = { messageId, senderKey, closed ->
                                 receiveSuccessorClaim(record.group, groupIdHex, messageId, senderKey, closed)
                             },
+                            accountDeletedSink = { senderKey, envelope ->
+                                receiveAccountDeleted(record.group, groupIdHex, senderKey, envelope)
+                            },
                             pinSink = { senderKey, op ->
                                 receivePin(record.group, groupIdHex, senderKey, op)
                             },
@@ -18852,6 +19035,8 @@ private class GroupRecord(
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
         groupSettingSink: ((MemberIdentity?, GroupSettingKind, ByteArray) -> Unit)? = null,
         groupClosedSink: ((Long, MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
+        /** ADR-0098 — an account-deleted statement: (sender key, envelope). */
+        accountDeletedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         /** `docs/ux/who-can-find-me.md` section 6.4 — a contact request sent
          *  inside the group: (sender key, envelope, DS message id, created at). */
         groupContactRequestSink: ((MemberIdentity?, ByteArray, Long, String) -> Unit)? = null,
@@ -19003,6 +19188,11 @@ private class GroupRecord(
                     // writes the claim state only on its verdict.
                     val closed = event.closed
                     if (closed != null) groupClosedSink?.invoke(event.messageId, event.senderKey, closed)
+                }
+                is IncomingChatEvent.AccountDeleted -> {
+                    // ADR-0098 — never a timeline row; the sink verifies the
+                    // statement against the sender resolved at receipt.
+                    accountDeletedSink?.invoke(event.senderKey, event.envelope)
                 }
                 is IncomingChatEvent.Pin -> {
                     // ADR-0052 decision 3 — a shared pin / unpin. Not a

@@ -33,6 +33,10 @@ public enum class AcceptOutcome {
 
     /** Nothing was delivered and no group stands: the request stays listed. */
     FAILED,
+
+    /** ADR-0098 — the requester's account was deleted: the card is removed
+     *  and `person.deleted.body` is shown. Nothing was built. */
+    ACCOUNT_DELETED,
 }
 
 /** Neither the request's reply grant nor a `contact` grant is held for the

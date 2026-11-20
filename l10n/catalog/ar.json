@@ -7621,6 +7621,14 @@
       "text": "فتح في التطبيق",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "تم حذف هذا الحساب.",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "حساب محذوف",
+      "status": "machine"
+    },
     "profile.save.error.full": {
       "text": "لا تتوفّر لدى Lakko مساحة لملفات جديدة الآن. حاول مرة أخرى لاحقًا.",
       "status": "machine"

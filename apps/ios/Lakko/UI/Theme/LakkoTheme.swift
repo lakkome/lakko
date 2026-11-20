@@ -237,11 +237,30 @@ struct InitialsAvatar: View {
     var playsVideo: Bool = false
 
     var body: some View {
-        if let photo {
+        if isDeletedAccount {
+            deletedCircle
+        } else if let photo {
             AvatarPhotoView(photo: photo, size: size, playsVideo: playsVideo) { initialsCircle }
         } else {
             initialsCircle
         }
+    }
+
+    /// ADR-0098 — a person drawn under ``ResolvedDisplayName/deletedName``:
+    /// the neutral avatar, the person glyph on the neutral surface, no photo
+    /// and no initials, the same on every client.
+    private var isDeletedAccount: Bool {
+        !isGroup && name == ResolvedDisplayName.deletedName
+    }
+
+    private var deletedCircle: some View {
+        ZStack {
+            Circle().fill(Color.lakkoSurfaceSunken)
+            LkIconView(.personFill, size: size * 0.5, relativeTo: nil)
+                .foregroundStyle(Color.lakkoTextMuted)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 
     private var initialsCircle: some View {

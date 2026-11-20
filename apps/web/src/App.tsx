@@ -62,6 +62,7 @@ import { AccountNotices } from "./auth/protect/AccountNotices";
 import { RenameResume } from "./auth/rename-runtime";
 import { GroupHandleRuntime } from "./chat/GroupHandleRuntime";
 import { ConversationRejoinRuntime } from "./chat/ConversationRejoinRuntime";
+import { PersonStatusRuntime } from "./people/PersonStatusRuntime";
 import { BlobAccessRuntime } from "./storage/BlobAccessRuntime";
 import { AttachRuntime } from "./attach/AttachRuntime";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
@@ -303,6 +304,9 @@ const App: Component = () => (
           {/* ADR-0091 phase 2 - a device that fell behind a conversation
               asks to come back, and this device brings back another. */}
           <ConversationRejoinRuntime />
+          {/* ADR-0098 - a deleted account: statements, directory answers, the
+              on-screen check and the group removal. Renders nothing. */}
+          <PersonStatusRuntime />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

@@ -37,7 +37,7 @@ import {
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode } from "../auth/account-id";
-import { conversationLabelsOf, realNameOf } from "./member-label";
+import { conversationLabelsOf, deletedLabelsOf, realNameOf } from "./member-label";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient, isConversationBehind } from "../chat/client";
@@ -70,6 +70,13 @@ import { ownCardFlagFlipped, ownCardShareable, usernameForConversation, withCard
 import { installBeforeSend } from "../chat/before-send";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
 import { resolveDisplay, resolvePerson, type ResolvedName } from "./resolver";
+import { t } from "../l10n";
+import {
+  isDeletedAccount,
+  personStatusEntries,
+  personStatusVersion,
+  usernameMayShow,
+} from "../people/person-status";
 import type { ReceivedGrantWire } from "./profile-envelope";
 import { UsernameVerifier } from "./username-verification";
 import { isOwnKeyB64, ownKeysB64Of } from "./own-key";
@@ -253,7 +260,12 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   };
 
   const store = new ProfileStore(
-    new IdbProfileBackend(getDeviceKey, () => untrack(renames), () => untrack(conversationLabels)),
+    new IdbProfileBackend(
+      getDeviceKey,
+      () => untrack(renames),
+      () => untrack(conversationLabels),
+      () => untrack(deletedLabels),
+    ),
     (incoming, stored) => (wasm !== null ? wasm.profileIsNewer(incoming, stored) : incoming > stored),
     (err) => {
       // eslint-disable-next-line no-console
@@ -776,6 +788,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     renames();
     aliases();
     pendingContacts();
+    // ADR-0098: a person becoming deleted, or a pull-derived deletion being
+    // reverted, rewrites the worker's deleted-name mirror.
+    personStatusVersion();
     const account = accountId();
     if (account === null) return;
     if (labelsTimer !== null) clearTimeout(labelsTimer);
@@ -815,6 +830,30 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       (person) => realNameOf(api.resolve(person)),
       base64Encode,
       others,
+    );
+  }
+
+  /**
+   * ADR-0098 — "Deleted account" for every key of every person this device
+   * holds as deleted, mirrored for the service worker (`x` in the row), which
+   * reads it before a rename, a profile or a label.
+   */
+  function deletedLabels(): Map<string, string> {
+    const others = new Set<string>();
+    for (const c of loadAccepted()) others.add(c.signaturePubkeyB64);
+    for (const c of pendingContacts()) others.add(c.signaturePubkeyB64);
+    for (const [key] of store.entries()) others.add(key);
+    for (const key of aliases().keys()) others.add(key);
+    for (const [key] of personStatusEntries()) others.add(key);
+    return deletedLabelsOf(
+      chats.groups().map((g) => rosterOf(g.group)),
+      (person) => {
+        const canonical = aliases().get(person) ?? person;
+        return isDeletedAccount(person) || (canonical !== person && isDeletedAccount(canonical));
+      },
+      base64Encode,
+      others,
+      t("person.deleted.name"),
     );
   }
 
@@ -906,12 +945,18 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
             ? keyB64
             : canonical
           : (pending?.signaturePubkeyB64 ?? keyB64);
+      // ADR-0098: a deleted account reads "Deleted account" everywhere; a
+      // username is shown only while the account was recently confirmed.
+      const deleted = isDeletedAccount(keyB64) || (canonical !== keyB64 && isDeletedAccount(canonical));
       return resolvePerson({
         signatureKey: keyBytes,
         rename: renames().get(canonical),
         received: profile,
         linkStatement: pending,
         verificationOf: (username) => verifier.state(claimKeyB64, username),
+        deleted,
+        deletedName: deleted ? t("person.deleted.name") : undefined,
+        usernameShowable: usernameMayShow(keyB64) || (canonical !== keyB64 && usernameMayShow(canonical)),
       });
     },
     claimedUsernameOf(keyB64) {

@@ -150,6 +150,7 @@ import {
   blockDropsEvent,
   consumeGroupContactRequest,
   consumeKnockSeed,
+  consumeAccountDeleted,
   consumeRegistrarSeed,
   ChatClient,
   ConversationBehindError,
@@ -1006,6 +1007,9 @@ function sweepPortsFor(
           // ADR-0057 — consumed at receipt, like the poll does, never shown.
           if (event.kind === "registrarSeed") {
             await consumeRegistrarSeed(group, event);
+          } else if (event.kind === "accountDeleted") {
+            // ADR-0098 — verified and recorded at receipt, never shown.
+            await consumeAccountDeleted(group, event);
           } else if (event.kind === "groupContactRequest") {
             await consumeGroupContactRequest(group, event);
           } else if (event.kind === "group-setting" && event.setting?.kind === "knockSeed") {

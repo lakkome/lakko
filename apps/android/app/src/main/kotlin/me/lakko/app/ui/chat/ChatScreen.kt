@@ -340,6 +340,12 @@ public fun ChatScreen(
     val peerUsername = remember(state.groupIdHex, nameVersion, otherMembers) {
         viewModel.oneToOnePeerUsername()
     }
+    // ADR-0098 / UX section 3 — the other person of this one-to-one deleted
+    // their account: history stays, nothing can be sent or placed.
+    val peerDeleted = remember(state.groupIdHex, nameVersion, otherMembers) {
+        viewModel.oneToOnePeerDeleted()
+    }
+    LaunchedEffect(state.groupIdHex, otherMembers) { viewModel.noteOneToOnePeerOnScreen() }
     // docs/ux/conversation-info.md section 1 — WHICH info this conversation's
     // header opens, decided by what the conversation is. The rule is in
     // `me.lakko.app.chat` where the host suite runs it; this reads its answer
@@ -701,7 +707,10 @@ public fun ChatScreen(
     val capNoticeId by viewModel.reactionCapNotice.collectAsStateWithLifecycle()
     val quickChosen by me.lakko.app.chat.QuickReaction.chosen.collectAsStateWithLifecycle()
     val settingsVersion by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
-    val allowedReactions = remember(state.groupIdHex, settingsVersion) { viewModel.allowedReactions() }
+    // ADR-0098 — no React in a one-to-one whose other person is deleted.
+    val allowedReactions = remember(state.groupIdHex, settingsVersion, peerDeleted) {
+        if (peerDeleted) me.lakko.app.chat.AllowedReactions.Off else viewModel.allowedReactions()
+    }
     val reactionContext = remember(allowedReactions, quickChosen, capNoticeId, conversationKind, nameVersion) {
         BubbleReactionContext(
             allowed = allowedReactions,
@@ -853,7 +862,12 @@ public fun ChatScreen(
             // ADR-0091 UX 2.6 — the buttons stay while this device is behind;
             // the call hosts fail a start then with the ordinary notice.
             // ADR-0099 section 4 - a suspended account makes no calls.
-            callActive = callOccupant != null || membershipEnded || !callControls || suspendedReadOnly,
+            callActive = me.lakko.app.chat.callButtonsHidden(
+                callOccupied = callOccupant != null,
+                membershipEnded = membershipEnded,
+                callControls = callControls,
+                peerDeleted = peerDeleted,
+            ) || suspendedReadOnly,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
@@ -1089,6 +1103,8 @@ public fun ChatScreen(
                 androidx.compose.runtime.CompositionLocalProvider(
                     LocalBubbleReactions provides reactionContext,
                     LocalContentBubble provides contentBubbleContext,
+                    LocalReplyWithdrawn provides peerDeleted,
+                    LocalQuotedAuthorDeleted provides { target -> nameVersion.let { viewModel.messageAuthorDeleted(target) } },
                 ) {
                 LazyColumn(
                     state = listState,
@@ -1439,7 +1455,7 @@ public fun ChatScreen(
                     // ADR-0099 section 4 - the account is suspended: one muted
                     // line in place of the composer, no send control.
                     me.lakko.app.ui.suspension.SuspendedComposerLine()
-                } else if (blockedPeerKey != null) {
+                } else if (blockedPeerKey != null && !peerDeleted) {
                     // ADR-0099 / UX 1.2 — a banner replaces the composer in the
                     // one-to-one with a person this account blocked.
                     BlockedBanner(
@@ -1450,7 +1466,7 @@ public fun ChatScreen(
                             }
                         },
                     )
-                } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
+                } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft, peerDeleted)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
                 recorder = recorder,
                 emojiInsert = pendingEmojiInsert,
@@ -3067,7 +3083,8 @@ internal fun ReplyQuote(
     quotesOwnAccount: Boolean = false,
 ) {
     val strings = LocalStrings.current
-    val (name, excerpt) = replyQuoteLines(reply, strings, quotesOwnAccount)
+    val quotesDeleted = !quotesOwnAccount && LocalQuotedAuthorDeleted.current(reply.target)
+    val (name, excerpt) = replyQuoteLines(reply, strings, quotesOwnAccount, quotesDeleted)
     val label = if (name.isEmpty()) strings["chat.reply.quote"] else strings.format("chat.reply.quote_to", mapOf("name" to name))
     Row(
         modifier = modifier
@@ -5429,6 +5446,11 @@ private fun MembersSheet(
                                 // the own row shows the owner's own photo.
                                 val memberName = viewModel.memberLabel(member)
                                 val isOwnRow = ownLeaf == member.leafIndex
+                                // ADR-0098 section 2 — a visible member row: the
+                                // directory is asked about them when a check is due.
+                                LaunchedEffect(memberKeyB64, isOwnRow) {
+                                    if (!isOwnRow) viewModel.notePersonOnScreen(memberKeyB64)
+                                }
                                 LakkoAvatar(
                                     // Initials from the name alone, never
                                     // the ` · @username` label.
@@ -6002,3 +6024,8 @@ private fun BlockedBanner(name: String, onUnblock: () -> Unit) {
         TextButton(onClick = onUnblock) { Text(t("block.unblock")) }
     }
 }
+
+/** ADR-0098 — whether the author of the message with this DS id is shown as
+ *  Deleted account (a quote then names them so). `false` outside a chat. */
+internal val LocalQuotedAuthorDeleted =
+    androidx.compose.runtime.staticCompositionLocalOf<(Long) -> Boolean> { { false } }

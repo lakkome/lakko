@@ -241,6 +241,9 @@ public final class ContactsViewModel: ObservableObject {
     /// The requests being accepted: a second press does nothing, or it would
     /// found a second chat.
     @Published public private(set) var accepting: Set<Int64> = []
+    /// ADR-0098 — the last Accept found the person's account deleted; the
+    /// card went and the list says so once.
+    @Published public private(set) var acceptedDeletedAccount = false
 
     /// Accept a pending request (``ContactAccept``). The chat is founded
     /// first and the row moves only then. The ack follows the Welcome, never
@@ -252,10 +255,12 @@ public final class ContactsViewModel: ObservableObject {
         guard let pending = repository.state.pending.first(where: { $0.messageId == messageId }),
               accepting.insert(messageId).inserted else { return }
         acceptFailed.remove(messageId)
+        acceptedDeletedAccount = false
         Task {
             let outcome = await repository.acceptIncomingRequest(pending)
             accepting.remove(messageId)
             if outcome == .failed { acceptFailed.insert(messageId) }
+            if outcome == .deletedAccount { acceptedDeletedAccount = true }
         }
     }
 

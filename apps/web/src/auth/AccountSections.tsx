@@ -34,6 +34,16 @@ import {
 import { DiscoveryClient } from "../discovery/client";
 import { runAccountDeletion } from "./account-deletion";
 import { buildDeletionCleanups, prepareDeletionTokens } from "./account-deletion-cleanups";
+import {
+  bindingSigner,
+  buildStatementCleanups,
+  isStatementConversation,
+  type StatementTarget,
+} from "./account-deleted-statement";
+import { useChats } from "../chat/ChatContext";
+import { ChatClient } from "../chat/client";
+import { durableSnapshotHook } from "../chat/persist-hooks";
+import { loadWasm } from "../wasm";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
 import { t, type L10nArgs } from "../l10n";
@@ -235,6 +245,7 @@ export function DeleteAccountDialog(props: {
     c.setSessionToken(tg.bearer);
     return c;
   };
+  const chats = useChats();
   const [busy, setBusy] = createSignal(false);
   const [noPassword, setNoPassword] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -274,6 +285,54 @@ export function DeleteAccountDialog(props: {
     const c = client();
     if (c === null) throw new Error("signed out");
     await c.assertAction(await actionHashForDeleteAccount(accountId));
+  }
+
+  /**
+   * ADR-0098 section 1: one account-deleted statement per conversation this
+   * device holds, posted after the auth deletion and before the wipe. Built
+   * here because the conversations and the signing identity live in the chat
+   * context; no session is needed (the DS publish is proved by the epoch key).
+   */
+  async function statementCleanups(accountIdB64: string) {
+    const device = chats.identity();
+    if (device === null) return [];
+    let boundKey: Uint8Array | undefined;
+    try {
+      boundKey = device.accountPublicKey ?? undefined;
+    } catch {
+      boundKey = undefined;
+    }
+    const signer = bindingSigner(boundKey, [
+      chats.conversationAccountIdentity(),
+      chats.accountIdentity(),
+      ...chats.ownPredecessorIdentities(),
+    ]);
+    if (signer === null) return [];
+    const publisher = new ChatClient(undefined, {
+      identityProvider: () => chats.identity(),
+      onPersist: durableSnapshotHook(chats, () => accountIdB64),
+    });
+    const targets: StatementTarget[] = [];
+    for (const entry of chats.groups()) {
+      if (!isStatementConversation(entry.group)) continue;
+      let groupId: Uint8Array;
+      try {
+        groupId = entry.group.groupId;
+      } catch {
+        continue;
+      }
+      targets.push({
+        groupId,
+        publish: async (plaintext) => {
+          // The person's own action: held only while this device is behind.
+          await publisher.broadcastControl(null, entry.group, plaintext, { personAction: true });
+        },
+      });
+    }
+    const wasm = await loadWasm();
+    return buildStatementCleanups(targets, signer.ed25519Seed, (seed, groupId) =>
+      wasm.composeAccountDeletedEnvelope(seed, groupId),
+    );
   }
 
   async function onDelete(): Promise<void> {
@@ -340,8 +399,18 @@ export function DeleteAccountDialog(props: {
             }
           }
         },
-        cleanups: () =>
-          buildDeletionCleanups(base64Encode(secrets.accountId), secrets.bearer),
+        cleanups: async () => {
+          // ADR-0098: the statements first, so a short budget reaches them.
+          let statements: Awaited<ReturnType<typeof statementCleanups>> = [];
+          try {
+            statements = await statementCleanups(base64Encode(secrets.accountId));
+          } catch {
+            // eslint-disable-next-line no-console
+            console.warn("[account] delete: statements not built");
+          }
+          const rest = await buildDeletionCleanups(base64Encode(secrets.accountId), secrets.bearer);
+          return [...statements, ...rest];
+        },
         wipe: async () => {
           gate.clear();
           // Wipes this device and lands on the sign-in screen (ADR-0099: a

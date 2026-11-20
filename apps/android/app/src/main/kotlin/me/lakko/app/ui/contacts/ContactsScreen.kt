@@ -212,11 +212,14 @@ public fun ContactsScreen(
                 placeholder = resolved.isPlaceholder,
             )
         } + invited.map { p ->
-            val stated = PendingContacts.name(p)
+            // ADR-0098 — a pending contact whose account was deleted is
+            // `Deleted account`, with no stated name or username.
+            val deleted = directory.isDeleted(p.signaturePubkeyB64)
+            val stated = if (deleted) me.lakko.app.profile.DELETED_ACCOUNT_NAME else PendingContacts.name(p)
             ContactRowModel(
                 key = INVITED_ROW_PREFIX + p.accountIdHex,
                 name = stated ?: unnamed,
-                username = p.username.ifEmpty { null },
+                username = if (deleted) null else p.username.ifEmpty { null },
                 placeholder = stated == null,
                 personKey = p.signaturePubkeyB64,
             )
@@ -300,6 +303,18 @@ public fun ContactsScreen(
                         onQueryChange = { query = it },
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     )
+                }
+                if (state.acceptDeletedNotice) {
+                    // ADR-0098 / UX section 3 — an Accept whose requester's
+                    // account was deleted: the card is gone, one line says why.
+                    item(key = "accept-deleted") {
+                        Text(
+                            text = t("person.deleted.body"),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        )
+                    }
                 }
                 state.refreshError?.let { inboxError ->
                     // The transport detail stays out of the copy (UX section 6);
@@ -403,6 +418,10 @@ public fun ContactsScreen(
                         if (!oneList) stickyHeader(key = "letter-${section.letter}") { LetterHeader(section.letter) }
                         items(section.rows, key = { "c-${it.key}" }) { row ->
                             val contact = byKey[row.key]
+                            // ADR-0098 section 2 — a visible row: the directory
+                            // is asked about the person when a check is due.
+                            val rowPersonKey = contact?.let { base64Encode(it.request.fromPubkey) } ?: row.personKey
+                            LaunchedEffect(rowPersonKey) { rowPersonKey?.let(directory::noteOnScreen) }
                             ContactRow(
                                 row = row,
                                 onClick = {

@@ -131,6 +131,10 @@ export interface BubbleHost {
    *  or another device of this person's) and held in this timeline: a reply
    *  quoting it draws "You" for the author snapshot. */
   isAuthoredByViewer?: (messageId: number) => boolean;
+  /** ADR-0098: whether the message with this id is held in this timeline and
+   *  its author's account was deleted: a reply quoting it names its author
+   *  "Deleted account". */
+  isQuotedAuthorDeleted?: (messageId: number) => boolean;
   /** ADR-0023 — our own signature key (for the own-reaction
    *  highlight). Not our leaf: a leaf we compare against a stored
    *  reactor would start matching a stranger after a renumber. */
@@ -161,6 +165,10 @@ export interface BubbleHost {
   chipConversation: ChipConversation;
   /** Section 5 — the six emoji of this message's reaction row. Reactive. */
   reactionRowFor: (messageId: number) => readonly string[];
+  /** ADR-0098: `false` in a one-to-one whose other person deleted their
+   *  account: Reply leaves the menu (React leaves with an empty
+   *  `reactionRowFor`). Default `true`. */
+  replyAllowed?: boolean;
   /** The person's account key, base64: who "mine" means (ADR-0050). */
   ownReactorKey: string | null;
   /** Section 10 — the message whose chips show the three-reactions line for
@@ -355,7 +363,7 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
-    if (ev.kind === "registrarSeed" || ev.kind === "groupContactRequest") {
+    if (ev.kind === "registrarSeed" || ev.kind === "groupContactRequest" || ev.kind === "accountDeleted") {
       // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
       // client, never a row.
       // Defensive.
@@ -1162,7 +1170,11 @@ function ChatBubbleBody(
                 <Show when={props.reply}>
                   {(reply) => {
                     const lines = (): ReturnType<typeof replyQuoteLines> =>
-                      replyQuoteLines(reply(), props.isAuthoredByViewer?.(reply().target) === true);
+                      replyQuoteLines(
+                        reply(),
+                        props.isAuthoredByViewer?.(reply().target) === true,
+                        props.isQuotedAuthorDeleted?.(reply().target) === true,
+                      );
                     return (
                       <button
                         type="button"
@@ -1529,7 +1541,7 @@ function ChatBubbleBody(
               anchor={anchor()}
               pinOnly={pinOnlyMenu()}
               canEditDelete={props.isOwn}
-              canReply={true}
+              canReply={props.replyAllowed !== false}
               /* `message-actions.md` section 3 — offered on "any message with
                  text", which is not the same predicate as Edit / Delete: Copy
                  is offered on somebody else's message too, and withheld from

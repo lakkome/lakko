@@ -201,6 +201,7 @@ public class ContactsViewModel(
             requiresReauth = repoState.requiresReauth,
             acceptingIds = ui.acceptingIds,
             acceptFailedIds = ui.acceptFailedIds,
+            acceptDeletedNotice = ui.acceptDeletedNotice,
         )
 
     /** Remove an accepted contact from this device (UX 5.3). Local only. */
@@ -474,6 +475,7 @@ public class ContactsViewModel(
                     } else {
                         ui.acceptFailedIds - messageId
                     },
+                    acceptDeletedNotice = outcome == me.lakko.app.contacts.AcceptOutcome.ACCOUNT_DELETED,
                 )
             }
         }
@@ -530,6 +532,8 @@ public class ContactsViewModel(
         val acceptingIds: Set<Long> = emptySet(),
         /** The requests whose last Accept failed with nothing standing. */
         val acceptFailedIds: Set<Long> = emptySet(),
+        /** ADR-0098 — an Accept found the requester's account deleted. */
+        val acceptDeletedNotice: Boolean = false,
         val generatingInvite: Boolean = false,
         val inviteError: UiText? = null,
         /** A notice on the Invite links sheet (`invite.links.deleted`). */
@@ -579,6 +583,9 @@ public data class ContactsUiState(
     val acceptingIds: Set<Long> = emptySet(),
     /** The requests whose last Accept failed: the row says so. */
     val acceptFailedIds: Set<Long> = emptySet(),
+    /** ADR-0098 / UX section 3 — the last Accept found the requester's
+     *  account deleted: `person.deleted.body` is shown and the card is gone. */
+    val acceptDeletedNotice: Boolean = false,
 )
 
 // =============================================================================

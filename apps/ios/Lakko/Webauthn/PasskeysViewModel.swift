@@ -72,6 +72,11 @@ public final class PasskeysViewModel: ObservableObject {
     /// same path Forget device takes. Required, so no caller can end up with
     /// a partial wipe of its own. The argument is the deleted account.
     private let wipeAfterDeletion: (String) -> Void
+    /// ADR-0098 — post the account-deleted statement in every conversation
+    /// this device holds; ``ChatRepository/announceAccountDeleted()`` in the
+    /// app. Run as one of the cleanups, after the auth delete and before the
+    /// wipe. `nil` posts nothing.
+    private let announceDeletion: (@MainActor () async throws -> Void)?
     private let client: WebauthnClient
     private let registration: WebauthnRegistration
     /// The ADR-0014 gesture bound to deleting the account (one system
@@ -82,6 +87,7 @@ public final class PasskeysViewModel: ObservableObject {
     public init(
         authRepository: AuthRepository,
         wipeAfterDeletion: @escaping (String) -> Void,
+        announceDeletion: (@MainActor () async throws -> Void)? = nil,
         client: WebauthnClient? = nil,
         registration: WebauthnRegistration? = nil,
         assertDeleteAction: (@MainActor (_ actionHashB64: String) async throws -> Void)? = nil
@@ -97,6 +103,7 @@ public final class PasskeysViewModel: ObservableObject {
         self.authRepository = authRepository
         self.addProof = FreshAuthProofModel(surface: .addPasskey, repository: authRepository)
         self.wipeAfterDeletion = wipeAfterDeletion
+        self.announceDeletion = announceDeletion
         let client = client ?? WebauthnClient()
         self.client = client
         self.assertDeleteAction = assertDeleteAction ?? { hash in
@@ -479,7 +486,8 @@ public final class PasskeysViewModel: ObservableObject {
                 cleanups: Self.deletionCleanups(
                     sessionToken: token,
                     subscriptionIds: subscriptionIds,
-                    pushTokens: pushTokens),
+                    pushTokens: pushTokens,
+                    announceDeletion: announceDeletion),
                 wipe: { wipeAfterDeletion(accountIdB64) }
             ).run()
             return true
@@ -522,7 +530,8 @@ public final class PasskeysViewModel: ObservableObject {
     static func deletionCleanups(
         sessionToken: String,
         subscriptionIds: [Data],
-        pushTokens: ReservedAnonTokens
+        pushTokens: ReservedAnonTokens,
+        announceDeletion: (@MainActor () async throws -> Void)? = nil
     ) -> [AccountDeletionCleanup] {
         var cleanups = [
             AccountDeletionCleanup(name: "discovery") {
@@ -534,6 +543,13 @@ public final class PasskeysViewModel: ObservableObject {
                 try await storage.deleteBackup()
             },
         ]
+        // ADR-0098 section 1 — the account-deleted statement in every
+        // conversation. A cleanup, so it runs only once the auth delete
+        // succeeded and always before the wipe; the DS needs no session
+        // (each post is proved by the group's epoch key).
+        if let announceDeletion {
+            cleanups.append(AccountDeletionCleanup(name: "conversations", run: announceDeletion))
+        }
         if !subscriptionIds.isEmpty {
             // One client for every attempt, so an id removed by an earlier
             // attempt is not sent again.

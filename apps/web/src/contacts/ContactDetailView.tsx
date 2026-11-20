@@ -44,7 +44,12 @@ import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from 
 
 import { base64Decode } from "../auth/account-id";
 import { DELETE_CHAT_CONTROL } from "../chat/membership-ended";
-import { personInfoSections, sectionsWhileSuspended } from "../chat/conversation-info";
+import {
+  deletedPersonInfoSections,
+  personInfoSections,
+  sectionsWhileSuspended,
+} from "../chat/conversation-info";
+import { isDeletedAccount, personOnScreen } from "../people/person-status";
 import { uiRules } from "../chat/ui-rules";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
@@ -188,17 +193,28 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   };
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
+  // ADR-0098: a deleted account has its own, shorter list (the shared rule).
+  const deleted = (): boolean => isDeletedAccount(props.personKeyB64);
+  createEffect(() => {
+    personOnScreen(props.personKeyB64);
+  });
   const sections = createMemo(() =>
-    // ADR-0099 step 3: a suspended account adds no contact and calls nobody.
-    sectionsWhileSuspended(
-      personInfoSections(uiRules(), {
-        membershipEnded: props.membershipEnded,
-        isContact: props.isContact,
-        contactsOfContactsOn: contactsOfContactsOn(),
-        isBlocked: blocked(),
-      }),
-      accountSuspended(),
-    ),
+    deleted()
+      ? deletedPersonInfoSections(
+          uiRules(),
+          props.chatHref !== null || props.onDeleteChat !== null,
+          props.isContact,
+        )
+      : // ADR-0099 step 3: a suspended account adds no contact and calls nobody.
+        sectionsWhileSuspended(
+          personInfoSections(uiRules(), {
+            membershipEnded: props.membershipEnded,
+            isContact: props.isContact,
+            contactsOfContactsOn: contactsOfContactsOn(),
+            isBlocked: blocked(),
+          }),
+          accountSuspended(),
+        ),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
@@ -397,13 +413,22 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             <div class="lk-meta">{t("contacts.detail.username_not_verified")}</div>
           </Show>
           {/* ADR-0099 UX 1.4 - a muted line under a blocked person's name. */}
-          <Show when={blocked()}>
+          <Show when={!deleted() && blocked()}>
             <div class="lk-meta">{t("block.card_line")}</div>
           </Show>
           {/* ADR-0099 step 4, UX 3 - a muted line under a suspended person's
               name; a block's line wins. */}
-          <Show when={personMark(blocked(), isSuspendedKeyB64(props.personKeyB64)) === "suspended"}>
+          <Show
+            when={
+              !deleted() &&
+              personMark(blocked(), isSuspendedKeyB64(props.personKeyB64)) === "suspended"
+            }
+          >
             <div class="lk-meta">{t("suspended.card_line")}</div>
+          </Show>
+          {/* ADR-0098 - a deleted account: one line, no block or report. */}
+          <Show when={deleted()}>
+            <div class="lk-meta" role="note">{t("person.deleted.body")}</div>
           </Show>
         </header>
 

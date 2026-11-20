@@ -1118,6 +1118,18 @@ internal fun toEvent(
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
+            } else if (looksLikeAccountDeletedEnvelope(processed.data)) {
+                // ADR-0098 section 1 — the sender's device says their account
+                // was deleted. Never a timeline bubble. The sender is resolved
+                // to its account KEY here (C-68): the repository verifies the
+                // statement's signature under exactly that key and this
+                // conversation's group id, and changes nothing otherwise.
+                IncomingChatEvent.AccountDeleted(
+                    messageId = messageId,
+                    envelope = processed.data,
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
             } else if (looksLikePinEnvelope(processed.data)) {
                 // ADR-0052 decision 3 — a shared pin or unpin of one message.
                 // Never a timeline bubble. Same shape as the group-name arm:
@@ -1914,6 +1926,23 @@ public sealed interface IncomingChatEvent {
         val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent
+
+    /** ADR-0098 section 1 — an account-deleted statement. Never a timeline
+     *  bubble. [envelope] is the whole plaintext, verified by the repository
+     *  against [senderKey] (the sender's account key resolved at receipt,
+     *  C-68; `null` when unresolvable, then dropped). */
+    public data class AccountDeleted(
+        val messageId: Long,
+        val envelope: ByteArray,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent {
+        override fun equals(other: Any?): Boolean =
+            other is AccountDeleted && messageId == other.messageId && envelope.contentEquals(other.envelope) &&
+                senderKey == other.senderKey && createdAt == other.createdAt
+
+        override fun hashCode(): Int = messageId.hashCode() * 31 + envelope.contentHashCode()
+    }
 
     /** ADR-0052 decision 3 — a shared pin / unpin envelope. Never a timeline
      *  bubble.

@@ -188,9 +188,64 @@ is. A group owned by the deleted account keeps a dead owner; removal of the owne
   stay, the identity bundle and the owned rows are deleted as before. This reverses the
   earlier test assertion that a deleted account's name "is free at once"; the registry test
   now asserts the name is refused to a stranger until the pruner frees it.
-- Not built: everything on the clients (sending on deletion, the receive arm, the per-person
-  record, the checks, the screens, the copy keys of the UX spec), the admin removal of
-  section 5.
+- Catalog keys `person.deleted.name` / `person.deleted.body` (English, ten machine
+  translations), compiled into the three clients.
+
+### Clients (2026-11-20, pass 2, host-tested only, not walked in a browser or on a device)
+
+Web (and the desktop app, which runs the web build), iOS (NSE included) and Android, each:
+
+- **Send.** One more cleanup in the existing deletion order, after the auth delete and
+  before the wipe, inside the existing budget: the statement composed per active one-to-one
+  and group (never channels, never the DeviceGroup) with the seed of the key the device's
+  leaves are bound under, posted through the epoch-proof group publish (no session). Web
+  `auth/account-deleted-statement.ts` + `AccountSections.tsx`; iOS
+  `ChatRepository+DeletedAccount.swift` `announceAccountDeleted` + `PasskeysViewModel`;
+  Android `account/AccountDeletion.kt` `accountDeletedAnnouncement` +
+  `ChatRepository.announceAccountDeleted`. A failure is logged by a fixed label and never
+  blocks the wipe. The retry shapes differ: Android retries only the conversations not yet
+  reached, iOS throws only when every conversation failed, web posts one cleanup per
+  conversation.
+- **Receive.** A dispatch arm ahead of the chat parser on the poll and the sweep path,
+  verified with `verifyAccountDeletedEnvelope` over the group id and the sender's account key
+  resolved at receipt; the own account's echo is ignored. The background readers (web
+  service worker, iOS NSE, Android background decrypt) stay silent.
+- **Per-person record** (statement, last answer and time, last `SamePerson` time, last
+  attempt, account id) keyed on the account key, behind the account store gate and wiped with
+  the account: web IndexedDB `lakko-person-status`, iOS `UserDefaults`
+  `deleted_accounts.<account>`, Android prefs `person-status.v1:<account>`.
+- **Pull.** `DiscoveryClient.identityFetch` reports every 200 / 404 on each client, so every
+  existing identity fetch records its answer; on-screen checks (contact rows, pending rows,
+  open one-to-one, person info, pending chat, group member rows) are gated by
+  `directoryCheckDue`, one request in flight per person.
+- **Show.** The one display-name resolver of each client returns "Deleted account" over every
+  name including a local rename, no username, a neutral person glyph; otherwise a username
+  only when `mayShowUsername` and the certificate check pass. A deleted one-to-one: composer
+  replaced by `person.deleted.body`, no call or video buttons, no Reply / React, no typing or
+  read receipts. Person info through `deletedPersonInfoSections`. An incoming request from a
+  deleted account is dropped; an accept whose identity fetch answers 404 removes the card and
+  shows `person.deleted.body`; a pending contact waiting on them shows "Deleted account" and
+  its held messages are dropped.
+- **Section 5.** A verified statement in a group where this device is owner or admin and the
+  deleted account is not the owner records an owed removal, proposed once through
+  `removeMemberFromGroup` (all the account's leaves), retried on later polls; never on a
+  directory answer, never in a one-to-one.
+
+With ADR-0099 (reporting and moderation, merged the same day): a deleted person's card shows
+no Block and no Report (nothing more can arrive, and no account is left for a report to act
+on), nor the block or suspension lines; Report stays in the message menu on their messages;
+a deleted one-to-one shows the deleted line in place of the composer ahead of the block
+banner; a suspended device without its chats sends no statement. Background notifications
+name a deleted sender "Deleted account" on all three (web: the profile row's `x` mirror the
+service worker reads; iOS: the call-peer name mirror the NSE reads; Android: the profile name
+snapshot).
+
+Found while building: the username gate hides every `@username` until that person was
+confirmed within 21 days, which happens only when their row, chat or card is on screen with a
+working network, or through another identity fetch; a group member whose account id is not
+known (no profile v2, not a contact) never shows a username again. Android checks are not
+run from ordinary chat-list rows (the ADR does not list them). An owed removal counts as done
+once its proposal is published; if no committer ever sweeps it, it is not proposed again.
 
 ## Alternatives
 

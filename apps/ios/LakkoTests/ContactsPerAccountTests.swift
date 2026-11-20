@@ -188,6 +188,10 @@ final class ContactsPerAccountTests: XCTestCase {
                 authClientFactory: { Offline.auth() },
                 persistence: EmptyPersistence(),
                 nowMs: { 1_000_000 }),
+            // ADR-0098 — the accept asks the directory first; here it is
+            // unreachable (a network failure, not a `404`), so the accept
+            // goes on and fails as the test needs.
+            discoveryClientFactory: { UnreachableDiscovery.client() },
             inboxStore: ContactsInboxStore(defaults: defaults),
             accountBinding: session.eraseToAnyPublisher())
     }
@@ -215,4 +219,24 @@ private struct EmptyPersistence: SessionPersistence {
     func sessionToken(accountIdB64: String) -> PersistedSessionToken? { nil }
     func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws {}
     func deleteSessionToken(accountIdB64: String) {}
+}
+
+/// A discovery client whose every request fails as a network failure.
+private enum UnreachableDiscovery {
+    final class Refusing: URLProtocol {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+        }
+        override func stopLoading() {}
+    }
+
+    static func client() -> DiscoveryClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [Refusing.self]
+        return DiscoveryClient(
+            baseURL: Offline.discoveryBaseURL, session: URLSession(configuration: configuration),
+            sessionToken: nil, tokens: OfflineAnonTokens())
+    }
 }

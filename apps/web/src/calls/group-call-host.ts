@@ -215,6 +215,9 @@ export interface ChatCallAffordanceInput {
   /** People in the conversation, each counted once however many devices they
    *  are on (`chat/person-key.ts`). */
   readonly people: number;
+  /** ADR-0098: the other person of a one-to-one deleted their account.
+   *  Nobody can be called there. */
+  readonly peerDeleted?: boolean;
 }
 
 /**
@@ -231,6 +234,7 @@ export interface ChatCallAffordanceInput {
  */
 export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffordance {
   if (input.membershipEnded || input.callInProgress) return "hidden";
+  if (!input.isGroup && input.peerDeleted === true) return "hidden";
   if (input.liveCallInThisChat) return "join-group";
   if (!input.isGroup) return "start-one-to-one";
   return input.people > 1 ? "start-group" : "hidden";

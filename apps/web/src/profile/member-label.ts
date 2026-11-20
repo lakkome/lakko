@@ -129,6 +129,43 @@ export function conversationLabelsOf(
   return out;
 }
 
+/**
+ * ADR-0098 — the keys the service worker must name "Deleted account" for:
+ * every person this device holds as deleted, under every key the worker can
+ * be handed for them (the account key and each of their leaf keys in the
+ * rosters, plus any other key the caller knows them by). `deletedName` is the
+ * catalog's `person.deleted.name` in the device language. Pure.
+ */
+export function deletedLabelsOf(
+  rosters: Iterable<readonly LabelledMember[]>,
+  isDeleted: (personKeyB64: string) => boolean,
+  encode: (bytes: Uint8Array) => string,
+  otherKeys: Iterable<string>,
+  deletedName: string,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (deletedName.trim().length === 0) return out;
+  const deleted = (key: string): boolean => {
+    try {
+      return isDeleted(key);
+    } catch {
+      return false;
+    }
+  };
+  for (const roster of rosters) {
+    for (const m of roster) {
+      const person = encode(m.accountKey ?? m.signaturePublicKey);
+      if (!deleted(person)) continue;
+      out.set(person, deletedName);
+      out.set(encode(m.signaturePublicKey), deletedName);
+    }
+  }
+  for (const key of otherKeys) {
+    if (!out.has(key) && deleted(key)) out.set(key, deletedName);
+  }
+  return out;
+}
+
 /** What the viewer's own avatar is lettered from when it has no photo: their
  *  display name, the username only when there is none. */
 export function ownAvatarLabel(displayName: string | null, username: string): string {

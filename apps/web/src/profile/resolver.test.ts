@@ -222,3 +222,48 @@ describe("resolvePerson — a pending contact's link statement", () => {
     expect(profileInputOf(undefined, undefined, { displayName: "  ", username: "" })).toBeUndefined();
   });
 });
+
+describe("ADR-0098 — a deleted account and a username not recently confirmed", () => {
+  const key = new Uint8Array(32).fill(9);
+  const profile = { displayName: "Ann", username: "ann" };
+
+  it("a deleted person is named Deleted account, over a rename and a verified username", () => {
+    const r = resolveDisplay({
+      signatureKey: key,
+      rename: "My Ann",
+      profile,
+      verification: "verified",
+      deleted: true,
+      deletedName: "Deleted account",
+      usernameShowable: true,
+    });
+    expect(r.name).toBe("Deleted account");
+    expect(r.source).toBe("deleted");
+    expect(r.username).toBeNull();
+    expect(r.listLabel).toBe("Deleted account");
+    expect(r.theirName).toBeNull();
+    expect(r.usernameNotVerified).toBe(false);
+    // Never the old name.
+    expect(memberNameOf(r, "test")).toBe("Deleted account");
+  });
+
+  it("a verified username is hidden when it was not confirmed recently", () => {
+    const shown = resolveDisplay({ signatureKey: key, profile, verification: "verified", usernameShowable: true });
+    expect(shown.username).toBe("@ann");
+    const hidden = resolveDisplay({ signatureKey: key, profile, verification: "verified", usernameShowable: false });
+    expect(hidden.username).toBeNull();
+    expect(hidden.listLabel).toBe("Ann");
+  });
+
+  it("resolvePerson carries both through", () => {
+    const r = resolvePerson({
+      signatureKey: key,
+      received: profile,
+      verificationOf: () => "verified",
+      deleted: true,
+      deletedName: "Deleted account",
+    });
+    expect(r.name).toBe("Deleted account");
+    expect(r.username).toBeNull();
+  });
+});

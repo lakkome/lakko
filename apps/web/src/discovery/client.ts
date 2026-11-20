@@ -36,6 +36,7 @@
  * "username unknown" (HTTP 404 from `/lookup`) from network-level
  * failures.
  */
+import { noteIdentityAnswer } from "./identity-answers";
 import { loadWasm } from "../wasm";
 import {
   base64Decode,
@@ -698,7 +699,11 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError("/discovery/identity (GET)", err);
     }
-    if (response.status === 404) return null;
+    if (response.status === 404) {
+      // ADR-0098 section 2: every identity answer is also recorded.
+      noteIdentityAnswer(accountId, null);
+      return null;
+    }
     if (!response.ok) {
       const text = await safeReadBody(response);
       throw new DiscoveryHttpError(
@@ -707,7 +712,9 @@ export class DiscoveryClient {
         text,
       );
     }
-    return (await response.json()) as IdentityFetchResponse;
+    const bundle = (await response.json()) as IdentityFetchResponse;
+    noteIdentityAnswer(accountId, bundle);
+    return bundle;
   }
 
   /**

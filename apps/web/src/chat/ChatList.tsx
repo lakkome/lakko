@@ -18,6 +18,7 @@
  */
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedBanner } from "../auth/SuspendedReadOnly";
+import { isDeletedAccount } from "../people/person-status";
 import { dropRequestSent, requestsSent } from "./requests-sent";
 import { RequestsSentScreen } from "./RequestsSentScreen";
 import { unseenReactionIds } from "./unseen-reactions";
@@ -231,8 +232,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     const account = accountId();
     if (account !== null) void loadPendingContacts(account);
   });
+  // ADR-0098: an inviter whose account was deleted reads "Deleted account".
   const invitedName = (p: PendingContact): string =>
-    pendingNameOf(p) ?? t("invite.contact.page.unnamed");
+    isDeletedAccount(p.signaturePubkeyB64)
+      ? t("person.deleted.name")
+      : (pendingNameOf(p) ?? t("invite.contact.page.unnamed"));
   const invitedRows = createMemo((): PendingContact[] => {
     const own = ownPersonKeyB64(chats.identity());
     const peers = new Set<string>();

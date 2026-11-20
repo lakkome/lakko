@@ -878,7 +878,15 @@ private fun ConversationList(
  */
 @Composable
 private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClick: () -> Unit) {
-    val title = me.lakko.app.contacts.PendingContacts.name(contact) ?: t("invite.contact.page.unnamed")
+    // ADR-0098 — `Deleted account` once the inviter's account is known gone.
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val directory = androidx.compose.runtime.remember(appContext) { me.lakko.app.profile.ProfileDirectory.get(appContext) }
+    val nameVersion = directory.version.collectAsStateWithLifecycle().value
+    val title = if (nameVersion.let { directory.isDeleted(contact.signaturePubkeyB64) }) {
+        me.lakko.app.profile.DELETED_ACCOUNT_NAME
+    } else {
+        me.lakko.app.contacts.PendingContacts.name(contact) ?: t("invite.contact.page.unnamed")
+    }
     // UX profile-screen section 7: a chat list row plays a profile video
     // while a pointer hovers it.
     val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()

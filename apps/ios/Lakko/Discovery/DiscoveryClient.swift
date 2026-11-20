@@ -216,8 +216,17 @@ public final class DiscoveryClient {
             )
         }
         let slug = base64UrlEncodeNoPad(accountId)
-        return try await getNullableOn404(endpoint: "/discovery/identity/\(slug)")
+        let answer: IdentityFetchResponse? = try await getNullableOn404(endpoint: "/discovery/identity/\(slug)")
+        // ADR-0098 section 2 — every complete answer (a bundle, or a `404`)
+        // is recorded for the people this device holds under that account
+        // id. A throw (network, `5xx`) is not an answer and records nothing.
+        Self.identityAnswerObserver?(accountId, answer)
+        return answer
     }
+
+    /// ADR-0098 — told of every complete `GET /discovery/identity/{id}`
+    /// answer (`nil` for a `404`). Set once by the app.
+    nonisolated(unsafe) static var identityAnswerObserver: ((Data, IdentityFetchResponse?) -> Void)?
 
     /// `POST /discovery/keypackage` — upsert the user's MLS
     /// KeyPackage.
@@ -1856,7 +1865,7 @@ public final class DiscoveryClient {
     // MARK: - Constants
 
     /// Raw 16-byte UUIDv7.
-    fileprivate static let accountIdLength: Int = 16
+    static let accountIdLength: Int = 16
 
     /// Ed25519 + X25519 both use 32-byte public keys.
     fileprivate static let pubkeyLength: Int = 32

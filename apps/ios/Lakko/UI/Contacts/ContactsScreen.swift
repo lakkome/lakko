@@ -98,11 +98,12 @@ public struct ContactsScreen: View {
             return ContactListPresentation.matches(item, query: query) ? item : nil
         }
         let invited = viewModel.shownInvited.compactMap { contact -> ContactListPresentation.Item<ContactRowId>? in
-            let stated = PendingContacts.name(contact)
+            let stated = PendingContacts.shownName(contact)
             let item = ContactListPresentation.Item(
                 id: ContactRowId.invited(contact.accountIdHex),
                 name: stated ?? l10n.t("invite.contact.page.unnamed"),
-                username: contact.username.isEmpty ? nil : contact.username,
+                // ADR-0098 — never found by the old username once deleted.
+                username: contact.username.isEmpty || PendingContacts.isDeleted(contact) ? nil : contact.username,
                 isPlaceholder: stated == nil)
             return ContactListPresentation.matches(item, query: query) ? item : nil
         }
@@ -305,6 +306,15 @@ public struct ContactsScreen: View {
 
     @ViewBuilder
     private var requestsSection: some View {
+        // ADR-0098 — an Accept whose person turned out to be gone: the card
+        // went, and this one line says why.
+        if viewModel.acceptedDeletedAccount {
+            Section {
+                Text(ResolvedDisplayName.deletedBody)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+        }
         if !incoming.isEmpty {
             Section {
                 ForEach(incoming, id: \.messageId) { request in
@@ -452,7 +462,7 @@ private struct InvitedRow: View {
     @State private var hovering = false
 
     var body: some View {
-        let stated = PendingContacts.name(contact)
+        let stated = PendingContacts.shownName(contact)
         NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
             HStack(spacing: 12) {
                 InitialsAvatar(
@@ -466,7 +476,8 @@ private struct InvitedRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(stated ?? l10n.t("invite.contact.page.unnamed"))
                         .foregroundStyle(Color.lakkoText)
-                    if !contact.username.isEmpty, stated != "@\(contact.username)" {
+                    if !contact.username.isEmpty, stated != "@\(contact.username)",
+                       !PendingContacts.isDeleted(contact) {
                         Text("@\(contact.username)")
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
@@ -477,6 +488,10 @@ private struct InvitedRow: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
         }
+        // ADR-0098 section 2 — a visible row asks whether the account still
+        // exists, when a check is due.
+        .checksAccountExists(
+            personKey: contact.signaturePubkey, accountId: StateBundle.hexDecode(contact.accountIdHex))
     }
 }
 
@@ -515,6 +530,9 @@ private struct ContactRow: View {
                 .onHover { hovering = $0 }
             }
         }
+        // ADR-0098 section 2 — a visible contacts row asks whether the
+        // account still exists, when a check is due.
+        .checksAccountExists(personKey: contact.request.fromPubkey, accountId: contact.request.fromAccountId)
     }
 }
 

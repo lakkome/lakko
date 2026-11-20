@@ -257,7 +257,16 @@ public class DiscoveryClient(
         }
         val slug = base64UrlEncodeNoPad(accountId)
         val endpoint = "/discovery/identity/$slug"
-        return getNullableOn404(endpoint)
+        val bundle: IdentityFetchResponse? = getNullableOn404(endpoint)
+        // ADR-0098 section 2 — every complete answer (200 or 404) is
+        // recorded for the person this device holds under that account id;
+        // a thrown error is not an answer and records nothing.
+        me.lakko.app.profile.DirectoryAnswerFeed.report(
+            accountId.copyOf(),
+            bundle?.signature_pubkey,
+            bundle?.conversation_link,
+        )
+        return bundle
     }
 
     /** `POST /discovery/keypackage` — upsert the user's MLS

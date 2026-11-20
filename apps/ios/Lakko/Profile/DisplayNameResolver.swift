@@ -31,7 +31,29 @@ public struct ResolvedDisplayName: Equatable, Sendable {
         /// Nothing is known about this person beyond their key; ``name`` is
         /// the neutral placeholder.
         case placeholder
+        /// ADR-0098 — the person's account was deleted; ``name`` is
+        /// ``deletedName`` whatever else is known about them.
+        case deletedAccount
     }
+
+    /// ADR-0098 — the name of a person whose account was deleted, in the
+    /// interface language when it is read.
+    public static var deletedName: String { Localization.text("person.deleted.name") }
+
+    /// ADR-0098 — the one line shown where a deleted person can no longer be
+    /// written to.
+    public static var deletedBody: String { Localization.text("person.deleted.body") }
+
+    /// The result for a deleted account: the name only, no username, no
+    /// line about their own name.
+    public static func deletedAccount(signatureKey: Data) -> ResolvedDisplayName {
+        ResolvedDisplayName(
+            name: deletedName, source: .deletedAccount, verifiedUsername: nil,
+            fingerprint: displayFingerprint(signatureKey), theirName: nil, usernameNotVerified: false)
+    }
+
+    /// `true` for a person whose account was deleted.
+    public var isDeletedAccount: Bool { source == .deletedAccount }
 
     /// The roster / sender label for a person nothing is known about, in the
     /// interface language when it is read (ADR-0061).

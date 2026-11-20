@@ -7621,6 +7621,14 @@
       "text": "פתיחה באפליקציה",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "החשבון הזה נמחק.",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "חשבון שנמחק",
+      "status": "machine"
+    },
     "profile.save.error.full": {
       "text": "אין כרגע מקום ב-Lakko לקבצים חדשים. נסה/י שוב מאוחר יותר.",
       "status": "machine"

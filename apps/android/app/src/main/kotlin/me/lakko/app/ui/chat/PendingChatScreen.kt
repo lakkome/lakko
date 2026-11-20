@@ -68,13 +68,29 @@ public fun PendingChatScreen(
     val invited by contacts.invited.collectAsStateWithLifecycle()
     val handedOver by contacts.handedOver.collectAsStateWithLifecycle()
     val contact = invited.firstOrNull { it.accountIdHex == accountIdHex }
-    val name = contact?.let(PendingContacts::name) ?: t("invite.contact.page.unnamed")
+    // ADR-0098 / UX section 3 — a pending contact whose account was deleted is
+    // `Deleted account`: no composer, nothing held is sent.
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val directory = remember(appContext) { me.lakko.app.profile.ProfileDirectory.get(appContext) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
+    val deleted = contact != null && nameVersion.let { directory.isDeleted(contact.signaturePubkeyB64) }
+    LaunchedEffect(contact?.signaturePubkeyB64) { contact?.signaturePubkeyB64?.let(directory::noteOnScreen) }
+    val name = if (deleted) {
+        me.lakko.app.profile.DELETED_ACCOUNT_NAME
+    } else {
+        contact?.let(PendingContacts::name) ?: t("invite.contact.page.unnamed")
+    }
     var draft by remember { mutableStateOf("") }
     var callHintShown by remember { mutableStateOf(false) }
     /** Bumped after every message this screen keeps (the queue is not a
      *  flow). */
     var queueVersion by remember { mutableIntStateOf(0) }
-    val messages = remember(queueVersion, contact) { contacts.pendingInvitedMessages(accountIdHex) }
+    // Nothing held is shown once the account is known deleted (it is
+    // discarded, never sent).
+    val messages = remember(queueVersion, contact, deleted) {
+        if (deleted) emptyList() else contacts.pendingInvitedMessages(accountIdHex)
+    }
+
 
     LaunchedEffect(handedOver) { handedOver[accountIdHex]?.let(onConnected) }
 
@@ -104,15 +120,16 @@ public fun PendingChatScreen(
                 },
                 actions = {
                     // Disabled until the inviter's app answers; a tap shows
-                    // the hint (a disabled IconButton takes no tap).
-                    IconButton(onClick = { callHintShown = true }) {
+                    // the hint (a disabled IconButton takes no tap). None for
+                    // a deleted account (ADR-0098).
+                    if (!deleted) IconButton(onClick = { callHintShown = true }) {
                         LkIcon(
                             R.drawable.ic_lk_phone,
                             contentDescription = t("chat.pending.call_disabled", mapOf("name" to name)),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
                         )
                     }
-                    IconButton(onClick = { callHintShown = true }) {
+                    if (!deleted) IconButton(onClick = { callHintShown = true }) {
                         LkIcon(
                             R.drawable.ic_lk_video,
                             contentDescription = t("chat.pending.call_disabled", mapOf("name" to name)),
@@ -138,7 +155,7 @@ public fun PendingChatScreen(
                 horizontalAlignment = Alignment.End,
             ) {
                 if (contact != null) {
-                    item {
+                    if (!deleted) item {
                         val line = when (PendingContacts.line(contact, System.currentTimeMillis())) {
                             PendingContacts.Line.WAITING -> t("chat.pending.waiting", mapOf("name" to name))
                             PendingContacts.Line.STALE -> t("chat.pending.stale", mapOf("name" to name))
@@ -183,7 +200,14 @@ public fun PendingChatScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
-            Row(
+            if (deleted) {
+                Text(
+                    text = t("person.deleted.body"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            } else Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()

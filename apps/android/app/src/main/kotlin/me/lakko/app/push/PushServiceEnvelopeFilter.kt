@@ -294,6 +294,13 @@ private fun isServiceEnvelopeOtherThanCall(
     // it next reads the journal.
     if (me.lakko.app.chat.looksLikeGroupClosedEnvelope(payload)) return true
 
+    // Kind 5b2 — ADR-0098, an account-deleted statement. The same
+    // NUL-terminated-prefix peek the foreground classifier uses. Suppressed
+    // only: the deletion never produces a notification, and recording it is a
+    // WRITE this read-only path must never do (C-59); the foreground verifies
+    // and records it when it next reads the journal.
+    if (me.lakko.app.chat.looksLikeAccountDeletedEnvelope(payload)) return true
+
     // Kind 5c — ADR-0087: the group photo, the allowed reactions, the
     // conversation handle and the knock seed. NUL-terminated domains, the same
     // peek the foreground classifier uses; suppressed only (storing is a write,

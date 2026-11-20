@@ -304,6 +304,21 @@ export function personInfoSections(
 }
 
 /**
+ * ADR-0098 — the person info of a deleted account, the shared rule
+ * (`lakko-ui-rules::info::deleted_person_info_sections`): `Message` and
+ * `Delete chat` only when a one-to-one exists, `Remove contact` only when the
+ * person is on the contact list; no call, safety number, rename, add or share.
+ */
+export function deletedPersonInfoSections(
+  rules: UiRules | null,
+  hasOneToOne: boolean,
+  isContact: boolean,
+): readonly InfoSection[] {
+  if (rules === null) return [];
+  return known(rules.deletedPersonInfoSections(hasOneToOne, isContact));
+}
+
+/**
  * How a conversation's header opens its info (`docs/ux/conversation-info.md`
  * section 3).
  *

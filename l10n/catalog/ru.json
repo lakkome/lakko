@@ -7793,6 +7793,14 @@
       "text": "Открыть в приложении",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "Этот аккаунт удалён.",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "Удалённый аккаунт",
+      "status": "machine"
+    },
     "profile.avatar.change": {
       "text": "Изменить фото",
       "status": "machine"

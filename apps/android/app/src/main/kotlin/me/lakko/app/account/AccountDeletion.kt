@@ -130,3 +130,21 @@ public class AccountDeletion(
             if (subscriptions <= 0) 0 else subscriptions + PUSH_TOKEN_SPARE
     }
 }
+
+/**
+ * ADR-0098 section 1 — the cleanup that tells every conversation the account
+ * was deleted. Being a cleanup puts it where the ADR wants it: after the auth
+ * delete succeeded (a refusal throws before any cleanup runs, so the
+ * statement is never a false claim about an account that stays) and before
+ * the wipe, inside the shared budget. [announce] posts the statement to every
+ * conversation not yet in the set it is handed and throws when any is left,
+ * so a retry reaches only the rest. A failure is logged by this cleanup's
+ * name ("conversations") and never stops the wipe.
+ */
+public fun accountDeletedAnnouncement(
+    seeds: List<ByteArray>,
+    announce: suspend (seeds: List<ByteArray>, sent: MutableSet<String>) -> Unit,
+): AccountDeletion.Cleanup {
+    val sent: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    return AccountDeletion.Cleanup("conversations") { announce(seeds, sent) }
+}

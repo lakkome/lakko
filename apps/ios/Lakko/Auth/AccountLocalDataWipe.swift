@@ -399,6 +399,8 @@ enum AccountLocalDataWipe {
         step("link-requests") { LinkRequestInbox.clear(accountIdB64: accountIdB64) }
         step("link-claims") { LinkClaims.Record.clear(accountIdB64: accountIdB64) }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
+        // ADR-0098 — who this account learned was deleted.
+        step("deleted-accounts") { DeletedAccountStore.clear(accountIdB64: accountIdB64) }
         // ADR-0084 — the decrypted avatars this device cached (and the
         // prepared ones waiting for Save).
         // ADR-0065 — the owed blob deletes and the keep schedule; the passes.

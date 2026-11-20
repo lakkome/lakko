@@ -7621,6 +7621,14 @@
       "text": "在应用中打开",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "此账号已被删除。",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "已删除的账号",
+      "status": "machine"
+    },
     "profile.save.error.full": {
       "text": "Lakko 目前没有空间存放新文件。请稍后再试。",
       "status": "machine"

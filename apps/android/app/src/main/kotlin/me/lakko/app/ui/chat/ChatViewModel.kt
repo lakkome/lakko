@@ -2044,6 +2044,13 @@ public class ChatViewModel(
     /** ADR-0099 — the other person's account key (base64) in a one-to-one, else `null`. */
     public fun oneToOnePeerPersonKey(): String? = repo.oneToOnePeerPersonKey(groupIdHex)
 
+    /** ADR-0098 — whether the author of [messageId] in this chat is shown as
+     *  Deleted account. */
+    public fun messageAuthorDeleted(messageId: Long): Boolean {
+        val author = state.value.messages.firstOrNull { it.messageId == messageId }?.authorKey ?: return false
+        return profileNames.isDeleted(author)
+    }
+
     public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String {
         val resolved = profileNames.resolve(identity)
         if (resolved.isPlaceholder) me.lakko.app.profile.reportUnnamedPerson(identity)
@@ -2087,6 +2094,29 @@ public class ChatViewModel(
      */
     public fun oneToOnePeerUsername(): String? =
         repo.oneToOnePeerKey(groupIdHex)?.let { profileNames.resolve(it).verifiedUsername }
+
+    /**
+     * ADR-0098 / UX section 3 — whether the other person of a one-to-one is
+     * shown as Deleted account: then the history stays readable and nothing
+     * can be sent or placed (no composer, no call buttons, no Reply, no React,
+     * no typing or read markers). `false` for a group.
+     */
+    public fun oneToOnePeerDeleted(): Boolean =
+        repo.oneToOnePeerKey(groupIdHex)?.let { profileNames.isDeleted(it) } == true
+
+    /** ADR-0098 section 2 — the one-to-one is open: its other person is on
+     *  screen, so the directory is asked about them when a check is due. */
+    public fun noteOneToOnePeerOnScreen() {
+        repo.oneToOnePeerKey(groupIdHex)?.let {
+            profileNames.noteOnScreen(java.util.Base64.getEncoder().encodeToString(it))
+        }
+    }
+
+    /** ADR-0098 section 2 — the person [identity] is drawn on screen (a group
+     *  member row). */
+    public fun notePersonOnScreen(identity: me.lakko.app.chat.MemberIdentity?) {
+        if (identity != null) profileNames.noteOnScreen(identity)
+    }
 
     /**
      * docs/ux/conversation-info.md section 1 — the other person's signature
@@ -2994,6 +3024,9 @@ public class ChatViewModel(
      */
     private fun scheduleReadReceipt(highest: Long) {
         if (highest <= 0L) return
+        // ADR-0098 — read markers stop in a one-to-one whose other person
+        // deleted their account: nobody is there to read them.
+        if (oneToOnePeerDeleted()) return
         if (highest <= lastPublishedReadReceipt) return
         val target = highest
         readReceiptJob?.cancel()
@@ -3163,6 +3196,7 @@ public class ChatViewModel(
      * once on blur / send.
      */
     private fun maybeSendTypingTrue() {
+        if (oneToOnePeerDeleted()) return
         val now = System.currentTimeMillis()
         if (typingActive && now - lastTypingTrueSentMs < TYPING_SEND_THROTTLE_MS) return
         lastTypingTrueSentMs = now

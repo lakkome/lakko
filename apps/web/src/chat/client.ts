@@ -141,6 +141,7 @@ import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
 import { isGroupContactRequestEnvelope } from "./group-contact-request-envelope";
 import { deliverGroupContactRequest } from "../contacts/group-contact-request";
 import { deliverRegistrarSeed } from "../ds/registrar-seeds";
+import { deliverAccountDeleted, isAccountDeletedBytes } from "./account-deleted-envelope";
 import { deliverKnockSeed, groupIsPublic, knockSeedsForRow, rememberKnockName } from "../ds/knock-seeds";
 import { rememberKnockOrigin, rowStampMs } from "./knock-origins";
 import { joinReplyBindingVerifies, rememberJoinReply } from "../reach/join-replies";
@@ -645,6 +646,21 @@ export type IncomingChatEvent =
        *  sealed to opens it. Listed in the union, like `registrarSeed`, only
        *  so a caller that forgets to consume it cannot render it. */
       kind: "groupContactRequest";
+      messageId: number;
+      /** The whole envelope. */
+      plaintext: Uint8Array;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0098 — an account-deleted statement. Never a timeline bubble,
+       *  never a notification: consumed at receipt
+       *  (`chat/account-deleted-envelope.ts`), where it is verified against
+       *  this conversation's id and the sender's account key. Listed in the
+       *  union, like `registrarSeed`, only so a caller that forgets to
+       *  consume it cannot render it. */
+      kind: "accountDeleted";
       messageId: number;
       /** The whole envelope. */
       plaintext: Uint8Array;
@@ -1952,6 +1968,11 @@ export class ChatClient {
         await consumeRegistrarSeed(group, event);
         continue;
       }
+      // ADR-0098 — the same: verified and recorded at receipt.
+      if (event.kind === "accountDeleted") {
+        await consumeAccountDeleted(group, event);
+        continue;
+      }
       // Section 6.4 - a contact request sealed to one member, the same way.
       if (event.kind === "groupContactRequest") {
         if (!(await consumeGroupContactRequest(group, event))) groupRequestUnwritten = true;
@@ -2185,6 +2206,35 @@ export async function consumeRegistrarSeed(
 }
 
 /**
+ * ADR-0098 — hand one account-deleted statement on, with this conversation's
+ * group id and the sender's account key resolved at receipt (C-68). Never
+ * throws; the sink verifies it and drops anything that does not verify.
+ */
+export async function consumeAccountDeleted(
+  group: WasmGroup,
+  event: { readonly plaintext: Uint8Array; readonly senderKey: MemberIdentity | undefined },
+): Promise<void> {
+  let groupId: Uint8Array;
+  try {
+    groupId = group.groupId;
+  } catch {
+    return;
+  }
+  let senderAccountKey: Uint8Array | undefined;
+  try {
+    senderAccountKey = event.senderKey === undefined ? undefined : base64Decode(event.senderKey);
+  } catch {
+    senderAccountKey = undefined;
+  }
+  await deliverAccountDeleted({
+    groupId,
+    groupIdB64: base64Encode(groupId),
+    plaintext: event.plaintext,
+    senderAccountKey,
+  });
+}
+
+/**
  * `docs/ux/who-can-find-me.md` section 6.4 - hand one contact request sealed
  * inside this group to the request list's handler, with the sender's account
  * key as resolved at receipt (C-68). Never throws. `false` when the request
@@ -2339,6 +2389,11 @@ export async function toEvent(
     // fixed length so a chat message never pays for the call.
     if (isRegistrarSeedEnvelope(await loadWasm(), bytes)) {
       return { kind: "registrarSeed", messageId, plaintext: bytes, senderKey, createdAt };
+    }
+    // ADR-0098 — an account-deleted statement, before the chat parser for
+    // the same reason. Fixed length, so a chat message never pays the call.
+    if (isAccountDeletedBytes(await loadWasm(), bytes)) {
+      return { kind: "accountDeleted", messageId, plaintext: bytes, senderKey, createdAt };
     }
     // Section 6.4 - a contact request sealed to one member, the same way.
     if (isGroupContactRequestEnvelope(await loadWasm(), bytes)) {

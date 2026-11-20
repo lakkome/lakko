@@ -696,7 +696,7 @@ public struct ChatListScreen: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return shown }
         return shown.filter { contact in
-            let title = PendingContacts.name(contact) ?? l10n.t("invite.contact.page.unnamed")
+            let title = PendingContacts.shownName(contact) ?? l10n.t("invite.contact.page.unnamed")
             return ChatListFormatting.matches(query: trimmed, title: title, preview: "")
         }
     }
@@ -1491,7 +1491,7 @@ struct InvitedChatRow: View {
     @State private var hovering = false
 
     var body: some View {
-        let title = PendingContacts.name(contact) ?? Localization.text("invite.contact.page.unnamed")
+        let title = PendingContacts.shownName(contact) ?? Localization.text("invite.contact.page.unnamed")
         NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
             HStack(alignment: .center, spacing: 12) {
                 InitialsAvatar(

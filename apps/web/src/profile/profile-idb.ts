@@ -72,6 +72,12 @@ export interface ProfileRowPayload {
    *  retired key's contact, a pending contact's link statement, the unnamed
    *  word). Additive, absent in older rows. */
   readonly n?: Record<string, string>;
+  /** ADR-0098: keyB64 -> "Deleted account" (in the device language) for
+   *  every key of a person this device holds as deleted. The worker reads it
+   *  before anything else: it overrides a rename, a profile and `n`. Written
+   *  again whenever a person becomes deleted or stops being so. Additive,
+   *  absent in older rows and when nobody is deleted. */
+  readonly x?: Record<string, string>;
 }
 
 const VERIFICATION_STATES: ReadonlySet<string> = new Set(["verified", "mismatch", "error"]);
@@ -81,6 +87,7 @@ export function encodeProfileRow(
   row: ProfileRow,
   renames: ReadonlyMap<string, string>,
   labels: ReadonlyMap<string, string> = new Map(),
+  deleted: ReadonlyMap<string, string> = new Map(),
 ): string {
   const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown; ns?: boolean }> = {};
   for (const [key, prof] of row.profiles) {
@@ -111,7 +118,18 @@ export function encodeProfileRow(
   for (const [key, label] of labels) {
     if (label.trim().length > 0) n[key] = label;
   }
-  const payload: ProfileRowPayload = { v: PROFILE_ROW_VERSION, p, vf, r, ...(labels.size > 0 ? { n } : {}) };
+  const x: Record<string, string> = {};
+  for (const [key, name] of deleted) {
+    if (name.trim().length > 0) x[key] = name;
+  }
+  const payload: ProfileRowPayload = {
+    v: PROFILE_ROW_VERSION,
+    p,
+    vf,
+    r,
+    ...(labels.size > 0 ? { n } : {}),
+    ...(Object.keys(x).length > 0 ? { x } : {}),
+  };
   return JSON.stringify(payload);
 }
 
@@ -232,12 +250,15 @@ async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<U
  * @param renamesFor    the local renames to mirror into the row
  * @param labelsFor     the labels the app shows per person key, mirrored for
  *                      the service worker
+ * @param deletedFor    ADR-0098: "Deleted account" per key of a deleted person
  */
 export class IdbProfileBackend implements ProfileBackend {
   constructor(
     private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>,
     private readonly renamesFor: () => ReadonlyMap<string, string>,
     private readonly labelsFor: () => ReadonlyMap<string, string> = () => new Map(),
+    /** ADR-0098: the deleted-name mirror (`x`). */
+    private readonly deletedFor: () => ReadonlyMap<string, string> = () => new Map(),
   ) {}
 
   async load(accountId: string): Promise<ProfileRow | null> {
@@ -270,7 +291,7 @@ export class IdbProfileBackend implements ProfileBackend {
   async save(accountId: string, row: ProfileRow): Promise<void> {
     const deviceKey = await this.deviceKeyFor(accountId);
     if (deviceKey === null) return;
-    const json = encodeProfileRow(row, this.renamesFor(), this.labelsFor());
+    const json = encodeProfileRow(row, this.renamesFor(), this.labelsFor(), this.deletedFor());
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {

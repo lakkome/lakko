@@ -317,7 +317,12 @@ internal sealed interface ComposerSlot {
  * the user's text, and this decides whether to show it, not what it should have
  * been.
  */
-internal fun composerState(state: MembershipState, draft: String): ComposerSlot {
+internal fun composerState(state: MembershipState, draft: String, peerDeleted: Boolean = false): ComposerSlot {
+    // ADR-0098 / UX `deleted-account.md` section 3 — a one-to-one whose other
+    // person deleted their account: one line, no button, no draft block.
+    if (peerDeleted && !membershipEnded(state)) {
+        return ComposerSlot.Withdrawn(notice = PEER_DELETED_NOTICE, draft = null, draftLabel = null)
+    }
     if (!membershipEnded(state)) return ComposerSlot.Composer
     val worthKeeping = draft.isNotBlank()
     return ComposerSlot.Withdrawn(
@@ -665,3 +670,7 @@ internal class SharedPrefsLeaveRecordStore(context: Context) : LeaveRecordStore 
         internal fun decodeStamp(raw: String?): Long? = raw?.toLongOrNull()
     }
 }
+
+/** ADR-0098 — the line in place of the composer of a one-to-one whose other
+ *  person deleted their account (`person.deleted.body`). */
+internal val PEER_DELETED_NOTICE: UiText = UiText("person.deleted.body")

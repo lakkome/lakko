@@ -31,6 +31,8 @@
  * session, so a `null` here is transient; the fallback panel offers a real
  * way back to the sign-in form.
  */
+import { DiscoveryClient } from "../discovery/client";
+import { recordDirectoryAnswer } from "../people/person-status";
 import {
   createEffect,
   createMemo,
@@ -264,10 +266,25 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
             persistHeld: () => chats.persistSnapshotDurable(account),
           },
           profiles,
+          accountGone: async (accountId) => {
+            try {
+              return (await new DiscoveryClient().identityFetch(accountId)) === null;
+            } catch {
+              return false;
+            }
+          },
         },
         req,
       );
       setAccepted(outcome.accepted);
+      if (outcome.status === "deleted") {
+        // ADR-0098: the account behind the request was deleted. Marked so a
+        // later request from that key is dropped too, and the card goes.
+        void recordDirectoryAnswer(base64Encode(req.fromPubkey), "absent");
+        mailbox.removePending(req.messageId);
+        setAcceptError(() => t("person.deleted.body"));
+        return;
+      }
       if (acceptKeepsRequest(outcome)) {
         setAcceptFailed((ids) => withId(ids, req.messageId));
         return;

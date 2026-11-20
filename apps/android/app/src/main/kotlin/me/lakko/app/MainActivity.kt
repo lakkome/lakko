@@ -222,6 +222,23 @@ class MainActivity : ComponentActivity() {
             )
         }
         chatRepository.visibilityListener = { chatRepository.runIntroductionsBestEffort() }
+        // ADR-0098 / UX section 3 — a pending contact (ADR-0079) whose account
+        // turns out deleted: the messages held for them are discarded, never
+        // sent. Re-attached on every activity recreate.
+        me.lakko.app.profile.ProfileDirectory.get(applicationContext).deletions?.book?.onPersonDeleted = { keyB64 ->
+            val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+            if (account != null) {
+                val pending = try {
+                    me.lakko.app.contacts.PendingContactsFiles.onDevice(applicationContext).load(account)
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+                pending.filter { it.signaturePubkeyB64 == keyB64 }
+                    .forEach { chatRepository.clearPendingInvitedMessages(it.queueKey) }
+            }
+            // An unanswered request from them is removed silently.
+            contactsRepository.dropRequestsFrom(keyB64)
+        }
         // Phase 2a3e2b-Android — process-scoped cross-device
         // sync runtime. Bootstrapped from `SessionRoot` once
         // identitySecrets land; cleared on logout /
@@ -3402,6 +3419,10 @@ private fun SessionRoot(
                                 me.lakko.app.webauthn.PasskeysViewModel(
                                     repo = authRepository,
                                     onAccountDeleted = forgetDevice,
+                                    // ADR-0098 — the statement to every
+                                    // conversation, between the auth delete
+                                    // and the wipe.
+                                    announceDeletion = { seeds, sent -> chatRepository.announceAccountDeleted(seeds, sent) },
                                     appContext = passkeysAppContext,
                                 )
                             },

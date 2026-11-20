@@ -121,8 +121,15 @@ public fun replyQuoteLines(
     /** The quoted message is this account's own: drawn "You" on this
      *  account's devices, whatever name the snapshot carries. */
     quotesOwnAccount: Boolean = false,
+    /** ADR-0098 — the quoted message's author deleted their account: drawn
+     *  `Deleted account`, whatever name the snapshot carries. */
+    quotesDeletedAccount: Boolean = false,
 ): Pair<String, String> {
-    val name = if (quotesOwnAccount) strings["chat.author.you"] else reply.author?.trim().orEmpty()
+    val name = when {
+        quotesOwnAccount -> strings["chat.author.you"]
+        quotesDeletedAccount -> strings["person.deleted.name"]
+        else -> reply.author?.trim().orEmpty()
+    }
     val excerpt = reply.excerpt?.trim()?.takeIf { it.isNotEmpty() } ?: strings[REPLY_FALLBACK_EXCERPT_KEY]
     return name to excerpt
 }

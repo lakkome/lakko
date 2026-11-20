@@ -7621,6 +7621,14 @@
       "text": "Uygulamada aç",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "Bu hesap silindi.",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "Silinmiş hesap",
+      "status": "machine"
+    },
     "profile.save.error.full": {
       "text": "Lakko'da şu anda yeni dosyalar için yer yok. Daha sonra tekrar deneyin.",
       "status": "machine"

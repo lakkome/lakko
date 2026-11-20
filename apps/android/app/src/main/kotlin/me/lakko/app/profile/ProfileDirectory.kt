@@ -276,16 +276,81 @@ public class ProfileDirectory internal constructor(
         }
     }
 
-    /** The UX §3 resolution for a signature key (standard base64). */
-    public fun resolve(signatureKeyB64: String): ResolvedName =
-        resolveThroughAlias(signatureKeyB64, aliases) { key ->
+    /**
+     * ADR-0098 — whether accounts still exist, as this device knows it. `null`
+     * until [attachDeletions] (and in host tests): nobody is deleted and a
+     * verified username shows as before.
+     */
+    @Volatile
+    public var deletions: AccountDeletionChecks? = null
+        private set
+
+    /** The signed-in account's id (hex), for [isOwnKey]; `null` when unknown. */
+    @Volatile
+    private var ownAccountIdHex: () -> String? = { null }
+
+    /** Wire the ADR-0098 state. Re-reads every name. */
+    public fun attachDeletions(checks: AccountDeletionChecks, ownAccountIdHex: () -> String?) {
+        deletions = checks
+        this.ownAccountIdHex = ownAccountIdHex
+        bump()
+    }
+
+    /** Re-read every name (an ADR-0098 change). */
+    public fun namesChanged() {
+        bump()
+    }
+
+    /** Whether [signatureKeyB64] (or the key it is aliased to) is shown as
+     *  Deleted account (ADR-0098). */
+    public fun isDeleted(signatureKeyB64: String): Boolean {
+        val book = deletions?.book ?: return false
+        if (book.isDeleted(signatureKeyB64)) return true
+        val previous = aliases[signatureKeyB64] ?: return false
+        return book.isDeleted(previous)
+    }
+
+    /** [isDeleted] for raw key bytes. */
+    public fun isDeleted(signatureKey: ByteArray): Boolean =
+        isDeleted(Base64.getEncoder().encodeToString(signatureKey))
+
+    /** ADR-0098 section 2 — [signatureKeyB64] is on screen: ask the directory
+     *  about them when a check is due. */
+    public fun noteOnScreen(signatureKeyB64: String) {
+        deletions?.onScreen(signatureKeyB64)
+    }
+
+    /** The signed-in account's own key: its username is never held back. */
+    private fun isOwnKey(signatureKeyB64: String): Boolean {
+        val own = ownAccountIdHex() ?: return false
+        return profiles.get(signatureKeyB64)?.accountIdHex == own
+    }
+
+    /** ADR-0098 section 3 — `mayShowUsername` for [key] now. */
+    private fun showsUsername(key: String): Boolean {
+        val book = deletions?.book ?: return true
+        if (isOwnKey(key)) return true
+        return try {
+            book.mayShowUsername(key)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** The UX §3 resolution for a signature key (standard base64). A deleted
+     *  person resolves to [deletedName] whatever else is known (ADR-0098). */
+    public fun resolve(signatureKeyB64: String): ResolvedName {
+        if (isDeleted(signatureKeyB64)) return deletedName(keyBytesOf(signatureKeyB64))
+        return resolveThroughAlias(signatureKeyB64, aliases) { key ->
             resolveName(
                 localRename = renames[key],
                 profile = profileFor(key),
                 verificationOf = { username -> verifications.get(key, username) },
                 signatureKey = keyBytesOf(key),
+                showUsername = showsUsername(key),
             )
         }
+    }
 
     /**
      * Whether this person's own profile is still owed: nothing names them, or
@@ -336,6 +401,7 @@ public class ProfileDirectory internal constructor(
         val account = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
         profiles.clear(account)
         verifications.clear(account)
+        deletions?.book?.forget()
         SharedPrefsProfilePersistence.deleteRetiredGlobalRows(persistenceContext)
         bump()
     }
@@ -369,6 +435,10 @@ public class ProfileDirectory internal constructor(
             val persistence = SharedPrefsProfilePersistence(app)
             persistence.saveProfiles(accountIdB64, emptyMap())
             persistence.saveVerifications(accountIdB64, emptyMap())
+            // ADR-0098 — the per-person deletion records and the owed group
+            // removals go with the account.
+            SharedPrefsPersonDeletionPersistence.delete(app, accountIdB64)
+            DeletedMemberRemovals.deleteOnDevice(app, accountIdB64)
             SharedPrefsProfilePersistence.deleteRetiredGlobalRows(app)
         }
 
@@ -381,7 +451,10 @@ public class ProfileDirectory internal constructor(
                     scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
                     persistenceContext = context.applicationContext,
                     initialRenames = renamesFromAcceptedContacts(context.applicationContext),
-                ).also { instance = it }
+                ).also {
+                    instance = it
+                    attachAccountDeletions(context.applicationContext, it)
+                }
             }
         }
 
@@ -426,11 +499,24 @@ public class ProfileNameSnapshot internal constructor(
     /** The keys of one person ([me.lakko.app.contacts.nameAliases]), the
      *  same set the app's directory falls through. */
     private val aliases: Map<String, String> = emptyMap(),
+    /** ADR-0098 — what this device recorded about deleted accounts, read
+     *  once; `null` = nobody is deleted and usernames show as before. */
+    private val deletions: PersonDeletionBook? = null,
 ) {
+    private fun deleted(key: String): Boolean {
+        val book = deletions ?: return false
+        return try {
+            book.isDeleted(key) || (aliases[key]?.let(book::isDeleted) == true)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     /** The resolved name for a signature key, standard base64, by the same
      *  rule as [ProfileDirectory.resolve]. */
-    public fun resolve(signatureKeyB64: String): ResolvedName =
-        resolveThroughAlias(signatureKeyB64, aliases) { key ->
+    public fun resolve(signatureKeyB64: String): ResolvedName {
+        if (deleted(signatureKeyB64)) return deletedName(keyBytesOf(signatureKeyB64))
+        return resolveThroughAlias(signatureKeyB64, aliases) { key ->
             resolveName(
                 localRename = renames[key],
                 profile = profiles[key] ?: pendingStatements[key],
@@ -438,8 +524,16 @@ public class ProfileNameSnapshot internal constructor(
                     verifications[UsernameVerificationStore.pairKey(key, username)]
                 },
                 signatureKey = keyBytesOf(key),
+                showUsername = deletions?.let { book ->
+                    try {
+                        book.mayShowUsername(key)
+                    } catch (_: Throwable) {
+                        false
+                    }
+                } ?: true,
             )
         }
+    }
 
     /** `true` when the viewer knows SOMETHING about this person (a rename, a
      *  profile name, a pending contact's link-stated name, or a verified
@@ -469,6 +563,7 @@ public class ProfileNameSnapshot internal constructor(
             renames = renames,
             pendingStatements = pendingStatements,
             aliases = aliases,
+            deletions = deletions,
         )
     }
 
@@ -494,6 +589,18 @@ public class ProfileNameSnapshot internal constructor(
                     }
                 } ?: emptyMap(),
                 aliases = account?.let { aliasesOnDevice(context.applicationContext, it) } ?: emptyMap(),
+                // Read only: the book writes nothing until it is told to.
+                deletions = account?.let { a ->
+                    PersonDeletionBook(
+                        persistence = object : PersonDeletionPersistence {
+                            private val inner = SharedPrefsPersonDeletionPersistence(context.applicationContext)
+                            override fun currentAccount(): String = a
+                            override fun load(account: String) = inner.load(account)
+                            override fun save(account: String, records: Map<String, PersonDeletionRecord>) = Unit
+                        },
+                        rules = FfiAccountDeletionRules,
+                    )
+                },
             )
         }
     }

@@ -90,8 +90,28 @@ public fun LakkoAvatar(
     // their key whenever the caller passes it, not by whatever id the screen
     // has (a one-to-one's group id in Chats, a route key in a picker, an
     // account id in Contacts), which gave one person different colours.
-    val tint = avatarTintFor(avatarTintSeed(seed, personKey, group), isLakkoDark())
     val inspection = LocalInspectionMode.current
+    // ADR-0098 / UX `deleted-account.md` section 7 — a deleted person is the
+    // person glyph on the neutral surface: no photo, no initials, no tint.
+    val deleted = !group && !groupGlyph && !inspection && personIsDeleted(personKey, name)
+    if (deleted) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            LkIcon(
+                R.drawable.ic_lk_person_fill,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = size * 0.55f,
+            )
+        }
+        return
+    }
+    val tint = avatarTintFor(avatarTintSeed(seed, personKey, group), isLakkoDark())
     val refs = when {
         inspection -> avatar
         group -> avatar ?: groupAvatar(groupIdHex)
@@ -163,7 +183,8 @@ private fun groupAvatar(groupIdHex: String?): AvatarRefs? {
     }
 }
 
-/** The stored avatar references of the person with signature key [key]. */
+/** The stored avatar references of the person with signature key [key];
+ *  none for a deleted person (ADR-0098). */
 @Composable
 private fun personAvatar(key: ByteArray?): AvatarRefs? {
     if (key == null || key.isEmpty()) return null
@@ -171,7 +192,23 @@ private fun personAvatar(key: ByteArray?): AvatarRefs? {
     val directory = remember(context) { me.lakko.app.profile.ProfileDirectory.get(context) }
     val version by directory.version.collectAsState()
     val keyB64 = remember(key.contentHashCode()) { java.util.Base64.getEncoder().encodeToString(key) }
-    return remember(keyB64, version) { directory.profiles.get(keyB64)?.avatar }
+    return remember(keyB64, version) {
+        if (directory.isDeleted(keyB64)) null else directory.profiles.get(keyB64)?.avatar
+    }
+}
+
+/** ADR-0098 — whether the person drawn is shown as Deleted account: by their
+ *  key when the caller passes it, else by the name a caller resolved. */
+@Composable
+private fun personIsDeleted(key: ByteArray?, name: String): Boolean {
+    val context = LocalContext.current
+    val directory = remember(context) { me.lakko.app.profile.ProfileDirectory.get(context) }
+    val version by directory.version.collectAsState()
+    val keyHash = key?.contentHashCode() ?: 0
+    return remember(keyHash, name, version) {
+        (key != null && key.isNotEmpty() && directory.isDeleted(key)) ||
+            name == me.lakko.app.profile.DELETED_ACCOUNT_NAME
+    }
 }
 
 @Composable

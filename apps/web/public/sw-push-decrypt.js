@@ -1263,6 +1263,10 @@ function isServiceEnvelope(wasm, bytes) {
   //     (`docs/ux/who-can-find-me.md` section 6.4). Suppressed, never opened:
   //     only the app tries it, and only the device it is sealed to can.
   if (isGroupContactRequestEnvelope(wasm, bytes)) return true;
+  // 14. ADR-0098 — an account-deleted statement. Classified only, never
+  //     verified or kept here (C-59): the deletion itself never produces a
+  //     notification.
+  if (isDispatchKind(wasm, bytes, ["AccountDeleted"])) return true;
   return false;
 }
 
@@ -2240,6 +2244,11 @@ export function groupNameFromRow(payload, groupHex) {
  */
 export function senderNameFromProfileRow(payload, senderKeyB64, batchProfile) {
   if (payload === null || typeof payload !== "object" || payload.v !== 1) return null;
+  // ADR-0098: a person the app holds as deleted is "Deleted account" (the
+  // app writes the word in the device language), over a rename, a profile,
+  // a profile this batch carried and a label.
+  const deleted = payload.x?.[senderKeyB64];
+  if (typeof deleted === "string" && deleted.trim().length > 0) return deleted.trim();
   const rename = payload.r?.[senderKeyB64];
   if (typeof rename === "string" && rename.trim().length > 0) return rename.trim();
   let profile = payload.p?.[senderKeyB64];

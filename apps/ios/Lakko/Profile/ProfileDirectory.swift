@@ -22,7 +22,7 @@ import LakkoCore
 /// file: it never writes a profile (C-59) and never verifies a username.
 @MainActor
 public final class ProfileDirectory: ObservableObject {
-    public static let shared = ProfileDirectory()
+    public static let shared = ProfileDirectory(deletions: .shared)
 
     /// Bumped whenever anything a resolved name depends on changes.
     @Published public private(set) var revision: UInt64 = 0
@@ -46,12 +46,18 @@ public final class ProfileDirectory: ObservableObject {
     /// the DeviceGroup sync runtime's own send). Never called for a profile
     /// adopted from another device: that one is already on the journal.
     var onOwnDeviceEnvelope: ((Data) -> Void)?
+    /// ADR-0098 — who is a deleted account and whose username may be shown.
+    /// `nil` (a directory built by a test) shows names as before.
+    let deletions: DeletedAccounts?
+    private var deletionsWatch: AnyCancellable?
 
     init(
         received: ReceivedProfileStore? = nil,
         verifier: UsernameVerifier? = nil,
-        ownStore: OwnProfileStore = OwnProfileStore()
+        ownStore: OwnProfileStore = OwnProfileStore(),
+        deletions: DeletedAccounts? = nil
     ) {
+        self.deletions = deletions
         self.received = received ?? ReceivedProfileStore(
             persistence: UserDefaultsProfilePersistence(),
             isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }
@@ -68,6 +74,10 @@ public final class ProfileDirectory: ObservableObject {
         // The renames of whichever account is bound; empty before a session.
         // ``activate(accountIdB64:username:)`` reloads them per account.
         setRenames(from: AcceptedContactsStore.load())
+        // A person learned deleted (or confirmed) re-renders every name.
+        deletionsWatch = deletions?.$revision.dropFirst().sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.bump() }
+        }
     }
 
     // MARK: - Account lifecycle
@@ -78,6 +88,7 @@ public final class ProfileDirectory: ObservableObject {
         if self.accountIdB64 == accountIdB64, ownUsername == canonical { return }
         self.accountIdB64 = accountIdB64
         ownUsername = canonical
+        deletions?.activate(accountIdB64: accountIdB64)
         received.activate(accountIdB64: accountIdB64)
         verifier.activate(accountIdB64: accountIdB64)
         ownProfile = ownStore.load(accountIdB64: accountIdB64)
@@ -151,6 +162,7 @@ public final class ProfileDirectory: ObservableObject {
         setPendingContacts([])
         received.activate(accountIdB64: nil)
         verifier.activate(accountIdB64: nil)
+        deletions?.deactivate()
         bump()
     }
 
@@ -159,6 +171,7 @@ public final class ProfileDirectory: ObservableObject {
         received.clear(accountIdB64: accountIdB64)
         verifier.clear(accountIdB64: accountIdB64)
         ownStore.delete(accountIdB64: accountIdB64)
+        deletions?.forget(accountIdB64: accountIdB64)
         if self.accountIdB64 == accountIdB64 { deactivate() }
     }
 
@@ -689,6 +702,17 @@ public final class ProfileDirectory: ObservableObject {
         if let alias = provenAlias(of: keyB64), let aliasKey = Data(base64Encoded: alias) {
             return resolve(signatureKey: aliasKey)
         }
+        // ADR-0098 — a deleted account replaces every name, the viewer's own
+        // rename included, and shows no username; a username is otherwise
+        // shown only while the account was recently confirmed to exist.
+        var usernameAllowed = true
+        if let deletions {
+            let keys = personKeys(keyB64)
+            if deletions.isDeleted(keysB64: keys) {
+                return ResolvedDisplayName.deletedAccount(signatureKey: signatureKey)
+            }
+            usernameAllowed = deletions.mayShowUsername(keysB64: keys)
+        }
         // Precedence: local rename > received profile > a pending contact's
         // link statement (ADR-0079) > the placeholder.
         let receivedProfile = received.profile(signatureKeyB64: keyB64)
@@ -711,13 +735,39 @@ public final class ProfileDirectory: ObservableObject {
             signatureKey: signatureKey,
             localRename: renames[keyB64],
             profile: profile,
-            verification: UsernameVerificationStateView(state)
+            verification: usernameAllowed ? UsernameVerificationStateView(state) : nil
         )
+    }
+
+    /// Every key the person holding `keyB64` is known by on this device:
+    /// itself, the keys of a proven rotation, and the keys an accepted reset
+    /// retired. A statement under any of them is about this person.
+    func personKeys(_ keyB64: String) -> [String] {
+        var keys = [keyB64]
+        for other in provenPredecessors.allKeys(of: keyB64) where !keys.contains(other) {
+            keys.append(other)
+        }
+        for (retired, current) in aliases where current == keyB64 && !keys.contains(retired) {
+            keys.append(retired)
+        }
+        return keys
+    }
+
+    /// ADR-0098 — whether the person holding `signatureKey` is a deleted
+    /// account here (over every key they are known by).
+    public func isDeletedAccount(signatureKey: Data) -> Bool {
+        let keyB64 = base64Encode(signatureKey)
+        if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
+            return isDeletedAccount(signatureKey: currentKey)
+        }
+        return deletions?.isDeleted(keysB64: personKeys(keyB64)) ?? false
     }
 
     /// ADR-0084 — the profile photo the person holding `signatureKey` set,
     /// through the same aliases a name resolves through, or `nil`.
     public func avatar(signatureKey: Data) -> ProfileAvatar? {
+        // ADR-0098 — a deleted account shows no photo.
+        if isDeletedAccount(signatureKey: signatureKey) { return nil }
         let keyB64 = base64Encode(signatureKey)
         if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
             return avatar(signatureKey: currentKey)

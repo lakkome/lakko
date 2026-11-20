@@ -37,6 +37,8 @@ import { contentFromPersisted } from "../attach/preview";
 import { Portal } from "solid-js/web";
 import { openMessageMenu } from "../chat/message-menu-registry";
 import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
+import { checkWhenVisible, isDeletedAccount, personOnScreen } from "../people/person-status";
+import { deletedConversationSurface, type ConversationSurface } from "../people/deleted-surface";
 import { ComposerTray } from "../chat/ComposerTray";
 import { backspaceRemovesLast, messageRefs, traySendable, type TrayStatus } from "../chat/compose-tray";
 import { release as releaseTrayItem, trayFor, type TrayStore } from "../chat/tray-store";
@@ -1222,6 +1224,13 @@ function ChatView(props: {
     const row = rows().find((r) => rowMessageId(r) === messageId);
     return row !== undefined && authorOf(row).kind === "self";
   }
+  /** ADR-0098: whether the message `messageId` is held here and its author's
+   *  account was deleted (the reply quote then names "Deleted account"). */
+  function isQuotedAuthorDeleted(messageId: number): boolean {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined || row.kind !== "incoming" || row.event.kind !== "application") return false;
+    return isDeletedAccount(row.event.senderKey);
+  }
   /** Section 5.1 — the href of another conversation, routed by ITS kind the
    *  way the Chats list routes a row (a one-to-one under `/chat/`, a group
    *  under `/groups/`). */
@@ -1592,6 +1601,20 @@ function ChatView(props: {
     const peers = memberKeysOf(props.entry.group).filter((k) => k !== ownB64);
     return peers.length === 1 ? (peers[0] ?? null) : null;
   };
+  /** ADR-0098: the other person of this one-to-one deleted their account.
+   *  The history stays; nothing can be sent, called or reacted to. */
+  const peerDeleted = (): boolean => {
+    if (isGroupChat()) return false;
+    const peer = peerKeyB64();
+    return peer !== null && isDeletedAccount(peer);
+  };
+  /** What the conversation offers (`people/deleted-surface.ts`). */
+  const surface = (): ConversationSurface => deletedConversationSurface(!isGroupChat(), peerDeleted());
+  // ADR-0098 section 2: an open one-to-one is on screen: its person is asked
+  // about when the rule says it is due.
+  createEffect(() => {
+    if (!isGroupChat()) personOnScreen(peerKeyB64());
+  });
   /** Under the name (docs/ux section 5.2): "typing..." while a typing
    *  indicator is live, else the person's "@username" in a 1x1, else "N
    *  members" (docs/ux/client-redesign.md 5.2, as iOS and Android say it; web
@@ -1601,6 +1624,7 @@ function ChatView(props: {
     const typing = typingIndicator();
     if (typing !== null && !membershipEnded()) return typing;
     const peer = isGroupChat() ? null : peerKeyB64();
+    if (peer !== null && peerDeleted()) return "";
     if (peer !== null) return profiles.resolve(peer).username ?? "";
     return t("chat.members.count", { count: memberCount() });
   };
@@ -1717,6 +1741,7 @@ function ChatView(props: {
       liveCallInThisChat: liveGroupCall() !== null,
       isGroup: isGroupChat(),
       people: memberCount(),
+      peerDeleted: !surface().callButtons,
     });
 
   /** Place a 1x1 call. The session lives in the call host, so it survives
@@ -4225,6 +4250,8 @@ function ChatView(props: {
     const own = ownSignatureKeyB64();
     const typers = activeTypers(typingMap(), now).filter((m) => m !== own);
     if (typers.length === 0) return null;
+    // ADR-0098: typing stops with a deleted account.
+    if (!surface().ephemeral) return null;
     // A 1×1 chat has exactly one peer — skip the name (the chat
     // header already shows who it is). ADR-0062: the kind, not the count.
     const oneOnOne = !isGroupChat();
@@ -4647,6 +4674,8 @@ function ChatView(props: {
       // ADR-0057 — consumed at receipt by the chat client; a stray one is
       // dropped here, never shown.
       if (e.kind === "registrarSeed") continue;
+      // ADR-0098 — an account-deleted statement: the same.
+      if (e.kind === "accountDeleted") continue;
       // Who-can-find-me 6.4 — a contact request sealed to one member: the
       // same.
       if (e.kind === "groupContactRequest") continue;
@@ -5601,6 +5630,8 @@ function ChatView(props: {
     if (opRouteNow() !== "send") return;
     // ADR-0099 section 6 - nor to a blocked person.
     if (signalsWithheldFrom(props.entry.group, chats.identity())) return;
+    // ADR-0098: typing and read markers stop with a deleted account.
+    if (!surface().ephemeral) return;
     try {
       // Automatic: held also after a refused read (ADR-0091 live walk 3).
       await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
@@ -8567,6 +8598,7 @@ function ChatView(props: {
                   isReadByEveryOther(readWatermarks(), id, ownSignatureKeyB64())
                 }
                 isAuthoredByViewer={isAuthoredByViewer}
+                isQuotedAuthorDeleted={isQuotedAuthorDeleted}
                 readersOf={(id) => {
                   const own = ownSignatureKeyB64();
                   const out: MemberIdentity[] = [];
@@ -8600,7 +8632,8 @@ function ChatView(props: {
                 onQuickReact={(id) => onQuickReact(id)}
                 reactionAllowed={reactionAllowed}
                 chipConversation={isGroupChat() ? "group" : "one-to-one"}
-                reactionRowFor={reactionRowFor}
+                reactionRowFor={(id) => (surface().react ? reactionRowFor(id) : [])}
+                replyAllowed={surface().reply}
                 ownReactorKey={ownReactorKey()}
                 capNoticeId={capNoticeId()}
                 isContactKey={(k) => contactKeySet().has(k)}
@@ -8911,7 +8944,14 @@ function ChatView(props: {
           </Show>
         </div>
       </Show>
-      <Show when={!selecting()}>
+      {/* ADR-0098 — a one-to-one whose other person deleted their account:
+          the composer is replaced by one line, no button. */}
+      <Show when={!selecting() && !surface().composer}>
+        <div class="lk-composer-deleted" role="note">
+          {t("person.deleted.body")}
+        </div>
+      </Show>
+      <Show when={!selecting() && surface().composer}>
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
       <RecorderNotices recorder={recorder} />
       <VideoNoteOverlay recorder={recorder} />
@@ -9919,6 +9959,10 @@ function ChatView(props: {
                       }
                       class="lk-row"
                       style={{ padding: "8px 10px", gap: "10px" }}
+                      ref={(el) => {
+                        // ADR-0098 section 2: a visible member row is on screen.
+                        if (!isSelf) onCleanup(checkWhenVisible(el, () => memberKeyB64));
+                      }}
                     >
                       <Show
                         when={opensContact()}
@@ -10832,7 +10876,11 @@ function timelineRowToPersisted(
     // delegation, an introduction record). Never a row, never persisted.
     return null;
   }
-  if (row.event.kind === "registrarSeed" || row.event.kind === "groupContactRequest") {
+  if (
+    row.event.kind === "registrarSeed" ||
+    row.event.kind === "groupContactRequest" ||
+    row.event.kind === "accountDeleted"
+  ) {
     // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
     // client and never a row. Never persisted: it carries a sealed seed or a
     // sealed contact request.

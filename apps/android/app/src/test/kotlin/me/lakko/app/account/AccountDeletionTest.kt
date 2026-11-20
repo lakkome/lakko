@@ -212,4 +212,56 @@ class AccountDeletionTest {
         assertEquals(listOf("reserved-1", "reserved-2", "pool-1"), spent)
         assertEquals(1, pool.taken)
     }
+
+    // ---- ADR-0098: the account-deleted statement -------------------------
+
+    @Test
+    fun the_statement_is_sent_after_the_auth_delete_and_before_the_wipe() = runTest {
+        val announcement = accountDeletedAnnouncement(seeds = listOf(ByteArray(64))) { _, _ -> events += "conversations" }
+        deletion(cleanups = listOf(announcement)).run()
+        assertEquals(listOf("auth", "conversations", "wipe"), events)
+    }
+
+    @Test
+    fun the_statement_is_never_sent_when_auth_refuses() = runTest {
+        val announcement = accountDeletedAnnouncement(seeds = listOf(ByteArray(64))) { _, _ -> events += "conversations" }
+        try {
+            deletion(
+                deleteAtAuth = { throw java.io.IOException("refused") },
+                cleanups = listOf(announcement),
+            ).run()
+            fail("the auth refusal must propagate")
+        } catch (_: java.io.IOException) {
+            // expected
+        }
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun a_retry_reaches_only_the_conversations_not_yet_reached_and_a_failure_still_wipes() = runTest {
+        val all = listOf("g1", "g2", "g3")
+        val reached = mutableListOf<String>()
+        var attempt = 0
+        val announcement = accountDeletedAnnouncement(seeds = listOf(ByteArray(64))) { _, sent ->
+            attempt += 1
+            for (g in all) {
+                if (g in sent) continue
+                // g2 fails on the first attempt only.
+                if (g == "g2" && attempt == 1) continue
+                reached += g
+                sent += g
+            }
+            if (sent.size < all.size) throw IllegalStateException("not all reached")
+        }
+        deletion(cleanups = listOf(announcement)).run()
+        assertEquals(listOf("g1", "g3", "g2"), reached)
+        assertEquals("wipe", events.last())
+
+        events.clear()
+        logs.clear()
+        val failing = accountDeletedAnnouncement(seeds = emptyList()) { _, _ -> throw IllegalStateException("x") }
+        deletion(cleanups = listOf(failing), attempts = 2).run()
+        assertEquals(listOf("auth", "wipe"), events)
+        assertEquals(listOf("account deletion: conversations failed: IllegalStateException"), logs)
+    }
 }

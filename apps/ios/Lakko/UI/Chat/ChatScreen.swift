@@ -31,6 +31,9 @@ public struct ChatScreen: View {
     @ObservedObject private var l10n = Localization.shared
     /// ADR-0065 — the account's saved messages (the Save rows and marks).
     @ObservedObject private var saved = SavedMessagesCenter.shared
+    /// ADR-0098 — a person learned deleted re-draws the screen (composer,
+    /// call buttons, menus).
+    @ObservedObject private var deletions = DeletedAccounts.shared
     /// Leave this screen (pop it). Navigation back is the system back button
     /// and edge swipe; this is only for the case the chat was deleted from
     /// the members sheet, when there is nothing left to show.
@@ -238,6 +241,9 @@ public struct ChatScreen: View {
         // deliberately: the menu re-draws the production bubble, and a media
         // bubble reads the controller out of the environment.
         MessageMenuHost { chatBody }
+            // ADR-0098 section 2 — an open one-to-one asks whether the other
+            // person still has an account, when a check is due.
+            .checksAccountExists(personKey: viewModel.presentsAsGroup ? nil : viewModel.oneToOnePeerSignatureKey)
             .overlay { VideoNoteOverlay(media: media) }
             // ADR-0082 — the conversation id the rows translate under, the
             // translation session host, the pack dialog and the picker.
@@ -981,6 +987,8 @@ public struct ChatScreen: View {
                                 // ADR-0045 UX §6.2.5 — the same predicate the
                                 // composer is gated on.
                                 actionsAvailable: viewModel.messageActionsAvailable,
+                                sendActionsAvailable: viewModel.sendActionsAvailable,
+                                quotedAuthorDeleted: viewModel.quotedAuthorDeleted(entry.message),
                                 // ADR-0024 — "Sent" / "Read" glyph on our own
                                 // messages, derived from the other members'
                                 // read watermarks.
@@ -2058,7 +2066,7 @@ public struct ChatScreen: View {
             }
         }
         var items: [LakkoMenuItem] = []
-        if viewModel.messageActionsAvailable {
+        if viewModel.messageActionsAvailable, viewModel.sendActionsAvailable {
             items.append(.action(l10n.t("chat.message.react"), icon: .faceSmiling,
                                  perform: leaving { picker = PickerRequest(mode: .reaction, message: message) }))
             items.append(.action(MessageMenuAction.reply.title, icon: MessageMenuAction.reply.icon,
@@ -2362,6 +2370,13 @@ struct MessageRow: View {
     /// refuses Send. Passed in rather than read here so the row stays a pure
     /// renderer of what `MembershipEnded.swift` decided.
     let actionsAvailable: Bool
+    /// ADR-0098 — `false` in a one-to-one with a deleted account: Reply,
+    /// React, Edit and Delete would each send to nobody. Copy, Save, Forward
+    /// and Pin for me stay.
+    var sendActionsAvailable: Bool = true
+    /// ADR-0098 — the message this one quotes was written by a deleted
+    /// account: the quote names them `Deleted account`.
+    var quotedAuthorDeleted: Bool = false
     /// ADR-0024 — read state for our OWN outgoing messages
     /// (sent / read). `nil` for incoming / system rows and
     /// pre-ack outgoing rows (no glyph rendered).
@@ -2541,6 +2556,7 @@ struct MessageRow: View {
             return actionsAvailable && channelPost == .publisher && message.messageId > 0 && !message.deleted
         }
         return actionsAvailable
+            && sendActionsAvailable
             && message.direction == .outgoing
             && message.messageId > 0
             && !message.deleted
@@ -2548,7 +2564,7 @@ struct MessageRow: View {
 
     /// React is offered on any non-system message with an id.
     private var canReact: Bool {
-        readable
+        readable && sendActionsAvailable
     }
 
     /// Not a system row, landed, not a tombstone, readable here: the facts
@@ -3038,7 +3054,12 @@ struct MessageRow: View {
                     }
                     if let reply = message.reply {
                         ReplyQuoteBlock(
-                            reply: quotesOwnMessage ? ReplySnapshot.shownAsOwn(reply) : reply,
+                            reply: quotesOwnMessage
+                                ? ReplySnapshot.shownAsOwn(reply)
+                                : quotedAuthorDeleted
+                                    ? ReplyRef(target: reply.target, author: ResolvedDisplayName.deletedName,
+                                               excerpt: reply.excerpt)
+                                    : reply,
                             outgoing: isOutgoing
                         ) {
                             onQuoteTap(reply.target)
@@ -3114,7 +3135,12 @@ struct MessageRow: View {
                     // from the quoted message itself.
                     if let reply = message.reply {
                         ReplyQuoteBlock(
-                            reply: quotesOwnMessage ? ReplySnapshot.shownAsOwn(reply) : reply,
+                            reply: quotesOwnMessage
+                                ? ReplySnapshot.shownAsOwn(reply)
+                                : quotedAuthorDeleted
+                                    ? ReplyRef(target: reply.target, author: ResolvedDisplayName.deletedName,
+                                               excerpt: reply.excerpt)
+                                    : reply,
                             outgoing: isOutgoing
                         ) {
                             onQuoteTap(reply.target)
@@ -4646,6 +4672,10 @@ struct GroupInfoScreen: View {
                 }
             }
         }
+        // ADR-0098 section 2 — a visible member row asks whether the account
+        // still exists, when a check is due (never for this device's own row).
+        .checksAccountExists(
+            personKey: viewModel.ownLeafIndex == member.leafIndex ? nil : PersonKey.of(member))
         if viewModel.ownLeafIndex != member.leafIndex,
            let messageId = contacts.contactMessageId(forPersonKey: member.signaturePublicKey) {
             Button { onOpenContact(messageId) } label: { content.contentShape(Rectangle()) }

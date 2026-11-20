@@ -124,9 +124,16 @@ export function replyQuoteLines(
    *  device of this person's, ADR-0050): the snapshot carries the account's
    *  real name, and this device draws "You" for it (decided 2026-11-04). */
   authoredByViewer = false,
+  /** ADR-0098: the quoted message's author deleted their account; the quote
+   *  names them "Deleted account" whatever the snapshot carried. */
+  authorDeleted = false,
 ): ReplyQuoteLines {
   return {
-    name: authoredByViewer ? t("chat.author.you") : (reply.author ?? ""),
+    name: authoredByViewer
+      ? t("chat.author.you")
+      : authorDeleted
+        ? t("person.deleted.name")
+        : (reply.author ?? ""),
     excerpt: reply.excerpt ?? REPLY_EXCERPT_FALLBACK(),
   };
 }

@@ -36,6 +36,7 @@
  *   2026-10-01 and go with the `emoji-prefs` step.)
  * - the app-shell cache of the service worker: code, no account data.
  */
+import { deletePersonStatusRow } from "../people/account-status-idb";
 import { clearPendingPublisherRequests } from "../channels/pending-publisher-requests";
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";
 import {
@@ -235,6 +236,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
     { name: "account-kv", run: () => deleteAccountKv(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
+    // ADR-0098: which people this device learned were deleted.
+    { name: "person-status", run: () => deletePersonStatusRow(accountIdB64) },
     // ADR-0087 section 9: ends under way, the notices not yet closed and the
     // Welcomes held.
     { name: "membership-end", run: () => deleteMembershipEndRow(accountIdB64) },

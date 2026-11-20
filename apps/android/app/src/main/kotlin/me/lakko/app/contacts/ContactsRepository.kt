@@ -2243,7 +2243,9 @@ public class ContactsRepository(
                         state.copy(
                             accepted = answered.accepted,
                             sent = answered.sent,
-                            pending = withoutAcceptedSenders(merged.pending, answered.accepted),
+                            // ADR-0098 — a request from an account this
+                            // device knows was deleted is dropped silently.
+                            pending = withoutDeletedSenders(withoutAcceptedSenders(merged.pending, answered.accepted)),
                             // Never backwards: a stale batch cannot re-arm a
                             // re-fetch of rows this device already handled.
                             // A later mailbox's cursor is kept apart.
@@ -2368,7 +2370,58 @@ public class ContactsRepository(
         val request = mutableState.value.pending.firstOrNull { it.messageId == messageId }
             ?: return AcceptOutcome.DONE
         val accountB64 = boundAccountB64 ?: return AcceptOutcome.FAILED
+        // ADR-0098 / UX section 3 — accepting a request from an account that
+        // was deleted: the card goes and the person is told, nothing is built.
+        if (requestFromDeletedAccount(request)) {
+            declineContactRequest(messageId)
+            return AcceptOutcome.ACCOUNT_DELETED
+        }
         return acceptMutex.withLock { answerRequest(request, accountB64) }
+    }
+
+    /**
+     * ADR-0098 — whether [request] comes from an account this device knows
+     * was deleted, or whose identity fetch answers `404` now (recorded as
+     * `Absent` for the requester's key). Any other outcome, a network failure
+     * included, is "not known deleted".
+     */
+    private suspend fun requestFromDeletedAccount(request: IncomingContactRequest): Boolean {
+        val keyB64 = base64Encode(request.fromPubkey)
+        val directory = profileDirectory
+        if (directory?.isDeleted(keyB64) == true) return true
+        val accountId = request.fromAccountId?.takeIf { it.size == CONTACT_ACCOUNT_ID_LEN } ?: return false
+        val secrets = authRepo.identitySecrets.value ?: return false
+        val absent = try {
+            useClientWith(secrets) { client, _ -> client.fetchPublishedSignatureKey(accountId) } == null
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            false
+        }
+        if (absent) directory?.deletions?.book?.recordAnswer(keyB64, me.lakko.app.profile.DirectoryAnswer.ABSENT)
+        return absent
+    }
+
+    /** [pending] without the requests whose sender this device knows was
+     *  deleted (ADR-0098). */
+    private fun withoutDeletedSenders(pending: List<IncomingContactRequest>): List<IncomingContactRequest> {
+        val directory = profileDirectory ?: return pending
+        return pending.filterNot { directory.isDeleted(base64Encode(it.fromPubkey)) }
+    }
+
+    /**
+     * ADR-0098 — [keyB64] turned out deleted: an unanswered request from them
+     * is removed silently.
+     */
+    public fun dropRequestsFrom(keyB64: String) {
+        bindAccountIfSignedIn()
+        var changed = false
+        mutableState.update { state ->
+            val kept = state.pending.filterNot { base64Encode(it.fromPubkey) == keyB64 }
+            changed = kept.size != state.pending.size
+            if (changed) state.copy(pending = kept) else state
+        }
+        if (changed) persistInboxPending()
     }
 
     private suspend fun answerRequest(request: IncomingContactRequest, accountB64: String): AcceptOutcome {

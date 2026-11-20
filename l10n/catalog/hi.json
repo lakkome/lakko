@@ -7621,6 +7621,14 @@
       "text": "ऐप में खोलें",
       "status": "machine"
     },
+    "person.deleted.body": {
+      "text": "यह खाता हटा दिया गया है।",
+      "status": "machine"
+    },
+    "person.deleted.name": {
+      "text": "हटाया गया खाता",
+      "status": "machine"
+    },
     "profile.save.error.full": {
       "text": "Lakko के पास अभी नई फ़ाइलों के लिए जगह नहीं है। बाद में फिर कोशिश करें।",
       "status": "machine"

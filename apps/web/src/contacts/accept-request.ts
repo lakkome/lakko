@@ -37,8 +37,10 @@ export interface AcceptOutcome {
   readonly accepted: AcceptedContact[];
   /** base64 group id of the one-to-one, or `null` when none stands. */
   readonly groupIdB64: string | null;
-  /** See the module docs. `legacy`: the request carried no account id. */
-  readonly status: "done" | "owed" | "failed" | "legacy";
+  /** See the module docs. `legacy`: the request carried no account id.
+   *  `deleted` (ADR-0098): the directory has no account behind the request
+   *  any more; nothing was founded or sent, and the card goes. */
+  readonly status: "done" | "owed" | "failed" | "legacy" | "deleted";
 }
 
 /** Whether the request stays in the incoming list after this accept. */
@@ -60,6 +62,9 @@ export async function acceptContactRequest(
       persistHeld(): Promise<void>;
     };
     readonly profiles: Pick<ProfileApi, "groupJoined">;
+    /** ADR-0098: whether the directory answers `404` for this account id
+     *  (the account was deleted). A network error answers `false`. */
+    readonly accountGone?: (accountId: Uint8Array) => Promise<boolean>;
   },
   req: IncomingContactRequest,
 ): Promise<AcceptOutcome> {
@@ -85,6 +90,12 @@ export async function acceptContactRequest(
     // A contact is made only with its one-to-one (base walk 2026-11-04), and
     // a request with no account id cannot found one: no contact.
     return { accepted: loadAccepted(), groupIdB64: null, status: "legacy" };
+  }
+
+  // ADR-0098 — a request from an account that no longer exists founds
+  // nothing; the caller shows that and removes the card.
+  if (deps.accountGone !== undefined && (await deps.accountGone(req.fromAccountId))) {
+    return { accepted: loadAccepted(), groupIdB64: null, status: "deleted" };
   }
 
   // ADR-0062 — a contact's conversation is a one-to-one for good.

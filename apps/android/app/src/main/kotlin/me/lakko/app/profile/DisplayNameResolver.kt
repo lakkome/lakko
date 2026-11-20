@@ -152,6 +152,9 @@ public data class ResolvedName(
     /** The key fingerprint (`a1b2 c3d4`). Never shown as a name; for the
      *  safety-number and debug surfaces. */
     val fingerprint: String,
+    /** ADR-0098 — the person's account was deleted: [primary] is
+     *  [DELETED_ACCOUNT_NAME], with no username, no rename and no photo. */
+    val deleted: Boolean = false,
 ) {
     /**
      * The list-row label: `Name · @username` when a username is verified and
@@ -186,10 +189,13 @@ public fun resolveName(
     profile: PeerProfile?,
     verificationOf: (String) -> UsernameVerification?,
     signatureKey: ByteArray,
+    /** ADR-0098 section 3 — `mayShowUsername` for this person now. `false`
+     *  shows no username at all, verified or not. */
+    showUsername: Boolean = true,
 ): ResolvedName {
     val rename = localRename?.trim()?.takeIf { it.isNotEmpty() }
     val profileName = profile?.displayName?.trim()?.takeIf { it.isNotEmpty() }
-    val claimed = profile?.username?.takeIf { it.isNotEmpty() }
+    val claimed = profile?.username?.takeIf { it.isNotEmpty() && showUsername }
     val verification = claimed?.let(verificationOf)
     val verified = claimed?.takeIf { verification == UsernameVerification.VERIFIED }
     val fingerprint = fingerprintLabel(signatureKey)
@@ -207,6 +213,29 @@ public fun resolveName(
         fingerprint = fingerprint,
     )
 }
+
+/**
+ * ADR-0098 — the label of a person whose account was deleted, in the interface
+ * language at the moment it is read (`person.deleted.name`).
+ */
+public val DELETED_ACCOUNT_NAME: String
+    get() = me.lakko.app.l10n.Localization.strings.value["person.deleted.name"]
+
+/**
+ * ADR-0098 — the resolution of a deleted person: [DELETED_ACCOUNT_NAME]
+ * replaces every name (a local rename too), no username is shown, and the
+ * card shows nothing of what the person said about themselves.
+ */
+public fun deletedName(signatureKey: ByteArray): ResolvedName =
+    ResolvedName(
+        primary = DELETED_ACCOUNT_NAME,
+        verifiedUsername = null,
+        isPlaceholder = false,
+        theirName = null,
+        usernameNotVerified = false,
+        fingerprint = fingerprintLabel(signatureKey),
+        deleted = true,
+    )
 
 /**
  * The name an avatar's initials are taken from: the display name alone, never

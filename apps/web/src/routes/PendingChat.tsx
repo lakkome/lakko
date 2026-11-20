@@ -47,6 +47,7 @@ import {
 } from "../contacts/pending-contacts";
 import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
+import { isDeletedAccount, personOnScreen, usernameMayShow } from "../people/person-status";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
 
@@ -92,8 +93,17 @@ export default function PendingChat(): JSX.Element {
     const c = contact();
     return c === undefined ? [] : carriedCopiesFor(pendingQueueKey(c));
   });
+  /** ADR-0098: the inviter's account was deleted. */
+  const deleted = (): boolean => {
+    const c = contact();
+    return c !== undefined && isDeletedAccount(c.signaturePubkeyB64);
+  };
+  createEffect(() => {
+    personOnScreen(contact()?.signaturePubkeyB64);
+  });
   const name = (): string => {
     const c = contact();
+    if (deleted()) return t("person.deleted.name");
     return (c === undefined ? null : pendingNameOf(c)) ?? t("invite.contact.page.unnamed");
   };
 
@@ -150,7 +160,7 @@ export default function PendingChat(): JSX.Element {
               <Avatar label={name()} id={c().signaturePubkeyB64} size="sm" personKey={c().signaturePubkeyB64} playVideo="header" />
               <div class="lk-chat-title-text">
                 <h1>{name()}</h1>
-                <Show when={c().username.length > 0}>
+                <Show when={c().username.length > 0 && !deleted() && usernameMayShow(c().signaturePubkeyB64)}>
                   <div class="lk-chat-sub">@{c().username}</div>
                 </Show>
               </div>
@@ -168,6 +178,7 @@ export default function PendingChat(): JSX.Element {
           <div class="lk-chat-body">
             <div class="lk-chat-scroll">
           <ol class="lk-timeline">
+            <Show when={!deleted()}>
             <li class="lk-day-sep" role="status">
               <span>
                 {pendingLine(c(), Date.now()) === "stale"
@@ -175,6 +186,7 @@ export default function PendingChat(): JSX.Element {
                   : t("chat.pending.waiting", { name: name() })}
               </span>
             </li>
+            </Show>
             <For each={carried()}>
               {(m) => (
                 <li class="lk-bubble-row outgoing run-start run-end">
@@ -187,7 +199,7 @@ export default function PendingChat(): JSX.Element {
                 </li>
               )}
             </For>
-            <For each={queued()}>
+            <For each={deleted() ? [] : queued()}>
               {(m) => (
                 <li class="lk-bubble-row outgoing run-start run-end">
                   <div class="lk-bubble outgoing run-start run-end">
@@ -201,6 +213,14 @@ export default function PendingChat(): JSX.Element {
             </For>
           </ol>
             </div>
+          <Show
+            when={!deleted()}
+            fallback={
+              <div class="lk-composer-deleted" role="note">
+                {t("person.deleted.body")}
+              </div>
+            }
+          >
           {/* ADR-0099 step 3: nothing is queued for a contact while suspended. */}
           <SuspendedComposerLine />
           <form
@@ -232,6 +252,7 @@ export default function PendingChat(): JSX.Element {
               <Icon name="arrow-up-circle-fill" size={26} />
             </button>
           </form>
+          </Show>
           </div>
         </article>
       )}

@@ -20,6 +20,8 @@ struct PendingChatScreen: View {
     let onConnected: (String) -> Void
 
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0098 — the person learned deleted re-draws the screen.
+    @ObservedObject private var deletions = DeletedAccounts.shared
     @State private var draft = ""
     @State private var messages: [HeldSendQueue.Entry] = []
     @State private var callHintShown = false
@@ -27,14 +29,17 @@ struct PendingChatScreen: View {
     private var contact: PendingContact? { contacts.pendingContact(accountIdHex: accountIdHex) }
 
     private var name: String {
-        contact.flatMap(PendingContacts.name) ?? l10n.t("invite.contact.page.unnamed")
+        contact.flatMap(PendingContacts.shownName) ?? l10n.t("invite.contact.page.unnamed")
     }
+
+    /// ADR-0098 — their account is gone: no waiting line, no composer.
+    private var deleted: Bool { contact.map(PendingContacts.isDeleted) ?? false }
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .trailing, spacing: 8) {
-                    if let contact {
+                    if let contact, !deleted {
                         Text(lineText(contact))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
@@ -70,7 +75,16 @@ struct PendingChatScreen: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
             }
-            composer
+            if deleted {
+                // ADR-0098 — one line in the composer's place, no button.
+                Text(ResolvedDisplayName.deletedBody)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(maxWidth: .infinity)
+                    .padding(12)
+            } else {
+                composer
+            }
         }
         .navigationTitle(name)
         .navigationBarTitleDisplayMode(.inline)
@@ -87,7 +101,7 @@ struct PendingChatScreen: View {
                     Text(name).font(.headline).lineLimit(1)
                 }
             }
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            if !deleted { ToolbarItemGroup(placement: .topBarTrailing) {
                 // Disabled until the inviter's app answers; a tap on the
                 // disabled control shows the hint (a disabled Button takes no
                 // tap, so the hint rides a gesture on its label).
@@ -97,12 +111,17 @@ struct PendingChatScreen: View {
                 LkIconView(.video, size: 24, label: l10n.t("chat.pending.call_disabled", texts: ["name": name]))
                     .foregroundStyle(Color.lakkoTextMuted)
                     .onTapGesture { callHintShown = true }
-            }
+            } }
         }
         .onAppear {
             reload()
             followIfConnected()
         }
+        // ADR-0098 section 2 — the open chat with them asks whether their
+        // account still exists, when a check is due.
+        .checksAccountExists(
+            personKey: contact?.signaturePubkey, accountId: StateBundle.hexDecode(accountIdHex))
+        .onChange(of: deletions.revision) { _, _ in reload() }
         .onChange(of: contacts.handedOver) { _, _ in followIfConnected() }
     }
 
